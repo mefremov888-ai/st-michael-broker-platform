@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: st-michael-postgres
+    environment:
+      POSTGRES_DB: broker_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - st-michael-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: st-michael-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - st-michael-network
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: st-michael-api
+    ports:
+      - "4000:4000"
+    env_file: .env
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - st-michael-network
+    restart: unless-stopped
+    volumes:
+      - ./packages/database/prisma:/app/packages/database/prisma:ro
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    container_name: st-michael-web
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      - api
+    networks:
+      - st-michael-network
+    restart: unless-stopped
+
+  telegram:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.telegram
+    container_name: st-michael-telegram
+    env_file: .env
+    depends_on:
+      - api
+    networks:
+      - st-michael-network
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+networks:
+  st-michael-network:
+    driver: bridge
