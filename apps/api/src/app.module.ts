@@ -16,6 +16,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { DatabaseModule } from './database/database.module';
 import { AuditModule } from './audit/audit.module';
 import { HealthController } from './health.controller';
+import { SchedulerModule } from './scheduler/scheduler.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { HealthController } from './health.controller';
     DocumentsModule,
     AnalyticsModule,
     WebhooksModule,
+    SchedulerModule,
   ],
   controllers: [HealthController],
 })

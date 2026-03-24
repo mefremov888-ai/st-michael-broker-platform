@@ -28,6 +28,7 @@
     "@nestjs/jwt": "^10.0.0",
     "@nestjs/passport": "^10.0.0",
     "@nestjs/platform-express": "^10.0.0",
+    "@nestjs/schedule": "^6.1.1",
     "@nestjs/swagger": "^7.0.0",
     "@nestjs/throttler": "^5.0.0",
     "@st-michael/database": "file:../../packages/database",
