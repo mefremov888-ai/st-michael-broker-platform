@@ -11,7 +11,7 @@ async function main() {
       name: 'Недвижимость+',
       legalName: 'ООО "Недвижимость+"',
       inn: '7701234567',
-      phone: '+7-495-123-45-67',
+      phone: '+74951234567',
       email: 'info@nedvizh-plus.ru',
       address: 'Москва, ул. Ленина, 10',
       totalSqmSold: 150.5,
@@ -25,7 +25,7 @@ async function main() {
       name: 'Тренд',
       legalName: 'ИП Иванов Иван Иванович',
       inn: '7709876543',
-      phone: '+7-495-987-65-43',
+      phone: '+74959876543',
       email: 'trend@realty.ru',
       address: 'Москва, пр. Мира, 25',
       totalSqmSold: 320.0,
@@ -39,7 +39,7 @@ async function main() {
       name: 'Ромашка',
       legalName: 'ООО "Ромашка"',
       inn: '7705551234',
-      phone: '+7-495-555-12-34',
+      phone: '+74955551234',
       email: 'romashka@agency.ru',
       address: 'Москва, ул. Цветочная, 5',
       totalSqmSold: 75.0,
@@ -52,7 +52,7 @@ async function main() {
   const broker1 = await prisma.broker.create({
     data: {
       fullName: 'Александр Петров',
-      phone: '+7-900-123-45-67',
+      phone: '+79001234567',
       email: 'alex.petrov@email.com',
       role: 'BROKER',
       status: 'ACTIVE',
@@ -74,7 +74,7 @@ async function main() {
   const broker2 = await prisma.broker.create({
     data: {
       fullName: 'Мария Сидорова',
-      phone: '+7-900-987-65-43',
+      phone: '+79009876543',
       email: 'maria.sidorova@email.com',
       role: 'BROKER',
       status: 'ACTIVE',
@@ -95,7 +95,7 @@ async function main() {
   const broker3 = await prisma.broker.create({
     data: {
       fullName: 'Дмитрий Иванов',
-      phone: '+7-900-555-12-34',
+      phone: '+79005551234',
       email: 'dmitry.ivanov@email.com',
       role: 'BROKER',
       status: 'ACTIVE',
@@ -117,7 +117,7 @@ async function main() {
     data: {
       brokerId: broker1.id,
       fullName: 'Елена Козлова',
-      phone: '+7-901-111-22-33',
+      phone: '+79011112233',
       email: 'elena.kozlova@email.com',
       comment: 'Интересуется 2-к квартирой',
       project: Project.ZORGE9,
@@ -135,7 +135,7 @@ async function main() {
     data: {
       brokerId: broker2.id,
       fullName: 'Андрей Николаев',
-      phone: '+7-902-222-33-44',
+      phone: '+79022223344',
       email: 'andrey.nikolaev@email.com',
       comment: 'Звонил по рекламе',
       project: Project.ZORGE9,
@@ -151,7 +151,7 @@ async function main() {
     data: {
       brokerId: broker1.id,
       fullName: 'Ольга Сергеева',
-      phone: '+7-903-333-44-55',
+      phone: '+79033334455',
       email: 'olga.sergeeva@email.com',
       comment: 'Переоткрыта закрытая сделка',
       project: Project.ZORGE9,
@@ -168,7 +168,7 @@ async function main() {
     data: {
       brokerId: broker3.id,
       fullName: 'Владимир Петрович',
-      phone: '+7-904-444-55-66',
+      phone: '+79044445566',
       email: 'vladimir.petrovich@email.com',
       comment: 'Интересуется коммерцией',
       project: Project.ZORGE9,
@@ -184,7 +184,7 @@ async function main() {
     data: {
       brokerId: broker2.id,
       fullName: 'Татьяна Михайлова',
-      phone: '+7-905-555-66-77',
+      phone: '+79055556677',
       email: 'tatyana.mikhailova@email.com',
       comment: 'Уникальный клиент',
       project: Project.ZORGE9,

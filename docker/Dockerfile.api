@@ -6,15 +6,23 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 COPY apps/api/package*.json ./apps/api/
-COPY packages/*/package*.json ./packages/
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/database/package*.json ./packages/database/
+COPY packages/integrations/package*.json ./packages/integrations/
 
 # Install dependencies
 RUN npm ci
 
 # Copy source code
-COPY . .
+COPY packages ./packages
+COPY apps/api ./apps/api
 
-# Build the API
+# Generate Prisma client
+RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
+
+# Build shared packages and API
+RUN npm run build --workspace=packages/shared || true
+RUN npm run build --workspace=packages/integrations || true
 RUN npm run build --workspace=apps/api
 
 # Production stage
@@ -25,23 +33,41 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 COPY apps/api/package*.json ./apps/api/
-COPY packages/*/package*.json ./packages/
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/database/package*.json ./packages/database/
+COPY packages/integrations/package*.json ./packages/integrations/
 
 # Install production dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy built application
+# Copy Prisma schema and migrations
+COPY packages/database/prisma ./packages/database/prisma
+
+# Generate Prisma client in production
+RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
+
+# Copy built packages
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/packages/shared/src ./packages/shared/src
+COPY --from=builder /app/packages/integrations/dist ./packages/integrations/dist
+COPY --from=builder /app/packages/integrations/src ./packages/integrations/src
+COPY --from=builder /app/packages/database/dist ./packages/database/dist
+
+# Copy built API
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
-COPY --from=builder /app/packages ./packages
+
+# Copy entrypoint
+COPY docker/entrypoint-api.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nestjs -u 1001
-
-# Change ownership
+RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
 RUN chown -R nestjs:nodejs /app
 USER nestjs
 
 EXPOSE 4000
 
-CMD ["npm", "run", "start:prod", "--workspace=apps/api"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:4000/health || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
