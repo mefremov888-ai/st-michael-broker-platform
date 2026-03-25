@@ -1,47 +1,19 @@
-# Build stage
 FROM node:20-alpine AS builder
-
 WORKDIR /app
-
-# Copy entire project (monorepo workspaces need full context)
 COPY . .
-
-# Install dependencies
-RUN npm install --ignore-scripts
-
-# Generate Prisma client
+RUN npm install
 RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
+RUN npm run build --workspace=apps/api 2>/dev/null || (cd apps/api && npx nest build)
 
-# Build API
-RUN npm run build --workspace=apps/api 2>/dev/null || \
-    cd apps/api && npx nest build
-
-# Production stage
-FROM node:20-alpine AS production
-
+FROM node:20-alpine
 WORKDIR /app
-
-# Copy everything from builder (simpler for monorepo)
 COPY --from=builder /app /app
-
-# Remove dev dependencies and rebuild for prod
-RUN npm prune --omit=dev --ignore-scripts 2>/dev/null || true
-
-# Re-generate Prisma client after prune
-RUN npx prisma generate --schema=packages/database/prisma/schema.prisma
-
-# Copy entrypoint
 COPY docker/entrypoint-api.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-# Create non-root user
 RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
 RUN chown -R nestjs:nodejs /app
 USER nestjs
-
 EXPOSE 4000
-
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD wget -qO- http://localhost:4000/health || exit 1
-
 ENTRYPOINT ["/entrypoint.sh"]

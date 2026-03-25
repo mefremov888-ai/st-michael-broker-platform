@@ -1,43 +1,20 @@
-# Build stage
 FROM node:20-alpine AS builder
-
 WORKDIR /app
-
-# Copy entire project
 COPY . .
-
-# Install dependencies
-RUN npm install --ignore-scripts
-
-# Build web app
+RUN npm install
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build --workspace=apps/web 2>/dev/null || \
-    cd apps/web && npx next build
+RUN npm run build --workspace=apps/web 2>/dev/null || (cd apps/web && npx next build)
 
-# Production stage
-FROM node:20-alpine AS production
-
+FROM node:20-alpine
 WORKDIR /app
-
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-
-# Create non-root user
 RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
-
-# Copy standalone build
 COPY --from=builder /app/apps/web/.next/standalone ./
 COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
-
 RUN chown -R nextjs:nodejs /app
 USER nextjs
-
 EXPOSE 3000
-
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:3000/ || exit 1
-
 CMD ["node", "apps/web/server.js"]
