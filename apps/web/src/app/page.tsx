@@ -1001,30 +1001,33 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 .btn-white{display:inline-flex;align-items:center;gap:8px;padding:14px 32px;background:var(--white);color:var(--black);font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;border-radius:var(--r-pill);transition:all var(--t);border:none;cursor:pointer}.btn-white:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.15)}
 .hero-banner{padding:0 60px;margin-top:20px}
 /* Полноширинный стиль с картинкой и тёмным градиентом, текст поверх.
-   align-items:flex-start — текст начинается СВЕРХУ (раньше был flex-end,
-   из-за чего длинные тайтлы съезжали и тег пропадал из видимости).
-   Правка заказчика 2026-05-08. */
-.hero-slides{position:relative;width:100%;height:380px;border-radius:var(--r-card);overflow:hidden;background:var(--bg2)}
-.hero-slide{position:absolute;inset:0;display:flex;align-items:flex-start;padding:44px 56px;background-size:cover;background-position:center;transition:opacity .6s ease}
+   align-items:flex-start — текст всегда начинается СВЕРХУ.
+   Высота 420px (раньше 380) + уплотнённые margin'ы — кнопка "Подробнее"
+   на длинных промо теперь помещается. Правка заказчика 2026-05-08. */
+.hero-slides{position:relative;width:100%;height:420px;border-radius:var(--r-card);overflow:hidden;background:var(--bg2)}
+.hero-slide{position:absolute;inset:0;display:flex;align-items:flex-start;padding:36px 48px;background-size:cover;background-position:center;transition:opacity .6s ease}
 .hero-slide-content{max-width:680px;color:#fff;display:flex;flex-direction:column;align-items:flex-start;gap:0}
-.hero-slide-tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold);margin-bottom:14px;padding:6px 14px;border:1px solid rgba(180,147,111,0.6);border-radius:var(--r-pill);background:rgba(0,0,0,0.25);backdrop-filter:blur(8px)}
-.hero-slide-title{font-size:clamp(26px,3vw,40px);font-weight:300;line-height:1.1;margin:0 0 12px;letter-spacing:-0.5px;color:#fff}
+.hero-slide-tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold);margin-bottom:10px;padding:6px 14px;border:1px solid rgba(180,147,111,0.6);border-radius:var(--r-pill);background:rgba(0,0,0,0.25);backdrop-filter:blur(8px)}
+.hero-slide-title{font-size:clamp(24px,2.8vw,36px);font-weight:300;line-height:1.1;margin:0 0 8px;letter-spacing:-0.5px;color:#fff}
 .hero-slide-title strong{font-weight:700}
-.hero-slide-desc{font-size:14px;line-height:1.6;color:rgba(255,255,255,0.9);font-weight:300;max-width:560px;margin:0 0 16px}
-.hero-slide-content .btn-gold{padding:12px 24px;font-size:11px}
+.hero-slide-desc{font-size:13px;line-height:1.5;color:rgba(255,255,255,0.9);font-weight:300;max-width:560px;margin:0 0 12px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.hero-slide-content .btn-gold{padding:12px 24px;font-size:11px;margin-top:4px}
 .hero-slide-dots{position:absolute;bottom:18px;left:0;right:0;display:flex;justify-content:center;gap:6px;z-index:3}
 .hero-slide-arrow{position:absolute;top:50%;transform:translateY(-50%);width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,0.92);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--black);box-shadow:0 4px 16px rgba(0,0,0,0.18);transition:all var(--t);z-index:4}
 .hero-slide-arrow:hover{background:var(--gold);color:var(--white);box-shadow:0 6px 20px rgba(180,147,111,0.4)}
 .hero-slide-arrow-prev{left:18px}.hero-slide-arrow-next{right:18px}
-.hero{padding:56px 60px 44px}
-.hero-compact{max-width:920px;margin:0 auto;text-align:center}
-.hero-tag{display:inline-flex;align-items:center;gap:10px;margin-bottom:18px}.hero-compact .hero-tag{justify-content:center}.hero-tag::before{content:'';width:28px;height:1px;background:var(--gold)}.hero-tag span{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold)}
+/* Hero компактный + по левому краю заголовка (правка 2026-05-08).
+   Раньше был text-align:center + margin:0 auto. Теперь содержимое
+   прижато к левому краю; padding/margin уменьшены. */
+.hero{padding:40px 60px 36px}
+.hero-compact{max-width:920px;margin:0 auto;text-align:left}
+.hero-tag{display:inline-flex;align-items:center;gap:10px;margin-bottom:14px}.hero-tag::before{content:'';width:28px;height:1px;background:var(--gold)}.hero-tag span{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold)}
 /* H1 "треугольник" — каждая строка чуть длиннее предыдущей. \n в title
    рендерится как <br/>. line-height:1 уплотняет блок. */
-.hero h1{font-size:var(--fs-h1);font-weight:300;line-height:1;letter-spacing:-1.5px;margin-bottom:24px;text-wrap:balance}
+.hero h1{font-size:var(--fs-h1);font-weight:300;line-height:1;letter-spacing:-1.5px;margin-bottom:18px;text-wrap:balance}
 .hero h1 strong{font-weight:700}.hero h1 em{font-style:normal;color:var(--gold);font-weight:700}
-.hero-desc{font-size:15px;color:var(--light);line-height:1.6;font-weight:400;margin-bottom:28px;max-width:640px}.hero-compact .hero-desc{margin-left:auto;margin-right:auto}
-.hero-btns{display:flex;gap:14px;flex-wrap:wrap;align-items:center}.hero-compact .hero-btns{justify-content:center}
+.hero-desc{font-size:15px;color:var(--light);line-height:1.6;font-weight:400;margin-bottom:22px;max-width:640px}
+.hero-btns{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
 .btn-lg{padding:18px 40px;font-size:12px}
 .stats-band{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--bw);border-bottom:1px solid var(--bw);background:var(--white);margin:0 60px}.hst{padding:32px 24px;text-align:center;border-right:1px solid var(--bw)}.hst:last-child{border-right:none}.hst-n{font-size:32px;font-weight:700;line-height:1;margin-bottom:8px;letter-spacing:-0.8px;color:var(--black)}.hst-l{font-size:11px;color:var(--muted);line-height:1.4;font-weight:500;letter-spacing:0.3px}
 .quick{display:grid;grid-template-columns:repeat(3,1fr);border-radius:var(--r-card);overflow:hidden;margin:0 60px;background:var(--bg)}.qa{padding:28px 32px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:background var(--t);border-right:1px solid rgba(0,0,0,0.04)}.qa:last-child{border-right:none}.qa:hover{background:var(--bg2)}.qa-title{font-size:15px;font-weight:500}.qa-sub{font-size:12px;color:var(--muted);margin-top:3px}.qa-arrow{width:36px;height:36px;border-radius:50%;background:var(--white);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;transition:all var(--t);flex-shrink:0}.qa:hover .qa-arrow{background:var(--black);color:var(--white)}
@@ -1051,7 +1054,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 .mat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
 .mat-card{display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--bg);border-radius:10px;cursor:pointer;transition:all var(--t);text-decoration:none;color:inherit}.mat-card:hover{background:var(--gold-bg);transform:translateX(2px)}.mat-card-icon{width:32px;height:32px;border-radius:8px;background:var(--white);display:flex;align-items:center;justify-content:center;color:var(--gold);flex-shrink:0}.mat-card-body{flex:1;min-width:0}.mat-card-name{font-size:12px;font-weight:500;color:var(--black);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mat-card-type{font-size:9px;font-weight:600;letter-spacing:1px;color:var(--muted);text-transform:uppercase;margin-top:2px}.mat-card-dl{color:var(--muted);flex-shrink:0}.mat-card:hover .mat-card-dl{color:var(--gold)}
 @media(max-width:1279px){.lp section{padding:72px 40px}.s-adv,.s-comm,.s-cta{padding-left:40px;padding-right:40px}.lp header{padding:0 40px}.hero{padding:48px 40px 40px}.hero-banner{padding:0 40px}.lp footer{padding:40px 40px}.quick,.sep,.stats-band{margin-left:40px;margin-right:40px}}
-@media(max-width:1023px){.adv-grid,.proj-grid{grid-template-columns:repeat(2,1fr)}.mat-groups{grid-template-columns:1fr}.foot-grid{grid-template-columns:1fr 1fr;gap:32px}.news-grid{grid-template-columns:repeat(2,1fr)}.hero-slides{height:320px}.hero-slide{padding:36px 40px}.h-burger-menu{right:40px}}
+@media(max-width:1023px){.adv-grid,.proj-grid{grid-template-columns:repeat(2,1fr)}.mat-groups{grid-template-columns:1fr}.foot-grid{grid-template-columns:1fr 1fr;gap:32px}.news-grid{grid-template-columns:repeat(2,1fr)}.hero-slides{height:360px}.hero-slide{padding:30px 36px}.h-burger-menu{right:40px}}
 @media(max-width:767px){.lp header{padding:0 20px;height:60px}.lp section{padding:56px 20px}.s-adv,.s-comm,.s-cta{padding-left:20px;padding-right:20px}.hero{padding:28px 20px 28px}.hero-banner{padding:0 20px;margin-top:16px}.lp footer{padding:32px 20px}.quick,.sep,.stats-band{margin-left:20px;margin-right:20px}.stats-band{grid-template-columns:repeat(2,1fr)}.hst{padding:24px 16px}.hst:nth-child(2){border-right:none}.hst:nth-child(1),.hst:nth-child(2){border-bottom:1px solid var(--bw)}.quick,.proj-grid,.ev-grid,.comm-content,.coop-grid,.comm-grid,.adv-grid,.news-grid,.mat-grid,.mat-groups{grid-template-columns:1fr}.foot-grid{grid-template-columns:1fr 1fr;gap:24px}.qa{padding:22px 24px;border-right:none;border-bottom:1px solid rgba(0,0,0,0.04)}.proj-card{padding:28px 24px;min-height:200px}.sh{margin-bottom:28px}.hero-slides{height:280px}.hero-slide{padding:24px 22px}.hero-slide-title{font-size:clamp(20px,5vw,28px)}.hero h1{font-size:clamp(28px,8vw,40px)}.h-burger-menu{right:20px}.h-phone{display:none}}
 @media(max-width:499px){.stats-band{grid-template-columns:1fr 1fr}.foot-grid{grid-template-columns:1fr}.proj-card{min-height:180px;padding:24px 20px}.proj-name{font-size:24px}.adv-card{padding:28px 22px}.comm-grid{gap:24px}.h-phone{font-size:12px}}
 @media(max-width:374px){.hero-btns{flex-direction:column;align-items:stretch}.hero-btns .btn-gold{width:100%;justify-content:center}}
@@ -1173,7 +1176,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             (правка 2026-05-07: каждый слайд должен быть с картинкой). */}
         {promos.length > 0 && (
           <section id="promos" style={{padding:'40px 60px'}}>
-            <div className="hero-slides" style={{height:280}}>
+            <div className="hero-slides" style={{height:340}}>
               {promos.map((p, i) => {
                 const FALLBACK = 'https://storage.yandexcloud.net/st-michael-media/media/p/p/i/bd2e855b408722fb61fa362b50d7f83282d3a86e.jpg';
                 const img = p.imageUrl || FALLBACK;
