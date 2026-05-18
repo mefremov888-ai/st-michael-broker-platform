@@ -12,6 +12,22 @@ const statusLabels: Record<string, { label: string; cls: string }> = {
   CANCELLED: { label: 'Отменён', cls: 'bg-error/20 text-error' },
 };
 
+const projectLabels: Record<string, string> = {
+  ZORGE9: 'Зорге 9',
+  SILVER_BOR: 'Серебряный Бор',
+};
+
+// Форматирование телефона +7 (XXX) XXX-XX-XX (правка 2026-05-13).
+function formatPhone(phone: string | null | undefined): string {
+  if (!phone) return '—';
+  let d = phone.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('8')) d = '7' + d.slice(1);
+  if (d.length === 10) d = '7' + d;
+  if (d.length === 11 && !d.startsWith('7')) d = '7' + d.slice(1);
+  if (d.length !== 11) return phone;
+  return `+7 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9, 11)}`;
+}
+
 interface DealsSummary {
   total: number;
   totalAmount: number;
@@ -143,9 +159,9 @@ export default function DealsPage() {
                     <tr key={deal.id} className="border-b border-border last:border-0 hover:bg-surface-secondary">
                       <td className="py-3">
                         <div className="font-medium">{deal.client?.fullName}</div>
-                        <div className="text-xs text-text-muted">{deal.client?.phone}</div>
+                        <div className="text-xs text-text-muted">{formatPhone(deal.client?.phone)}</div>
                       </td>
-                      <td className="py-3">{deal.project}</td>
+                      <td className="py-3">{projectLabels[deal.project] || deal.project}</td>
                       <td className="py-3 text-text-muted">{deal.lot?.number || '—'}</td>
                       <td className="py-3">{Math.round(Number(deal.amount)).toLocaleString('ru-RU')} ₽</td>
                       <td className="py-3 text-accent">
@@ -158,7 +174,8 @@ export default function DealsPage() {
                         </span>
                       </td>
                       <td className="py-3 text-text-muted">
-                        {new Date(deal.createdAt).toLocaleDateString('ru-RU')}
+                        {/* signedAt — дата из amoCRM (правка 2026-05-13). */}
+                        {new Date(deal.signedAt || deal.createdAt).toLocaleDateString('ru-RU')}
                       </td>
                     </tr>
                   ))}

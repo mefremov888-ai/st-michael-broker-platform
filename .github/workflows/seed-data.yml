@@ -20,6 +20,7 @@ on:
           - create-admin
           - sync-amocrm-all
           - seed-commission-policies
+          - dry-run-dedup
       admin_phone:
         description: 'Телефон админа (для task=create-admin), формат +7XXXXXXXXXX'
         required: false
@@ -89,6 +90,11 @@ jobs:
             if [ "$TASK" = "seed-commission-policies" ]; then
               echo "=== seed-commission-policies (начальные политики комиссии Зорге 9) ==="
               $COMPOSE_CMD exec -T api node /app/scripts/seed-commission-policies.js
+            fi
+
+            if [ "$TASK" = "dry-run-dedup" ]; then
+              echo "=== dry-run-dedup (вывод какие дубликаты будут удалены — БД НЕ МЕНЯЕТСЯ) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/dry-run-dedup.js
             fi
 
             if [ "$TASK" = "sync-amocrm-all" ]; then

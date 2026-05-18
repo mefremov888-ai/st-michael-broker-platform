@@ -17,14 +17,16 @@ const projectLabels: Record<string, string> = {
 };
 
 // Форматирование телефона в формат +7 (XXX) XXX-XX-XX.
-// Правка 2026-05-12: брокеры видят СВОИХ клиентов полным телефоном
-// (маска убрана — раньше показывалось "+7 (999) ***-**-67", непригодно для звонка).
+// Правка 2026-05-13: нормализуем перед форматированием (раньше `09251234567`
+// показывался как «+0 (925)...» — теперь всегда +7).
 function formatPhone(phone: string | null | undefined): string {
   if (!phone) return '—';
-  const digits = phone.replace(/\D/g, '');
-  if (digits.length < 10) return phone;
-  const d = digits.slice(-11);
-  return `+${d[0]} (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9, 11)}`;
+  let d = phone.replace(/\D/g, '');
+  if (d.length === 11 && d.startsWith('8')) d = '7' + d.slice(1);
+  if (d.length === 10) d = '7' + d;
+  if (d.length === 11 && !d.startsWith('7')) d = '7' + d.slice(1);
+  if (d.length !== 11) return phone;
+  return `+7 (${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7, 9)}-${d.slice(9, 11)}`;
 }
 
 function daysUntilExpiry(expiresAt: string | null): number | null {

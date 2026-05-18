@@ -226,7 +226,7 @@ export class CommissionService {
     const deals = await this.prisma.deal.findMany({
       where: { brokerId, status: { in: ['SIGNED', 'PAID', 'COMMISSION_PAID'] } },
       include: { client: { select: { fullName: true } }, lot: { select: { number: true } } },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { signedAt: 'desc' },
     });
 
     return deals.map((deal) => ({
@@ -235,10 +235,13 @@ export class CommissionService {
       lotNumber: deal.lot?.number || null,
       project: deal.project,
       amount: Number(deal.amount),
+      sqm: Number(deal.sqm),
       rate: Number(deal.commissionRate),
       commission: Number(deal.commissionAmount),
       status: deal.status,
       isInstallment: deal.isInstallment,
+      // signedAt — дата из amoCRM, createdAt — день нашего синка. Правка 2026-05-13.
+      signedAt: deal.signedAt,
       createdAt: deal.createdAt,
     }));
   }
