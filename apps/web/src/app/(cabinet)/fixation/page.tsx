@@ -237,7 +237,9 @@ export default function FixationPage() {
     const payload = {
       phone,
       fullName,
-      email: email || undefined,
+      // 2026-07-02: trim + falsy → undefined. Раньше email со случайным
+      // пробелом падал в zod .email() → «Поле email: неверный формат».
+      email: email.trim() || undefined,
       project,
       agencyInn: brokerAgency?.inn || '',
       propertyType,

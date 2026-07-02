@@ -56,7 +56,12 @@ export const refreshTokenDtoSchema = z.object({
 export const fixClientDtoSchema = z.object({
   phone: phoneSchema,
   fullName: z.string().min(2, 'Full name too short'),
-  email: z.string().email().optional(),
+  // 2026-07-02: allow пустая строка / пробелы — фронт иногда шлёт "" когда
+  // поле оставили пустым. Раньше zod валил такой запрос с «Invalid email».
+  email: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().email().optional(),
+  ),
   comment: z.string().optional(),
   project: z.nativeEnum(Project),
   agencyInn: z.string().regex(/^\d{10}$/, 'INN must be 10 digits'),
