@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
 import { Building, RefreshCw, ChevronLeft, ChevronRight, X, SlidersHorizontal, Heart, Printer, CalendarDays, Bookmark } from 'lucide-react';
+import { useFavorites } from '@/lib/favorites';
 
 const statusLabels: Record<string, { label: string; cls: string }> = {
   AVAILABLE: { label: 'Свободен', cls: 'bg-success/20 text-success' },
@@ -30,32 +31,11 @@ function formatReadiness(lot: { builtYear?: number | null; readyQuarter?: number
   return `${lot.readyQuarter ? `${lot.readyQuarter} кв. ` : ''}${lot.builtYear}`;
 }
 
-const FAVORITES_KEY = 'catalog_favorites';
-
-function getFavorites(): string[] {
-  if (typeof window === 'undefined') return [];
-  try { return JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]'); } catch { return []; }
-}
-
-function toggleFavorite(lotId: string): string[] {
-  const favs = getFavorites();
-  const idx = favs.indexOf(lotId);
-  if (idx >= 0) favs.splice(idx, 1); else favs.push(lotId);
-  localStorage.setItem(FAVORITES_KEY, JSON.stringify(favs));
-  return favs;
-}
-
 function LotDetail({ lot, onClose, onBook, onVisit }: { lot: any; onClose: () => void; onBook: (lot: any) => void; onVisit: (lot: any) => void }) {
-  const [isFavorite, setIsFavorite] = useState(false);
-
-  useEffect(() => {
-    setIsFavorite(getFavorites().includes(lot.id));
-  }, [lot.id]);
-
-  const handleToggleFav = () => {
-    const favs = toggleFavorite(lot.id);
-    setIsFavorite(favs.includes(lot.id));
-  };
+  // 2026-06-15: избранное через API (БД), не localStorage. См. useFavorites.
+  const { isFavorite: isFav, toggle: toggleFav } = useFavorites();
+  const isFavorite = isFav(lot.id);
+  const handleToggleFav = () => toggleFav(lot.id);
 
   const handlePrint = () => {
     const w = window.open('', '_blank');
@@ -286,6 +266,7 @@ function ContactModal({ lot, kind, onClose }: { lot: any; kind: 'book' | 'visit'
 }
 
 export default function CatalogPage() {
+  const { isFavorite: isFav, toggle: toggleFav } = useFavorites();
   const [lots, setLots] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -630,16 +611,11 @@ export default function CatalogPage() {
                         {statusLabels[lot.status]?.label || lot.status}
                       </span>
                       <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleFavorite(lot.id);
-                          // Force re-render by updating lots array
-                          setLots((prev) => [...prev]);
-                        }}
-                        className={`p-1 rounded ${getFavorites().includes(lot.id) ? 'text-error' : 'text-text-muted hover:text-text'}`}
+                        onClick={(e) => { e.stopPropagation(); toggleFav(lot.id); }}
+                        className={`p-1 rounded ${isFav(lot.id) ? 'text-error' : 'text-text-muted hover:text-text'}`}
                         title="В избранное"
                       >
-                        <Heart className={`w-4 h-4 ${getFavorites().includes(lot.id) ? 'fill-current' : ''}`} />
+                        <Heart className={`w-4 h-4 ${isFav(lot.id) ? 'fill-current' : ''}`} />
                       </button>
                     </div>
                   </div>

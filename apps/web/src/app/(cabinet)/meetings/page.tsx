@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { api, apiGet, apiPost } from '@/lib/api';
-import { Calendar, ChevronLeft, ChevronRight, CheckCircle2, Pencil, X, Ban, Check } from 'lucide-react';
+import { Calendar, ChevronLeft, ChevronRight, CheckCircle2, Pencil, X, Ban, Check, Phone } from 'lucide-react';
 
 const statusLabels: Record<string, { label: string; cls: string }> = {
   PENDING: { label: 'Ожидает', cls: 'bg-warning/20 text-warning' },
@@ -199,6 +199,29 @@ export default function MeetingsPage() {
   useEffect(() => { fetchMeetings(); }, [page]);
   useEffect(() => { fetchClients(); }, []);
 
+  // 2026-06-18: пока форма создания встречи дорабатывается, показываем брокеру
+  // телефон горячей линии для брокеров (из CMS-блока «contact»). Админ правит
+  // блок через /admin/content → «Команда».
+  // 2026-07-01: тут именно горячая линия отдела (contact.phone + blockTitle),
+  // а не персональный номер менеджера — чтобы брокер понимал, что звонит на
+  // общий телефон.
+  const [hotline, setHotline] = useState<{ blockTitle?: string; phone?: string; phoneHours?: string }>({});
+  useEffect(() => {
+    apiGet('/public/cms/content/contact')
+      .then((d: any) => {
+        const v = d?.value || {};
+        setHotline({
+          blockTitle: v.blockTitle,
+          phone: v.phone,
+          phoneHours: v.phoneHours,
+        });
+      })
+      .catch(() => {});
+  }, []);
+
+  // 2026-07-02: блок «Календарь из amoCRM» убран по просьбе Ксении.
+  // Соответствующий useState/useEffect удалены.
+
   // Load slots whenever date or type changes (in slots mode)
   useEffect(() => {
     if (!useSlots || !slotDate) { setSlots([]); return; }
@@ -257,10 +280,34 @@ export default function MeetingsPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.2fr] gap-6">
-        {/* Form — always visible */}
+        {/* 2026-06-18: форма временно скрыта — показываем брокеру телефон
+            менеджера по работе с брокерами для записи. Форма вернётся когда
+            доработаем (см. project_pending_tasks). */}
         <div className="card">
-          <h2 className="text-lg font-semibold mb-4">Новая встреча</h2>
+          <h2 className="text-lg font-semibold mb-3">Записаться на встречу</h2>
+          {/* 2026-07-02: подпись «раздел дорабатывается» убрана + блок «Календарь из amoCRM» убран. */}
+          <div className="rounded-lg border border-accent/30 bg-accent/5 p-4">
+            <div className="text-xs text-text-muted mb-2">
+              {hotline.blockTitle || 'Горячая линия по работе с партнёрами'}
+            </div>
+            {hotline.phone ? (
+              <a
+                href={`tel:${hotline.phone.replace(/[^\d+]/g, '')}`}
+                className="inline-flex items-center gap-2 text-accent font-semibold text-lg hover:underline"
+              >
+                <Phone className="w-5 h-5" /> {hotline.phone}
+              </a>
+            ) : (
+              <div className="text-sm text-text-muted">Телефон не задан — обратитесь в админ-панель CMS</div>
+            )}
+            {hotline.phoneHours && (
+              <div className="text-xs text-text-muted mt-1">{hotline.phoneHours}</div>
+            )}
+          </div>
+        </div>
 
+        {/* Старая форма скрыта — оставляем заглушку для div'а который никогда не рендерится */}
+        <div className="hidden">
           {success && (
             <div className="mb-4 p-3 bg-success/20 text-success rounded-lg text-sm flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4" /> Встреча создана, уведомления отправлены
@@ -339,7 +386,17 @@ export default function MeetingsPage() {
                       {slotsLoading ? (
                         <div className="text-text-muted text-sm">Загрузка слотов…</div>
                       ) : slots.length === 0 ? (
-                        <div className="text-text-muted text-sm">На эту дату нет доступных слотов. Попросите менеджера настроить расписание или укажите время вручную.</div>
+                        <div className="text-sm text-text-muted">
+                          На эту дату слоты ещё не подгрузились — укажите удобное время вручную.
+                          {' '}
+                          <button
+                            type="button"
+                            className="text-accent hover:underline font-medium"
+                            onClick={() => { setUseSlots(false); setForm({ ...form, slotId: '', date: '' }); }}
+                          >
+                            Указать вручную
+                          </button>
+                        </div>
                       ) : (
                         <div className="grid grid-cols-3 gap-2 max-h-48 overflow-y-auto">
                           {slots.map((s) => {

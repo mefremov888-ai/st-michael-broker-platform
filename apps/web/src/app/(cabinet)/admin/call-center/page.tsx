@@ -118,6 +118,8 @@ export default function AdminCallCenterPage() {
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
+  // 2026-07-06: фильтр по специализации — коммерция / жилая / обе / не указана.
+  const [specializationFilter, setSpecializationFilter] = useState('');
   const [includeAll, setIncludeAll] = useState(false);
   const [coordinatorsFilter, setCoordinatorsFilter] = useState<'' | 'only' | 'exclude'>('');
   const [queue, setQueue] = useState<QueueResponse | null>(null);
@@ -140,6 +142,7 @@ export default function AdminCallCenterPage() {
     const p = new URLSearchParams({ page: String(page), limit: '20' });
     if (search) p.set('search', search);
     if (categoryFilter) p.set('category', categoryFilter);
+    if (specializationFilter) p.set('specialization', specializationFilter);
     if (includeAll) p.set('includeAll', 'true');
     if (coordinatorsFilter) p.set('coordinators', coordinatorsFilter);
     if (assignmentFilter && assignmentFilter !== 'all') p.set('assignment', assignmentFilter);
@@ -147,7 +150,7 @@ export default function AdminCallCenterPage() {
       .then(setQueue)
       .catch(() => setQueue({ brokers: [], total: 0, page: 1, limit: 20, totalPages: 1 }))
       .finally(() => setLoading(false));
-  }, [page, search, categoryFilter, includeAll, coordinatorsFilter, assignmentFilter]);
+  }, [page, search, categoryFilter, specializationFilter, includeAll, coordinatorsFilter, assignmentFilter]);
 
   const loadStats = useCallback(() => {
     apiGet<CallCenterStats>('/admin/call-center/stats').then(setStats).catch(() => {});
@@ -164,7 +167,7 @@ export default function AdminCallCenterPage() {
   useEffect(() => { loadManagers(); }, [loadManagers]);
 
   // При смене страницы или фильтра — сбрасываем выбор (не путаем менеджера).
-  useEffect(() => { setSelected(new Set()); }, [page, search, categoryFilter, includeAll, coordinatorsFilter, assignmentFilter]);
+  useEffect(() => { setSelected(new Set()); }, [page, search, categoryFilter, specializationFilter, includeAll, coordinatorsFilter, assignmentFilter]);
 
   const toggleSelected = (id: string) => {
     const next = new Set(selected);
@@ -276,6 +279,17 @@ export default function AdminCallCenterPage() {
           <select className="input w-auto" value={categoryFilter} onChange={(e) => { setCategoryFilter(e.target.value); setPage(1); }}>
             <option value="">Все категории</option>
             {Object.entries(categoryLabels).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+          </select>
+          {/* 2026-07-06: фильтр специализации — можно собрать очередь только по
+              коммерческим брокерам (или наоборот). COMM ставится автоматически
+              при импорте из Google по маркерам в комментарии. */}
+          <select className="input w-auto" value={specializationFilter} onChange={(e) => { setSpecializationFilter(e.target.value); setPage(1); }}>
+            <option value="">Все специализации</option>
+            <option value="COMM">Коммерция</option>
+            <option value="RESIDENTIAL">Жилая</option>
+            <option value="BOTH">Обе</option>
+            <option value="REGIONAL">Региональный</option>
+            <option value="UNSET">Не указана</option>
           </select>
           <select className="input w-auto" value={coordinatorsFilter} onChange={(e) => { setCoordinatorsFilter(e.target.value as any); setPage(1); }}>
             <option value="">Брокеры + координаторы</option>

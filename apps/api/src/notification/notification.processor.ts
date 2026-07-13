@@ -3,10 +3,13 @@ import { Logger, Inject } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaClient } from '@st-michael/database';
 import * as webpush from 'web-push';
+import * as sgMail from '@sendgrid/mail';
 
 interface NotificationJob {
   brokerId: string;
-  channel: 'SMS' | 'WHATSAPP' | 'TELEGRAM' | 'EMAIL' | 'PUSH';
+  // 2026-07-02: убран WHATSAPP (не подключён). TELEGRAM оставлен на случай
+  // старых job'ов в очереди — processor молча пропустит без TOKEN.
+  channel: 'SMS' | 'TELEGRAM' | 'EMAIL' | 'PUSH';
   subject?: string;
   body: string;
   // Event type — if set, processor checks broker's notification preferences and
@@ -16,12 +19,22 @@ interface NotificationJob {
   data?: { url?: string; tag?: string; icon?: string };
 }
 
+let sendgridConfigured = false;
+function configureSendgrid() {
+  if (sendgridConfigured) return;
+  const key = process.env.SENDGRID_API_KEY;
+  if (key) {
+    sgMail.setApiKey(key);
+    sendgridConfigured = true;
+  }
+}
+
 let webPushConfigured = false;
 function configureWebPush() {
   if (webPushConfigured) return;
   const pub = process.env.VAPID_PUBLIC_KEY;
   const prv = process.env.VAPID_PRIVATE_KEY;
-  const subject = process.env.VAPID_SUBJECT || 'mailto:broker@stmichael.ru';
+  const subject = process.env.VAPID_SUBJECT || 'mailto:info@zorge9.com';
   if (pub && prv) {
     webpush.setVapidDetails(subject, pub, prv);
     webPushConfigured = true;
@@ -67,9 +80,6 @@ export class NotificationProcessor {
         case 'SMS':
           await this.sendSms(broker.phone, body);
           break;
-        case 'WHATSAPP':
-          await this.sendWhatsApp(broker.phone, body);
-          break;
         case 'TELEGRAM':
           await this.sendTelegram(broker.telegramChatId, body);
           break;
@@ -114,18 +124,6 @@ export class NotificationProcessor {
     // In production: await fetch(`https://sms.ru/sms/send?api_id=${apiKey}&to=${phone}&msg=${encodeURIComponent(body)}&json=1`)
   }
 
-  private async sendWhatsApp(phone: string, body: string) {
-    const token = process.env.WHATSAPP_TOKEN;
-    const phoneId = process.env.WHATSAPP_PHONE_ID;
-    if (!token || !phoneId) {
-      this.logger.warn(`[WhatsApp] Not configured. Message to ${phone}: ${body}`);
-      return;
-    }
-
-    this.logger.log(`[WhatsApp] Sending to ${phone}: ${body.substring(0, 50)}...`);
-    // In production: await fetch(`https://graph.facebook.com/v18.0/${phoneId}/messages`, { ... })
-  }
-
   private async sendTelegram(chatId: bigint | null, body: string) {
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
     if (!botToken || !chatId) {
@@ -148,9 +146,40 @@ export class NotificationProcessor {
       this.logger.warn(`[Email] No email for broker. Subject: ${subject}`);
       return;
     }
+    configureSendgrid();
+    if (!sendgridConfigured) {
+      this.logger.warn(`[Email] SENDGRID_API_KEY not configured — skip. To: ${email}, Subject: ${subject}`);
+      return;
+    }
 
-    this.logger.log(`[Email] Sending to ${email}: ${subject}`);
-    // In production: integrate with nodemailer, SendGrid, etc.
+    // 2026-07-02: Real SendGrid отправка. FROM_EMAIL — верифицированный
+    // отправитель в SendGrid (Ксения настраивает через Sender Authentication).
+    // Fallback: info@zorge9.com — уже есть в CMS-блоке contact.
+    const from = process.env.SENDGRID_FROM || 'info@zorge9.com';
+    const fromName = process.env.SENDGRID_FROM_NAME || 'ST Michael';
+
+    // Тело письма: если body содержит HTML-теги, используем его как HTML.
+    // Иначе оборачиваем в простой text-only.
+    const isHtml = /<[a-z][^>]*>/i.test(body);
+    const html = isHtml ? body : body.replace(/\n/g, '<br>');
+    const text = body.replace(/<[^>]+>/g, '');
+
+    this.logger.log(`[Email→SendGrid] To: ${email}, Subject: ${subject}`);
+    try {
+      await sgMail.send({
+        to: email,
+        from: { email: from, name: fromName },
+        subject,
+        text,
+        html,
+      });
+    } catch (e: any) {
+      const details = e?.response?.body?.errors
+        ? JSON.stringify(e.response.body.errors)
+        : (e?.message || String(e));
+      this.logger.error(`[Email→SendGrid] Failed: ${details}`);
+      throw e; // Let BullMQ retry.
+    }
   }
 
   private async sendPush(

@@ -5,13 +5,14 @@ import { usePathname } from 'next/navigation';
 import { Home, ChevronRight } from 'lucide-react';
 
 const labels: Record<string, string> = {
-  fixation: 'Фиксация',
-  clients: 'Клиенты',
+  fixation: 'Проверка на уникальность',
+  clients: 'Мои клиенты',
   meetings: 'Встречи',
   catalog: 'Подбор квартир',
-  deals: 'Сделки',
+  favorites: 'Избранное',
+  deals: 'Мои сделки',
   commission: 'Комиссия',
-  materials: 'Материалы',
+  materials: 'Материалы для работы',
   documents: 'Документы',
   offer: 'Договор оферты',
   profile: 'Профиль',

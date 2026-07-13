@@ -6,28 +6,50 @@ export class AnalyticsService {
   constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
 
   async getDashboard(brokerId: string) {
+    // 2026-07-03: на дашборде показываем ТОЛЬКО клиентов-владельцев (creator).
+    // Делегированные (когда А фиксирует на Б) в дашборд Б не входят: комиссия,
+    // м² в уровень, статистика — всё это идёт создателю (А). У Б они видны
+    // только в списке /clients как «Исполнитель по фиксации».
+    // Раньше был OR по responsibleBrokerId — из-за этого у Б в дашборде
+    // считались клиенты, за которых он не получает ни денег, ни зачёта.
+    const clientOwnership = { brokerId } as any;
     const [
       totalClients,
       activeFixations,
+      rejectedFixations,
       expiredFixations,
+      delegatedToMe,
       totalDeals,
       pendingDeals,
       paidDeals,
       commissionStats,
       upcomingMeetings,
     ] = await Promise.all([
-      this.prisma.client.count({ where: { brokerId } }),
+      this.prisma.client.count({ where: clientOwnership }),
       this.prisma.client.count({
         where: {
-          brokerId,
+          ...clientOwnership,
           uniquenessStatus: 'CONDITIONALLY_UNIQUE',
           uniquenessExpiresAt: { gt: new Date() },
         },
       }),
+      // 2026-07-08: считаем «Не уникален» — нужно для % успеха уникальности.
+      this.prisma.client.count({
+        where: { ...clientOwnership, uniquenessStatus: 'REJECTED' },
+      }),
       this.prisma.client.count({
         where: {
-          brokerId,
+          ...clientOwnership,
           uniquenessStatus: 'EXPIRED',
+        },
+      }),
+      // Делегированные КО МНЕ (я responsibleBroker, не создатель). Нужны
+      // отдельным числом, чтобы брокер видел клиентов, которых ведёт от А,
+      // но за которых не получит комиссию.
+      this.prisma.client.count({
+        where: {
+          responsibleBrokerId: brokerId,
+          NOT: { brokerId },
         },
       }),
       this.prisma.deal.count({ where: { brokerId } }),
@@ -49,7 +71,7 @@ export class AnalyticsService {
     // Fixations expiring in next 7 days
     const expiringFixations = await this.prisma.client.count({
       where: {
-        brokerId,
+        ...clientOwnership,
         uniquenessStatus: 'CONDITIONALLY_UNIQUE',
         uniquenessExpiresAt: {
           gt: new Date(),
@@ -58,12 +80,30 @@ export class AnalyticsService {
       },
     });
 
+    // 2026-07-08: % успеха уникальности. Считаем среди «завершённых»
+    // фиксаций (все статусы кроме UNDER_REVIEW) — сколько из них дошли
+    // до CONDITIONALLY_UNIQUE. Показывает, насколько успешно брокер
+    // проходит правила уникальности КЦ.
+    const uniqueFixationsForRatio = await this.prisma.client.count({
+      where: {
+        ...clientOwnership,
+        uniquenessStatus: 'CONDITIONALLY_UNIQUE',
+      },
+    });
+    const finalizedFixations = uniqueFixationsForRatio + rejectedFixations + expiredFixations;
+    const uniquenessSuccessRate = finalizedFixations > 0
+      ? Math.round((uniqueFixationsForRatio / finalizedFixations) * 100)
+      : 0;
+
     return {
       clients: {
         total: totalClients,
         activeFixations,
         expiredFixations,
         expiringFixations,
+        // 2026-07-08: новые метрики
+        uniquenessSuccessRate,   // % «Уникален» среди завершённых фиксаций
+        delegatedToMe,           // клиенты, которых я веду за другого брокера
       },
       deals: {
         total: totalDeals,
@@ -80,41 +120,10 @@ export class AnalyticsService {
     };
   }
 
-  async getFunnel(filters: {
-    startDate?: string;
-    endDate?: string;
-    project?: string;
-  }) {
-    const where: any = {};
-    if (filters.startDate) where.createdAt = { ...(where.createdAt || {}), gte: new Date(filters.startDate) };
-    if (filters.endDate) where.createdAt = { ...(where.createdAt || {}), lte: new Date(filters.endDate) };
-
-    const [newBrokers, brokerTour, fixation, meeting, deal] = await Promise.all([
-      this.prisma.broker.count({ where: { ...where, funnelStage: 'NEW_BROKER' } }),
-      this.prisma.broker.count({ where: { ...where, funnelStage: 'BROKER_TOUR' } }),
-      this.prisma.broker.count({ where: { ...where, funnelStage: 'FIXATION' } }),
-      this.prisma.broker.count({ where: { ...where, funnelStage: 'MEETING' } }),
-      this.prisma.broker.count({ where: { ...where, funnelStage: 'DEAL' } }),
-    ]);
-
-    const stages = [
-      { name: 'Новый брокер', stage: 'NEW_BROKER', count: newBrokers },
-      { name: 'Брокер-тур', stage: 'BROKER_TOUR', count: brokerTour },
-      { name: 'Фиксация', stage: 'FIXATION', count: fixation },
-      { name: 'Встреча', stage: 'MEETING', count: meeting },
-      { name: 'Сделка', stage: 'DEAL', count: deal },
-    ];
-
-    const total = stages.reduce((sum, s) => sum + s.count, 0);
-
-    return {
-      stages: stages.map((s) => ({
-        ...s,
-        percentage: total > 0 ? Math.round((s.count / total) * 100) : 0,
-      })),
-      total,
-    };
-  }
+  // 2026-07-07: удалён неиспользуемый метод getFunnel() — эндпоинт
+  // GET /analytics/funnel был мёртвым кодом (фронтенд его не дёргал),
+  // распределение по стадиям воронки живёт внутри getAdminOverview
+  // (funnelByStage).
 
   // Admin overview — implements ТЗ §15.6
   async getAdminOverview(filters: { startDate?: string; endDate?: string }) {
@@ -237,11 +246,106 @@ export class AnalyticsService {
     }
 
     // ─── Funnel stage distribution ───────────────────────
+    // 2026-07-07 (багфикс): раньше воронка считалась за всё время, не
+    // учитывая выбранный период — пользователь выбирал «Месяц», а видел
+    // распределение всех брокеров за всю историю. Теперь фильтруем
+    // группировку по createdAt in [from, to] — цифры совпадают с
+    // «Новых в периоде» и графиком регистраций.
     const funnelGroups = await this.prisma.broker.groupBy({
       by: ['funnelStage'],
+      where: { createdAt: { gte: from, lte: to } },
       _count: true,
     });
     const funnelByStage = funnelGroups.map((f) => ({ stage: f.funnelStage, count: f._count }));
+
+    // ─── Broker-tour → Fixation → Deal funnel (в периоде) ─
+    // 2026-07-07: сквозная воронка брокер-туров. Показывает, сколько
+    // брокеров, посетивших тур в выбранном периоде, потом сделали
+    // уникальную фиксацию и довели её до сделки. Ключевая метрика для
+    // управления — раньше в аналитике не было вообще.
+    const brokersOnTour = await this.prisma.broker.findMany({
+      where: {
+        brokerTourVisited: true,
+        brokerTourDate: { gte: from, lte: to },
+      },
+      select: { id: true },
+    });
+    const tourBrokerIds = brokersOnTour.map((b) => b.id);
+    let tourWithFixation = 0;
+    let tourWithDeal = 0;
+    if (tourBrokerIds.length > 0) {
+      const [fixationGroups, dealGroups] = await Promise.all([
+        this.prisma.client.groupBy({
+          by: ['brokerId'],
+          where: {
+            brokerId: { in: tourBrokerIds },
+            uniquenessStatus: 'CONDITIONALLY_UNIQUE',
+          },
+        }),
+        this.prisma.deal.groupBy({
+          by: ['brokerId'],
+          where: {
+            brokerId: { in: tourBrokerIds },
+            status: { in: ['PAID', 'COMMISSION_PAID'] },
+          },
+        }),
+      ]);
+      tourWithFixation = fixationGroups.length;
+      tourWithDeal = dealGroups.length;
+    }
+    const brokerTourFunnel = {
+      tourVisited: tourBrokerIds.length,
+      withFixation: tourWithFixation,
+      withDeal: tourWithDeal,
+      toFixationPct: tourBrokerIds.length > 0
+        ? Math.round((tourWithFixation / tourBrokerIds.length) * 100)
+        : 0,
+      toDealPct: tourBrokerIds.length > 0
+        ? Math.round((tourWithDeal / tourBrokerIds.length) * 100)
+        : 0,
+    };
+
+    // ─── Аналитика по источникам брокеров (в периоде) ─────
+    // 2026-07-07: Broker.source в БД был, но в аналитике не показывался.
+    // Позволяет оценить эффективность каналов привлечения: лендинг vs
+    // холодный обзвон vs брокер-туры.
+    const sourceGroups = await this.prisma.broker.groupBy({
+      by: ['source'],
+      where: { createdAt: { gte: from, lte: to } },
+      _count: true,
+    });
+    const bySource = sourceGroups
+      .filter((s) => s.source)
+      .map((s) => ({ source: s.source as string, count: s._count }))
+      .sort((a, b) => b.count - a.count);
+
+    // ─── Топ-10 брокеров по уникальным фиксациям (в периоде) ─
+    // 2026-07-07: раньше был только топ по комиссии — а нужно видеть кто
+    // приносит фиксации, даже если сделка ещё не закрыта.
+    const topFixationRows = await this.prisma.client.groupBy({
+      by: ['brokerId'],
+      where: {
+        uniquenessStatus: 'CONDITIONALLY_UNIQUE',
+        ...periodFilter,
+      },
+      _count: true,
+      orderBy: { _count: { brokerId: 'desc' } },
+      take: 10,
+    });
+    const fixationBrokerIds = topFixationRows.map((r) => r.brokerId);
+    const fixationBrokerMeta = fixationBrokerIds.length
+      ? await this.prisma.broker.findMany({
+          where: { id: { in: fixationBrokerIds } },
+          select: { id: true, fullName: true, phone: true },
+        })
+      : [];
+    const fixationBrokerMap = new Map(fixationBrokerMeta.map((b) => [b.id, b]));
+    const topFixationBrokers = topFixationRows.map((r) => ({
+      brokerId: r.brokerId,
+      fullName: fixationBrokerMap.get(r.brokerId)?.fullName || '—',
+      phone: fixationBrokerMap.get(r.brokerId)?.phone || '',
+      uniqueFixations: r._count,
+    }));
 
     return {
       period: { from: from.toISOString(), to: to.toISOString() },
@@ -263,6 +367,11 @@ export class AnalyticsService {
       },
       deals: { funnel: dealsFunnel },
       topBrokers,
+      // 2026-07-07: новые блоки — сквозная воронка брокер-туров и топ по
+      // уникальным фиксациям. UI должен добавить их в /admin/analytics.
+      brokerTourFunnel,
+      topFixationBrokers,
+      bySource,
       projects: Object.values(projectStats),
     };
   }
@@ -275,6 +384,7 @@ export class AnalyticsService {
 
     const [
       clientsCreated,
+      uniqueFixations,
       meetingsHeld,
       dealsClosed,
       callsMade,
@@ -282,6 +392,17 @@ export class AnalyticsService {
       this.prisma.client.count({
         where: {
           brokerId,
+          ...(hasDateFilter ? { createdAt: dateFilter } : {}),
+        },
+      }),
+      // 2026-07-07: раньше конверсия считалась как dealsClosed / clientsCreated —
+      // это неправильно: в знаменателе учитывались клиенты в UNDER_REVIEW и
+      // REJECTED, у которых сделки быть не могло в принципе. Теперь считаем
+      // «Фиксация → Сделка»: сколько % уникальных фиксаций дошли до PAID.
+      this.prisma.client.count({
+        where: {
+          brokerId,
+          uniquenessStatus: 'CONDITIONALLY_UNIQUE',
           ...(hasDateFilter ? { createdAt: dateFilter } : {}),
         },
       }),
@@ -314,11 +435,13 @@ export class AnalyticsService {
       },
       metrics: {
         clientsCreated,
+        uniqueFixations,
         meetingsHeld,
         dealsClosed,
         callsMade,
-        conversionRate: clientsCreated > 0
-          ? Math.round((dealsClosed / clientsCreated) * 100)
+        // «% фиксаций, которые дошли до сделки» — правильная воронка брокера.
+        conversionRate: uniqueFixations > 0
+          ? Math.round((dealsClosed / uniqueFixations) * 100)
           : 0,
       },
     };

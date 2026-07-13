@@ -1,6 +1,7 @@
 import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
-import { AmoCrmAdapter } from '@st-michael/integrations';
+import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitLeadDate } from '@st-michael/integrations';
+import { getSystemSetting } from '../common/system-setting';
 
 const KNOWN_KEYS = ['hero', 'advantages', 'commission', 'contact', 'howto', 'projectsSection', 'cooperation'] as const;
 
@@ -69,6 +70,12 @@ const DEFAULT_CONTENT: Record<string, any> = {
     title: 'Прогрессивная шкала вознаграждения',
     titleAccent: 'шкала',
     subtitle: 'Метраж суммируется по обоим проектам в рамках одного агентства. Действует с 1 января по 30 июня 2026 года.',
+    // 2026-07-01: параметры калькулятора комиссии /commission/calculate.
+    // *Enabled=false → вариант оплаты скрыт на форме калькулятора.
+    installmentDiscount: 0.5,
+    installmentEnabled: true,
+    subsidizedMortgageRate: 4,
+    subsidizedMortgageEnabled: true,
     levelsByProject: {
       ZORGE9: [
         { name: 'Start', range: '0–59 м²', rate: '5,0%', active: false },
@@ -116,12 +123,14 @@ const DEFAULT_CONTENT: Record<string, any> = {
     blockTitle: 'Горячая линия по работе с партнёрами',
     phone: '+7 (499) 226-22-49',
     phoneHours: 'Ежедневно с 9:00 до 21:00',
-    email: 'broker@stmichael.ru',
+    email: 'info@zorge9.com',
     telegram: 'https://t.me/stmichaelBroker',
     manager: {
       name: 'Ксения Цепляева',
       role: 'Руководитель отдела по работе с партнёрами',
-      phone: '+7 (906) 061-78-00',
+      // 2026-07-01: телефон отдела по работе с брокерами (был личный
+      // мобильный Ксении +7 906 061-78-00).
+      phone: '+7 (499) 226-22-49',
     },
   },
 };
@@ -131,6 +140,7 @@ export class CmsService {
   // 2026-05-26: AmoCrmAdapter не зарегистрирован в DI этого модуля, создаём
   // напрямую. Использует env AMO_ACCESS_TOKEN.
   private amo = new AmoCrmAdapter();
+  private morekit = new MorekitAdapter();
   constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
 
   async getAllContent() {
@@ -495,6 +505,8 @@ export class CmsService {
     // 2026-05-26: параллельно создаём карточку в amoCRM (пайплайн БРОКЕРЫ)
     // — контакт с IS_BROKER + лид + задача КЦ. Если amo упал — не валим:
     // brokerId в нашей БД создан, синк может пройти позже.
+    let amoLeadId: number | undefined;
+    let amoContactId: number | undefined;
     try {
       const amo = await this.amo.createBrokerLeadFromLanding({
         brokerName: data.fullName,
@@ -503,14 +515,43 @@ export class CmsService {
         source: data.source === 'broker-tour' ? 'LANDING_BROKER_TOUR' : 'LANDING_FORM',
         note: data.note,
       });
-      if (amo?.contactId) {
+      amoLeadId = amo?.leadId;
+      amoContactId = amo?.contactId;
+      if (amoContactId) {
         await this.prisma.broker.update({
           where: { id: created.id },
-          data: { amoContactId: BigInt(amo.contactId) as any },
+          data: { amoContactId: BigInt(amoContactId) as any },
         }).catch(() => {});
       }
     } catch (e: any) {
       console.error('[upsertBrokerFromLandingLead] amo create failed:', e?.message || e);
+    }
+
+    // 2026-06-17: дублируем уведомление в Морикит — он создаст вторую задачу
+    // на КЦ-менеджере по графику смен (Ксения как руководитель направления
+    // может пропустить — нужен явный обзвон от КЦ-оператора). Лид остаётся
+    // на Ксении (PR #165), а задача Морикита уйдёт на текущего оператора КЦ.
+    if (amoLeadId) {
+      try {
+        const morekitUrl = await getSystemSetting(this.prisma, 'MOREKIT_WEBHOOK_URL');
+        if (morekitUrl) {
+          this.morekit.notifyFixation({
+            id: String(amoLeadId),
+            agency: '',
+            broker_id: amoContactId ? String(amoContactId) : '',
+            agent_name: data.fullName, // новый брокер сам же «агент»
+            agent_phone: morekitPhone(phone),
+            agent_mail: data.email || '',
+            budget: '0',
+            clients: [{ name: data.fullName, phone: morekitPhone(phone) }],
+            type: 'Брокер-тур',
+            lead_date: morekitLeadDate(),
+            project: data.source === 'broker-tour' ? 'Брокер-тур' : 'Заявка с лендинга',
+          }, morekitUrl).catch((e) => console.error('[upsertBrokerFromLandingLead] morekit notify error:', e?.message || e));
+        }
+      } catch (e: any) {
+        console.error('[upsertBrokerFromLandingLead] morekit setup failed:', e?.message || e);
+      }
     }
 
     return created.id;
@@ -577,71 +618,18 @@ export class CmsService {
 
   // Seeds default content (idempotent — only inserts if missing)
   async seedDefaults() {
-    // Одноразовая миграция 2026-05-22-bis: применяем Ксенины правки КБ4
-    // (документ docs/КБ4-изменения-блоков-для-проверки.docx, колонка «СТАЛО»).
-    // В БД сейчас могут лежать «старые» дефолты (Почему брокеры выбирают
-    // нас / ИП-ООО / Зорге 9 и Квартал...) — это означает что никто их
-    // не редактировал руками. Удаляем такие записи, чтобы ниже пересоздались
-    // с актуального DEFAULT_CONTENT (Ксенины тексты КБ4). Кастомы
-    // пользователя (с другими текстами) проверка не тронет — маркеры
-    // однозначные.
-    const oldAdvantagesTitle = 'Почему брокеры выбирают нас';
-    const oldHowtoSubtitle = 'Можно начать сотрудничество с первой сделки — даже с первого дня существования вашего ИП. Без дополнительных условий.';
-    const oldProjectsSubtitle = 'Зорге 9 и Квартал Серебряный Бор. Каждый проект — отдельная прогрессивная шкала комиссии.';
-
-    try {
-      const adv = await this.prisma.siteContent.findUnique({ where: { key: 'advantages' } });
-      if (adv && (adv.value as any)?.title === oldAdvantagesTitle) {
-        await this.prisma.siteContent.delete({ where: { key: 'advantages' } });
-      }
-      const howto = await this.prisma.siteContent.findUnique({ where: { key: 'howto' } });
-      if (howto && (howto.value as any)?.subtitle === oldHowtoSubtitle) {
-        await this.prisma.siteContent.delete({ where: { key: 'howto' } });
-      }
-      const ps = await this.prisma.siteContent.findUnique({ where: { key: 'projectsSection' } });
-      if (ps && (ps.value as any)?.subtitle === oldProjectsSubtitle) {
-        await this.prisma.siteContent.delete({ where: { key: 'projectsSection' } });
-      }
-    } catch (e) {
-      // Не валим seedDefaults если миграция не отработала
-    }
-
-    // 2026-05-26: ОТКАТ КБ5-миграции. Моя предыдущая «стирающая» миграция
-    // снесла ксенины тексты КБ4. Теперь — обратное: удаляем мои КБ5-тексты
-    // («Прогрессивная шкала: чем больше квадратных метров…», «Конкурентная
-    // комиссия», убранный «Квартальный бонус») чтобы при пересоздании
-    // подхватились возвращённые ксенины DEFAULT_CONTENT.
-    try {
-      const hero = await this.prisma.siteContent.findUnique({ where: { key: 'hero' } });
-      if (hero) {
-        const desc = (hero.value as any)?.description || '';
-        if (desc.startsWith('Прогрессивная шкала комиссии: чем больше квадратных метров')) {
-          await this.prisma.siteContent.delete({ where: { key: 'hero' } });
-        }
-      }
-      const adv2 = await this.prisma.siteContent.findUnique({ where: { key: 'advantages' } });
-      if (adv2) {
-        const items = (adv2.value as any)?.items || [];
-        const hasMyKb5 = items.some((it: any) =>
-          it?.title === 'Конкурентная комиссия' ||
-          /Прогрессивная шкала — растёт вместе с объёмом продаж/.test(it?.description || '')
-        );
-        if (hasMyKb5) {
-          await this.prisma.siteContent.delete({ where: { key: 'advantages' } });
-        }
-      }
-      const comm = await this.prisma.siteContent.findUnique({ where: { key: 'commission' } });
-      if (comm) {
-        const cards = (comm.value as any)?.cards || [];
-        const hasQuarterly = cards.some((c: any) => c?.title === 'Квартальный бонус');
-        // Если квартального НЕТ — значит это моя обрезанная версия КБ5, сносим
-        if (!hasQuarterly && cards.length > 0) {
-          await this.prisma.siteContent.delete({ where: { key: 'commission' } });
-        }
-      }
-    } catch (e) {
-      // не валим seedDefaults
-    }
+    // 2026-06-11: УДАЛЕНЫ две одноразовые миграции (2026-05-22-bis КБ4-fix
+    // и 2026-05-26 КБ5-rollback), которые удаляли админские записи
+    // hero/advantages/howto/projectsSection/commission по «маркерам старого
+    // содержимого». Эти миграции работали как ловушка: Ксения убрала
+    // прогрессивную шкалу + карточку «Квартальный бонус» через /admin/content,
+    // а на каждом рестарте API код видел «нет карточки Квартальный бонус» →
+    // удалял её запись → пересоздавал из DEFAULT_CONTENT с прогрессивной
+    // шкалой обратно. Каждый деплой откатывал её правки.
+    //
+    // Миграции свою задачу выполнили ещё в мае 2026 — на проде уже нет
+    // записей с этими «маркерами», условия больше не срабатывают на
+    // легитимные данные. Оставлять их не нужно.
 
     for (const key of KNOWN_KEYS) {
       const exists = await this.prisma.siteContent.findUnique({ where: { key } });
@@ -650,6 +638,30 @@ export class CmsService {
           data: { key, value: DEFAULT_CONTENT[key] },
         });
       }
+    }
+
+    // 2026-07-01: миграция телефона менеджера с личного мобильного Ксении
+    // (+7 906 061-78-00) на общий телефон отдела (+7 499 226-22-49).
+    // Идемпотентно: срабатывает только если старый номер до сих пор в БД.
+    try {
+      const contactRow = await this.prisma.siteContent.findUnique({ where: { key: 'contact' } });
+      const contactValue = contactRow?.value as any;
+      const currentPhone = contactValue?.manager?.phone;
+      const OLD_PHONE = '+7 (906) 061-78-00';
+      const NEW_PHONE = '+7 (499) 226-22-49';
+      if (contactValue && currentPhone === OLD_PHONE) {
+        const nextValue = {
+          ...contactValue,
+          manager: { ...(contactValue.manager || {}), phone: NEW_PHONE },
+        };
+        await this.prisma.siteContent.update({
+          where: { key: 'contact' },
+          data: { value: nextValue },
+        });
+        console.log('[CMS migration] contact.manager.phone обновлён на', NEW_PHONE);
+      }
+    } catch (e: any) {
+      console.warn('[CMS migration] manager.phone migration failed:', e?.message || e);
     }
 
     const projectsCount = await this.prisma.landingProject.count();

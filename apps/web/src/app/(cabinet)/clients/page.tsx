@@ -12,6 +12,19 @@ const statusLabels: Record<string, { label: string; cls: string }> = {
   EXPIRED: { label: 'Истёк', cls: 'bg-text-muted/20 text-text-muted' },
 };
 
+// 2026-07-02: если А зафиксировал клиента на Б через «Фиксирую на другого
+// брокера», уникальность принадлежит А (создателю). Б просто исполнитель —
+// у него в списке НЕ должен светиться «Уникален». Определяем по паре
+// (client.broker.id, client.responsibleBroker.id) — исполнитель это тот,
+// кто отличается от creator'а и совпадает с responsible.
+function isExecutorView(c: any, myBrokerId: string | undefined): boolean {
+  if (!myBrokerId) return false;
+  if (!c?.broker?.id || !c?.responsibleBroker?.id) return false;
+  return c.broker.id !== c.responsibleBroker.id
+    && c.broker.id !== myBrokerId
+    && c.responsibleBroker.id === myBrokerId;
+}
+
 const projectLabels: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный бор',
@@ -186,9 +199,18 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
         )}
 
         <div className="flex flex-wrap gap-2 mb-4">
-          <span className={`text-xs px-2 py-1 rounded ${statusLabels[client.uniquenessStatus]?.cls || 'bg-text-muted/20'}`}>
-            {statusLabels[client.uniquenessStatus]?.label || client.uniquenessStatus}
-          </span>
+          {/* 2026-07-02: если брокер только исполнитель по фиксации (А зафиксировал
+              на него) — не показываем «Уникален», показываем «Исполнитель»:
+              уникальность принадлежит создателю (А). */}
+          {isExecutorView(client, broker?.id) ? (
+            <span className="text-xs px-2 py-1 rounded bg-info/20 text-info">
+              Исполнитель по фиксации
+            </span>
+          ) : (
+            <span className={`text-xs px-2 py-1 rounded ${statusLabels[client.uniquenessStatus]?.cls || 'bg-text-muted/20'}`}>
+              {statusLabels[client.uniquenessStatus]?.label || client.uniquenessStatus}
+            </span>
+          )}
           {client.fixationStatus && client.fixationStatus !== 'NOT_FIXED' && (
             <span className="text-xs px-2 py-1 rounded bg-info/20 text-info">{client.fixationStatus}</span>
           )}
@@ -217,33 +239,75 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
               <span className="font-medium">{client.status}</span>
             </div>
           )}
-          <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
-            <span className="text-text-muted block text-xs flex items-center gap-1">
-              <Calendar className="w-3 h-3" /> Уникальность до
-            </span>
-            <span className="font-medium">
-              {client.uniquenessExpiresAt ? new Date(client.uniquenessExpiresAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : '—'}
-            </span>
-            {daysLeft !== null && (
-              <div className={`text-xs mt-1 ${daysLeft < 0 ? 'text-error' : daysLeft <= 1 ? 'text-error' : daysLeft <= 7 ? 'text-warning' : 'text-text-muted'}`}>
-                {daysLeft < 0
-                  ? `⚠ истекла ${-daysLeft} дн. назад`
-                  : daysLeft === 0
-                    ? '⚠ истекает сегодня'
-                    : `осталось ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'} (можно продлить)`}
-              </div>
-            )}
-            {client.uniquenessReason && (
-              <div className="text-xs mt-1 text-text-muted">Основание: {client.uniquenessReason}</div>
-            )}
-          </div>
-          {client.broker && (
+          {/* 2026-07-02: срок уникальности показываем только владельцу (creator).
+              Исполнитель не имеет уникальности, ему таймер неактуален. */}
+          {!isExecutorView(client, broker?.id) && (
             <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
-              <span className="text-text-muted block text-xs">Брокер</span>
-              <span className="font-medium">{client.broker.fullName}</span>
-              <span className="text-xs text-text-muted ml-2">{formatPhone(client.broker.phone)}</span>
+              <span className="text-text-muted block text-xs flex items-center gap-1">
+                <Calendar className="w-3 h-3" /> Статус до
+              </span>
+              <span className="font-medium">
+                {client.uniquenessExpiresAt ? new Date(client.uniquenessExpiresAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' }) : '—'}
+              </span>
+              {daysLeft !== null && (
+                <div className={`text-xs mt-1 ${daysLeft < 0 ? 'text-error' : daysLeft <= 1 ? 'text-error' : daysLeft <= 7 ? 'text-warning' : 'text-text-muted'}`}>
+                  {daysLeft < 0
+                    ? `⚠ истекла ${-daysLeft} дн. назад`
+                    : daysLeft === 0
+                      ? '⚠ истекает сегодня'
+                      : `осталось ${daysLeft} ${daysLeft === 1 ? 'день' : daysLeft < 5 ? 'дня' : 'дней'} (можно продлить)`}
+                </div>
+              )}
             </div>
           )}
+          {/* 2026-07-02: фиксация А → на Б.
+              - У А (creator): «Зафиксирован мной на: {Б}» — уникальность у меня.
+              - У Б (designated): «Зафиксирован на меня брокером: {А}» — вижу что мне отдали клиента.
+              - Иначе (self-fix / staff): обычный «Брокер: {broker}». */}
+          {client.broker && (() => {
+            const iAmCreator = broker?.id && client.broker.id === broker.id;
+            const iAmDesignated = broker?.id && client.responsibleBroker?.id === broker.id;
+            const hasDelegation = client.responsibleBroker && client.responsibleBroker.id !== client.broker.id;
+            if (hasDelegation && iAmCreator) {
+              return (
+                <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
+                  <span className="text-text-muted block text-xs">Зафиксирован мной на</span>
+                  <span className="font-medium">{client.responsibleBroker.fullName}</span>
+                  <span className="text-xs text-text-muted ml-2">{formatPhone(client.responsibleBroker.phone)}</span>
+                </div>
+              );
+            }
+            if (hasDelegation && iAmDesignated) {
+              return (
+                <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
+                  <span className="text-text-muted block text-xs">Зафиксирован на меня брокером</span>
+                  <span className="font-medium">{client.broker.fullName}</span>
+                  <span className="text-xs text-text-muted ml-2">{formatPhone(client.broker.phone)}</span>
+                </div>
+              );
+            }
+            // Staff (admin/manager) или обычная фиксация на себя — показываем обоих если они разные.
+            if (hasDelegation) {
+              return (
+                <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
+                  <span className="text-text-muted block text-xs">Зафиксировал → на</span>
+                  <div className="font-medium">
+                    {client.broker.fullName} <span className="text-text-muted">→</span> {client.responsibleBroker.fullName}
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    {formatPhone(client.broker.phone)} <span className="mx-1">·</span> {formatPhone(client.responsibleBroker.phone)}
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
+                <span className="text-text-muted block text-xs">Брокер</span>
+                <span className="font-medium">{client.broker.fullName}</span>
+                <span className="text-xs text-text-muted ml-2">{formatPhone(client.broker.phone)}</span>
+              </div>
+            );
+          })()}
           <div className="bg-surface-secondary rounded-lg p-3">
             <span className="text-text-muted block text-xs">Создано</span>
             <span className="font-medium">{new Date(client.createdAt).toLocaleDateString('ru-RU')}</span>
@@ -473,6 +537,9 @@ export default function ClientsPage() {
       {/* Expiring fixations banner */}
       {(() => {
         const expiring = clients.filter((c) => {
+          // 2026-07-02: исполнителя по фиксации не тревожим — уникальность
+          // и её срок принадлежат создателю (А), не Б.
+          if (isExecutorView(c, broker?.id)) return false;
           if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE') return false;
           const d = daysUntilExpiry(c.uniquenessExpiresAt);
           return d !== null && d >= 0 && d <= 7;
@@ -546,8 +613,8 @@ export default function ClientsPage() {
                     <th className="pb-3 font-medium">ФИО</th>
                     <th className="pb-3 font-medium">Телефон</th>
                     <th className="pb-3 font-medium">Проект</th>
-                    <th className="pb-3 font-medium">Уникальность</th>
-                    <th className="pb-3 font-medium">Уникален до</th>
+                    <th className="pb-3 font-medium">Статус</th>
+                    <th className="pb-3 font-medium">Статус до</th>
                     <th className="pb-3 font-medium" title="Дата создания заявки в amoCRM">Дата</th>
                     <th className="pb-3 font-medium w-10"></th>
                   </tr>
@@ -563,29 +630,42 @@ export default function ClientsPage() {
                       <td className="py-3 text-text-muted">{formatPhone(c.phone)}</td>
                       <td className="py-3">{projectLabels[c.project] || c.project}</td>
                       <td className="py-3">
-                        <span className={`text-xs px-2 py-1 rounded ${statusLabels[c.uniquenessStatus]?.cls || ''}`}>
-                          {statusLabels[c.uniquenessStatus]?.label || c.uniquenessStatus}
-                        </span>
-                        {(() => {
-                          if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE') return null;
-                          const d = daysUntilExpiry(c.uniquenessExpiresAt);
-                          if (d === null || d > 7 || d < 0) return null;
-                          return (
-                            <div className={`text-[10px] mt-1 ${d <= 1 ? 'text-error' : 'text-warning'}`}>
-                              ⚠ истекает через {d} дн.
-                            </div>
-                          );
-                        })()}
+                        {/* 2026-07-02: исполнитель по фиксации не видит «Уникален» —
+                            уникальность принадлежит создателю (А). */}
+                        {isExecutorView(c, broker?.id) ? (
+                          <span className="text-xs px-2 py-1 rounded bg-info/20 text-info">
+                            Исполнитель по фиксации
+                          </span>
+                        ) : (
+                          <>
+                            <span className={`text-xs px-2 py-1 rounded ${statusLabels[c.uniquenessStatus]?.cls || ''}`}>
+                              {statusLabels[c.uniquenessStatus]?.label || c.uniquenessStatus}
+                            </span>
+                            {(() => {
+                              if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE') return null;
+                              const d = daysUntilExpiry(c.uniquenessExpiresAt);
+                              if (d === null || d > 7 || d < 0) return null;
+                              return (
+                                <div className={`text-[10px] mt-1 ${d <= 1 ? 'text-error' : 'text-warning'}`}>
+                                  ⚠ истекает через {d} дн.
+                                </div>
+                              );
+                            })()}
+                          </>
+                        )}
                       </td>
                       <td className="py-3 text-text-muted">
                         {/* КБ6: колонка «Уникален до» — дата окончания 30-дн уникальности.
-                            Подсветка: ≤1 дн — красный, ≤7 дн — оранжевый. */}
-                        {c.uniquenessExpiresAt ? (() => {
-                          const d = daysUntilExpiry(c.uniquenessExpiresAt);
-                          const dateStr = new Date(c.uniquenessExpiresAt).toLocaleDateString('ru-RU');
-                          const cls = d === null ? '' : d < 0 ? 'text-error' : d <= 1 ? 'text-error' : d <= 7 ? 'text-warning' : '';
-                          return <span className={cls}>{dateStr}</span>;
-                        })() : '—'}
+                            Подсветка: ≤1 дн — красный, ≤7 дн — оранжевый.
+                            2026-07-02: исполнителю таймер уникальности не показываем. */}
+                        {isExecutorView(c, broker?.id)
+                          ? '—'
+                          : (c.uniquenessExpiresAt ? (() => {
+                              const d = daysUntilExpiry(c.uniquenessExpiresAt);
+                              const dateStr = new Date(c.uniquenessExpiresAt).toLocaleDateString('ru-RU');
+                              const cls = d === null ? '' : d < 0 ? 'text-error' : d <= 1 ? 'text-error' : d <= 7 ? 'text-warning' : '';
+                              return <span className={cls}>{dateStr}</span>;
+                            })() : '—')}
                       </td>
                       <td className="py-3 text-text-muted" title="Дата создания заявки в amoCRM">
                         {new Date(c.amoCreatedAt || c.createdAt).toLocaleDateString('ru-RU')}

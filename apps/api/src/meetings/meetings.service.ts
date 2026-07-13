@@ -2,7 +2,7 @@ import { Injectable, Inject, NotFoundException, BadRequestException } from '@nes
 import { PrismaClient } from '@st-michael/database';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
-import { AmoCrmAdapter } from '@st-michael/integrations';
+import { AmoCrmAdapter, isSalesPipeline } from '@st-michael/integrations';
 
 @Injectable()
 export class MeetingsService {
@@ -65,6 +65,87 @@ export class MeetingsService {
       limit,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  // 2026-07-01: календарь встреч из amoCRM (read-only) для кабинета брокера.
+  // Тянем задачи task_type_id=2 (Встреча) по всем клиентам брокера (по их
+  // amoLeadId), плюс задачи-встречи назначенные на amoContactId брокера
+  // (если он есть). Возвращаем плоский список с датами — UI сортирует.
+  async getAmoCrmCalendar(brokerId: string): Promise<Array<{
+    id: number;
+    text: string;
+    date: string;
+    isCompleted: boolean;
+    source: 'lead' | 'contact';
+    clientName?: string | null;
+    leadId?: number | null;
+  }>> {
+    const clients = await this.prisma.client.findMany({
+      where: { brokerId, amoLeadId: { not: null } },
+      select: { fullName: true, amoLeadId: true },
+    });
+    const broker = await this.prisma.broker.findUnique({
+      where: { id: brokerId },
+      select: { amoContactId: true },
+    });
+
+    const MEETING_TASK_TYPE = 2;
+    const result: Array<{
+      id: number; text: string; date: string; isCompleted: boolean;
+      source: 'lead' | 'contact'; clientName?: string | null; leadId?: number | null;
+    }> = [];
+    const seenTaskIds = new Set<number>();
+
+    // По каждому клиенту — задачи-встречи из лида.
+    for (const c of clients) {
+      const leadId = Number(c.amoLeadId);
+      if (!leadId) continue;
+      try {
+        const tasks = await this.amo.getTasksByEntity('leads', leadId);
+        for (const t of tasks) {
+          if (t.task_type_id !== MEETING_TASK_TYPE) continue;
+          if (seenTaskIds.has(t.id)) continue;
+          seenTaskIds.add(t.id);
+          result.push({
+            id: t.id,
+            text: t.text,
+            date: new Date(t.complete_till * 1000).toISOString(),
+            isCompleted: !!t.is_completed,
+            source: 'lead',
+            clientName: c.fullName,
+            leadId,
+          });
+        }
+      } catch (e: any) {
+        console.warn(`[getAmoCrmCalendar] lead ${leadId} failed:`, e?.message || e);
+      }
+    }
+
+    // Задачи-встречи на contact брокера — если он менеджер / у него закреплены.
+    if (broker?.amoContactId) {
+      try {
+        const contactTasks = await this.amo.getTasksByEntity('contacts', Number(broker.amoContactId));
+        for (const t of contactTasks) {
+          if (t.task_type_id !== MEETING_TASK_TYPE) continue;
+          if (seenTaskIds.has(t.id)) continue;
+          seenTaskIds.add(t.id);
+          result.push({
+            id: t.id,
+            text: t.text,
+            date: new Date(t.complete_till * 1000).toISOString(),
+            isCompleted: !!t.is_completed,
+            source: 'contact',
+            clientName: null,
+            leadId: null,
+          });
+        }
+      } catch (e: any) {
+        console.warn('[getAmoCrmCalendar] broker contact tasks failed:', e?.message || e);
+      }
+    }
+
+    result.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return result;
   }
 
   async getMeeting(id: string, brokerId: string) {
@@ -178,10 +259,40 @@ export class MeetingsService {
       select: { amoLeadId: true },
     });
     if (clientForAmo?.amoLeadId) {
-      const note = `Брокер запланировал встречу: ${typeLabel}\nКлиент: ${meeting.client.fullName} (${meeting.client.phone})\nКогда: ${dateStr}\nКомментарий: ${meeting.comment || '(без комментария)'}`;
-      this.amo.addNoteToLead(Number(clientForAmo.amoLeadId), note).catch((e) => {
-        console.error('amoCRM addNoteToLead failed:', e?.message || e);
-      });
+      // 2026-06-15: воронки продаж broker-platform не трогает. Если лид
+      // клиента уже в Зорге9/Берзарина/Толбухина — не пишем ни ноту, ни
+      // задачу. Этой картой управляет админ/менеджер продаж.
+      const fullLead = await this.amo
+        .getLead(Number(clientForAmo.amoLeadId))
+        .catch(() => null);
+      const leadPipelineId = Number((fullLead as any)?.pipeline_id || 0);
+      if (leadPipelineId && isSalesPipeline(leadPipelineId)) {
+        console.log(`[createMeeting] лид ${clientForAmo.amoLeadId} в sales-pipeline ${leadPipelineId} — пропускаем amo-запись`);
+      } else {
+        const note = `Брокер запланировал встречу: ${typeLabel}\nКлиент: ${meeting.client.fullName} (${meeting.client.phone})\nКогда: ${dateStr}\nКомментарий: ${meeting.comment || '(без комментария)'}`;
+        this.amo.addNoteToLead(Number(clientForAmo.amoLeadId), note).catch((e) => {
+          console.error('amoCRM addNoteToLead failed:', e?.message || e);
+        });
+
+        // 2026-06-15 (правки Ксении KB5 п.2В): создаём задачу в amoCRM на
+        // менеджера встреч (Ксения), чтобы встреча отобразилась в её
+        // календаре.
+        const managerId = Number(process.env.AMO_BROKER_MEETINGS_MANAGER_ID || 0);
+        if (managerId) {
+          const meetingTaskTypeId = Number(process.env.AMO_MEETING_TASK_TYPE_ID || 2);
+          const taskText = `Встреча ${typeLabel} с клиентом ${meeting.client.fullName} (${meeting.client.phone}). Брокер: ${broker?.fullName || '—'}.${meeting.comment ? ` Коммент: ${meeting.comment}` : ''}`;
+          this.amo.createTask({
+            text: taskText,
+            entityType: 'leads',
+            entityId: Number(clientForAmo.amoLeadId),
+            taskTypeId: meetingTaskTypeId,
+            completeTillSec: Math.floor(meetingDate.getTime() / 1000),
+            responsibleUserId: managerId,
+          }).catch((e) => {
+            console.error('amoCRM createTask (meeting) failed:', e?.message || e);
+          });
+        }
+      }
     }
 
     return meeting;
@@ -266,16 +377,45 @@ export class MeetingsService {
       : [];
     const bookedMap = new Map(booked.map((b) => [b.slotId, b._count]));
 
+    // 2026-06-15 (правки Ксении KB5 п.2В): синхронизируем с календарём
+    // Ксении в amoCRM. Берём её незавершённые задачи в нужном окне и
+    // вычитаем из доступности — слот, попадающий на задачу, считаем
+    // занятым. Если AMO_BROKER_MEETINGS_MANAGER_ID не задан или amo
+    // недоступен — fail-soft, отдаём только локальную картину.
+    const managerId = Number(process.env.AMO_BROKER_MEETINGS_MANAGER_ID || 0);
+    const amoBusy = managerId
+      ? await this.amo
+          .getOpenTasksForUser(
+            managerId,
+            Math.floor(from.getTime() / 1000),
+            Math.floor(to.getTime() / 1000),
+          )
+          .catch(() => [])
+      : [];
+
     return slots.map((s) => {
       const bookedCount = bookedMap.get(s.id) || 0;
+      const slotStart = s.startsAt.getTime();
+      const slotEnd = slotStart + s.durationMin * 60 * 1000;
+      // Слот пересекается с задачей если интервал задачи [task_start, complete_till]
+      // (где task_start = complete_till - 1h) накладывается на [slotStart, slotEnd].
+      const isBusyInAmo = amoBusy.some((t) => {
+        const taskEnd = t.completeTill;
+        const taskStart = taskEnd - t.durationSec * 1000;
+        return taskStart < slotEnd && taskEnd > slotStart;
+      });
+      const effectiveBooked = isBusyInAmo ? s.capacity : bookedCount;
       return {
         id: s.id,
         startsAt: s.startsAt,
         durationMin: s.durationMin,
         capacity: s.capacity,
         type: s.type,
-        booked: bookedCount,
-        available: Math.max(0, s.capacity - bookedCount),
+        booked: effectiveBooked,
+        available: Math.max(0, s.capacity - effectiveBooked),
+        // диагностика — фронт может показывать «у менеджера занято» отдельно
+        // от «слот полностью забронирован брокерами»
+        ...(isBusyInAmo ? { busyInAmoCrm: true } : {}),
       };
     });
   }

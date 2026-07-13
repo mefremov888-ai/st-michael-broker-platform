@@ -3,11 +3,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
+import { InnAutocomplete } from '@/components/InnAutocomplete';
 import {
   Headphones, PhoneCall, Wallet, TrendingUp, Users2, GraduationCap,
   Shield, Sparkles,
   FileText, Download as DownloadIcon, ChevronLeft, ChevronRight,
 } from 'lucide-react';
+import { HintIcon } from '@/components/HintIcon';
 
 // ─── мини-компоненты для оживления лендинга ──────────────────
 
@@ -43,19 +45,79 @@ function slugToProject(slug: string | undefined): string | null {
 // иначе таблица levels из политики. Fallback на CMS levelsByProject если в
 // БД нет активной политики (например для свежего инстанса).
 function CommissionScale({
-  project, activePolicies, cmsLevelsByProject, cmsLevels,
+  project, activePolicies, cmsLevelsByProject, cmsLevels, cmsModeByProject, cmsFlatRateByProject, cmsFlatNoteByProject,
 }: {
   project: string;
   activePolicies: Array<{ project: string; mode: 'PROGRESSIVE' | 'FLAT'; flatRate: number | null; levels: any[] | null }>;
   cmsLevelsByProject?: Record<string, any[]>;
   cmsLevels?: any[];
+  cmsModeByProject?: Record<string, 'FLAT' | 'PROGRESSIVE'>;
+  cmsFlatRateByProject?: Record<string, number>;
+  cmsFlatNoteByProject?: Record<string, string>;
 }) {
-  // 2026-05-28: приоритет CMS-content над commission-policies для отображения.
-  // Раньше БД-политика (FLAT/PROGRESSIVE) перебивала шкалу из /admin/content
-  // → админ редактировал 7 уровней в CMS, а лендинг показывал FLAT 5% из БД.
-  // Теперь: если CMS содержит уровни — показываем их. Если CMS пуст —
-  // fallback на БД (FLAT/PROGRESSIVE из commission-policies).
-  // БД остаётся источником истины для калькулятора в /commission.
+  // 2026-07-01: единый источник истины по процентам — БД commission-policies
+  // (что видит админ в /admin/commission-policies и брокер в кабинете).
+  // CMS оставлен только для необязательной подписи под FLAT-ставкой
+  // (cmsFlatNoteByProject). Раньше приоритет был у CMS → админ правил
+  // политику, а лендинг показывал старую цифру из CMS.
+  const policy = activePolicies.find((p) => p.project === project);
+
+  // 1) Активная FLAT-политика в БД.
+  if (policy && policy.mode === 'FLAT' && policy.flatRate != null) {
+    const note = cmsFlatNoteByProject?.[project] || 'при 100% оплате или ипотеке';
+    return (
+      <div className="comm-table">
+        <div className="ct-head"><span>Условие</span><span></span><span>Ставка</span></div>
+        <div className="ct-row active">
+          <span className="ct-level">Все сделки проекта</span>
+          <span className="ct-range">{note}</span>
+          <span className="ct-rate">{String(policy.flatRate).replace('.', ',')}%</span>
+        </div>
+      </div>
+    );
+  }
+
+  // 2) Активная PROGRESSIVE-политика в БД.
+  if (policy && policy.mode === 'PROGRESSIVE' && Array.isArray(policy.levels) && policy.levels.length > 0) {
+    const sorted = [...policy.levels].sort((a, b) => Number(a.minSqm) - Number(b.minSqm));
+    const rows = sorted.map((lv, i) => {
+      const next = sorted[i + 1];
+      const minSqm = Number(lv.minSqm);
+      const range = next ? `${minSqm}–${Number(next.minSqm) - 1} м²` : `${minSqm}+ м²`;
+      return { name: lv.level, range, rate: String(lv.rate).replace('.', ',') + '%' };
+    });
+    return (
+      <div className="comm-table">
+        <div className="ct-head"><span>Уровень</span><span>Объём м2/кв.</span><span>Ставка</span></div>
+        {rows.map((lv: any, i: number) => (
+          <div key={i} className="ct-row">
+            <span className="ct-level">{lv.name}</span>
+            <span className="ct-range">{lv.range}</span>
+            <span className="ct-rate">{lv.rate}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // 3) Политики в БД нет — fallback на CMS. Сначала CMS-режим FLAT.
+  const cmsMode = cmsModeByProject?.[project];
+  if (cmsMode === 'FLAT') {
+    const rate = cmsFlatRateByProject?.[project];
+    const note = cmsFlatNoteByProject?.[project] || '';
+    return (
+      <div className="comm-table">
+        <div className="ct-head"><span>Условие</span><span></span><span>Ставка</span></div>
+        <div className="ct-row active">
+          <span className="ct-level">Все сделки проекта</span>
+          <span className="ct-range">{note || 'единая ставка'}</span>
+          <span className="ct-rate">{rate != null ? `${String(rate).replace('.', ',')}%` : '—'}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // 4) Потом CMS-шкала (если админ настроил в /admin/content).
   const cmsRows = cmsLevelsByProject?.[project] || cmsLevels || [];
   if (Array.isArray(cmsRows) && cmsRows.length > 0) {
     return (
@@ -72,42 +134,10 @@ function CommissionScale({
     );
   }
 
-  // Fallback на БД commission-policies (если CMS пустой)
-  const policy = activePolicies.find((p) => p.project === project);
-  if (policy && policy.mode === 'FLAT' && policy.flatRate != null) {
-    return (
-      <div className="comm-table">
-        <div className="ct-head"><span>Условие</span><span></span><span>Ставка</span></div>
-        <div className="ct-row active">
-          <span className="ct-level">Все сделки проекта</span>
-          <span className="ct-range">при 100% оплате или ипотеке</span>
-          <span className="ct-rate">{String(policy.flatRate).replace('.', ',')}%</span>
-        </div>
-      </div>
-    );
-  }
-
-  let rows: any[] = [];
-  if (policy && policy.mode === 'PROGRESSIVE' && Array.isArray(policy.levels) && policy.levels.length > 0) {
-    const sorted = [...policy.levels].sort((a, b) => Number(a.minSqm) - Number(b.minSqm));
-    rows = sorted.map((lv, i) => {
-      const next = sorted[i + 1];
-      const minSqm = Number(lv.minSqm);
-      const range = next ? `${minSqm}–${Number(next.minSqm) - 1} м²` : `${minSqm}+ м²`;
-      return { name: lv.level, range, rate: String(lv.rate).replace('.', ',') + '%' };
-    });
-  }
-
+  // Ничего не настроено — пустая таблица.
   return (
     <div className="comm-table">
       <div className="ct-head"><span>Уровень</span><span>Объём м2/кв.</span><span>Ставка</span></div>
-      {rows.map((lv: any, i: number) => (
-        <div key={i} className={`ct-row${lv.active ? ' active' : ''}`}>
-          <span className="ct-level">{lv.name}</span>
-          <span className="ct-range">{lv.range}</span>
-          <span className="ct-rate">{lv.rate}</span>
-        </div>
-      ))}
     </div>
   );
 }
@@ -226,6 +256,7 @@ function PhoneInput({ value, onChange, style }: { value: string; onChange: (v: s
 function AuthModal({ mode, onClose, onSwitch, onSuccess }: { mode: 'login' | 'register'; onClose: () => void; onSwitch: () => void; onSuccess: () => void }) {
   const [phoneDigits, setPhoneDigits] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
   const [lastName, setLastName] = useState('');
   const [firstName, setFirstName] = useState('');
   const [middleName, setMiddleName] = useState('');
@@ -233,46 +264,98 @@ function AuthModal({ mode, onClose, onSwitch, onSuccess }: { mode: 'login' | 're
   const [agencyName, setAgencyName] = useState('');
   const [inn, setInn] = useState('');
   const [innType, setInnType] = useState<'PERSONAL' | 'AGENCY'>('AGENCY');
+  // 2026-06-17: чекбоксы оферты/ПД — без них бэк (PR #134) валит регистрацию
+  // ошибкой «Поле offerAccepted: необходимо принять Договор-оферту».
+  const [offerAccepted, setOfferAccepted] = useState(false);
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [forgotMode, setForgotMode] = useState(false);
   const [forgotSent, setForgotSent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // 2026-06-29: подсветка полей при ошибке регистрации (симметрично
+  // странице /register). Сначала валидация на клиенте при submit,
+  // потом ошибки с бэка раскидываем по полям.
+  type FieldKey = 'fullName' | 'phone' | 'email' | 'password' | 'passwordConfirm' | 'inn' | 'agencyName';
+  type FieldErrors = Partial<Record<FieldKey, string>>;
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [submitted, setSubmitted] = useState(false);
   const { login } = useAuth();
 
   const fullPhone = '+7' + phoneDigits;
+
+  // 2026-06-11: общий парсер ошибок API. Раньше в модалке делали res.json()
+  // ДО проверки res.ok — если API/nginx вернул HTML (502, redeploy, и т.п.),
+  // res.json() кидал SyntaxError «Unexpected token '<', '<html> <h'... is not
+  // valid JSON» и эта raw-строка попадала в пользователя.
+  const parseApiError = async (res: Response, fallback: string): Promise<string> => {
+    let raw: string;
+    try { raw = await res.text(); } catch { return fallback; }
+    if (!raw.trim()) return fallback;
+    try {
+      const data = JSON.parse(raw);
+      const msg = data?.message;
+      if (Array.isArray(msg)) return msg.filter(Boolean).join('; ') || fallback;
+      if (typeof msg === 'string' && msg.trim()) return msg;
+      if (typeof data?.error === 'string' && data.error.trim()) return data.error;
+    } catch { /* HTML — отдадим fallback */ }
+    return fallback;
+  };
 
   const doLogin = async (phone: string, pw: string) => {
     const res = await fetch('/api/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ phone, password: pw }),
     });
-    const data = await res.json();
-    if (res.ok) { login(data.accessToken, data.refreshToken); onSuccess(); }
-    else throw new Error(data.message || 'Ошибка входа');
+    if (res.ok) {
+      const data = await res.json();
+      login(data.accessToken, data.refreshToken);
+      onSuccess();
+    } else {
+      throw new Error(await parseApiError(res, 'Неверный телефон или пароль'));
+    }
   };
 
   const handleLogin = async () => {
     setLoading(true); setError('');
     try { await doLogin(fullPhone, password); }
-    catch (e: any) { setError(e.message || 'Ошибка соединения'); }
+    catch (e: any) { setError(e.message || 'Ошибка соединения с сервером'); }
     setLoading(false);
   };
 
   const handleForgot = async () => {
     setLoading(true); setError('');
     try {
-      await fetch('/api/auth/forgot-password', {
+      const res = await fetch('/api/auth/forgot-password', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
       });
-      setForgotSent(true);
-    } catch { setError('Ошибка соединения'); }
+      if (res.ok) {
+        setForgotSent(true);
+      } else {
+        setError(await parseApiError(res, 'Не удалось отправить письмо. Попробуйте ещё раз.'));
+      }
+    } catch { setError('Ошибка соединения с сервером'); }
     setLoading(false);
   };
 
+  // 2026-06-29: клиентская валидация для подсветки полей до submit.
+  const validateRegister = (): FieldErrors => {
+    const e: FieldErrors = {};
+    if (!firstName.trim() || !lastName.trim()) e.fullName = 'Введите ФИО (фамилия и имя)';
+    if (phoneDigits.length !== 10) e.phone = 'Введите 10 цифр номера';
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) e.email = 'Неверный формат email';
+    if (password.length < 8) e.password = 'Минимум 8 символов';
+    if (passwordConfirm !== password) e.passwordConfirm = 'Пароли не совпадают';
+    if (inn && inn.length !== 10 && inn.length !== 12) e.inn = 'ИНН должен быть 10 или 12 цифр';
+    return e;
+  };
+
   const handleRegister = async () => {
-    if (password.length < 8) {
-      setError('Пароль должен быть не менее 8 символов');
+    setSubmitted(true);
+    const errs = validateRegister();
+    setFieldErrors(errs);
+    if (Object.keys(errs).length > 0) {
+      setError('');
       return;
     }
     setLoading(true); setError('');
@@ -287,14 +370,51 @@ function AuthModal({ mode, onClose, onSwitch, onSuccess }: { mode: 'login' | 're
           inn: inn || undefined,
           innType: inn ? innType : undefined,
           agencyName: agencyName || undefined,
+          offerAccepted,
+          privacyAccepted,
         }),
       });
-      const data = await res.json();
-      if (res.ok) { await doLogin(fullPhone, password); }
-      else setError(data.message || 'Ошибка регистрации');
-    } catch (e: any) { setError(e.message || 'Ошибка соединения'); }
+      if (res.ok) {
+        await doLogin(fullPhone, password);
+      } else {
+        // 2026-06-29: бэк шлёт { message, field, errors: [{field, message}, ...] }.
+        // Раскидываем по полям, остаток — в общую плашку.
+        const raw = await res.json().catch(() => null);
+        const valid: FieldKey[] = ['fullName','phone','email','password','passwordConfirm','inn','agencyName'];
+        const list: Array<{ field?: string; message: string }> = Array.isArray(raw?.errors)
+          ? raw.errors
+          : (raw?.field || raw?.message)
+            ? [{ field: raw?.field, message: raw?.message }]
+            : [];
+        const next: FieldErrors = {};
+        let leftover = '';
+        for (const item of list) {
+          const f = item.field as FieldKey | undefined;
+          const msg = item.message || 'Проверьте поле';
+          if (f && (valid as string[]).includes(f)) next[f] = msg;
+          else if (!leftover) leftover = msg;
+        }
+        if (Object.keys(next).length > 0) {
+          setFieldErrors((prev) => ({ ...prev, ...next }));
+          setError(leftover);
+        } else {
+          setError(leftover || await parseApiError(res, 'Ошибка регистрации'));
+        }
+      }
+    } catch (e: any) { setError(e.message || 'Ошибка соединения с сервером'); }
     setLoading(false);
   };
+
+  // Перевалидация на лету после submit, чтобы подсветка снималась
+  // когда пользователь ввёл недостающее.
+  const revalidate = () => { if (submitted) setFieldErrors(validateRegister()); };
+  // Стиль рамки с красной подсветкой при ошибке поля.
+  const eb = (k: FieldKey) => ({
+    borderColor: fieldErrors[k] ? '#c0392b' : 'rgba(0,0,0,0.12)',
+  });
+  const errLine = (k: FieldKey) => fieldErrors[k] ? (
+    <div style={{fontSize:11,color:'#c0392b',marginTop:-8}}>{fieldErrors[k]}</div>
+  ) : null;
 
   return (
     <div className="lp-overlay" style={{position:'fixed',inset:0,zIndex:1000,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}} onClick={onClose}>
@@ -328,45 +448,115 @@ function AuthModal({ mode, onClose, onSwitch, onSuccess }: { mode: 'login' | 're
           <div style={{display:'flex',flexDirection:'column',gap:12}}>
             {mode === 'register' && (
               <>
-                <input placeholder="Фамилия *" value={lastName} onChange={e=>setLastName(e.target.value)}
-                  style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
-                <input placeholder="Имя *" value={firstName} onChange={e=>setFirstName(e.target.value)}
-                  style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
+                <input placeholder="Фамилия *" value={lastName} onChange={e=>{setLastName(e.target.value); revalidate();}}
+                  style={{padding:'12px 16px',border:`1px solid ${eb('fullName').borderColor}`,borderRadius:4,fontSize:14,outline:'none'}} />
+                <input placeholder="Имя *" value={firstName} onChange={e=>{setFirstName(e.target.value); revalidate();}}
+                  style={{padding:'12px 16px',border:`1px solid ${eb('fullName').borderColor}`,borderRadius:4,fontSize:14,outline:'none'}} />
+                {errLine('fullName')}
                 <input placeholder="Отчество (необязательно)" value={middleName} onChange={e=>setMiddleName(e.target.value)}
                   style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
-                <PhoneInput value={phoneDigits} onChange={setPhoneDigits} />
-                <input placeholder="Email" type="email" value={email} onChange={e=>setEmail(e.target.value)}
-                  style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
-                <input placeholder="Название агентства" value={agencyName} onChange={e=>setAgencyName(e.target.value)}
-                  style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
-                <input placeholder="ИНН (10 или 12 цифр)" inputMode="numeric" value={inn}
-                  onChange={e=>setInn(e.target.value.replace(/\D/g,'').slice(0,12))}
-                  style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
+                <PhoneInput value={phoneDigits} onChange={(v)=>{setPhoneDigits(v); revalidate();}} />
+                {errLine('phone')}
+                {/* 2026-06-29: значок i возле email с подсказкой о ФЗ №406-ФЗ.
+                    Реализация через переиспользуемый HintIcon — работает и
+                    на desktop (hover), и на мобильных (tap), c outside-click. */}
+                <div style={{position:'relative'}}>
+                  <input placeholder="Email" type="email" value={email} onChange={e=>{setEmail(e.target.value); revalidate();}}
+                    style={{padding:'12px 40px 12px 16px',border:`1px solid ${eb('email').borderColor}`,borderRadius:4,fontSize:14,outline:'none',width:'100%',boxSizing:'border-box'}} />
+                  <div style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)'}}>
+                    <HintIcon ariaLabel="Информация о требованиях к email">
+                      <p style={{marginBottom:8}}>
+                        Согласно <strong>ФЗ №406-ФЗ</strong> авторизация на российских сайтах должна осуществляться через российский почтовый сервис.
+                      </p>
+                      <p>
+                        Рекомендуем: <span style={{color:'#B4936F'}}>yandex.ru, mail.ru, rambler.ru, bk.ru</span> и подобные.
+                      </p>
+                    </HintIcon>
+                  </div>
+                </div>
+                {errLine('email')}
+                <input placeholder="Название агентства" value={agencyName} onChange={e=>{setAgencyName(e.target.value); revalidate();}}
+                  style={{padding:'12px 16px',border:`1px solid ${eb('agencyName').borderColor}`,borderRadius:4,fontSize:14,outline:'none'}} />
+                {errLine('agencyName')}
+                {/* 2026-06-26: автодополнение ИНН через Dadata. Подсказки по
+                    юр.лицам/ИП, клик подставляет ИНН + название агентства. */}
+                <InnAutocomplete
+                  value={inn}
+                  onChange={(v)=>{setInn(v); revalidate();}}
+                  onSelect={(s) => setAgencyName(s.name)}
+                  placeholder="ИНН (10 или 12 цифр)"
+                  inputClassName=""
+                  inputStyle={{padding:'12px 16px',border:`1px solid ${eb('inn').borderColor}`,borderRadius:4,fontSize:14,outline:'none',width:'100%',boxSizing:'border-box'}}
+                />
+                {errLine('inn')}
+                {/* 2026-06-29: опцию "Личный ИНН" убрали (заказчик: только
+                    юр.лица/ИП). Остался один radio "ИНН агентства" с дефолтом
+                    AGENCY — это и текущее значение state. */}
                 <div style={{display:'flex',gap:16,fontSize:13,color:'#1a1a1a'}}>
-                  <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
-                    <input type="radio" name="innType" checked={innType==='PERSONAL'} onChange={()=>setInnType('PERSONAL')} />
-                    Личный ИНН
-                  </label>
                   <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
                     <input type="radio" name="innType" checked={innType==='AGENCY'} onChange={()=>setInnType('AGENCY')} />
                     ИНН агентства
                   </label>
                 </div>
+                {/* 2026-06-18: чекбоксы оферты и ПД больше не обязательны (отдельная
+                    договорённость с юристами, ставится позже). Оставляем возможность
+                    отметить добровольно — тогда акцепт логируется. */}
+                <label style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:12,color:'#1a1a1a',cursor:'pointer',lineHeight:1.5}}>
+                  <input type="checkbox" checked={offerAccepted} onChange={e=>setOfferAccepted(e.target.checked)} style={{marginTop:3,accentColor:'#B4936F'}} />
+                  <span>
+                    Я ознакомлен(а) и принимаю условия{' '}
+                    <a
+                      href="/offer"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{color:'#B4936F',textDecoration:'underline'}}
+                      onClick={(e)=>{e.stopPropagation(); window.open('/offer','_blank','noopener,noreferrer'); e.preventDefault();}}
+                    >Договора-оферты</a>
+                  </span>
+                </label>
+                <label style={{display:'flex',alignItems:'flex-start',gap:8,fontSize:12,color:'#1a1a1a',cursor:'pointer',lineHeight:1.5}}>
+                  <input type="checkbox" checked={privacyAccepted} onChange={e=>setPrivacyAccepted(e.target.checked)} style={{marginTop:3,accentColor:'#B4936F'}} />
+                  <span>
+                    Я даю{' '}
+                    <a
+                      href="/privacy"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{color:'#B4936F',textDecoration:'underline'}}
+                      onClick={(e)=>{e.stopPropagation(); window.open('/privacy','_blank','noopener,noreferrer'); e.preventDefault();}}
+                    >согласие на обработку персональных данных</a>
+                  </span>
+                </label>
               </>
             )}
             {mode === 'login' && (
               <PhoneInput value={phoneDigits} onChange={setPhoneDigits} />
             )}
-            <input placeholder={mode === 'register' ? 'Пароль (минимум 8 символов)' : 'Пароль'} type="password" value={password} onChange={e=>setPassword(e.target.value)}
+            <input placeholder={mode === 'register' ? 'Пароль (минимум 8 символов)' : 'Пароль'} type="password" value={password} onChange={e=>{setPassword(e.target.value); if (mode === 'register') revalidate();}}
               onKeyDown={e=>e.key==='Enter' && (mode==='login' ? handleLogin() : handleRegister())}
-              style={{padding:'12px 16px',border:'1px solid rgba(0,0,0,0.12)',borderRadius:4,fontSize:14,outline:'none'}} />
+              style={{padding:'12px 16px',border:`1px solid ${mode === 'register' ? eb('password').borderColor : 'rgba(0,0,0,0.12)'}`,borderRadius:4,fontSize:14,outline:'none'}} />
+            {mode === 'register' && errLine('password')}
+            {mode === 'register' && (
+              <>
+                <input placeholder="Подтвердите пароль" type="password" value={passwordConfirm} onChange={e=>{setPasswordConfirm(e.target.value); revalidate();}}
+                  onKeyDown={e=>e.key==='Enter' && handleRegister()}
+                  style={{
+                    padding:'12px 16px',
+                    border: `1px solid ${eb('passwordConfirm').borderColor}`,
+                    borderRadius:4,fontSize:14,outline:'none',
+                  }} />
+                {errLine('passwordConfirm')}
+              </>
+            )}
+            {/* 2026-06-29: для register оставляем кнопку всегда кликабельной —
+                иначе validateRegister() не запускается, пользователь видит
+                "неактивную" кнопку (визуально она НЕ серая, opacity не меняется),
+                не понимает что не так. Для login оставляем старое поведение —
+                там нет подсветки полей, проще не дать нажать кнопку. */}
             <button onClick={mode==='login' ? handleLogin : handleRegister}
               disabled={
                 loading ||
-                !password ||
-                (mode === 'login'
-                  ? phoneDigits.length !== 10
-                  : (!firstName || !lastName || !email || phoneDigits.length !== 10 || (inn.length !== 10 && inn.length !== 12) || password.length < 8))
+                (mode === 'login' && (phoneDigits.length !== 10 || !password))
               }
               style={{padding:'14px',background:'#1a1a1a',color:'#fff',border:'none',borderRadius:50,fontSize:13,fontWeight:700,letterSpacing:1,cursor:'pointer',opacity:loading?0.6:1}}>
               {loading ? <><span className="lp-spinner" />{mode==='login' ? 'Вход' : 'Регистрация'}</> : mode==='login' ? 'ВОЙТИ' : 'ЗАРЕГИСТРИРОВАТЬСЯ'}
@@ -924,7 +1114,22 @@ const DEFAULT_COMMISSION = {
   // в рамках одного проекта, не по обоим. Сообщение под клиента: больше
   // продаёшь — выше ставка.
   subtitle: 'Чем больше квадратных метров продаёте в рамках одного проекта — тем выше ваша ставка комиссии. Действует с 1 января по 30 июня 2026 года.',
-  // Per-project levels (preferred). Fallback to "levels" if absent.
+  // 2026-06-16: режим комиссии по проекту. По умолчанию для ZORGE9 — FLAT 4%
+  // (действует с 07.05.2026, см. seed-commission-policies.js).
+  // Для SILVER_BOR — PROGRESSIVE с шкалой ниже.
+  modeByProject: {
+    ZORGE9: 'FLAT' as 'FLAT' | 'PROGRESSIVE',
+    SILVER_BOR: 'PROGRESSIVE' as 'FLAT' | 'PROGRESSIVE',
+  },
+  flatRateByProject: {
+    ZORGE9: 4.0,
+    SILVER_BOR: 0,
+  },
+  flatNoteByProject: {
+    ZORGE9: 'Единая ставка по проекту Зорге 9 с 07 мая 2026 года.',
+    SILVER_BOR: '',
+  },
+  // Per-project levels (используется только для проектов с modeByProject = 'PROGRESSIVE').
   levelsByProject: {
     ZORGE9: [
       { name: 'Start', range: '0–59 м²', rate: '5,0%', active: false },
@@ -970,7 +1175,7 @@ const DEFAULT_CONTACT = {
   blockTitle: 'Горячая линия по работе с партнёрами',
   phone: '+7 (499) 226-22-49',
   phoneHours: 'Ежедневно с 9:00 до 21:00',
-  email: 'broker@stmichael.ru',
+  email: 'info@zorge9.com',
   telegram: 'https://t.me/stmichaelBroker',
   managers: [
     {
@@ -1567,15 +1772,26 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 activePolicies={activePolicies}
                 cmsLevelsByProject={commission.levelsByProject}
                 cmsLevels={commission.levels}
+                cmsModeByProject={commission.modeByProject}
+                cmsFlatRateByProject={commission.flatRateByProject}
+                cmsFlatNoteByProject={commission.flatNoteByProject}
               />
             </div>
             <div className="comm-info">
-              {(commission.cards || []).map((c: any, i: number) => (
-                <div key={i} className="comm-card">
-                  <div className="comm-card-title">{c.title}</div>
-                  <p>{c.text}</p>
-                </div>
-              ))}
+              {/* 2026-07-03: карточки условий тоже переключаются по проекту.
+                  Fallback на старый общий commission.cards для совместимости. */}
+              {(() => {
+                const byProject = commission?.cardsByProject?.[commissionProject];
+                const list = Array.isArray(byProject) && byProject.length > 0
+                  ? byProject
+                  : (commission?.cards || []);
+                return list.map((c: any, i: number) => (
+                  <div key={i} className="comm-card">
+                    <div className="comm-card-title">{c.title}</div>
+                    <p>{c.text}</p>
+                  </div>
+                ));
+              })()}
             </div>
           </div>
         </section>

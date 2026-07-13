@@ -5,7 +5,6 @@ import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { CurrentUser, CurrentUserPayload } from '../auth/current-user.decorator';
 import { AnalyticsService } from './analytics.service';
-import { analyticsFiltersSchema } from '@st-michael/shared';
 import { UserRole } from '@st-michael/shared';
 
 @ApiTags('analytics')
@@ -22,15 +21,9 @@ export class AnalyticsController {
     return this.analyticsService.getDashboard(user.id);
   }
 
-  @Get('funnel')
-  @UseGuards(RolesGuard)
-  @Roles(UserRole.MANAGER, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Get broker funnel analytics (manager only)' })
-  @ApiResponse({ status: 200, description: 'Funnel data' })
-  async getFunnel(@Query() query: any) {
-    const filters = analyticsFiltersSchema.parse(query);
-    return this.analyticsService.getFunnel(filters);
-  }
+  // 2026-07-07: удалён @Get('funnel') — мёртвый эндпоинт, фронтенд его
+  // не дёргал. Распределение по стадиям воронки уже возвращается
+  // внутри /admin/overview (funnelByStage).
 
   @Get('my')
   @ApiOperation({ summary: 'Get personal broker analytics' })

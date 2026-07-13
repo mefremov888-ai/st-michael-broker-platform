@@ -7,12 +7,106 @@ import * as bcrypt from 'bcrypt';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, brokerToAmoContactFields, mapMeetingStatus, leadToProject, BROKER_PIPELINE_ID } from '@st-michael/integrations';
+import { AmoCrmAdapter, AMO_CONTACT_FIELDS, brokerToAmoContactFields, agencyToAmoCompanyFields, mapMeetingStatus, leadToProject, BROKER_PIPELINE_ID } from '@st-michael/integrations';
 import { CatalogService } from '../catalog/catalog.service';
-import { levelForSqm, rateFor } from '../commission/commission.service';
+import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
 
 const UPLOADS_ROOT = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATAR_PUBLIC_PREFIX = '/files';
+
+// 2026-06-15: общий HTML-шаблон для welcome / reset-password писем.
+// Брендовый цвет #B4936F (см. apps/web/tailwind.config). Table-based layout
+// для совместимости с Outlook / Apple Mail. preheader скрыт от тела письма
+// но показывается в списке inbox-а как preview-строка.
+function escapeHtml(s: string): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderEmailLayout(opts: {
+  title: string;
+  preheader: string;
+  body: string;
+  cta?: { text: string; url: string };
+  afterCta?: string;
+}): string {
+  const { title, preheader, body, cta, afterCta = '' } = opts;
+  const ctaBlock = cta
+    ? `
+        <tr><td align="center" style="padding:8px 0 32px;">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr><td align="center" bgcolor="#B4936F" style="border-radius:6px;">
+              <a href="${cta.url}" target="_blank"
+                 style="display:inline-block;padding:14px 32px;font-family:Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:6px;letter-spacing:0.3px;">
+                ${escapeHtml(cta.text)}
+              </a>
+            </td></tr>
+          </table>
+        </td></tr>
+        <tr><td align="center" style="padding:0 0 8px;font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a8a8a;">
+          или скопируйте ссылку:<br>
+          <a href="${cta.url}" style="color:#B4936F;word-break:break-all;">${escapeHtml(cta.url)}</a>
+        </td></tr>
+      `
+    : '';
+  return `<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>${escapeHtml(title)}</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f1ec;font-family:Helvetica,Arial,sans-serif;">
+  <span style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;font-size:1px;line-height:1px;">
+    ${escapeHtml(preheader)}
+  </span>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f4f1ec">
+    <tr><td align="center" style="padding:32px 16px;">
+      <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+        <tr><td bgcolor="#B4936F" style="padding:24px 32px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+              <td style="font-family:Georgia,'Times New Roman',serif;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:1px;">
+                ST&nbsp;MICHAEL
+              </td>
+              <td align="right" style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#f4ddc4;letter-spacing:0.5px;text-transform:uppercase;">
+                Кабинет брокера
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:32px 32px 8px;">
+          <h1 style="margin:0 0 16px;font-family:Georgia,'Times New Roman',serif;font-size:24px;font-weight:600;color:#1f1f1f;">
+            ${escapeHtml(title)}
+          </h1>
+          ${body}
+        </td></tr>
+        ${ctaBlock}
+        ${afterCta ? `<tr><td style="padding:0 32px;">${afterCta}</td></tr>` : ''}
+        <tr><td style="padding:24px 32px 32px;border-top:1px solid #eee;">
+          <p style="margin:0 0 8px;font-family:Helvetica,Arial,sans-serif;font-size:13px;color:#6a6a6a;">
+            Вопросы? Напишите нам:
+          </p>
+          <p style="margin:0;font-family:Helvetica,Arial,sans-serif;font-size:13px;color:#3a3a3a;">
+            Telegram&nbsp;<a href="https://t.me/stmichael_broker" style="color:#B4936F;text-decoration:none;">@stmichael_broker</a>
+            &nbsp;·&nbsp;
+            <a href="mailto:info@zorge9.com" style="color:#B4936F;text-decoration:none;">info@zorge9.com</a>
+          </p>
+        </td></tr>
+      </table>
+      <p style="margin:16px 0 0;font-family:Helvetica,Arial,sans-serif;font-size:11px;color:#a0a0a0;">
+        © ST Michael · Кабинет брокера
+      </p>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
 
 @Injectable()
 export class AuthService {
@@ -26,82 +120,85 @@ export class AuthService {
     private readonly catalogService: CatalogService,
   ) {}
 
-  async register(data: { phone: string; fullName?: string; firstName?: string; lastName?: string; middleName?: string; email?: string; password: string; inn?: string; innType?: 'PERSONAL' | 'AGENCY'; agencyName?: string }) {
+  async register(
+    data: { phone: string; fullName?: string; firstName?: string; lastName?: string; middleName?: string; email?: string; password: string; inn?: string; innType?: 'PERSONAL' | 'AGENCY'; agencyName?: string; offerAccepted?: boolean; privacyAccepted?: boolean },
+    ip?: string | null,
+    userAgent?: string | null,
+  ) {
+    // 2026-06-18: согласия больше не обязательны (отдельная договорённость
+    // с юристами, ставится позже). Регистрация проходит независимо от
+    // галочек. Если галочки стоят — ниже логируем акцепт с ip/ua/версией.
     // Normalize composite fullName from parts if provided
     if (!data.fullName && (data.firstName || data.lastName)) {
       data.fullName = [data.lastName, data.firstName, data.middleName].filter(Boolean).join(' ').trim();
     }
-    if (!data.fullName) {
-      throw new BadRequestException('ФИО обязательно');
-    }
-    const existing = await this.prisma.broker.findUnique({
-      where: { phone: data.phone },
-    });
+    // 2026-06-26: копим ВСЕ семантические ошибки регистрации (пустое ФИО,
+    // дубль phone, дубль email) и кидаем разом массивом — UI подсветит сразу
+    // все проблемные поля, а не по одной.
+    const errors: Array<{ field?: string; message: string }> = [];
 
-    if (existing) {
-      throw new BadRequestException('Broker with this phone already exists');
+    if (!data.fullName) {
+      errors.push({ field: 'fullName', message: 'Введите ФИО' });
+    }
+
+    const existingByPhone = await this.prisma.broker.findUnique({ where: { phone: data.phone } });
+
+    // 2026-06-30: если телефон существует БЕЗ пароля — это «активация»
+    // импортированного брокера, а не дубль. Идём дальше и в конце обновляем
+    // существующего вместо создания нового. Если пароль есть — дубль.
+    const isActivation = !!existingByPhone && !existingByPhone.passwordHash;
+
+    if (existingByPhone && existingByPhone.passwordHash) {
+      errors.push({ field: 'phone', message: 'Брокер с этим номером телефона уже зарегистрирован' });
+    }
+    // 2026-07-02: email-конфликт больше не блокирует регистрацию.
+    // Ксения: у некоторых агентств (например СДМ) один общий email на всё
+    // агентство — несколько брокеров могут регистрироваться с mail@sdm.moscow.
+    // Уникальность идентифицируется только по телефону. Email хранится
+    // информативно (для рассылки уведомлений), дубли допустимы.
+
+    if (errors.length) {
+      throw new BadRequestException({
+        message: errors[0].message,
+        field: errors[0].field,
+        errors,
+      });
     }
 
     const passwordHash = await bcrypt.hash(data.password, 10);
 
-    // Check amoCRM for existing contact by phone
-    let amoContactId: bigint | undefined;
+    // 2026-07-01: убрали ручной 5-полевой маппинг в amoCRM. Теперь сначала
+    // делаем Broker в БД (create или update при активации), потом единый
+    // syncBrokerProfileToAmo который передаёт все 13 полей и сам ищет/
+    // создаёт/обновляет контакт по phone без дублей.
     let amoLeadsCount = 0;
-    try {
-      const brokerFields: any[] = [
-        { field_id: AMO_CONTACT_FIELDS.PHONE, values: [{ value: data.phone, enum_code: 'WORK' }] },
-        { field_id: AMO_CONTACT_FIELDS.IS_BROKER, values: [{ value: true }] },
-      ];
-      if (data.email) {
-        brokerFields.push({ field_id: AMO_CONTACT_FIELDS.EMAIL, values: [{ value: data.email, enum_code: 'WORK' }] });
-      }
-      if (data.inn) {
-        brokerFields.push({ field_id: AMO_CONTACT_FIELDS.INN, values: [{ value: data.inn }] });
-      }
-      if (data.agencyName) {
-        brokerFields.push({ field_id: AMO_CONTACT_FIELDS.AGENCY_NAME, values: [{ value: data.agencyName }] });
-      } else if (data.inn && data.innType === 'AGENCY') {
-        brokerFields.push({ field_id: AMO_CONTACT_FIELDS.AGENCY_NAME, values: [{ value: `Агентство ${data.inn}` }] });
-      }
-
-      const amoContact = await this.amo.findBrokerContactByPhone(data.phone);
-      if (amoContact) {
-        amoContactId = BigInt(amoContact.id);
-        // Update contact: set broker flag, INN, agency
-        try {
-          await this.amo.updateContact(amoContact.id, {
-            custom_fields_values: brokerFields,
-          } as any);
-        } catch (e) {
-          console.error('amoCRM updateContact failed:', e);
-        }
-        const fullContact = await this.amo.getContact(amoContact.id);
-        amoLeadsCount = fullContact?._embedded?.leads?.length || 0;
-      } else {
-        // Create new contact as broker
-        const newContact = await this.amo.createContact({
-          name: data.fullName,
-          custom_fields_values: brokerFields,
-        });
-        if (newContact?.id) amoContactId = BigInt(newContact.id);
-      }
-    } catch (e) {
-      console.error('amoCRM sync failed during register:', e);
+    let broker: { id: string };
+    if (isActivation && existingByPhone) {
+      // Активация: ФИО, email перезаписываем, password устанавливаем.
+      broker = await this.prisma.broker.update({
+        where: { id: existingByPhone.id },
+        data: {
+          fullName: data.fullName,
+          email: data.email,
+          passwordHash,
+          status: UserStatus.ACTIVE,
+        },
+        select: { id: true },
+      });
+    } else {
+      broker = await this.prisma.broker.create({
+        data: {
+          phone: data.phone,
+          fullName: data.fullName,
+          email: data.email,
+          passwordHash,
+          status: UserStatus.ACTIVE,
+          source: 'BROKER_CABINET',
+        },
+      });
     }
 
-    const broker = await this.prisma.broker.create({
-      data: {
-        phone: data.phone,
-        fullName: data.fullName,
-        email: data.email,
-        passwordHash,
-        status: UserStatus.ACTIVE,
-        source: 'BROKER_CABINET',
-        ...(amoContactId && { amoContactId }),
-      },
-    });
-
-    // Create or link agency by INN
+    // Create or link agency by INN.
     if (data.inn) {
       const agencyName = data.agencyName || (data.innType === 'PERSONAL' ? `ИП ${data.fullName}` : `Агентство ${data.inn}`);
       let agency = await this.prisma.agency.findUnique({ where: { inn: data.inn } });
@@ -112,9 +209,52 @@ export class AuthService {
       } else if (data.agencyName && agency.name !== data.agencyName) {
         agency = await this.prisma.agency.update({ where: { id: agency.id }, data: { name: data.agencyName } });
       }
-      await this.prisma.brokerAgency.create({
-        data: { brokerId: broker.id, agencyId: agency.id, isPrimary: true },
+      // 2026-06-30: при активации привязка может уже существовать — не
+      // создаём дубль через unique constraint (brokerId + agencyId).
+      const existingLink = await this.prisma.brokerAgency.findFirst({
+        where: { brokerId: broker.id, agencyId: agency.id },
+        select: { id: true },
       });
+      if (!existingLink) {
+        await this.prisma.brokerAgency.create({
+          data: { brokerId: broker.id, agencyId: agency.id, isPrimary: true },
+        });
+      }
+    }
+
+    // 2026-06-18: акцепты логируем ТОЛЬКО если брокер сам отметил галочку
+    // при регистрации. Не отметил — не пишем (отдельный шаг позже).
+    if (data.offerAccepted) {
+      try {
+        const offerCurrent = await this.prisma.siteContent.findUnique({ where: { key: 'offer_terms' } });
+        const offerVersion = ((offerCurrent?.value as any)?.version as string) || '2026-06-15';
+        await this.prisma.offerAcceptance.create({
+          data: {
+            brokerId: broker.id,
+            offerVersion,
+            ip: ip || null,
+            userAgent: userAgent || null,
+          },
+        });
+      } catch (e: any) {
+        console.error('[register] offer acceptance log failed:', e?.message || e);
+      }
+    }
+    if (data.privacyAccepted) {
+      try {
+        const privacyCurrent = await this.prisma.siteContent.findUnique({ where: { key: 'privacy_terms' } });
+        const privacyVersion = ((privacyCurrent?.value as any)?.version as string) || '2026-06-15';
+        await this.prisma.privacyAcceptance.create({
+          data: {
+            brokerId: broker.id,
+            privacyVersion,
+            ip: ip || null,
+            userAgent: userAgent || null,
+          },
+        });
+      } catch (e: any) {
+        console.error('[register] privacy acceptance log failed:', e?.message || e);
+      }
     }
 
     // 2026-06-09: welcome-email брокеру при регистрации.
@@ -126,12 +266,22 @@ export class AuthService {
       });
     }
 
+    // 2026-07-01: единая точка синка в amoCRM. Все 13 полей контакта.
+    // syncBrokerProfileToAmo сам: если amoContactId уже есть → update,
+    // иначе ищет по phone → update / create. Дублей контактов не будет.
+    await this.syncBrokerProfileToAmo(broker.id).catch((e) => {
+      console.error('[register] syncBrokerProfileToAmo failed:', e?.message || e);
+    });
+    const finalBroker = await this.prisma.broker.findUnique({
+      where: { id: broker.id },
+      select: { amoContactId: true },
+    });
+
     return {
       message: 'Registration successful',
       brokerId: broker.id,
-      amoLinked: !!amoContactId,
+      amoLinked: !!finalBroker?.amoContactId,
       amoLeadsCount,
-      autoSyncTip: amoContactId ? 'Use POST /api/amocrm/sync-my-deals to pull deals/clients' : undefined,
     };
   }
 
@@ -148,30 +298,69 @@ export class AuthService {
     }
     const webUrl = process.env.WEB_URL || 'https://broker.stmichael.ru';
     const loginUrl = `${webUrl}/login`;
-    const html = `
-      <p>Здравствуйте, ${fullName}!</p>
-      <p>Вы успешно зарегистрировались в личном кабинете брокера <strong>ST Michael Broker Platform</strong>.</p>
-      <p><strong>Что делать дальше:</strong></p>
-      <ol>
-        <li>Войти в кабинет по ссылке: <a href="${loginUrl}">${loginUrl}</a> (используйте телефон, под которым регистрировались, и ваш пароль).</li>
-        <li>В разделе <em>«Профиль»</em> заполните данные: ФИО, должность, регион, дата рождения, Telegram. Эти данные нужны для оформления сделок и комиссий.</li>
-        <li>В разделе <em>«Подбор квартир»</em> можно сразу посмотреть каталог объектов.</li>
-        <li>Чтобы зафиксировать первого клиента — раздел <em>«Фиксация»</em>. После фиксации клиент закрепляется за вами на 30 дней.</li>
-      </ol>
-      <p><strong>Контакты КЦ для вопросов:</strong></p>
-      <ul>
-        <li>Telegram: <a href="https://t.me/stmichael_broker">@stmichael_broker</a></li>
-        <li>Почта: <a href="mailto:broker@stmichael.ru">broker@stmichael.ru</a></li>
-      </ul>
-      <p>Будем рады долгому и продуктивному сотрудничеству!</p>
-      <p>—<br>Команда ST Michael</p>
-    `;
+    const html = renderEmailLayout({
+      title: 'Добро пожаловать',
+      preheader: 'Ваш личный кабинет брокера ST Michael готов к работе',
+      body: `
+        <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1f1f1f;">
+          Здравствуйте, <strong>${escapeHtml(fullName)}</strong>!
+        </p>
+        <p style="margin:0 0 24px;font-size:16px;line-height:1.6;color:#1f1f1f;">
+          Вы успешно зарегистрировались в кабинете брокера <strong>ST&nbsp;Michael</strong>.
+          Здесь вы будете фиксировать клиентов, подбирать им квартиры и отслеживать
+          свою комиссию по сделкам.
+        </p>
+      `,
+      cta: { text: 'Войти в кабинет', url: loginUrl },
+      afterCta: `
+        <h2 style="margin:24px 0 12px;font-family:Georgia,'Times New Roman',serif;font-size:18px;font-weight:600;color:#1f1f1f;">
+          Первые шаги
+        </h2>
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+          <tr><td style="padding:10px 0;border-bottom:1px solid #f0ebe2;">
+            <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+              <tr>
+                <td valign="top" width="32" style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#B4936F;padding-right:12px;">1</td>
+                <td valign="top" style="font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#3a3a3a;">
+                  Заполните <strong>Профиль</strong> — ФИО, должность, регион, Telegram. Эти данные нужны для оформления сделок и выплат комиссии.
+                </td>
+              </tr>
+            </table>
+          </td></tr>
+          <tr><td style="padding:10px 0;border-bottom:1px solid #f0ebe2;">
+            <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+              <tr>
+                <td valign="top" width="32" style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#B4936F;padding-right:12px;">2</td>
+                <td valign="top" style="font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#3a3a3a;">
+                  Откройте <strong>Подбор&nbsp;квартир</strong> — каталог наших объектов с актуальными ценами и планировками.
+                </td>
+              </tr>
+            </table>
+          </td></tr>
+          <tr><td style="padding:10px 0;">
+            <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+              <tr>
+                <td valign="top" width="32" style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#B4936F;padding-right:12px;">3</td>
+                <td valign="top" style="font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#3a3a3a;">
+                  Зафиксируйте клиента в разделе <strong>Фиксация</strong>. Он закрепится за вами на&nbsp;30&nbsp;дней — никто другой не сможет вести его параллельно.
+                </td>
+              </tr>
+            </table>
+          </td></tr>
+        </table>
+        <p style="margin:24px 0 0;font-size:14px;line-height:1.6;color:#6a6a6a;">
+          Будем рады долгому и продуктивному сотрудничеству.
+        </p>
+      `,
+    });
     const nodemailer = require('nodemailer');
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT || 465),
       secure: process.env.SMTP_SECURE !== 'false',
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      // 2026-06-11: см. forgotPassword ниже — mail.stmichael.ru self-signed.
+      tls: { rejectUnauthorized: false },
     });
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
@@ -204,12 +393,42 @@ export class AuthService {
           port: Number(process.env.SMTP_PORT || 465),
           secure: process.env.SMTP_SECURE !== 'false',
           auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+          // 2026-06-11: mail.stmichael.ru использует self-signed сертификат —
+          // без этой опции STARTTLS падает с «self-signed certificate» и
+          // sendMail глушится try/catch ниже. Письма пропадают молча.
+          tls: { rejectUnauthorized: false },
         });
+        const fullName = (broker as any)?.fullName || 'коллега';
         await transporter.sendMail({
           from: process.env.SMTP_FROM || process.env.SMTP_USER,
           to: email,
           subject: 'Восстановление пароля — ST Michael',
-          html: `<p>Для сброса пароля перейдите по ссылке:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>Ссылка действует 1 час.</p>`,
+          html: renderEmailLayout({
+            title: 'Восстановление пароля',
+            preheader: 'Ссылка для сброса пароля действует 1 час',
+            body: `
+              <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1f1f1f;">
+                Здравствуйте, <strong>${escapeHtml(fullName)}</strong>!
+              </p>
+              <p style="margin:0 0 24px;font-size:16px;line-height:1.6;color:#1f1f1f;">
+                Мы получили запрос на восстановление пароля для вашего кабинета
+                <strong>ST&nbsp;Michael</strong>. Нажмите кнопку ниже, чтобы задать новый пароль.
+              </p>
+            `,
+            cta: { text: 'Сбросить пароль', url: resetUrl },
+            afterCta: `
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px;">
+                <tr><td bgcolor="#fcf7ef" style="padding:14px 16px;border-radius:6px;border-left:3px solid #B4936F;font-family:Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#6a5238;">
+                  Ссылка действует <strong>1&nbsp;час</strong> с момента отправки письма.
+                  Если истекла — запросите новую через форму «Забыли пароль?» в кабинете.
+                </td></tr>
+              </table>
+              <p style="margin:16px 0 0;font-size:13px;line-height:1.6;color:#8a8a8a;">
+                Если вы не запрашивали восстановление пароля — просто проигнорируйте это письмо.
+                Ваш пароль останется прежним.
+              </p>
+            `,
+          }),
         });
       } catch (e) {
         console.error('SMTP send failed:', e);
@@ -253,9 +472,22 @@ export class AuthService {
       },
     });
 
-    // 2026-06-09: понятные русские сообщения в UI вместо 'Invalid credentials'.
-    if (!broker || !broker.passwordHash) {
-      throw new UnauthorizedException('Неверный логин или пароль');
+    // 2026-06-30: разделили 3 разных кейса для понятного UX.
+    //   1) телефона нет в БД      → needsRegistration (фронт редиректит на /register)
+    //   2) есть, но passwordHash    → needsActivation (фронт тоже на /register —
+    //      импортированный брокер ещё не установил пароль)
+    //   3) есть, пароль не совпал → обычная ошибка
+    if (!broker) {
+      throw new UnauthorizedException({
+        message: 'Аккаунт не найден. Зарегистрируйтесь.',
+        code: 'NEEDS_REGISTRATION',
+      });
+    }
+    if (!broker.passwordHash) {
+      throw new UnauthorizedException({
+        message: 'Аккаунт ещё не активирован. Завершите регистрацию.',
+        code: 'NEEDS_ACTIVATION',
+      });
     }
 
     if (broker.status === 'BLOCKED') {
@@ -367,15 +599,19 @@ export class AuthService {
           });
         }
 
-        // Calculate commission — use new project-specific scales (ТЗ §"Объединённая шкала")
+        // Calculate commission — учитываем активную политику из админки
+        // (правка 2026-07-01). Раньше был хардкод rateFor(project, level),
+        // из-за чего bootstrap sync после активации создавал сделки со старой
+        // ставкой, даже если админ настроил FLAT/новую PROGRESSIVE политику.
         const amount = Number(lead.price || 0);
         const brokerAgency = await this.prisma.brokerAgency.findFirst({
           where: { brokerId, isPrimary: true },
           include: { agency: true },
         });
         const totalSqm = Number(brokerAgency?.agency?.totalSqmSold || 0);
-        const level = levelForSqm(project, totalSqm);
-        const rate = rateFor(project, level);
+        const dealDate = lead.created_at ? new Date(lead.created_at * 1000) : new Date();
+        const policyResult = await rateForWithPolicy(this.prisma, project, totalSqm, dealDate);
+        const rate = policyResult.rate;
         const commissionAmount = Math.round(amount * rate / 100);
 
         const existingDeal = await this.prisma.deal.findFirst({ where: { amoDealId: BigInt(lead.id) } });
@@ -408,12 +644,21 @@ export class AuthService {
               if (existing) {
                 await this.prisma.meeting.update({ where: { id: existing.id }, data: { type: meetingType as any, status: meetingStatus as any } });
               } else {
+                // 2026-07-01: мини-детали клиента в комментарии.
+                const projectLabel = (client as any)?.project === 'ZORGE9' ? 'Зорге 9'
+                  : (client as any)?.project === 'SILVER_BOR' ? 'Серебряный Бор'
+                  : ((client as any)?.project || '');
+                const commentLines = [
+                  `Клиент: ${client.fullName}`,
+                  `Телефон: ${client.phone}`,
+                  ...(projectLabel ? [`Проект: ${projectLabel}`] : []),
+                ];
                 await this.prisma.meeting.create({
                   data: {
                     brokerId, clientId: client.id,
                     type: meetingType as any, status: meetingStatus as any,
                     date: meetingDate,
-                    comment: rawType ? `Тип из amoCRM: ${rawType}` : null,
+                    comment: commentLines.join('\n'),
                   },
                 });
               }
@@ -473,6 +718,7 @@ export class AuthService {
       presentationSent: broker.presentationSent,
       role: broker.role,
       status: broker.status,
+      isCoordinator: broker.isCoordinator,
       funnelStage: broker.funnelStage,
       source: broker.source,
       brokerTourVisited: broker.brokerTourVisited,
@@ -484,7 +730,11 @@ export class AuthService {
         inn: ba.agency.inn,
         isPrimary: ba.isPrimary,
         commissionLevel: ba.agency.commissionLevel,
+        // 2026-07-02: полный набор реквизитов агентства.
         legalAddress: ba.agency.legalAddress,
+        address: ba.agency.address, // адрес для корреспонденции
+        phone: ba.agency.phone,
+        email: ba.agency.email,
         bankName: ba.agency.bankName,
         bankBik: ba.agency.bankBik,
         bankAccount: ba.agency.bankAccount,
@@ -509,7 +759,11 @@ export class AuthService {
       region?: string | null;
       agency?: {
         id?: string;
+        // 2026-07-02: полный набор реквизитов агентства.
         legalAddress?: string | null;
+        address?: string | null; // адрес для корреспонденции
+        phone?: string | null;
+        email?: string | null;
         bankName?: string | null;
         bankBik?: string | null;
         bankAccount?: string | null;
@@ -571,6 +825,9 @@ export class AuthService {
           where: { id: agencyId },
           data: {
             ...(a.legalAddress !== undefined && { legalAddress: a.legalAddress || null }),
+            ...(a.address !== undefined && { address: a.address || null }),
+            ...(a.phone !== undefined && { phone: a.phone || null }),
+            ...(a.email !== undefined && { email: a.email || null }),
             ...(a.bankName !== undefined && { bankName: a.bankName || null }),
             ...(a.bankBik !== undefined && { bankBik: a.bankBik || null }),
             ...(a.bankAccount !== undefined && { bankAccount: a.bankAccount || null }),
@@ -632,11 +889,8 @@ export class AuthService {
 
     if (amoContactId) {
       await this.amo.updateContact(Number(amoContactId), payload);
-      return;
-    }
-
-    // Нет линка — пробуем найти контакт по телефону среди БРОКЕРОВ (IS_BROKER=true)
-    if (broker.phone) {
+    } else if (broker.phone) {
+      // Нет линка — пробуем найти контакт по телефону среди БРОКЕРОВ (IS_BROKER=true)
       const existing = await this.amo.findBrokerContactByPhone(broker.phone);
       if (existing) {
         amoContactId = BigInt(existing.id);
@@ -651,6 +905,38 @@ export class AuthService {
           where: { id: brokerId },
           data: { amoContactId },
         });
+      }
+    }
+
+    // 2026-07-03: синк реквизитов primary-агентства в amoCRM Company.
+    // Поля юр.лица (Юр. лицо, Юр. адрес, ОГРН, КПП, БИК, Название банка,
+    // Рас.счет, Кор.счет, Телефон, Email) хранятся в связанной company,
+    // а не в контакте. Ищем по ИНН → update / create → linkContactToCompany.
+    // isolated от синка контакта: если контакт не создался, амо-компанию всё
+    // равно можно обновить, никого не сломает.
+    if (primaryAgency && primaryAgency.inn) {
+      try {
+        const companyFields = agencyToAmoCompanyFields(primaryAgency);
+        const companyPayload = {
+          name: primaryAgency.name,
+          custom_fields_values: companyFields,
+        };
+        let amoCompanyId: number | null = null;
+        const found = await this.amo.findCompanyByInn(primaryAgency.inn);
+        if (found?.id) {
+          amoCompanyId = Number(found.id);
+          await this.amo.updateCompany(amoCompanyId, companyPayload);
+        } else {
+          const created = await this.amo.createCompany(companyPayload);
+          if (created?.id) amoCompanyId = Number(created.id);
+        }
+        if (amoCompanyId && amoContactId) {
+          await this.amo
+            .linkContactToCompany(Number(amoContactId), amoCompanyId)
+            .catch(() => { /* уже связаны — не критично */ });
+        }
+      } catch (e: any) {
+        console.error('[syncBrokerProfileToAmo] agency company sync failed:', e?.message || e);
       }
     }
   }
@@ -713,6 +999,84 @@ export class AuthService {
     });
 
     return { agency: { id: agency.id, name: agency.name, inn: agency.inn } };
+  }
+
+  /**
+   * 2026-06-17: смена primary-агентства брокера по ИНН.
+   * Сценарий: при регистрации ввели неправильный ИНН — надо исправить.
+   * - Находим (или создаём) Agency по новому ИНН.
+   * - Если у брокера уже есть primary BrokerAgency на ТОТ ЖЕ ИНН — просто
+   *   возвращаем как есть (no-op).
+   * - Иначе: удаляем все BrokerAgency где isPrimary=true у этого брокера
+   *   (старые «неправильные»), затем создаём новую primary.
+   * - Историю фиксаций и сделок не трогаем — Client.fixationAgencyId
+   *   указывает на старую Agency, это часть истории.
+   */
+  async replacePrimaryAgencyByInn(brokerId: string, inn: string) {
+    const cleanInn = String(inn || '').replace(/\D/g, '');
+    if (cleanInn.length < 10 || cleanInn.length > 12) {
+      throw new BadRequestException('ИНН должен быть 10 или 12 цифр');
+    }
+
+    let agency = await this.prisma.agency.findUnique({ where: { inn: cleanInn } });
+    if (!agency) {
+      let amoName: string | null = null;
+      try {
+        const amoCompany = await this.amo.findCompanyByInn(cleanInn);
+        if (amoCompany) {
+          amoName = amoCompany.name;
+        } else {
+          const created = await this.amo.createCompany({ name: `Агентство ${cleanInn}` });
+          amoName = created?.name || `Агентство ${cleanInn}`;
+        }
+      } catch {
+        amoName = `Агентство ${cleanInn}`;
+      }
+      agency = await this.prisma.agency.create({
+        data: { name: amoName!, inn: cleanInn },
+      });
+    }
+
+    const existingPrimary = await this.prisma.brokerAgency.findFirst({
+      where: { brokerId, isPrimary: true },
+      include: { agency: true },
+    });
+
+    if (existingPrimary?.agencyId === agency.id) {
+      return { agency: { id: agency.id, name: agency.name, inn: agency.inn }, changed: false };
+    }
+
+    // Удаляем старую primary-связь(и).
+    await this.prisma.brokerAgency.deleteMany({
+      where: { brokerId, isPrimary: true },
+    });
+
+    // Удаляем неосновную связь с этим же агентством, чтобы не было дубля
+    // при создании ниже.
+    await this.prisma.brokerAgency.deleteMany({
+      where: { brokerId, agencyId: agency.id },
+    });
+
+    await this.prisma.brokerAgency.create({
+      data: {
+        brokerId,
+        agencyId: agency.id,
+        isPrimary: true,
+      },
+    });
+
+    // Sync в amoCRM: подтянем актуальный ИНН/название агентства в карточку.
+    await this.syncBrokerProfileToAmo(brokerId).catch((e) => {
+      console.error('amoCRM sync after replaceAgency failed:', e);
+    });
+
+    return {
+      agency: { id: agency.id, name: agency.name, inn: agency.inn },
+      replacedFrom: existingPrimary
+        ? { id: existingPrimary.agency.id, name: existingPrimary.agency.name, inn: existingPrimary.agency.inn }
+        : null,
+      changed: true,
+    };
   }
 
   async changePassword(brokerId: string, currentPassword: string, newPassword: string) {

@@ -46,8 +46,27 @@ interface Overview {
   };
   deals: { funnel: Array<{ status: string; count: number; totalAmount: number; totalCommission: number }> };
   topBrokers: Array<{ brokerId: string; fullName: string; phone: string; dealsCount: number; totalAmount: number; totalCommission: number }>;
+  brokerTourFunnel: {
+    tourVisited: number;
+    withFixation: number;
+    withDeal: number;
+    toFixationPct: number;
+    toDealPct: number;
+  };
+  topFixationBrokers: Array<{ brokerId: string; fullName: string; phone: string; uniqueFixations: number }>;
+  bySource: Array<{ source: string; count: number }>;
   projects: Array<{ project: string; totalDeals: number; paidDeals: number; totalAmount: number; totalCommission: number; totalSqm: number }>;
 }
+
+// 2026-07-08: подписи источников для нового блока «Аналитика по источникам».
+const sourceLabels: Record<string, string> = {
+  CRM_MANUAL: 'Внесён вручную',
+  BROKER_CABINET: 'Регистрация через кабинет',
+  PHONE_CALL: 'Позвонил на линию',
+  LANDING_BROKER_TOUR: 'Лендинг: брокер-тур',
+  LANDING_FORM: 'Лендинг: форма',
+  CLOSED_AS_BROKER: 'Закрыт как брокер',
+};
 
 function fmtRub(n: number) {
   return Math.round(n).toLocaleString('ru-RU') + ' ₽';
@@ -215,6 +234,106 @@ export default function AdminAnalyticsPage() {
                 );
               })}
             </div>
+          </div>
+
+          {/* 2026-07-08: Аналитика по источникам брокеров.
+              Broker.source в БД был, но в UI не показывался. Показывает
+              эффективность каналов привлечения — лендинг vs холодный
+              обзвон vs брокер-туры. */}
+          <div className="card mb-6">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <Users className="w-5 h-5 text-accent" /> Новые брокеры по источникам
+            </h2>
+            {(!data.bySource || data.bySource.length === 0) ? (
+              <div className="text-text-muted text-sm">В выбранном периоде нет новых брокеров с указанным источником</div>
+            ) : (
+              <div className="space-y-2">
+                {(() => {
+                  const maxCount = Math.max(...data.bySource.map((s) => s.count), 1);
+                  return data.bySource.map((s) => (
+                    <div key={s.source}>
+                      <div className="flex items-center justify-between text-sm mb-1">
+                        <span>{sourceLabels[s.source] || s.source}</span>
+                        <span className="font-bold text-accent">{s.count}</span>
+                      </div>
+                      <div className="w-full bg-surface-secondary rounded-full h-2">
+                        <div
+                          className="bg-accent rounded-full h-2"
+                          style={{ width: `${Math.round((s.count / maxCount) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            )}
+          </div>
+
+          {/* 2026-07-07: Сквозная воронка брокер-туров.
+              Показывает, сколько брокеров, посетивших тур в выбранном
+              периоде, потом сделали уникальную фиксацию и довели её до
+              оплаченной сделки. Считается по Broker.brokerTourDate. */}
+          <div className="card mb-6">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <TrendingUp className="w-5 h-5 text-accent" /> Сквозная воронка: Брокер-тур → Фиксация → Сделка
+            </h2>
+            {data.brokerTourFunnel.tourVisited === 0 ? (
+              <div className="text-text-muted text-sm">Нет брокеров, посетивших тур в выбранном периоде</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="rounded-lg bg-surface-secondary p-4">
+                  <div className="text-sm text-text-muted mb-1">Посетили брокер-тур</div>
+                  <div className="text-3xl font-bold">{data.brokerTourFunnel.tourVisited}</div>
+                  <div className="text-xs text-text-muted mt-1">за выбранный период</div>
+                </div>
+                <div className="rounded-lg bg-surface-secondary p-4">
+                  <div className="text-sm text-text-muted mb-1">Сделали уникальную фиксацию</div>
+                  <div className="text-3xl font-bold">{data.brokerTourFunnel.withFixation}</div>
+                  <div className="text-xs text-accent mt-1">{data.brokerTourFunnel.toFixationPct}% от тех, кто был на туре</div>
+                </div>
+                <div className="rounded-lg bg-surface-secondary p-4">
+                  <div className="text-sm text-text-muted mb-1">Довели до оплаченной сделки</div>
+                  <div className="text-3xl font-bold">{data.brokerTourFunnel.withDeal}</div>
+                  <div className="text-xs text-accent mt-1">{data.brokerTourFunnel.toDealPct}% от тех, кто был на туре</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 2026-07-07: Топ-10 по уникальным фиксациям — параллельно
+              с топом по комиссии. Показывает, кто приносит фиксации,
+              даже если сделки ещё не закрыты. */}
+          <div className="card mb-6">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <Trophy className="w-5 h-5 text-accent" /> Топ-10 брокеров по уникальным фиксациям
+            </h2>
+            {data.topFixationBrokers.length === 0 ? (
+              <div className="text-text-muted text-sm">Нет уникальных фиксаций в периоде</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-text-muted">
+                      <th className="py-2 pr-2">#</th>
+                      <th className="py-2 pr-2">Брокер</th>
+                      <th className="py-2 pl-2 text-right">Уникальных фиксаций</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.topFixationBrokers.map((b, i) => (
+                      <tr key={b.brokerId} className="border-b border-border last:border-0">
+                        <td className="py-2 pr-2 text-text-muted">{i + 1}</td>
+                        <td className="py-2 pr-2">
+                          <div className="font-medium">{b.fullName}</div>
+                          <div className="text-xs text-text-muted">{b.phone}</div>
+                        </td>
+                        <td className="py-2 pl-2 text-right text-accent font-bold">{b.uniqueFixations}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           {/* Top brokers */}

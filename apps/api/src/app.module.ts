@@ -22,6 +22,9 @@ import { AmocrmModule } from './amocrm/amocrm.module';
 import { AdminModule } from './admin/admin.module';
 import { CmsModule } from './cms/cms.module';
 import { OfferModule } from './offer/offer.module';
+import { PrivacyModule } from './privacy/privacy.module';
+import { FavoritesModule } from './favorites/favorites.module';
+import { AgenciesModule } from './agencies/agencies.module';
 import { AmoTokenBootstrapService } from './common/amo-token-bootstrap.service';
 import { MangoBootstrapService } from './common/mango-bootstrap.service';
 
@@ -62,6 +65,9 @@ import { MangoBootstrapService } from './common/mango-bootstrap.service';
     AdminModule,
     CmsModule,
     OfferModule,
+    PrivacyModule,
+    FavoritesModule,
+    AgenciesModule,
   ],
   controllers: [HealthController],
   providers: [AmoTokenBootstrapService, MangoBootstrapService],

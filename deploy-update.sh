@@ -40,7 +40,15 @@ echo "    HEAD: $(git log --oneline -1)"
 # 2) Rebuild + restart
 echo ""
 echo "==> [2/4] Rebuild и рестарт контейнеров..."
-$COMPOSE_CMD up -d --build
+# 2026-06-25: строим api и web ПО ОЧЕРЕДИ, не параллельно. При пустом
+# buildkit кеше параллельный `npm install` для api + web суммарно жрёт
+# >2 ГБ RAM → OOM-killer убивает процесс → SSH сессия рвётся без exit
+# кода (run 28107132638, 28179889464). После того как кеш слоя npm install
+# прогрелся — оба билда становятся CACHED и параллелизм безопасен,
+# но последовательная сборка работает в любом случае.
+$COMPOSE_CMD build api
+$COMPOSE_CMD build web
+$COMPOSE_CMD up -d
 
 # 3) Wait for API to be ready
 echo ""

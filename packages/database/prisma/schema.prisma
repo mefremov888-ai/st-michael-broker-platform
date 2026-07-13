@@ -273,6 +273,11 @@ model Broker {
   category               BrokerCategory           @default(COLD)
   specialization         BrokerSpecialization?
   region                 String? // MSK / SPB / OTHER
+  // 2026-07-09: пометка «региональный» — КЦ в комментариях пишет что
+  // брокер из региона (регекс парсит «регион», «региональ»). Хранится
+  // как отдельный признак, не как значение specialization: региональный
+  // брокер может параллельно быть коммерческим или жилым.
+  isRegional             Boolean                  @default(false) @map("is_regional")
   isCoordinator          Boolean                  @default(false) @map("is_coordinator")
   coordinatorAgency      String?                  @map("coordinator_agency")
   lastCallAt             DateTime?                @map("last_call_at")
@@ -289,6 +294,7 @@ model Broker {
   phones                 BrokerPhone[]
   callLogs               CallLog[]
   clients                Client[]
+  responsibleForClients  Client[]                 @relation("ClientResponsibleBroker")
   deals                  Deal[]
   calls                  Call[]
   meetings               Meeting[]
@@ -296,8 +302,14 @@ model Broker {
   pushSubscriptions      PushSubscription[]
   notificationPrefs      NotificationPreference[]
   offerAcceptances       OfferAcceptance[]
+  privacyAcceptances     PrivacyAcceptance[]
+  favoriteLots           FavoriteLot[]
   createdAt              DateTime                 @default(now()) @map("created_at")
   updatedAt              DateTime                 @updatedAt @map("updated_at")
+  // 2026-07-10: момент повторной активации аккаунта — ставится когда админ
+  // переводит status из BLOCKED/CLOSED обратно в ACTIVE. Используется на
+  // /admin/broker-applications, вкладка «Заходы».
+  reactivatedAt          DateTime?                @map("reactivated_at")
 
   @@index([category])
   @@index([nextCallAt])
@@ -307,8 +319,13 @@ model Broker {
 
 model Client {
   id                  String           @id @default(uuid())
-  brokerId            String           @map("broker_id")
+  brokerId            String           @map("broker_id") // владелец кабинета (для координатора — координатор)
   broker              Broker           @relation(fields: [brokerId], references: [id])
+  // 2026-06-19: для координаторов — реальный брокер, который ведёт клиента.
+  // Nullable для обратной совместимости: если поле пустое, ответственный = brokerId
+  // (как было раньше). У координаторов на новых фиксациях ОБЯЗАТЕЛЬНО.
+  responsibleBrokerId String?          @map("responsible_broker_id")
+  responsibleBroker   Broker?          @relation("ClientResponsibleBroker", fields: [responsibleBrokerId], references: [id])
   amoLeadId           BigInt?          @map("amo_lead_id")
   fullName            String           @map("full_name")
   phone               String
@@ -398,6 +415,7 @@ model Lot {
   discountPercent  Decimal?  @map("discount_percent") @db.Decimal(5, 2)
   discountName     String?   @map("discount_name")
   deals            Deal[]
+  favoritedBy      FavoriteLot[]
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
@@ -641,6 +659,23 @@ model Mailing {
 
 // Acceptance record of the public offer (договор оферты) by a broker.
 // Stored per offer version so admin can publish a new version without invalidating prior acceptances.
+// 2026-06-15 (правки Ксении KB5 #3): «избранное» лотов для брокера.
+// Раньше хранили в localStorage — терялось при очистке кэша и не
+// синхронизировалось между устройствами. Теперь в БД, одна запись на
+// (broker, lot). Каскад: удалили лот → ушёл из избранного автоматом.
+model FavoriteLot {
+  id        String   @id @default(uuid())
+  brokerId  String   @map("broker_id")
+  broker    Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  lotId     String   @map("lot_id")
+  lot       Lot      @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([brokerId, lotId])
+  @@index([brokerId])
+  @@map("favorite_lots")
+}
+
 model OfferAcceptance {
   id           String   @id @default(uuid())
   brokerId     String   @map("broker_id")
@@ -654,6 +689,24 @@ model OfferAcceptance {
   @@unique([brokerId, offerVersion])
   @@index([brokerId])
   @@map("offer_acceptances")
+}
+
+// 2026-06-15 (правки Ксении KB5 #5): согласие на обработку персональных
+// данных по 152-ФЗ. Отдельный документ от оферты — закон требует явное
+// согласие на обработку ПД, оно не покрывается акцептом оферты.
+// Версионируем чтобы при изменении текста требовать переподтверждения.
+model PrivacyAcceptance {
+  id             String   @id @default(uuid())
+  brokerId       String   @map("broker_id")
+  broker         Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  privacyVersion String   @map("privacy_version")
+  acceptedAt     DateTime @default(now()) @map("accepted_at")
+  ip             String?
+  userAgent      String?  @map("user_agent")
+
+  @@unique([brokerId, privacyVersion])
+  @@index([brokerId])
+  @@map("privacy_acceptances")
 }
 
 model AuditLog {
