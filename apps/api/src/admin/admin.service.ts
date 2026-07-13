@@ -970,10 +970,15 @@ export class AdminService {
       throw new BadRequestException('У брокера не указан телефон');
     }
 
-    // Mango звонит менеджеру на mangoEmployeeNum, после ответа — брокеру.
-    const r = await this.mango.initiateCallbackViaWebhook({
-      employeeNum: manager.mangoEmployeeNum,
-      phone: broker.phone,
+    // Mango звонит менеджеру на его внутренний номер, после ответа — брокеру.
+    // Штатный VPBX callback по api_key/salt (MANGO_CALLBACK_URL не нужен).
+    // Caller ID для брокера — общий офисный номер (MANGO_OUTBOUND_LINE),
+    // иначе Mango подставит дефолтную линию аккаунта.
+    const lineNumber = process.env.MANGO_OUTBOUND_LINE || undefined;
+    const r = await this.mango.initiateCallbackFromExtension({
+      extension: manager.mangoEmployeeNum,
+      to: broker.phone,
+      lineNumber,
     });
 
     const call = await this.prisma.call.create({

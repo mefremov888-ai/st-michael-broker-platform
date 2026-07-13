@@ -143,6 +143,54 @@ export class MangoAdapter implements IMangoAdapter {
     return { callId: commandId };
   }
 
+  /**
+   * 2026-07 (issue #2): callback от ВНУТРЕННЕГО НОМЕРА сотрудника.
+   * Mango звонит на extension менеджера (его SIP/МангоМобайл), после ответа
+   * дозванивается до `to` и соединяет. Штатный VPBX commands/callback с
+   * HMAC-подписью — нужны только api_key + api_salt (MANGO_CALLBACK_URL НЕ
+   * требуется). extension — короткий внутренний номер сотрудника (напр. "33").
+   */
+  async initiateCallbackFromExtension(req: {
+    extension: string;
+    to: string;
+    lineNumber?: string;
+  }): Promise<{ callId: string }> {
+    if (!this.apiKey || !this.apiSalt) {
+      throw new Error('Mango: API key / salt не настроены (см. /admin/integrations)');
+    }
+    const extension = String(req.extension || '').trim();
+    if (!extension) {
+      throw new Error('Mango callback: не указан внутренний номер сотрудника (extension)');
+    }
+    const toDigits = this.digits(req.to);
+    if (toDigits.length < 10) {
+      throw new Error(`Mango callback: некорректный номер брокера (${req.to})`);
+    }
+
+    const commandId = crypto.randomUUID();
+    const json = JSON.stringify({
+      command_id: commandId,
+      from: { extension },
+      to_number: toDigits,
+      ...(req.lineNumber ? { line_number: this.digits(req.lineNumber) } : {}),
+    });
+    const sign = crypto
+      .createHash('sha256')
+      .update(this.apiKey + json + this.apiSalt)
+      .digest('hex');
+
+    const params = new URLSearchParams({ vpbx_api_key: this.apiKey, sign, json });
+    const res = await fetch(`${this.apiUrl}/commands/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Mango callback ${res.status}: ${text.slice(0, 300)}`);
+    }
+    return { callId: commandId };
+  }
   /** Совместимость со старым stub-API. */
   async initiateCall(from: string, to: string): Promise<{ callId: string }> {
     return this.initiateCallback({ from, to });
