@@ -168,6 +168,15 @@ export class AdminController {
     return this.adminService.logCall(user.id, body);
   }
 
+  // ─── issue #2: звонок менеджера КЦ брокеру через Mango ────
+  @Post('mango-call')
+  @ApiOperation({ summary: 'Менеджер КЦ звонит брокеру через Mango (callback)' })
+  async mangoCall(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() body: { brokerId: string },
+  ) {
+    return this.adminService.mangoCallBroker(user.id, body.brokerId);
+  }
   @Get('call-center/stats')
   @ApiOperation({ summary: 'KPI оператора и команды на сегодня/неделю/месяц' })
   async callCenterStats(@CurrentUser() user: CurrentUserPayload) {

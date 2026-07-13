@@ -226,6 +226,18 @@ export default function AdminCallCenterPage() {
     }
   };
 
+  // issue #2: клик-ту-колл — менеджер КЦ звонит брокеру через Mango.
+  // Дёргает POST /admin/mango-call; Mango звонит менеджеру, тот берёт трубку —
+  // соединяют с брокером. Итог показываем в общей плашке message.
+  const handleMangoCall = async (brokerId: string) => {
+    try {
+      const res: any = await apiPost('/admin/mango-call', { brokerId });
+      setMessage(res?.message || 'Mango звонит вам — возьмите трубку, соединим с брокером');
+    } catch (e: any) {
+      setMessage(`Ошибка звонка: ${e?.message || 'не удалось'}`);
+    }
+    setTimeout(() => setMessage(''), 6000);
+  };
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setSearch(searchInput);
@@ -366,6 +378,7 @@ export default function AdminCallCenterPage() {
               <BrokerRow
                 key={b.id}
                 broker={b}
+                onCall={handleMangoCall}
                 expanded={expandedId === b.id}
                 onToggle={() => setExpandedId(expandedId === b.id ? null : b.id)}
                 onLogged={() => {
@@ -417,6 +430,7 @@ function BrokerRow({
   showCheckbox = false,
   selected = false,
   onSelectToggle,
+  onCall,
 }: {
   broker: QueueBroker;
   expanded: boolean;
@@ -425,9 +439,20 @@ function BrokerRow({
   showCheckbox?: boolean;
   selected?: boolean;
   onSelectToggle?: () => void;
+  onCall: (brokerId: string) => Promise<void>;
 }) {
   const cat = categoryLabels[broker.category];
   const lastResult = broker.callLogs[0];
+  const [calling, setCalling] = useState(false);
+  const doCall = async () => {
+    if (broker.doNotCall || calling) return;
+    setCalling(true);
+    try {
+      await onCall(broker.id);
+    } finally {
+      setCalling(false);
+    }
+  };
 
   return (
     <div className={`border rounded-lg flex items-center ${expanded ? 'border-accent bg-accent/5' : selected ? 'border-accent bg-accent/10' : 'border-border'}`}>
@@ -462,7 +487,18 @@ function BrokerRow({
               </div>
             )}
           </div>
-          <div className="text-sm font-mono">{broker.phone}</div>
+          <div className="text-sm font-mono flex items-center gap-2">
+            <span>{broker.phone}</span>
+            <span
+              role="button"
+              tabIndex={0}
+              onClick={(e) => { e.stopPropagation(); doCall(); }}
+              title={broker.doNotCall ? 'Брокер в списке «не звонить»' : 'Позвонить брокеру через Mango'}
+              className={`inline-flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0 ${broker.doNotCall ? 'opacity-30 cursor-not-allowed' : 'bg-accent/15 text-accent hover:bg-accent/30 cursor-pointer'}`}
+            >
+              {calling ? <span className="text-[10px]">…</span> : <PhoneCall className="w-3.5 h-3.5" />}
+            </span>
+          </div>
           <div className="text-xs text-text-muted truncate">{broker.coordinatorAgency || '—'}</div>
           <span className={`text-xs px-2 py-1 rounded whitespace-nowrap ${cat?.cls || ''}`}>{cat?.label || broker.category}</span>
           {/* Bug fix 2026-06-02: в превью показываем ВСЮ историю звонков

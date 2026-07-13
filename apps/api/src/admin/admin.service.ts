@@ -4,7 +4,7 @@ import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { AmocrmService } from '../amocrm/amocrm.service';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig } from '@st-michael/integrations';
+import { AmoCrmAdapter, MangoAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig } from '@st-michael/integrations';
 import {
   VALID_CATEGORIES,
   VALID_CALL_FLAGS,
@@ -28,6 +28,7 @@ interface MailingFilters {
 @Injectable()
 export class AdminService {
   private amo = new AmoCrmAdapter();
+  private mango = new MangoAdapter();
 
   constructor(
     @Inject('PrismaClient') private prisma: PrismaClient,
@@ -946,6 +947,58 @@ export class AdminService {
     }));
   }
 
+  // 2026-07: issue #2 — менеджер КЦ звонит брокеру одной кнопкой через Mango.
+  // Mango callback: сначала звонит менеджеру на его внутренний номер
+  // (mangoEmployeeNum), тот берёт трубку → Mango дозванивается до брокера и
+  // соединяет. Запись Call создаётся сразу (status INITIATED, clientId=null —
+  // клиента в этой паре нет). Итог допишет webhook /webhooks/mango/call-result.
+  async mangoCallBroker(managerId: string, brokerId: string) {
+    const manager = await this.prisma.broker.findUnique({ where: { id: managerId } });
+    if (!manager) throw new NotFoundException('Менеджер не найден');
+    if (!manager.mangoEmployeeNum) {
+      throw new BadRequestException(
+        'У вас не заполнен внутренний номер Mango (mangoEmployeeNum) — обратитесь к администратору',
+      );
+    }
+
+    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+    if (!broker) throw new NotFoundException('Брокер не найден');
+    if (broker.doNotCall) {
+      throw new BadRequestException('Брокер в списке «не звонить» (doNotCall)');
+    }
+    if (!broker.phone) {
+      throw new BadRequestException('У брокера не указан телефон');
+    }
+
+    // Mango звонит менеджеру на его внутренний номер, после ответа — брокеру.
+    // Штатный VPBX callback по api_key/salt (MANGO_CALLBACK_URL не нужен).
+    // Caller ID для брокера — общий офисный номер (MANGO_OUTBOUND_LINE),
+    // иначе Mango подставит дефолтную линию аккаунта.
+    const lineNumber = process.env.MANGO_OUTBOUND_LINE || undefined;
+    const r = await this.mango.initiateCallbackFromExtension({
+      extension: manager.mangoEmployeeNum,
+      to: broker.phone,
+      lineNumber,
+    });
+
+    const call = await this.prisma.call.create({
+      data: {
+        brokerId: broker.id,
+        clientId: null,
+        mangoCallId: r.callId,
+        direction: 'OUTBOUND',
+        status: 'INITIATED' as any,
+        attemptNumber: 1,
+        cycleDay: 0,
+      },
+    });
+
+    return {
+      callId: call.id,
+      mangoCallId: r.callId,
+      message: 'Mango сейчас позвонит вам на рабочий телефон — возьмите трубку, соединим с брокером.',
+    };
+  }
   async assignBrokersToManager(brokerIds: string[], managerId: string) {
     if (!brokerIds.length) throw new BadRequestException('Не выбрано ни одного брокера');
     const manager = await this.prisma.broker.findUnique({
