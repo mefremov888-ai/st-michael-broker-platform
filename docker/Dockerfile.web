@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.6
-FROM node:20-alpine AS builder
+FROM mirror.gcr.io/library/node:20-alpine AS builder
 WORKDIR /app
 # python3/make/g++ нужны для нативной компиляции bcrypt из workspace apps/api,
 # когда prebuilt-бинарник не качается. Эти пакеты живут только в throwaway-builder-stage.
@@ -15,7 +15,14 @@ COPY packages/integrations/package.json packages/integrations/
 COPY packages/shared/package.json packages/shared/
 
 # 2) npm install с BuildKit cache mount.
-RUN --mount=type=cache,target=/root/.npm npm install
+# 2026-06-25: добавлена проверка наличия next-бинарника. Без неё битый
+# кеш-слой от упавшего ранее build'а (PR #178 → run 28107132638 — npm
+# install оборвался на середине, SSH сдох) попадал в CACHE → следующий
+# build пропускал установку, потом падал на `sh: next: not found`.
+# Проверка делает две вещи: (а) меняет cache-key слоя — Buildkit пересоберёт
+# с нуля; (б) если npm install снова не доустановится — упадёт здесь, а
+# не на туманном этапе позже.
+RUN --mount=type=cache,target=/root/.npm npm install && test -x node_modules/.bin/next
 
 # 3) Остальной код.
 COPY . .
@@ -30,7 +37,7 @@ RUN rm -rf apps/web/.next apps/web/tsconfig.tsbuildinfo \
  && npm run build --workspace=apps/web
 
 # ─── runtime ───
-FROM node:20-alpine
+FROM mirror.gcr.io/library/node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -41,6 +48,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/
 # Без этой строки stmichael-logo.png, sw.js и другие статики из public/
 # отдают 404. См. https://nextjs.org/docs/app/api-reference/next-config-js/output#caveats
 COPY --from=builder --chown=nextjs:nodejs /app/apps/web/public ./apps/web/public
+# 2026-06-24: точка монтирования для shared volume web-data (см. docker-compose.yml).
+# Создаём заранее с правами nextjs, чтобы при первом запуске named volume
+# унаследовал владельца и SSR-код смог писать cms-snapshot.json.
+RUN mkdir -p /app/data && chown nextjs:nodejs /app/data
 USER nextjs
 EXPOSE 3000
 ENV PORT=3000

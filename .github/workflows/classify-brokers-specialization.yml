@@ -1,0 +1,63 @@
+name: Classify brokers specialization (Claude)
+
+# 2026-07-07: batch-классификация специализации брокеров через Claude API.
+# Читает всех Broker с specialization=null, собирает комментарии из CallLog,
+# отправляет в Claude Haiku и проставляет COMM / RESIDENTIAL / BOTH.
+#
+# Запуск ручной из GitHub Actions UI:
+#   Actions → "Classify brokers specialization (Claude)" → Run workflow.
+# По умолчанию — dry-run (только вывод, без записи в БД).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (ничего не пишет в БД)'
+        required: true
+        type: boolean
+        default: true
+      limit:
+        description: 'Ограничить N брокеров (для теста). Пусто = все.'
+        required: false
+        default: ''
+
+concurrency:
+  group: classify-brokers-spec
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: Run Claude classifier on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: SSH to server and run classifier
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 235m
+          script: |
+            set -e
+            ARGS=""
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              ARGS="$ARGS --dry-run"
+            fi
+            if [ -n "${{ inputs.limit }}" ]; then
+              ARGS="$ARGS --limit ${{ inputs.limit }}"
+            fi
+            echo "=== Args: $ARGS ==="
+            cd ${{ secrets.DEPLOY_PATH }}
+            # 2026-07-07: ANTHROPIC_API_KEY контейнер api сам не подтягивает
+            # из .env (для этого нужен рестарт). Читаем ключ прямо из .env
+            # хоста и пробрасываем в exec через -e — работает без рестарта.
+            ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' .env | cut -d= -f2- | tr -d '\r\n\t "')
+            if [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "ERR: ANTHROPIC_API_KEY отсутствует в .env — проверь GitHub Secret + deploy.yml"
+              exit 1
+            fi
+            eval "docker compose exec -T -e ANTHROPIC_API_KEY=\"$ANTHROPIC_API_KEY\" api node /app/scripts/classify-brokers-specialization.js $ARGS"
+            echo "=== Готово ==="

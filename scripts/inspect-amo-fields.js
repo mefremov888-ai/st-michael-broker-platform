@@ -24,7 +24,7 @@ function arg(name) {
 }
 
 const grep = arg('grep');
-const onlyEntity = arg('entity'); // 'leads' | 'contacts' | 'pipelines' | 'task_types' | null = leads+contacts
+const onlyEntity = arg('entity'); // 'leads' | 'contacts' | 'companies' | 'pipelines' | 'task_types' | null = leads+contacts
 
 const SUBDOMAIN = process.env.AMO_SUBDOMAIN || 'stmichael';
 const BASE = process.env.AMO_BASE_DOMAIN || 'amocrm.ru';
@@ -171,6 +171,14 @@ function printTaskTypes(types) {
       const contactFields = await fetchAllFields('contacts');
       printFields('contacts', contactFields);
     }
+
+    // 2026-07-03: companies — реквизиты юр.лица (ИНН, ОГРН, КПП, банк, БИК,
+    // р/с, к/с, юр. адрес и т.д.) обычно хранятся здесь. Инспектор нужен
+    // для маппинга полей Agency → AMO_COMPANY_FIELDS.
+    if (onlyEntity === 'companies') {
+      const companyFields = await fetchAllFields('companies');
+      printFields('companies', companyFields);
+    }
   }
 
   console.log('\n━'.repeat(80));
@@ -178,6 +186,7 @@ function printTaskTypes(types) {
   console.log('  --grep "От брокера" — отфильтрует поля/воронки по подстроке в name');
   console.log('  --entity leads      — только поля лидов');
   console.log('  --entity contacts   — только поля контактов');
+  console.log('  --entity companies  — только поля компаний (юр.лиц)');
   console.log('  --entity pipelines  — воронки и их стадии (status_id для каждой)');
   console.log('  --entity task_types — типы задач (нужен для ID «Аларм»)');
 })().catch((e) => {

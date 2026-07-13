@@ -78,9 +78,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const isAuthPage = pathname === '/login' || pathname === '/register';
     const isLanding = pathname === '/';
-    const isPublic = pathname === '/reset-password';
+    // 2026-06-26: добавлены /offer, /privacy, /forgot-password — иначе при
+    // клике на ссылку Договора-оферты или согласия на ПД со страницы
+    // регистрации новая вкладка открывалась и тут же редиректилась на /
+    // (AuthProvider видел отсутствие токена и выкидывал на лендинг).
+    // PR #177 b951736 чинил рендер этих страниц, но не сам редирект.
+    const isPublic =
+      pathname === '/reset-password' ||
+      pathname === '/forgot-password' ||
+      pathname === '/offer' ||
+      pathname === '/privacy';
 
-    // Unauthenticated users can only see landing / reset-password / login / register
+    // Unauthenticated users can only see landing / public legal & auth-helper pages
     if (!broker && !isAuthPage && !isLanding && !isPublic) {
       router.replace('/');
     } else if (broker && isAuthPage) {

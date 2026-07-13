@@ -4,13 +4,14 @@ import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { AmocrmService } from '../amocrm/amocrm.service';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig } from '@st-michael/integrations';
+import { AmoCrmAdapter, MangoAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig, isSalesPipeline } from '@st-michael/integrations';
 import {
   VALID_CATEGORIES,
   VALID_CALL_FLAGS,
   parseAndFilter,
   mapCoordRow,
   normalizePhone,
+  buildPhoneSearchConditions,
   type BrokerCategoryCode,
   type Candidate,
 } from './brokers-import.helper';
@@ -28,6 +29,7 @@ interface MailingFilters {
 @Injectable()
 export class AdminService {
   private amo = new AmoCrmAdapter();
+  private mango = new MangoAdapter();
 
   constructor(
     @Inject('PrismaClient') private prisma: PrismaClient,
@@ -90,7 +92,8 @@ export class AdminService {
       throw new BadRequestException('channels required');
     }
 
-    const validChannels = new Set(['EMAIL', 'PUSH', 'TELEGRAM', 'SMS']);
+    // 2026-07-02: работают только Email + Push. SMS/Telegram убраны из UI.
+    const validChannels = new Set(['EMAIL', 'PUSH']);
     const channels = data.channels.filter((c) => validChannels.has(c));
     if (channels.length === 0) throw new BadRequestException('No valid channels');
 
@@ -212,21 +215,41 @@ export class AdminService {
     return updated;
   }
 
-  async listBrokers(query: { page?: number; limit?: number; search?: string; role?: string; status?: string }) {
+  async listBrokers(query: { page?: number; limit?: number; search?: string; role?: string; status?: string; isCoordinator?: string; specialization?: 'COMM' | 'RESIDENTIAL' | 'BOTH' | 'REGIONAL' | 'UNSET' | string; category?: string }) {
     const page = Number(query.page) || 1;
     const limit = Number(query.limit) || 20;
     const skip = (page - 1) * limit;
 
     const where: any = {};
     if (query.search) {
+      // 2026-06-29: phone-поиск теперь нормализует входной формат.
+      // "8925..." и "+7925..." и "79255724188" — все находят брокера
+      // с phone="+79255724188" в БД.
       where.OR = [
         { fullName: { contains: query.search, mode: 'insensitive' } },
-        { phone: { contains: query.search } },
         { email: { contains: query.search, mode: 'insensitive' } },
+        ...buildPhoneSearchConditions(query.search),
       ];
     }
     if (query.role) where.role = query.role;
     if (query.status) where.status = query.status;
+    // 2026-06-29: фильтр по координаторам — string 'true'/'false' из query.
+    if (query.isCoordinator === 'true') where.isCoordinator = true;
+    if (query.isCoordinator === 'false') where.isCoordinator = false;
+    // 2026-07-06: фильтр по специализации (COMM/RESIDENTIAL/BOTH).
+    // 'UNSET' — брокеры без указанной специализации (null).
+    // 2026-07-09: 'REGIONAL' — региональный брокер (isRegional=true). Не
+    // тип недвижимости, но живёт в том же селекте UI для удобства.
+    if (query.specialization === 'REGIONAL') where.isRegional = true;
+    else if (query.specialization === 'UNSET') where.specialization = null;
+    else if (query.specialization && ['COMM', 'RESIDENTIAL', 'BOTH'].includes(query.specialization)) {
+      where.specialization = query.specialization;
+    }
+    // 2026-07-06: фильтр по BrokerCategory (COLD/WARM/HOT/…) — используется
+    // на странице колл-центра.
+    if (query.category && ['COLD', 'WARM', 'HOT', 'CONVERTED', 'ON_BOT_REVIEW', 'BLACKLIST'].includes(query.category)) {
+      where.category = query.category;
+    }
 
     const [brokers, total] = await Promise.all([
       this.prisma.broker.findMany({
@@ -241,6 +264,13 @@ export class AdminService {
           funnelStage: true,
           source: true,
           amoContactId: true,
+          // 2026-06-29: возвращаем isCoordinator для отображения в списке.
+          isCoordinator: true,
+          // 2026-07-06: возвращаем specialization и category — колонка в UI.
+          specialization: true,
+          category: true,
+          // 2026-07-09: региональный признак — покажется бейджем в списке.
+          isRegional: true,
           createdAt: true,
           _count: { select: { clients: true, deals: true, meetings: true, offerAcceptances: true } },
         },
@@ -299,7 +329,17 @@ export class AdminService {
   }
 
   async changeStatus(id: string, status: 'ACTIVE' | 'BLOCKED' | 'PENDING') {
-    return this.prisma.broker.update({ where: { id }, data: { status: status as any } });
+    // 2026-07-10: если возвращаем аккаунт в ACTIVE из закрытого/заблокированного,
+    // ставим reactivatedAt — этот факт выводится на /admin/broker-applications,
+    // вкладка «Заходы».
+    const current = await this.prisma.broker.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    const wasClosed = current && current.status !== 'ACTIVE';
+    const data: any = { status };
+    if (status === 'ACTIVE' && wasClosed) data.reactivatedAt = new Date();
+    return this.prisma.broker.update({ where: { id }, data });
   }
 
   async brokerDeals(brokerId: string, query: any) {
@@ -445,11 +485,15 @@ export class AdminService {
         // Upsert broker by phone
         const existing = await this.prisma.broker.findUnique({ where: { phone } });
         if (existing) {
+          // 2026-06-18: НЕ перетираем fullName и email брокера данными из amoCRM —
+          // внутри amo администраторы любят дописывать к имени служебные пометки
+          // («Савицкий Владимир (теперь Антон)»), которые брокеру в кабинете
+          // показывать нельзя. Заполняем эти поля ТОЛЬКО если в нашей БД пусто.
           await this.prisma.broker.update({
             where: { id: existing.id },
             data: {
-              fullName: contact.name || existing.fullName,
-              email: email || existing.email,
+              ...(existing.fullName ? {} : { fullName: contact.name || 'Без имени' }),
+              ...(existing.email ? {} : email ? { email } : {}),
               amoContactId: BigInt(contactId),
             },
           });
@@ -479,6 +523,32 @@ export class AdminService {
             await this.prisma.brokerAgency.create({
               data: { brokerId: newBroker.id, agencyId: agency.id, isPrimary: true },
             });
+          }
+        }
+
+        // 2026-07-06: если у брокера в amo есть ИНН — привязываем его
+        // контакт к Компании в amoCRM (поле «Компания» в карточке контакта).
+        // Ищем/создаём Company по ИНН, потом linkContactToCompany.
+        // amo не любит повторный link, но кидает 400 — заворачиваем в catch.
+        if (inn) {
+          try {
+            let amoCompanyId: number | null = null;
+            const existingCompany = await this.amo.findCompanyByInn(inn);
+            if (existingCompany?.id) {
+              amoCompanyId = Number(existingCompany.id);
+            } else {
+              const createdCompany = await this.amo.createCompany({
+                name: agencyName || `Агентство ${inn}`,
+              });
+              if (createdCompany?.id) amoCompanyId = Number(createdCompany.id);
+            }
+            if (amoCompanyId) {
+              await this.amo
+                .linkContactToCompany(Number(contactId), amoCompanyId)
+                .catch(() => { /* уже связаны — не критично */ });
+            }
+          } catch (e: any) {
+            errors.push(`Contact ${contactId} company link: ${e?.message || e}`);
           }
         }
       } catch (e: any) {
@@ -652,11 +722,20 @@ export class AdminService {
     });
 
     // Обновление в amoCRM (если есть линк к лиду + нашли amoUserId).
+    // 2026-06-15: воронки продаж broker-platform не трогает. Если лид
+    // клиента уже в sales pipeline (Зорге9/Берзарина/Толбухина) — не
+    // меняем ответственного, этим занимается админ продаж вручную.
     let amoUpdated = false;
     if (client.amoLeadId && newAmoUserId) {
       try {
-        await this.amo.updateLead(Number(client.amoLeadId), { responsible_user_id: newAmoUserId } as any);
-        amoUpdated = true;
+        const fullLead = await this.amo.getLead(Number(client.amoLeadId)).catch(() => null);
+        const pipelineId = Number((fullLead as any)?.pipeline_id || 0);
+        if (pipelineId && isSalesPipeline(pipelineId)) {
+          console.log(`[reassignClient] лид ${client.amoLeadId} в sales-pipeline ${pipelineId} — не трогаем responsible_user_id`);
+        } else {
+          await this.amo.updateLead(Number(client.amoLeadId), { responsible_user_id: newAmoUserId } as any);
+          amoUpdated = true;
+        }
       } catch (e) {
         // Логируем, но не валим всю операцию (в нашей БД уже передано).
       }
@@ -708,6 +787,65 @@ export class AdminService {
       newBroker: { id: newBroker.id, fullName: newBroker.fullName },
       oldBroker: { id: oldBroker.id, fullName: oldBroker.fullName },
     };
+  }
+
+  // 2026-06-19: пометить/снять флаг координатора у брокера.
+  async setBrokerCoordinator(brokerId: string, isCoordinator: boolean) {
+    const exists = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+    if (!exists) throw new NotFoundException('Broker not found');
+    return this.prisma.broker.update({
+      where: { id: brokerId },
+      data: { isCoordinator },
+      select: { id: true, fullName: true, isCoordinator: true },
+    });
+  }
+
+  // ─── Ручная смена uniquenessStatus клиента (admin only, критические случаи) ──
+  // 2026-06-17: бывает что webhook / amoCRM-логика не довела клиента до правильного
+  // статуса (баг, race condition, ручная правка в amo). Админ из кабинета может
+  // выставить любой статус с обязательной причиной — она пишется в uniquenessReason
+  // и в auditLog.
+  async setClientUniquenessStatus(
+    clientId: string,
+    newStatus: 'CONDITIONALLY_UNIQUE' | 'UNDER_REVIEW' | 'REJECTED',
+    reason: string,
+    executorId: string,
+  ) {
+    if (!reason || reason.trim().length < 3) {
+      throw new BadRequestException('Нужна причина (минимум 3 символа)');
+    }
+    if (!['CONDITIONALLY_UNIQUE', 'UNDER_REVIEW', 'REJECTED'].includes(newStatus)) {
+      throw new BadRequestException(`Неверный статус: ${newStatus}`);
+    }
+    const client = await this.prisma.client.findUnique({
+      where: { id: clientId },
+      select: { id: true, uniquenessStatus: true, brokerId: true, fullName: true, phone: true },
+    });
+    if (!client) throw new NotFoundException('Client not found');
+
+    const oldStatus = client.uniquenessStatus;
+    const UNIQUENESS_DAYS = 30;
+    const data: any = {
+      uniquenessStatus: newStatus,
+      uniquenessReason: `[Ручная правка админом] ${reason.trim()} (было: ${oldStatus})`,
+    };
+    if (newStatus === 'CONDITIONALLY_UNIQUE') {
+      data.uniquenessExpiresAt = new Date(Date.now() + UNIQUENESS_DAYS * 86400 * 1000);
+    } else if (newStatus === 'REJECTED') {
+      data.uniquenessExpiresAt = null;
+    }
+
+    await this.prisma.client.update({ where: { id: clientId }, data });
+    await this.prisma.auditLog.create({
+      data: {
+        userId: executorId,
+        action: 'CLIENT_UNIQUENESS_STATUS_MANUAL_CHANGE',
+        entity: 'Client',
+        entityId: clientId,
+        payload: { oldStatus, newStatus, reason: reason.trim(), clientName: client.fullName, phone: client.phone },
+      } as any,
+    });
+    return { success: true, clientId, oldStatus, newStatus };
   }
 
   // ─── Аналитика покрытия: что в amoCRM, чего нет в нашей базе ────────
@@ -835,6 +973,9 @@ export class AdminService {
     // currentUserId (передаётся через параметр).
     assignment?: 'mine' | 'unassigned' | 'all' | string;
     currentUserId?: string;
+    // 2026-07-06: фильтр по специализации — чтобы КЦ мог собрать очередь
+    // только коммерческих брокеров (или наоборот только жилой сегмент).
+    specialization?: 'COMM' | 'RESIDENTIAL' | 'BOTH' | 'REGIONAL' | 'UNSET' | string;
   }) {
     const page = Math.max(1, Number(query.page) || 1);
     const limit = Math.min(100, Number(query.limit) || 30);
@@ -865,6 +1006,13 @@ export class AdminService {
       where.assignedManagerId = null;
     }
     // 'all' / пусто — никакого фильтра по assignedManagerId не накладываем.
+    // 2026-07-06: специализация. UNSET — брокеры без указанной специализации.
+    // 2026-07-09: REGIONAL — региональный признак, живёт в том же селекте.
+    if (query.specialization === 'REGIONAL') where.isRegional = true;
+    else if (query.specialization === 'UNSET') where.specialization = null;
+    else if (query.specialization && ['COMM', 'RESIDENTIAL', 'BOTH'].includes(String(query.specialization))) {
+      where.specialization = query.specialization;
+    }
     // Bug fix 2026-05-22 (#3): не показывать оператору брокеров с
     // запланированным звонком в будущем (например +7 дней).
     // Условие OR: либо никогда не звонили (nextCallAt = null), либо
@@ -877,8 +1025,9 @@ export class AdminService {
         nextCallFilter,
         { OR: [
           { fullName: { contains: s, mode: 'insensitive' } },
-          { phone: { contains: s } },
           { coordinatorAgency: { contains: s, mode: 'insensitive' } },
+          // 2026-06-29: нормализация при поиске по телефону (как в /admin/brokers).
+          ...buildPhoneSearchConditions(s),
         ] },
       ];
     } else {
@@ -946,6 +1095,58 @@ export class AdminService {
     }));
   }
 
+  // 2026-07: issue #2 — менеджер КЦ звонит брокеру одной кнопкой через Mango.
+  // Mango callback: сначала звонит менеджеру на его внутренний номер
+  // (mangoEmployeeNum), тот берёт трубку → Mango дозванивается до брокера и
+  // соединяет. Запись Call создаётся сразу (status INITIATED, clientId=null —
+  // клиента в этой паре нет). Итог допишет webhook /webhooks/mango/call-result.
+  async mangoCallBroker(managerId: string, brokerId: string) {
+    const manager = await this.prisma.broker.findUnique({ where: { id: managerId } });
+    if (!manager) throw new NotFoundException('Менеджер не найден');
+    if (!manager.mangoEmployeeNum) {
+      throw new BadRequestException(
+        'У вас не заполнен внутренний номер Mango (mangoEmployeeNum) — обратитесь к администратору',
+      );
+    }
+
+    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+    if (!broker) throw new NotFoundException('Брокер не найден');
+    if (broker.doNotCall) {
+      throw new BadRequestException('Брокер в списке «не звонить» (doNotCall)');
+    }
+    if (!broker.phone) {
+      throw new BadRequestException('У брокера не указан телефон');
+    }
+
+    // Mango звонит менеджеру на его внутренний номер, после ответа — брокеру.
+    // Штатный VPBX callback по api_key/salt (MANGO_CALLBACK_URL не нужен).
+    // Caller ID для брокера — общий офисный номер (MANGO_OUTBOUND_LINE),
+    // иначе Mango подставит дефолтную линию аккаунта.
+    const lineNumber = process.env.MANGO_OUTBOUND_LINE || undefined;
+    const r = await this.mango.initiateCallbackFromExtension({
+      extension: manager.mangoEmployeeNum,
+      to: broker.phone,
+      lineNumber,
+    });
+
+    const call = await this.prisma.call.create({
+      data: {
+        brokerId: broker.id,
+        clientId: null,
+        mangoCallId: r.callId,
+        direction: 'OUTBOUND',
+        status: 'INITIATED' as any,
+        attemptNumber: 1,
+        cycleDay: 0,
+      },
+    });
+
+    return {
+      callId: call.id,
+      mangoCallId: r.callId,
+      message: 'Mango сейчас позвонит вам на рабочий телефон — возьмите трубку, соединим с брокером.',
+    };
+  }
   async assignBrokersToManager(brokerIds: string[], managerId: string) {
     if (!brokerIds.length) throw new BadRequestException('Не выбрано ни одного брокера');
     const manager = await this.prisma.broker.findUnique({
@@ -1101,46 +1302,303 @@ export class AdminService {
     return { callLog, broker: updated };
   }
 
-  // 2026-05-25: список заявок не переданных в amoCRM (amoSyncStatus=FAILED).
-  // fixationAgency не имеет prisma-relation на Client (только FK-поле
-  // fixationAgencyId), поэтому Agency грузим отдельным запросом.
-  async getAmoFailedClients() {
-    const clients = await this.prisma.client.findMany({
-      where: { amoSyncStatus: 'FAILED' as any },
-      include: {
-        broker: { select: { id: true, fullName: true, phone: true } },
+  // 2026-07-09: единая страница «Все заявки от брокеров».
+  // Заменяет /admin/amo-failed (там был только Client с FAILED).
+  // Показывает: Client (фиксации) + Meeting (встречи) + Call (звонки клиенту)
+  // + OfferAcceptance (акцепты договоров) — по всем брокерам.
+  // Доступ: MANAGER + ADMIN.
+  //
+  // Стратегия: 4 отдельных запроса (top-500 каждый), мержим в JS,
+  // сортируем по дате, пагинируем в памяти. При росте числа заявок
+  // (>10K в периоде) можно перейти на UNION в raw SQL или отдельный
+  // индекс/view — сейчас достаточно.
+  async getBrokerApplications(query: {
+    page?: number;
+    limit?: number;
+    // Мультиселект: строки-CSV ("CLIENT,MEETING") или строки-массивы.
+    // ALL / пусто = все типы (эквивалентно передаче всех).
+    type?: string;
+    amoStatus?: string;
+    search?: string;
+    startDate?: string;
+    endDate?: string;
+  }) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(200, Number(query.limit) || 50);
+    const ALL_TYPES = ['CLIENT', 'MEETING', 'CALL', 'OFFER', 'LOGIN'] as const;
+    const ALL_STATUSES = ['SYNCED', 'FAILED', 'PENDING'] as const;
+    // Парсим CSV или одиночную строку. Пусто/ALL — берём все.
+    const parseSet = (raw: string | undefined, fallback: readonly string[]): Set<string> => {
+      if (!raw) return new Set(fallback);
+      const parts = String(raw)
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+      if (!parts.length || parts.includes('ALL')) return new Set(fallback);
+      return new Set(parts);
+    };
+    const types = parseSet(query.type, ALL_TYPES);
+    const amoStatuses = parseSet(query.amoStatus, ALL_STATUSES);
+    // Если пользователь оставил все статусы — считаем, что фильтр «выключен»
+    // (показываем и заявки без amo-статуса: встречи/звонки/акцепты/логины).
+    const amoStatusFilterOn = amoStatuses.size < ALL_STATUSES.length;
+    const search = (query.search || '').trim();
+    const dateFilter: any = {};
+    if (query.startDate) dateFilter.gte = new Date(query.startDate);
+    if (query.endDate) dateFilter.lte = new Date(query.endDate);
+    const hasDate = Object.keys(dateFilter).length > 0;
+
+    const TOP_PER_TYPE = 500; // top-N по каждому типу до мержа
+
+    // 1) Client (фиксации) — только тут есть amoSync
+    const clientWhere: any = {};
+    if (hasDate) clientWhere.createdAt = dateFilter;
+    if (amoStatusFilterOn) clientWhere.amoSyncStatus = { in: Array.from(amoStatuses) };
+    if (search) {
+      clientWhere.OR = [
+        { fullName: { contains: search, mode: 'insensitive' } },
+        ...buildPhoneSearchConditions(search),
+      ];
+    }
+    const wantClient = types.has('CLIENT');
+
+    // 2) Meeting (встречи) — amoSync-статуса нет
+    const meetingWhere: any = {};
+    if (hasDate) meetingWhere.createdAt = dateFilter;
+    if (search) {
+      meetingWhere.client = { fullName: { contains: search, mode: 'insensitive' } };
+    }
+    const wantMeeting = types.has('MEETING');
+    // Если включён фильтр по amoStatus — встречи не показываем (у них статуса нет).
+    const showMeeting = wantMeeting && !amoStatusFilterOn;
+
+    // 3) Call (звонки через Mango брокер→клиент) — amoSync-статуса нет
+    const callWhere: any = { clientId: { not: null } }; // только звонки с клиентом
+    if (hasDate) callWhere.createdAt = dateFilter;
+    if (search) {
+      callWhere.client = { fullName: { contains: search, mode: 'insensitive' } };
+    }
+    const wantCall = types.has('CALL');
+    const showCall = wantCall && !amoStatusFilterOn;
+
+    // 4) OfferAcceptance — акцепты договоров брокером (не клиентом)
+    const offerWhere: any = {};
+    if (hasDate) offerWhere.acceptedAt = dateFilter;
+    if (search) {
+      offerWhere.broker = { fullName: { contains: search, mode: 'insensitive' } };
+    }
+    const wantOffer = types.has('OFFER');
+    const showOffer = wantOffer && !amoStatusFilterOn;
+
+    // 5) Login — регистрации / реактивации аккаунтов брокеров. Одна строка на
+    //    брокера: либо REGISTERED (createdAt), либо REACTIVATED (reactivatedAt)
+    //    — что позже, то и берём. Бэйдж «без оферты» ставим отдельно.
+    //
+    // 2026-07-10: исключаем брокеров, попавших в БД через импорт
+    //    (baseSource = google_sheet / amocrm / manual) — у них createdAt
+    //    это дата импорта, а не реальный заход в кабинет. Показываем только
+    //    тех, кто сам зарегистрировался (baseSource == null).
+    const loginWhereOr: any[] = [];
+    if (hasDate) {
+      loginWhereOr.push({ createdAt: dateFilter });
+      loginWhereOr.push({ reactivatedAt: dateFilter });
+    }
+    const loginWhere: any = { baseSource: null };
+    if (loginWhereOr.length) loginWhere.OR = loginWhereOr;
+    if (search) {
+      loginWhere.AND = [
+        {
+          OR: [
+            { fullName: { contains: search, mode: 'insensitive' } },
+            ...buildPhoneSearchConditions(search),
+          ],
+        },
+      ];
+    }
+    const wantLogin = types.has('LOGIN');
+    const showLogin = wantLogin && !amoStatusFilterOn;
+
+    const [clients, meetings, calls, offers, logins] = await Promise.all([
+      wantClient
+        ? this.prisma.client.findMany({
+            where: clientWhere,
+            include: {
+              broker: { select: { id: true, fullName: true, phone: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: TOP_PER_TYPE,
+          })
+        : Promise.resolve([]),
+      showMeeting
+        ? this.prisma.meeting.findMany({
+            where: meetingWhere,
+            include: {
+              client: { select: { fullName: true, phone: true } },
+              broker: { select: { id: true, fullName: true, phone: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: TOP_PER_TYPE,
+          })
+        : Promise.resolve([]),
+      showCall
+        ? this.prisma.call.findMany({
+            where: callWhere,
+            include: {
+              client: { select: { fullName: true, phone: true } },
+              broker: { select: { id: true, fullName: true, phone: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: TOP_PER_TYPE,
+          })
+        : Promise.resolve([]),
+      showOffer
+        ? this.prisma.offerAcceptance.findMany({
+            where: offerWhere,
+            include: {
+              broker: { select: { id: true, fullName: true, phone: true } },
+            },
+            orderBy: { acceptedAt: 'desc' },
+            take: TOP_PER_TYPE,
+          })
+        : Promise.resolve([]),
+      showLogin
+        ? this.prisma.broker.findMany({
+            where: loginWhere,
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+              createdAt: true,
+              reactivatedAt: true,
+              _count: { select: { offerAcceptances: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+            take: TOP_PER_TYPE,
+          })
+        : Promise.resolve([]),
+    ]);
+
+    // Нормализуем к общей форме {type, id, personName, personPhone, date, broker, amoStatus, extra}
+    type App = {
+      type: 'CLIENT' | 'MEETING' | 'CALL' | 'OFFER' | 'LOGIN';
+      id: string;
+      personName: string;
+      personPhone: string;
+      date: Date;
+      broker: { id: string; fullName: string; phone: string } | null;
+      amoStatus: string | null;
+      amoLeadId?: string | null;
+      amoSyncError?: string | null;
+      // Для LOGIN.subType: 'REGISTERED' | 'REACTIVATED', badges: ['NO_OFFER'] и т.п.
+      extra?: any;
+    };
+    const items: App[] = [];
+    for (const c of clients as any[]) {
+      items.push({
+        type: 'CLIENT',
+        id: c.id,
+        personName: c.fullName || '—',
+        personPhone: c.phone || '',
+        date: c.createdAt,
+        broker: c.broker,
+        amoStatus: c.amoSyncStatus || null,
+        amoLeadId: c.amoLeadId ? String(c.amoLeadId) : null,
+        amoSyncError: c.amoSyncError || null,
+        extra: { project: c.project, uniquenessStatus: c.uniquenessStatus },
+      });
+    }
+    for (const m of meetings as any[]) {
+      items.push({
+        type: 'MEETING',
+        id: m.id,
+        personName: m.client?.fullName || '—',
+        personPhone: m.client?.phone || '',
+        date: m.createdAt,
+        broker: m.broker,
+        amoStatus: null,
+        extra: { meetingType: m.type, meetingStatus: m.status, meetingDate: m.date },
+      });
+    }
+    for (const cl of calls as any[]) {
+      items.push({
+        type: 'CALL',
+        id: cl.id,
+        personName: cl.client?.fullName || '—',
+        personPhone: cl.client?.phone || '',
+        date: cl.createdAt,
+        broker: cl.broker,
+        amoStatus: null,
+        extra: { callStatus: cl.status, callResult: cl.result, durationSec: cl.durationSec },
+      });
+    }
+    for (const o of offers as any[]) {
+      items.push({
+        type: 'OFFER',
+        id: o.id,
+        personName: o.broker?.fullName || '—', // акцепт — это про брокера, не клиента
+        personPhone: o.broker?.phone || '',
+        date: o.acceptedAt,
+        broker: o.broker,
+        amoStatus: null,
+        extra: { offerVersion: o.offerVersion, ip: o.ip },
+      });
+    }
+    for (const b of logins as any[]) {
+      // Если у брокера есть reactivatedAt — это реактивация, дата = reactivatedAt.
+      // Иначе — регистрация, дата = createdAt.
+      const isReactivation = !!b.reactivatedAt;
+      const noOffer = (b._count?.offerAcceptances || 0) === 0;
+      items.push({
+        type: 'LOGIN',
+        id: b.id,
+        personName: b.fullName || '—',
+        personPhone: b.phone || '',
+        date: isReactivation ? b.reactivatedAt : b.createdAt,
+        broker: { id: b.id, fullName: b.fullName, phone: b.phone },
+        amoStatus: null,
+        extra: {
+          subType: isReactivation ? 'REACTIVATED' : 'REGISTERED',
+          noOffer,
+        },
+      });
+    }
+
+    // Сортируем по дате (свежие сверху) и пагинируем.
+    items.sort((a, b) => b.date.getTime() - a.date.getTime());
+    const total = items.length;
+    const skip = (page - 1) * limit;
+    const pageItems = items.slice(skip, skip + limit);
+
+    return {
+      items: pageItems,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      // Служебная инфа для KPI-бара.
+      countsByType: {
+        CLIENT: items.filter((i) => i.type === 'CLIENT').length,
+        MEETING: items.filter((i) => i.type === 'MEETING').length,
+        CALL: items.filter((i) => i.type === 'CALL').length,
+        OFFER: items.filter((i) => i.type === 'OFFER').length,
+        LOGIN: items.filter((i) => i.type === 'LOGIN').length,
       },
-      orderBy: { amoSyncLastAttemptAt: 'desc' },
-      take: 200,
-    });
-    const agencyIds = Array.from(new Set(clients.map((c) => c.fixationAgencyId).filter(Boolean) as string[]));
-    const agencies = agencyIds.length
-      ? await this.prisma.agency.findMany({
-          where: { id: { in: agencyIds } },
-          select: { id: true, name: true, inn: true },
-        })
-      : [];
-    const agencyMap = new Map(agencies.map((a) => [a.id, a]));
-    return clients.map((c) => ({
-      id: c.id,
-      fullName: c.fullName,
-      phone: c.phone,
-      project: c.project,
-      broker: c.broker,
-      agency: c.fixationAgencyId ? agencyMap.get(c.fixationAgencyId) || null : null,
-      amoSyncError: c.amoSyncError,
-      amoSyncAttempts: c.amoSyncAttempts,
-      amoSyncLastAttemptAt: c.amoSyncLastAttemptAt,
-      createdAt: c.createdAt,
-    }));
+      countsByAmoStatus: {
+        SYNCED: items.filter((i) => i.amoStatus === 'SYNCED').length,
+        FAILED: items.filter((i) => i.amoStatus === 'FAILED').length,
+        PENDING: items.filter((i) => i.amoStatus === 'PENDING').length,
+      },
+    };
   }
 
   // 2026-05-25: ручной retry — менеджер видит FAILED-заявку и нажимает «повторить».
   // Вызывает amo createFixationRequest снова. При успехе — статус SYNCED.
+  // 2026-06-19: если клиент был зафиксирован координатором (responsibleBrokerId !=
+  // brokerId), используем для amo реального брокера, а не координатора.
   async retryAmoSync(clientId: string) {
     const client = await this.prisma.client.findUnique({
       where: { id: clientId },
-      include: { broker: true },
+      include: { broker: true, responsibleBroker: true },
     });
     if (!client) throw new BadRequestException('Client not found');
     if (client.amoSyncStatus === 'SYNCED') return { ok: true, message: 'Уже синхронизирован' };
@@ -1148,13 +1606,15 @@ export class AdminService {
     const agency = await this.prisma.agency.findUnique({ where: { id: client.fixationAgencyId } });
     if (!agency) throw new BadRequestException('Агентство не найдено');
 
+    // 2026-06-19: для координаторских фиксаций берём реального брокера.
+    const responsibleBroker = (client as any).responsibleBroker || client.broker;
     try {
       await this.amo.createFixationRequest({
         clientPhone: client.phone,
         clientEmail: client.email || undefined,
         clientName: client.fullName,
-        brokerPhone: client.broker.phone,
-        brokerAmoContactId: client.broker.amoContactId ? Number(client.broker.amoContactId) : undefined,
+        brokerPhone: responsibleBroker.phone,
+        brokerAmoContactId: responsibleBroker.amoContactId ? Number(responsibleBroker.amoContactId) : undefined,
         agencyName: agency.name,
         agencyInn: agency.inn,
         comment: client.comment || '',

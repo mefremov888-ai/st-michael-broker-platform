@@ -1,6 +1,6 @@
 import { Injectable, Inject, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
-import { rateFor } from '../commission/commission.service';
+import { rateFor, rateForWithPolicy } from '../commission/commission.service';
 
 @Injectable()
 export class DealsService {
@@ -131,13 +131,14 @@ export class DealsService {
       include: { agency: true },
     });
 
-    // Calculate commission rate — используем единую таблицу COMMISSION_RATES
-    // из commission.service. Раньше здесь был дубль с другими значениями
-    // (Silver Bor START=4.5 vs 5.0) — это давало разную комиссию для
-    // одной и той же сделки в зависимости от того, кто её создал
-    // (ручное POST /deals vs amo-sync). Правка #7 из аудита 2026-05-22.
-    const level = brokerAgency?.agency.commissionLevel || 'START';
-    const rate = rateFor(data.project, level);
+    // Calculate commission rate — учитываем активную политику из админки
+    // (правка 2026-07-01). Раньше был хардкод rateFor(project, agency.commissionLevel),
+    // из-за чего ручное POST /deals не уважало FLAT/PROGRESSIVE политики
+    // в /admin/commission-policies. rateForWithPolicy — тот же helper что и
+    // в amo-sync и калькуляторе, единый источник истины.
+    const totalSqm = Number(brokerAgency?.agency?.totalSqmSold || 0);
+    const policyResult = await rateForWithPolicy(this.prisma, data.project, totalSqm);
+    const rate = policyResult.rate;
     const commissionAmount = (data.amount * rate) / 100;
 
     const deal = await this.prisma.deal.create({

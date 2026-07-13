@@ -155,9 +155,7 @@ export default function AdminBrokerDetailPage() {
                 <Database className="w-3 h-3" /> в базе КЦ
               </span>
             )}
-            {broker.isCoordinator && (
-              <span className="text-xs px-2 py-1 rounded bg-warning/20 text-warning">координатор {broker.coordinatorAgency ? `· ${broker.coordinatorAgency}` : ''}</span>
-            )}
+            {/* 2026-06-29 (refactor): флаг координатора убран. */}
           </h1>
           <div className="text-text-muted text-sm mt-1">
             {broker.phone} · amoCRM ID: {broker.amoContactId ? broker.amoContactId.toString() : '—'}
@@ -275,13 +273,14 @@ export default function AdminBrokerDetailPage() {
           ) : (
             <div className="space-y-2">
               {clients.map((c: any) => (
-                <div key={c.id} className="flex justify-between items-center py-2 border-b border-border last:border-0 text-sm">
-                  <div>
-                    <div className="font-medium">{c.fullName}</div>
-                    <div className="text-text-muted text-xs">{c.phone}</div>
-                  </div>
-                  <div className="text-text-muted text-xs">{c.uniquenessStatus}</div>
-                </div>
+                <ClientRowWithStatus
+                  key={c.id}
+                  client={c}
+                  isAdmin={isAdmin}
+                  onUpdated={(newStatus) => {
+                    setClients((prev) => prev.map((x: any) => x.id === c.id ? { ...x, uniquenessStatus: newStatus } : x));
+                  }}
+                />
               ))}
             </div>
           )}
@@ -358,6 +357,109 @@ export default function AdminBrokerDetailPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 2026-06-17: ручная смена uniquenessStatus админом из вкладки «Клиенты»
+// на странице брокера. Только для критических случаев — если автоматика
+// не довела клиента до правильного статуса (баг, race condition,
+// ручная правка в amoCRM).
+const STATUS_LABELS: Record<string, string> = {
+  CONDITIONALLY_UNIQUE: 'Условно уникален',
+  UNDER_REVIEW: 'На проверке',
+  REJECTED: 'Отклонён',
+};
+function ClientRowWithStatus({ client, isAdmin, onUpdated }: { client: any; isAdmin: boolean; onUpdated: (newStatus: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [newStatus, setNewStatus] = useState<string>(client.uniquenessStatus);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const save = async () => {
+    if (reason.trim().length < 3) { setError('Нужна причина (минимум 3 символа)'); return; }
+    setSaving(true); setError('');
+    try {
+      await api(`/admin/clients/${client.id}/uniqueness-status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: newStatus, reason: reason.trim() }),
+      });
+      onUpdated(newStatus);
+      setEditing(false);
+      setReason('');
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="py-2 border-b border-border last:border-0 text-sm">
+      <div className="flex justify-between items-center">
+        <div>
+          <div className="font-medium">{client.fullName}</div>
+          <div className="text-text-muted text-xs">{client.phone}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-2 py-1 rounded bg-text-muted/20">
+            {STATUS_LABELS[client.uniquenessStatus] || client.uniquenessStatus}
+          </span>
+          {isAdmin && !editing && (
+            <button
+              className="text-xs text-accent hover:underline"
+              onClick={() => { setEditing(true); setNewStatus(client.uniquenessStatus); }}
+            >
+              Сменить
+            </button>
+          )}
+        </div>
+      </div>
+      {editing && (
+        <div className="mt-2 p-3 bg-surface-secondary rounded-lg space-y-2">
+          <div className="text-xs text-warning">⚠️ Только для критических случаев. Изменение пишется в audit log.</div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-text-muted">Новый статус</label>
+            <select
+              className="input text-sm"
+              value={newStatus}
+              onChange={(e) => setNewStatus(e.target.value)}
+            >
+              {Object.entries(STATUS_LABELS).map(([v, l]) => (
+                <option key={v} value={v}>{l}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-text-muted">Причина (обязательно)</label>
+            <textarea
+              className="input text-sm"
+              rows={2}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Например: webhook от amo не пришёл, выставил вручную"
+            />
+          </div>
+          {error && <div className="text-xs text-error">{error}</div>}
+          <div className="flex gap-2 justify-end">
+            <button
+              className="text-xs px-3 py-1 rounded border border-border"
+              onClick={() => { setEditing(false); setReason(''); setError(''); }}
+              disabled={saving}
+            >
+              Отмена
+            </button>
+            <button
+              className="text-xs px-3 py-1 rounded bg-accent text-white"
+              onClick={save}
+              disabled={saving}
+            >
+              {saving ? 'Сохраняю…' : 'Сохранить'}
+            </button>
+          </div>
         </div>
       )}
     </div>

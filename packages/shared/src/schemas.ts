@@ -21,6 +21,11 @@ export const registerDtoSchema = z.object({
   inn: z.string().regex(/^\d{10}$|^\d{12}$/, 'INN must be 10 or 12 digits'),
   innType: z.enum(['PERSONAL', 'AGENCY']).optional(),
   agencyName: z.string().min(2).max(200).optional(),
+  // 2026-06-18: согласия больше не обязательны — отдельная договорённость с
+  // юристами, ставится позже отдельным шагом. Чекбоксы на лендинге остались,
+  // но не блокируют submit. Если брокер их отметил — фиксируем акцепт.
+  offerAccepted: z.boolean().optional(),
+  privacyAccepted: z.boolean().optional(),
 }).refine((d) => d.fullName || (d.firstName && d.lastName), {
   message: 'Either fullName or firstName+lastName required',
 });
@@ -51,7 +56,12 @@ export const refreshTokenDtoSchema = z.object({
 export const fixClientDtoSchema = z.object({
   phone: phoneSchema,
   fullName: z.string().min(2, 'Full name too short'),
-  email: z.string().email().optional(),
+  // 2026-07-02: allow пустая строка / пробелы — фронт иногда шлёт "" когда
+  // поле оставили пустым. Раньше zod валил такой запрос с «Invalid email».
+  email: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().email().optional(),
+  ),
   comment: z.string().optional(),
   project: z.nativeEnum(Project),
   agencyInn: z.string().regex(/^\d{10}$/, 'INN must be 10 digits'),
@@ -71,6 +81,11 @@ export const fixClientDtoSchema = z.object({
   readinessLevel: z.string().optional(),
   // 2026-05-26: подтверждение, что брокер хочет создать дубль уже своего клиента
   confirmDuplicate: z.boolean().optional(),
+  // 2026-06-19: для координаторов — ID реального брокера, ведущего клиента.
+  // У координатора в форме поле обязательно (валидация в сервисе по
+  // currentUser.isCoordinator). У обычного брокера может быть null —
+  // тогда ответственным считается сам владелец кабинета.
+  responsibleBrokerId: z.string().uuid().optional(),
 });
 
 // Client schemas
@@ -172,11 +187,13 @@ export const paginationQuerySchema = z.object({
 });
 
 // Commission calculation schema
+// 2026-07-01: agencyInn убран (агентство берётся по brokerId из JWT).
+// Добавлен paymentMode: FULL — полная оплата, INSTALLMENT — рассрочка (-0.5%
+// или из CMS), SUBSIDIZED_MORTGAGE — субсидированная ипотека (фикс 4% или из CMS).
 export const commissionCalculationDtoSchema = z.object({
   amount: z.number().positive(),
   project: z.nativeEnum(Project),
-  agencyInn: z.string().regex(/^\d{10}$/),
-  isInstallment: z.boolean().default(false),
+  paymentMode: z.enum(['FULL', 'INSTALLMENT', 'SUBSIDIZED_MORTGAGE']).default('FULL'),
 });
 
 // Analytics schemas

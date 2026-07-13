@@ -14,6 +14,8 @@ import { AuthGuard } from '@nestjs/passport';
 import type { Request } from 'express';
 import { PrismaClient } from '@st-michael/database';
 import type { NotificationChannel } from '@st-michael/database';
+import { InjectQueue } from '@nestjs/bull';
+import type { Queue } from 'bull';
 
 interface SubscribePayload {
   endpoint: string;
@@ -34,11 +36,37 @@ export const NOTIFICATION_EVENTS = [
   { type: 'ANNOUNCEMENTS', label: 'Объявления застройщика', icon: '📢' },
 ] as const;
 
-const NOTIFICATION_CHANNELS: NotificationChannel[] = ['EMAIL', 'PUSH', 'TELEGRAM', 'SMS'];
+// 2026-07-02: работают только EMAIL (через SendGrid) и PUSH (VAPID).
+// TELEGRAM/SMS/WHATSAPP убраны из UI т.к. не подключены.
+const NOTIFICATION_CHANNELS: NotificationChannel[] = ['EMAIL', 'PUSH'];
 
 @Controller('notifications')
 export class NotificationController {
-  constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
+  constructor(
+    @Inject('PrismaClient') private prisma: PrismaClient,
+    @InjectQueue('notifications') private notificationQueue: Queue,
+  ) {}
+
+  // 2026-07-02: test-endpoint для проверки что SendGrid реально отправляет.
+  // Отсылает подтверждающий email на broker.email. Только под JWT.
+  @UseGuards(AuthGuard('jwt'))
+  @Post('test-email')
+  async testEmail(@Req() req: Request) {
+    const brokerAuth = req.user as { id: string };
+    const broker = await this.prisma.broker.findUnique({
+      where: { id: brokerAuth.id },
+      select: { id: true, email: true, fullName: true },
+    });
+    if (!broker) return { ok: false, message: 'Broker not found' };
+    if (!broker.email) return { ok: false, message: 'В профиле не задан email' };
+    await this.notificationQueue.add('send', {
+      brokerId: broker.id,
+      channel: 'EMAIL',
+      subject: 'ST Michael — тест уведомлений',
+      body: `Здравствуйте, ${broker.fullName}!\n\nЭто тестовое письмо от системы уведомлений ST Michael.\nЕсли вы его получили, значит канал Email через SendGrid работает.\n\n— ST Michael Кабинет брокера`,
+    });
+    return { ok: true, sentTo: broker.email };
+  }
 
   // Public — клиенту нужен публичный VAPID-ключ до подписки
   @Get('push/vapid-key')

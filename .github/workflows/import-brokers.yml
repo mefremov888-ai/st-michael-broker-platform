@@ -11,6 +11,12 @@ name: Import brokers from Google Sheet
 # план). Чтобы реально записать в БД — поставить dry-run = false.
 
 on:
+  # 2026-07-06: авто-синк из Google Sheets — КЦ продолжает вести базу в
+  # таблице. Каждую ночь в 02:00 UTC = 05:00 МСК подтягиваем изменения:
+  # категории (COLD/WARM/HOT/…), флаг «не звонить», добавляем новых.
+  # Скрипт не затирает то, что брокер сам ввёл в кабинете.
+  schedule:
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       filter:
@@ -48,11 +54,12 @@ jobs:
     steps:
       - name: Show parameters
         run: |
-          echo "filter:         ${{ inputs.filter }}"
-          echo "call_flag:      ${{ inputs.call_flag }}"
-          echo "dry_run:        ${{ inputs.dry_run }}"
-          echo "limit:          ${{ inputs.limit }}"
-          echo "include_coords: ${{ inputs.include_coords }}"
+          echo "event:          ${{ github.event_name }}"
+          echo "filter:         ${{ inputs.filter || 'ALL (default)' }}"
+          echo "call_flag:      ${{ inputs.call_flag || 'да (default)' }}"
+          echo "dry_run:        ${{ inputs.dry_run || 'false (default)' }}"
+          echo "limit:          ${{ inputs.limit || '(no limit)' }}"
+          echo "include_coords: ${{ inputs.include_coords || 'false (default)' }}"
 
       - name: SSH to server and run import
         uses: appleboy/ssh-action@v1.0.3
@@ -66,11 +73,14 @@ jobs:
           envs: FILTER,CALL_FLAG,DRY_RUN,LIMIT,INCLUDE_COORDS
           script: |
             set -e
-            FILTER="${{ inputs.filter }}"
-            CALL_FLAG="${{ inputs.call_flag }}"
-            DRY_RUN="${{ inputs.dry_run }}"
+            # 2026-07-06: при ночном cron-запуске inputs.* пустые → fallback:
+            #   filter=ALL, call_flag=да, dry_run=false, без лимита, без координаторов.
+            # Для ручного запуска через UI берём значения из формы.
+            FILTER="${{ inputs.filter || 'ALL' }}"
+            CALL_FLAG="${{ inputs.call_flag || 'да' }}"
+            DRY_RUN="${{ inputs.dry_run || 'false' }}"
             LIMIT="${{ inputs.limit }}"
-            INCLUDE_COORDS="${{ inputs.include_coords }}"
+            INCLUDE_COORDS="${{ inputs.include_coords || 'false' }}"
 
             ARGS="--filter $FILTER"
             if [ -n "$CALL_FLAG" ]; then

@@ -16,6 +16,15 @@ async function bootstrap() {
   app.use(helmet());
   app.use(compression());
 
+  // 2026-06-15: amoCRM шлёт webhook в формате form-urlencoded с вложенными
+  // ключами вроде leads[update][0][id]=12345. По умолчанию NestJS поднимает
+  // express.urlencoded({extended:false}) — такой парсер оставляет ключи
+  // плоскими: data['leads[update][0][id]'], data.id остаётся undefined,
+  // syncBrokerAttachmentFromLead не находит лид. Переключаем на extended.
+  const express = require('express');
+  app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+  app.use(express.json({ limit: '5mb' }));
+
   // CORS
   app.enableCors({
     origin: process.env.WEB_URL || 'http://localhost:3000',

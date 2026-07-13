@@ -2,7 +2,7 @@ import { Project } from '@st-michael/shared';
 import {
   AMO_LEAD_FIELDS, AMO_LEAD_ENUMS, AMO_CONTACT_FIELDS,
   readinessLevelToEnumId, purchaseTimingToEnumId,
-  evaluateUniqueness,
+  evaluateUniqueness, brokerLeadMarkerFields,
 } from './amo-crm.fields';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -74,6 +74,7 @@ export interface UpdateLeadDto {
   name?: string;
   price?: number;
   status_id?: number;
+  responsible_user_id?: number;
   custom_fields_values?: any[];
 }
 
@@ -404,6 +405,43 @@ export class AmoCrmAdapter {
     });
   }
 
+  // 2026-06-15: список НЕзавершённых задач конкретного ответственного
+  // в указанном временном окне. Используется для определения занятых
+  // слотов менеджера встреч (Ксения) — чтобы брокер в кабинете не мог
+  // забронировать время, на которое у неё уже есть задача в amo.
+  // amoCRM filter[complete_till] — unix timestamp в секундах.
+  async getOpenTasksForUser(
+    responsibleUserId: number,
+    fromSec: number,
+    toSec: number,
+  ): Promise<Array<{ id: number; text: string; completeTill: number; durationSec: number }>> {
+    if (!responsibleUserId) return [];
+    try {
+      const params = [
+        `filter[responsible_user_id]=${responsibleUserId}`,
+        `filter[is_completed]=0`,
+        `filter[complete_till][from]=${fromSec}`,
+        `filter[complete_till][to]=${toSec}`,
+        `limit=250`,
+      ].join('&');
+      const data = await this.request<any>(`/tasks?${params}`);
+      const items = data?._embedded?.tasks || [];
+      // У задачи в amo нет «продолжительности» — есть только complete_till
+      // (deadline). Берём фиксированный слот 60 минут (стандарт для встреч
+      // у Ксении). Если задача не «встреча» а просто «позвонить», 60 минут
+      // — пессимистичная оценка, лучше перебдеть чем недобдеть.
+      return items.map((t: any) => ({
+        id: t.id,
+        text: t.text,
+        completeTill: Number(t.complete_till) * 1000, // ms
+        durationSec: 60 * 60,
+      }));
+    } catch (e: any) {
+      console.error('[getOpenTasksForUser] failed:', e?.message || e);
+      return [];
+    }
+  }
+
   // 2026-06-10: список задач по entity (лиду / контакту). Используется
   // для диагностики «кто ответственный за задачу» — чтобы убедиться
   // что Морикит / наш код проставляет правильного человека.
@@ -436,6 +474,76 @@ export class AmoCrmAdapter {
     }
   }
 
+  // 2026-06-11: Морикит создаёт задачу на КЦ-менеджере по графику смен, НО
+  // не обновляет responsible_user_id на самом лиде — там остаётся автор
+  // OAuth-токена (= админ). КЦ-менеджер не видит лид в своих фильтрах.
+  //
+  // Этот helper делает post-sync: периодически (раз в intervalMs, до maxAttempts)
+  // читает задачи на лиде. Как только появится задача с responsible_user_id
+  // отличным от текущего на лиде — обновляет лид и выходит. Возвращает true
+  // если ответственный был обновлён.
+  //
+  // 2026-06-11 v2: Морикит создаёт задачу через ~30 сек после webhook'а
+  // (по наблюдению на тестовом лиде 32208713). Раньше делали одну проверку
+  // через 8 сек — не успевали. Теперь polling: 10 сек × 6 попыток = до 60 сек.
+  //
+  // 2026-06-17: до 5 минут (30×10с) — был кейс с лидом 32216265 (RULE_EXCEPTION
+  // _AFTER_SALES_MEETING), когда Морикит-задача появилась после 60с и polling
+  // её не дождался → ответственный на лиде остался админом. ПЛЮС: захватываем
+  // initialResponsible при старте и обновляем ТОЛЬКО если он не изменился
+  // (защита от перетирания, если КЦ-менеджер вручную взял лид во время
+  // polling).
+  async syncLeadResponsibleFromLatestTask(
+    leadId: number,
+    opts: { intervalMs?: number; maxAttempts?: number } = {},
+  ): Promise<boolean> {
+    const intervalMs = opts.intervalMs ?? 10000;
+    const maxAttempts = opts.maxAttempts ?? 30;
+    // Фиксируем начального ответственного — если кто-то вручную возьмёт лид
+    // во время polling, не перетираем его выбор.
+    let initialResponsible: number | undefined;
+    try {
+      const initial = await this.getLead(leadId);
+      initialResponsible = (initial as any)?.responsible_user_id;
+    } catch (e: any) {
+      console.warn(`[sync-lead-responsible] lead=${leadId} initial getLead failed:`, e?.message || e);
+    }
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (intervalMs > 0) await sleep(intervalMs);
+      try {
+        const tasks = await this.getTasksByEntity('leads', leadId);
+        if (!tasks.length) continue;
+        const latest = tasks
+          .filter((t) => !!t.responsible_user_id)
+          .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0];
+        if (!latest?.responsible_user_id) continue;
+        const lead = await this.getLead(leadId);
+        const currentResponsible = (lead as any)?.responsible_user_id;
+        if (currentResponsible === latest.responsible_user_id) return false;
+        // Защита от перетирания ручного выбора КЦ-менеджера: если responsible
+        // на лиде УЖЕ изменился относительно начального — значит кто-то
+        // вручную взял лид → не трогаем.
+        if (initialResponsible !== undefined && currentResponsible !== initialResponsible) {
+          console.log(
+            `[sync-lead-responsible] lead=${leadId} skip — responsible изменился вручную (${initialResponsible} → ${currentResponsible}), не перетираем`,
+          );
+          return false;
+        }
+        await this.updateLead(leadId, { responsible_user_id: latest.responsible_user_id });
+        console.log(
+          `[sync-lead-responsible] lead=${leadId} updated: ${currentResponsible} → ${latest.responsible_user_id} (task ${latest.id}, attempt ${attempt})`,
+        );
+        return true;
+      } catch (e: any) {
+        console.error(`[sync-lead-responsible] attempt ${attempt} failed:`, e?.message || e);
+      }
+    }
+    console.warn(
+      `[sync-lead-responsible] lead=${leadId}: задачу с responsible не нашли за ${(maxAttempts * intervalMs) / 1000}с — Морикит залип?`,
+    );
+    return false;
+  }
+
   async addNoteToContact(contactId: number, text: string): Promise<void> {
     await this.request(`/contacts/${contactId}/notes`, {
       method: 'POST',
@@ -460,6 +568,25 @@ export class AmoCrmAdapter {
       body: JSON.stringify([data]),
     });
     return result?._embedded?.companies?.[0];
+  }
+
+  /**
+   * 2026-07-03: PATCH одной компании — используется для синка реквизитов
+   * агентства (Юр. лицо, ОГРН, КПП, банк, БИК, р/с, к/с и т.д.). amoCRM v4
+   * принимает объект напрямую (не массив как в create).
+   */
+  async updateCompany(
+    id: number,
+    data: { name?: string; custom_fields_values?: any[] },
+  ): Promise<AmoCompany | null> {
+    try {
+      return await this.request<AmoCompany>(`/companies/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      });
+    } catch (e) {
+      return null;
+    }
   }
 
   async linkContactToCompany(contactId: number, companyId: number): Promise<void> {
@@ -501,6 +628,23 @@ export class AmoCrmAdapter {
   }
 
   /**
+   * 2026-06-11: прикрепить контакт к лиду (в наш сценарий — брокера к старому
+   * лиду клиента по Правилу 1). Эквивалент кнопки «Добавить контакт» в карточке
+   * лида amoCRM. Идемпотентно: если контакт уже привязан, amoCRM вернёт 200 ОК.
+   */
+  async linkContactToLead(leadId: number, contactId: number): Promise<void> {
+    await this.request(`/leads/${leadId}/link`, {
+      method: 'POST',
+      body: JSON.stringify([
+        {
+          to_entity_id: contactId,
+          to_entity_type: 'contacts',
+        },
+      ]),
+    });
+  }
+
+  /**
    * 2026-06-03: проверка уникальности клиента по телефону через amoCRM.
    * Делает 3 запроса: findContactByPhone + getLeadsByContact + getContactsByIds
    * (для проверки IS_BROKER на каждом лиде). Применяет 4 правила пользователя.
@@ -509,28 +653,26 @@ export class AmoCrmAdapter {
    * Возвращает 'ALARM' → создавать Client с UNDER_REVIEW + задача для КЦ
    */
   async checkUniqueness(phone: string): Promise<{
-    verdict: 'UNIQUE' | 'ALARM';
+    rule: import('./amo-crm.fields').FixationRule;
+    verdict: 'UNIQUE' | 'ALARM'; // @deprecated: для совместимости со старым кодом
     reason: string;
     contactId?: number;
     leads?: Array<{ id: number; pipeline_id: number; status_id: number }>;
-    // 2026-06-03: если verdict=UNIQUE и есть активный лид в КЦ
-    // (Новое обращение / Квалифицировали выводим на встречу) — НЕ создаём
-    // новый лид при фиксации, а прикрепляем брокера к этому. Логика
-    // «конкурирующие брокеры до акта осмотра».
-    reusableLeadId?: number;
-    // 2026-06-05: тип триггера ALARM (DEFERRED_DEMAND / NEW_REQUEST_NO_BROKER
-    // / ACTIVE_SALES) и id лида, который его вызвал — для формирования
-    // специфичной ноты и задачи КЦ.
     triggerType?: 'DEFERRED_DEMAND' | 'NEW_REQUEST_NO_BROKER' | 'ACTIVE_SALES';
     triggerLeadId?: number;
   }> {
     const contact = await this.findContactByPhone(phone);
     if (!contact) {
-      return { verdict: 'UNIQUE', reason: 'Контакт в amoCRM не найден (правило 1)' };
+      return {
+        rule: 'NO_CONFLICT',
+        verdict: 'UNIQUE',
+        reason: 'Контакт в amoCRM не найден',
+      };
     }
     const leads = await this.getLeadsByContact(contact.id);
     if (leads.length === 0) {
       return {
+        rule: 'NO_CONFLICT',
         verdict: 'UNIQUE',
         reason: 'У контакта нет лидов в amoCRM',
         contactId: contact.id,
@@ -567,29 +709,16 @@ export class AmoCrmAdapter {
 
     const verdict = evaluateUniqueness(leadsForEval);
 
-    // 2026-06-03: если verdict=UNIQUE и есть активный лид в КЦ в стадии
-    // «Новое обращение» или «Квалифицировали выводим на встречу» — берём его
-    // как reusable. При фиксации новый брокер прикрепится к нему вторым
-    // контактом вместо создания нового лида.
-    let reusableLeadId: number | undefined;
-    if (verdict.verdict === 'UNIQUE') {
-      // Ищем лид в КЦ (pipeline 7600542) в одной из ранних стадий.
-      const kcEarlyStages = [62907118, 62907282]; // Новое обращение, Квалифицировали
-      const reusable = leads.find((l: any) =>
-        l.pipeline_id === 7600542 && kcEarlyStages.includes(l.status_id),
-      );
-      if (reusable) reusableLeadId = reusable.id;
-    }
-
     return {
-      ...verdict,
+      rule: verdict.rule,
+      verdict: verdict.verdict,
+      reason: verdict.reason,
       contactId: contact.id,
       leads: leadsForEval.map((l) => ({
         id: l.id,
         pipeline_id: l.pipeline_id,
         status_id: l.status_id,
       })),
-      reusableLeadId,
       triggerType: verdict.triggerType,
       triggerLeadId: verdict.triggerLeadId,
     };
@@ -716,6 +845,12 @@ export class AmoCrmAdapter {
     // к существующему. Логика «конкурирующие брокеры до акта осмотра»:
     // несколько брокеров одновременно могут быть условно-уникальными.
     reuseLeadId?: number;
+    // 2026-06-14: id и краткое описание ПРЕДЫДУЩЕГО (закрытого) лида этого
+    // же брокера на этого же клиента. Создаём НОВЫЙ лид + добавляем ссылку
+    // на старый в первой ноте. Используется когда брокер повторно фиксирует
+    // клиента, у которого прошлая сделка закрыта (143 / 142 / CANCELLED).
+    previousLeadId?: number;
+    previousLeadInfo?: string;
   }): Promise<AmoLead> {
     // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
     const clientCustomFields: any[] = [
@@ -760,11 +895,26 @@ export class AmoCrmAdapter {
     // отправляем эти два поля как multiselect-enum через текстовый
     // helper, если совпадает (иначе пропускаем).
     const propertyTypeEnums: Record<string, number> = {
-      // ID получены через GET /leads/custom_fields/587387 (Тип объекта, multiselect).
-      'квартира': 859233,
-      'апартаменты': 981093,
-      'дом': 859235,
-      'таунхаус': 1025397,
+      // 2026-06-11: ID перевыверены через inspect-amo-fields --grep="Тип объекта".
+      // Старые значения были перепутаны: 859233 на самом деле «Апартамент»,
+      // 981093 — «Кладовая», 1025397 — «Квартира». В результате форма «Апартаменты»
+      // улетала в amoCRM как «Кладовая». Реальные enum_id для field 587387:
+      //   859233  «Апартамент»
+      //   859235  «Паркинг»
+      //   889061  «Покупка коммерческого помещения»
+      //   981093  «Кладовая»
+      //   981095  «Аренда коммерческого помещения»
+      //   1025397 «Квартира»
+      // Форма (apps/web/.../fixation/page.tsx) шлёт только 3 значения:
+      // «Квартира», «Апартаменты», «Коммерческая» — мапим эти три.
+      'квартира': 1025397,
+      'апартаменты': 859233,
+      'апартамент': 859233,
+      'коммерческая': 889061,
+      'коммерческое помещение': 889061,
+      'кладовая': 981093,
+      'паркинг': 859235,
+      'машиноместо': 859235,
     };
     if (data.propertyType) {
       const enumId = propertyTypeEnums[String(data.propertyType).toLowerCase().trim()];
@@ -850,11 +1000,13 @@ export class AmoCrmAdapter {
     // Квалифицировали выводим на встречу) — новый брокер прикрепляется
     // к нему вторым контактом. Это «конкурирующие брокеры до акта осмотра».
     // 2026-06-10: распределение делает Морикит после webhook'а из
-    // ClientFixationService. Раньше тут стоял жёсткий fallback=9796826
-    // (Юлия), но он перебивал Морикита — тот не перезаписывает уже
-    // занятого ответственного. Теперь по умолчанию НЕ передаём
-    // responsible_user_id; env AMO_DEFAULT_RESPONSIBLE_USER_ID можно
-    // задать вручную через админку только если Морикит сломан.
+    // ClientFixationService. У Морикита свой график менеджеров КЦ — он
+    // знает кто сейчас на смене и ставит responsible_user_id уже созданного
+    // лида. Если мы здесь сами проставим — Морикит не перезапишет уже
+    // занятого ответственного, и график не сработает.
+    // Поэтому по умолчанию НЕ передаём responsible_user_id. env
+    // AMO_DEFAULT_RESPONSIBLE_USER_ID можно задать только если Морикит
+    // временно сломан и нужен аварийный fallback (например, на Юлю).
     const envFallback = process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
     const defaultResponsibleUserId = envFallback ? Number(envFallback) : undefined;
 
@@ -914,6 +1066,39 @@ export class AmoCrmAdapter {
       }
     }
 
+    // Шаг 2b: UTM/tracking-маркеры «Заявка от брокера» — ОТДЕЛЬНЫМ PATCH'ем.
+    // Раньше включали в общий PATCH, но amoCRM возвращал 400 на эти поля
+    // (они системные, привязаны к трекерам Calltouch/Yandex/Mango) и из-за
+    // этого ВСЕ кастом-поля терялись (PR #94 их вырубил полностью).
+    // 2026-06-11: возвращаем, но изолированно — если 400, основной PATCH
+    // уже прошёл, мы только маркеры не записали. Если bulk прошёл — отлично,
+    // utm-вкладка в лиде заполнена как у эталонного «Дмитрий от Ивана» 32205511.
+    if (!data.reuseLeadId && resultLead?.id) {
+      const markerFields = brokerLeadMarkerFields();
+      try {
+        await this.updateLead(resultLead.id, { custom_fields_values: markerFields } as any);
+        console.log(`[createFixationRequest] utm-маркеры записаны на лид ${resultLead.id}`);
+      } catch (e: any) {
+        console.warn(
+          `[createFixationRequest] utm-маркеры bulk-PATCH упал на лиде ${resultLead.id}: ${e?.message || e}. Пробую по одному...`,
+        );
+        // Fallback: PATCH каждое поле отдельно, чтобы изолировать «битые»
+        // поля. amoCRM может блокировать одно конкретное (напр. CallTouch),
+        // но остальные пройдут.
+        let ok = 0;
+        let failed = 0;
+        for (const f of markerFields) {
+          try {
+            await this.updateLead(resultLead.id, { custom_fields_values: [f] } as any);
+            ok++;
+          } catch {
+            failed++;
+          }
+        }
+        console.log(`[createFixationRequest] utm-маркеры fallback: ok=${ok} failed=${failed}`);
+      }
+    }
+
     // 2026-06-03: возвращаем ДЛИННУЮ ноту с полным дублированием заявки
     // из кабинета (пользователь явно попросил — «не забывай дублировать
     // заявку из кабинета брокера в поле СРМ как ранее на скрине»).
@@ -924,6 +1109,9 @@ export class AmoCrmAdapter {
       const lines: string[] = [];
       if (data.reuseLeadId) {
         lines.push(`🟢 Аукция уникальности — новый брокер на этом клиенте`);
+      } else if (data.previousLeadId) {
+        lines.push(`🔁 Повторная фиксация — клиент возвращается после закрытой сделки`);
+        lines.push(`Предыдущий лид: #${data.previousLeadId}${data.previousLeadInfo ? ` (${data.previousLeadInfo})` : ''}`);
       } else {
         lines.push(`📝 Фиксация клиента от брокера`);
       }
@@ -967,27 +1155,49 @@ export class AmoCrmAdapter {
     brokerName: string;
     brokerPhone: string;
     brokerEmail?: string | null;
-    source: string; // 'LANDING_BROKER_TOUR' | 'LANDING_FORM'
+    source: string; // 'LANDING_BROKER_TOUR' | 'LANDING_FORM' | 'FIXATION_BY_OTHER_BROKER'
     note?: string | null;
+    // 2026-07-01: если передан contactId — используем существующий контакт
+    // (без дублирования). Иначе создаём новый как раньше.
+    existingContactId?: number;
+    // 2026-07-01: кастомное название лида. Если не передано — используется
+    // старое «Заявка с лендинга — X» для обратной совместимости.
+    leadName?: string;
   }): Promise<{ contactId?: number; leadId?: number } | null> {
     try {
-      // 1) Контакт с IS_BROKER=true
-      const contact = await this.createContact({
-        name: data.brokerName,
-        custom_fields_values: [
-          { field_code: 'PHONE', values: [{ value: data.brokerPhone, enum_code: 'WORK' }] },
-          ...(data.brokerEmail
-            ? [{ field_code: 'EMAIL' as const, values: [{ value: data.brokerEmail, enum_code: 'WORK' }] }]
-            : []),
-          { field_id: 835415, values: [{ value: true }] }, // IS_BROKER
-        ],
-      });
+      // 1) Контакт с IS_BROKER=true. Если передан existingContactId — не
+      // создаём новый (контакт уже настроен через syncBrokerProfileToAmo).
+      let contact: { id: number } | null | undefined = data.existingContactId
+        ? { id: data.existingContactId }
+        : null;
+      if (!contact) {
+        contact = await this.createContact({
+          name: data.brokerName,
+          custom_fields_values: [
+            { field_code: 'PHONE', values: [{ value: data.brokerPhone, enum_code: 'WORK' }] },
+            ...(data.brokerEmail
+              ? [{ field_code: 'EMAIL' as const, values: [{ value: data.brokerEmail, enum_code: 'WORK' }] }]
+              : []),
+            { field_id: 835415, values: [{ value: true }] }, // IS_BROKER
+          ],
+        });
+      }
+
+      // 2026-06-17: ответственный — менеджер брокеров (Ксения). Раньше lead
+      // и task создавались без responsible_user_id → попадали на тех.админа,
+      // КЦ-менеджер их в своих фильтрах НЕ видел. Берём из env: сначала
+      // AMO_BROKER_MEETINGS_MANAGER_ID (Ксения, уже настроена), иначе
+      // AMO_DEFAULT_RESPONSIBLE_USER_ID. Если оба пусты — оставляем как было.
+      const brokerMgrEnv = process.env.AMO_BROKER_MEETINGS_MANAGER_ID
+        || process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
+      const responsibleUserId = brokerMgrEnv ? Number(brokerMgrEnv) : undefined;
 
       // 2) Лид в пайплайне брокеров
       const lead = await this.createLead({
-        name: `Заявка с лендинга — ${data.brokerName}`,
+        name: data.leadName || `Заявка с лендинга — ${data.brokerName}`,
         pipeline_id: 10787390, // BROKERS
         contacts: contact?.id ? [{ id: contact.id }] : undefined,
+        ...(responsibleUserId ? { responsible_user_id: responsibleUserId } : {}),
       } as any);
 
       // 3) Примечание и задача
@@ -1008,8 +1218,11 @@ export class AmoCrmAdapter {
             entityId: lead.id,
             taskTypeId: 1, // звонок
             completeTillSec: Math.floor(Date.now() / 1000) + 4 * 60 * 60, // 4 часа — новый лид срочно
+            responsibleUserId,
           });
-        } catch {}
+        } catch (e: any) {
+          console.error('[createBrokerLeadFromLanding] task failed:', e?.message || e);
+        }
       }
 
       return { contactId: contact?.id, leadId: lead?.id };

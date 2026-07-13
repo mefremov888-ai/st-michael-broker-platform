@@ -73,6 +73,42 @@ export function normalizePhone(input: unknown): NormalizedPhone {
   return { ok: true, phone: '+' + digits, foreign: true };
 }
 
+// 2026-06-29: helper для поиска по телефону в Prisma where-OR.
+// Принимает search-строку, возвращает массив условий для добавления в OR.
+// Логика:
+//   - Если в search есть цифры → нормализуем до +7XXX и добавляем точное
+//     совпадение. Это покрывает кейсы "8925...", "+7925...", "7 925..."
+//     — все находят брокера с phone "+79255724188".
+//   - Дополнительно — частичный поиск по цифровой части (на случай если
+//     ввели только последние 7+ цифр номера без префикса, например
+//     "5724188" — должен найти "+79255724188").
+// Если в search цифр нет (или их меньше 4) — возвращает пустой массив.
+export function buildPhoneSearchConditions(search: string): Array<{ phone: string | { contains: string } }> {
+  const trimmed = String(search || '').trim();
+  if (!trimmed) return [];
+  const hasDigit = /\d/.test(trimmed);
+  if (!hasDigit) return [];
+  const conditions: Array<{ phone: string | { contains: string } }> = [];
+  const norm = normalizePhone(trimmed);
+  if (norm.ok && norm.phone) {
+    conditions.push({ phone: norm.phone });
+  }
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (digitsOnly.length >= 4) {
+    conditions.push({ phone: { contains: digitsOnly } });
+    // 2026-06-29 patch: частичный ввод с префиксом 8 (например «8912»).
+    // normalizePhone не нормализует короткие строки (<10 цифр), а в БД
+    // номер хранится как +79XXX — `contains "8912"` не найдёт `+79124557274`.
+    // Поэтому если ввод начинается с 8 и длина < 11 — добавляем поиск с
+    // префиксом 7 (заменив первую цифру). Это покрывает кейс «начал
+    // вводить с привычной восьмёрки».
+    if (digitsOnly[0] === '8' && digitsOnly.length < 11) {
+      conditions.push({ phone: { contains: '7' + digitsOnly.slice(1) } });
+    }
+  }
+  return conditions;
+}
+
 export const RESULT_MAP: Record<string, { category: BrokerCategoryCode; result: CallResultCode | null }> = {
   'НДЗ': { category: 'COLD', result: 'NDZ' },
   '2 НДЗ': { category: 'ON_BOT_REVIEW', result: 'DOUBLE_NDZ' },
@@ -111,6 +147,39 @@ export interface MappedRow {
   doNotCall: boolean;
   resultStr: string;
   zorgeStr: string;
+  // 2026-07-06: специализация из комментария. Если в комментарии
+  // (или в поле «Результат», или в имени) встречается коммерческий
+  // маркер — ставим 'COMM'. Иначе null (residential/both уточним позже).
+  specialization: 'COMM' | 'RESIDENTIAL' | 'BOTH' | null;
+  // 2026-07-09: региональный признак — КЦ в комментариях пишет что
+  // брокер из региона. Отдельно от specialization: региональный может
+  // быть коммерческим или жилым — это разные оси.
+  isRegional: boolean;
+}
+
+// 2026-07-06: паттерн для распознавания «коммерческого» брокера в тексте.
+// Проверяется на комментарии, имени, поле «Результат». Одного вхождения
+// достаточно чтобы пометить брокера как COMM. Слова в нижнем регистре
+// (мы приводим текст к lower перед проверкой).
+const COMM_KEYWORDS = /(комм(?:ерц|\.|ерческ)|komm|commercial|офис|склад|торгов|нежил|ритейл|retail)/i;
+// 2026-07-09: региональный брокер. Ключевые слова: «региональ», «регион»,
+// «из региона», «регионал». Плюс — фразы про конкретный город часто
+// сопровождаются словом «регион», поэтому названия городов НЕ парсим —
+// оставляем это как отдельный признак без географической детализации.
+const REGIONAL_KEYWORDS = /(регион(?:аль|ы|а|)?|из\s+регион|региональ)/i;
+
+export function detectSpecialization(...sources: (string | null | undefined)[]): 'COMM' | null {
+  for (const s of sources) {
+    if (s && COMM_KEYWORDS.test(String(s))) return 'COMM';
+  }
+  return null;
+}
+
+export function detectRegional(...sources: (string | null | undefined)[]): boolean {
+  for (const s of sources) {
+    if (s && REGIONAL_KEYWORDS.test(String(s))) return true;
+  }
+  return false;
 }
 
 export function mapRow(row: Record<string, unknown>): MappedRow {
@@ -134,7 +203,10 @@ export function mapRow(row: Record<string, unknown>): MappedRow {
     resultStr === 'Отказ от коммуникации' ||
     zorgeStr === 'Просил не звонить';
 
-  return { name, phoneRaw, callFlag, category, callResult: mapped.result, zorgeResult, comment, doNotCall, resultStr, zorgeStr };
+  const specialization = detectSpecialization(comment, name, resultStr, zorgeStr);
+  const isRegional = detectRegional(comment, name, resultStr, zorgeStr);
+
+  return { name, phoneRaw, callFlag, category, callResult: mapped.result, zorgeResult, comment, doNotCall, resultStr, zorgeStr, specialization, isRegional };
 }
 
 export interface Candidate extends MappedRow {
@@ -197,6 +269,10 @@ function mergeCandidates(a: Candidate, b: Candidate): Candidate {
     doNotCall: a.doNotCall || b.doNotCall,
     resultStr: merge(a.resultStr, b.resultStr),
     zorgeStr: merge(a.zorgeStr, b.zorgeStr),
+    // 2026-07-06: специализация — если хотя бы одна из строк дубля COMM, ставим COMM.
+    specialization: a.specialization || b.specialization,
+    // 2026-07-09: региональный — OR по дублям (одна строка сказала регион → регионал).
+    isRegional: a.isRegional || b.isRegional,
   };
 }
 

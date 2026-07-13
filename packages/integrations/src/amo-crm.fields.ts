@@ -112,9 +112,137 @@ export function isQualifiedToMeetingStatus(pipelineId: number, statusId: number)
   );
 }
 
-/** Финальный статус «Закрыто и не реализовано» (143 — во всех воронках). */
+/**
+ * Финальный статус лида: закрыт.
+ * - 143 «Закрыто и не реализовано» — везде.
+ * - 142 — везде финал: в КЦ это «Встреча проведена» (лид выходит из КЦ),
+ *   в воронках продаж это «Успешно реализовано» (клиент купил).
+ *
+ * 2026-06-14: 142 теперь приравнивается к 143 для uniqueness — если все
+ * лиды контакта в финальных статусах, новая фиксация = RULE_3 (УНИКАЛЕН,
+ * создаём новый лид). Раньше 142 уходил в RULE_2 («На проверке») —
+ * блокировало повторные обращения от того же или другого брокера спустя
+ * время. По решению пользователя 142 = клиент завершил предыдущий цикл,
+ * можно фиксировать заново.
+ */
 export function isClosedLostStatus(statusId: number): boolean {
-  return statusId === 143;
+  return statusId === 143 || statusId === 142;
+}
+
+/**
+ * 2026-06-15: лид в воронке продаж — Зорге9 / Берзарина / Толбухина.
+ * После решения пользователя broker-platform НЕ трогает sales-pipeline
+ * лиды никак: не attach контактов, не note-ы, не задачи, не статусы.
+ * Эти карточки полностью под управлением админа/Морикита/менеджеров продаж.
+ *
+ * Для uniqueness sales-лиды игнорируем — повторная фиксация создаёт
+ * новый КЦ-лид независимо от того, что у клиента есть активная карточка
+ * в sales (в т.ч. «Встреча проведена, думают» 62907430/62907358/62907570).
+ */
+export function isSalesPipeline(pipelineId: number): boolean {
+  return (
+    pipelineId === AMO_PIPELINES.BERZARINA ||
+    pipelineId === AMO_PIPELINES.ZORGE9 ||
+    pipelineId === AMO_PIPELINES.TOLBUKHINA
+  );
+}
+
+/**
+ * 2026-06-16: лид в воронке продаж в стадии «Встреча назначена» —
+ * это самое начало sales-pipeline (после Морикит-создания вслед за
+ * КЦ-«Встреча проведена»). Для новой фиксации B → RULE_2 (UNDER_REVIEW,
+ * без новой карточки). Брокер A только-только начал в продажах.
+ */
+export function isSalesMeetingScheduledStatus(pipelineId: number, statusId: number): boolean {
+  return (
+    (pipelineId === AMO_PIPELINES.BERZARINA && statusId === AMO_BERZARINA_STATUS.MEETING_SCHEDULED) ||
+    (pipelineId === AMO_PIPELINES.ZORGE9 && statusId === AMO_ZORGE_STATUS.MEETING_SCHEDULED) ||
+    (pipelineId === AMO_PIPELINES.TOLBUKHINA && statusId === AMO_TOLBUKHINA_STATUS.MEETING_SCHEDULED)
+  );
+}
+
+/**
+ * 2026-06-16: «средние» стадии воронки продаж — встреча уже прошла, но
+ * до сделки ещё не дошло. Для новой фиксации B действует ИСКЛЮЧЕНИЕ:
+ *   - создаём L2 в КЦ (новая карточка)
+ *   - прикрепляем брокера B контактом к L2
+ *   - НО Client.uniquenessStatus = UNDER_REVIEW (не Уникален!)
+ *   - сниматься будет когда L2 достигнет статуса «Квалифицировали»
+ *     (62907282 в КЦ) или когда L1 (старая sales-карточка A) закроется 143.
+ *
+ * Стадии:
+ *   - MEETING_DONE_THINKING «Встреча проведена, думают»
+ *   - DEFERRED               «Отложенный спрос»
+ *   - ORAL_BOOKING           «Устная бронь»
+ *   - BOOKING_REMOVED        «Снята бронь» (близка к «думают»)
+ */
+export function isSalesExceptionStatus(pipelineId: number, statusId: number): boolean {
+  if (pipelineId === AMO_PIPELINES.BERZARINA) {
+    return (
+      statusId === AMO_BERZARINA_STATUS.MEETING_DONE_THINKING ||
+      statusId === AMO_BERZARINA_STATUS.DEFERRED ||
+      statusId === AMO_BERZARINA_STATUS.ORAL_BOOKING ||
+      statusId === AMO_BERZARINA_STATUS.BOOKING_REMOVED
+    );
+  }
+  if (pipelineId === AMO_PIPELINES.ZORGE9) {
+    return (
+      statusId === AMO_ZORGE_STATUS.MEETING_DONE_THINKING ||
+      statusId === AMO_ZORGE_STATUS.DEFERRED ||
+      statusId === AMO_ZORGE_STATUS.ORAL_BOOKING ||
+      statusId === AMO_ZORGE_STATUS.BOOKING_REMOVED
+    );
+  }
+  if (pipelineId === AMO_PIPELINES.TOLBUKHINA) {
+    return (
+      statusId === AMO_TOLBUKHINA_STATUS.MEETING_DONE_THINKING ||
+      statusId === AMO_TOLBUKHINA_STATUS.DEFERRED ||
+      statusId === AMO_TOLBUKHINA_STATUS.ORAL_BOOKING ||
+      statusId === AMO_TOLBUKHINA_STATUS.BOOKING_REMOVED
+    );
+  }
+  return false;
+}
+
+/**
+ * 2026-06-16: «поздние» стадии воронки продаж — клиент уже на пути
+ * к сделке (платная бронь, подготовка, сделка, регистрация, контроль
+ * оплаты). Для новой фиксации B → REJECTED сразу. Брокер A уже занял.
+ *   - PAID_BOOKING       «Платная бронь»
+ *   - DEAL_PREP          «Подготовка сделки»
+ *   - DEAL               «Сделка»
+ *   - DEAL_REGISTERED    «Сделка зарегистрирована»
+ *   - PAYMENT_CONTROL    «Контроль оплаты»
+ */
+export function isSalesDealStatus(pipelineId: number, statusId: number): boolean {
+  if (pipelineId === AMO_PIPELINES.BERZARINA) {
+    return [
+      AMO_BERZARINA_STATUS.PAID_BOOKING,
+      AMO_BERZARINA_STATUS.DEAL_PREP,
+      AMO_BERZARINA_STATUS.DEAL,
+      AMO_BERZARINA_STATUS.DEAL_REGISTERED,
+      AMO_BERZARINA_STATUS.PAYMENT_CONTROL,
+    ].includes(statusId as any);
+  }
+  if (pipelineId === AMO_PIPELINES.ZORGE9) {
+    return [
+      AMO_ZORGE_STATUS.PAID_BOOKING,
+      AMO_ZORGE_STATUS.DEAL_PREP,
+      AMO_ZORGE_STATUS.DEAL,
+      AMO_ZORGE_STATUS.DEAL_REGISTERED,
+      AMO_ZORGE_STATUS.PAYMENT_CONTROL,
+    ].includes(statusId as any);
+  }
+  if (pipelineId === AMO_PIPELINES.TOLBUKHINA) {
+    return [
+      AMO_TOLBUKHINA_STATUS.PAID_BOOKING,
+      AMO_TOLBUKHINA_STATUS.DEAL_PREP,
+      AMO_TOLBUKHINA_STATUS.DEAL,
+      AMO_TOLBUKHINA_STATUS.DEAL_REGISTERED,
+      AMO_TOLBUKHINA_STATUS.PAYMENT_CONTROL,
+    ].includes(statusId as any);
+  }
+  return false;
 }
 
 /** Финал КЦ: «Встреча проведена» (142 для пайплайна КЦ). Считаем как «КЦ завершён». */
@@ -136,6 +264,51 @@ export function isDeferredDemandStatus(pipelineId: number, statusId: number): bo
     (pipelineId === AMO_PIPELINES.ZORGE9 && statusId === AMO_ZORGE_STATUS.DEFERRED) ||
     (pipelineId === AMO_PIPELINES.TOLBUKHINA && statusId === AMO_TOLBUKHINA_STATUS.DEFERRED)
   );
+}
+
+/**
+ * 2026-06-11: Лид попадает под Правило 1 — старый лид в КЦ-воронке (7600542)
+ * в ранних стадиях (до встречи): Неразобранное / Новое обращение / Недозвон /
+ * Отложенный спрос / Классифицировали. Поведение при новой фиксации:
+ *   - НЕ создавать новый лид в amoCRM
+ *   - Прикрепить нового брокера как контакт на старый лид
+ *   - Поставить ALARM-задачу на старый лид
+ *   - Client в БД → UNDER_REVIEW (брокер видит «на уточнении»)
+ */
+export function isFixationRule1Lead(pipelineId: number, statusId: number): boolean {
+  if (pipelineId !== AMO_PIPELINES.KC) return false;
+  return (
+    statusId === AMO_KC_STATUS.UNSORTED ||
+    statusId === AMO_KC_STATUS.NEW_REQUEST ||
+    statusId === AMO_KC_STATUS.NO_ANSWER ||
+    statusId === AMO_KC_STATUS.DEFERRED ||
+    statusId === AMO_KC_STATUS.QUALIFIED
+  );
+}
+
+/**
+ * 2026-06-15: Лид попадает под Правило 2 — старый лид в КЦ-воронке,
+ * статус «Встреча назначена» (62907286). Поведение при новой фиксации:
+ *   - НЕ создавать новый лид в amoCRM
+ *   - Брокер НЕ прикрепляется как контакт
+ *   - ALARM-задача «Подтвердить уникальность» на старый лид
+ *   - Client в БД → UNDER_REVIEW
+ *
+ * Изменения:
+ * - 2026-06-14: 142 «Встреча проведена» = closed-lost, не RULE_2.
+ * - 2026-06-15: воронки продаж убраны — sales-pipeline лиды broker-platform
+ *   вообще не трогает. Повторная фиксация при активном sales-лиде → новый
+ *   КЦ-лид (RULE_3). См. isSalesPipeline.
+ */
+export function isFixationRule2Lead(pipelineId: number, statusId: number): boolean {
+  // 143 (closed-lost) — это Правило 3, не 2
+  if (statusId === 143) return false;
+  // КЦ-воронка: только «Встреча назначена» (после неё 142 = closed-lost).
+  if (pipelineId === AMO_PIPELINES.KC) {
+    return statusId === AMO_KC_STATUS.MEETING_SCHEDULED;
+  }
+  // Воронки продаж — не наша зона ответственности, игнорим.
+  return false;
 }
 
 /**
@@ -161,6 +334,46 @@ export type UniquenessTriggerType =
   | 'NEW_REQUEST_NO_BROKER' // активная стадия без привязанного брокера
   | 'ACTIVE_SALES';         // встреча назначена / сделка / контроль оплаты и т.д.
 
+/**
+ * 2026-06-11: правило реакции на новую фиксацию когда у клиента уже есть лид.
+ *
+ *   RULE_1 — старый лид в КЦ ранних стадиях (Неразобранное / Новое обращение /
+ *            Недозвон / Отложенный спрос / Классифицировали). Прикрепляем
+ *            нового брокера контактом + ALARM-задача КЦ. Нового лида НЕТ.
+ *   RULE_2 — старый лид в КЦ-встречах (62907286, 142) ИЛИ в любой воронке
+ *            продаж (активный статус). ALARM «подтвердить уникальность»
+ *            на старый лид. Брокер НЕ прикрепляется. Нового лида НЕТ.
+ *   RULE_3 — все лиды контакта закрыты (143). Создаём новый лид без ссылок.
+ *   NO_CONFLICT — у контакта нет лидов (или контакт не найден). Создаём новый.
+ */
+export type FixationRule =
+  | 'RULE_1'
+  | 'RULE_2'
+  | 'RULE_3'
+  | 'NO_CONFLICT'
+  // 2026-06-16: новый брокер пытается зафиксировать клиента, у которого
+  // уже есть активная sales-карточка в стадии «Встреча проведена, думают»
+  // / «Отложенный спрос» / «Устная бронь» / «Снята бронь». Создаём L2
+  // в КЦ + прикрепляем брокера, но статус Client = UNDER_REVIEW.
+  // Лифт в CONDITIONALLY_UNIQUE — когда L2 дойдёт до «Квалифицировали»
+  // (62907282) или старая sales-карточка закроется 143.
+  | 'RULE_EXCEPTION_AFTER_SALES_MEETING'
+  // 2026-06-16: новый брокер пытается зафиксировать клиента, у которого
+  // sales-карточка уже на «Платной брони» / «Подготовке» / «Сделке» /
+  // «Сделке зарегистрирована» / «Контроле оплаты». Брокер A уже занял,
+  // B не имеет смысла — REJECTED сразу, без создания новой карточки.
+  | 'RULE_REJECT_SALES_DEAL';
+
+export interface UniquenessVerdict {
+  rule: FixationRule;
+  reason: string;
+  triggerLeadId?: number;
+  /** @deprecated 2026-06-11: для обратной совместимости — RULE_1/RULE_2 = ALARM, иначе UNIQUE. */
+  verdict: 'UNIQUE' | 'ALARM';
+  /** @deprecated оставлено для совместимости со старым кодом ALARM-ветки. */
+  triggerType?: UniquenessTriggerType;
+}
+
 export function evaluateUniqueness(
   leads: Array<{
     id: number;
@@ -168,55 +381,111 @@ export function evaluateUniqueness(
     status_id: number;
     hasBrokerAttached: boolean;
   }>,
-): { verdict: 'UNIQUE' | 'ALARM'; reason: string; triggerType?: UniquenessTriggerType; triggerLeadId?: number } {
+): UniquenessVerdict {
   if (!leads || leads.length === 0) {
-    return { verdict: 'UNIQUE', reason: 'Контакт в amoCRM не найден или нет лидов' };
-  }
-
-  for (const lead of leads) {
-    // Финальные стадии — пропускаем (правило 2).
-    if (isClosedLostStatus(lead.status_id)) continue;
-    if (isKcMeetingHeldStatus(lead.pipeline_id, lead.status_id)) continue;
-
-    // 2026-06-05: «Отложенный спрос» — отдельный сценарий ALARM.
-    // Клиент сам говорил «не готов». КЦ должен уточнить, нужен ли брокер.
-    if (isDeferredDemandStatus(lead.pipeline_id, lead.status_id)) {
-      return {
-        verdict: 'ALARM',
-        reason: `Клиент в «Отложенный спрос» (лид ${lead.id}, pipeline=${lead.pipeline_id}). Ранее клиент сам сообщил, что пока не готов покупать. КЦ нужно уточнить у клиента — действительно ли он сейчас работает с этим брокером.`,
-        triggerType: 'DEFERRED_DEMAND',
-        triggerLeadId: lead.id,
-      };
-    }
-
-    // Активные допустимые стадии (правила 3, 4).
-    const isAllowedStage =
-      isNewRequestStatus(lead.pipeline_id, lead.status_id) ||
-      isQualifiedToMeetingStatus(lead.pipeline_id, lead.status_id);
-
-    if (isAllowedStage) {
-      if (lead.hasBrokerAttached) {
-        continue; // ОК, продолжаем проверку
-      } else {
-        return {
-          verdict: 'ALARM',
-          reason: `Лид ${lead.id} в активной стадии без привязанного брокера (pipeline=${lead.pipeline_id}, status=${lead.status_id}).`,
-          triggerType: 'NEW_REQUEST_NO_BROKER',
-          triggerLeadId: lead.id,
-        };
-      }
-    }
-
-    // Всё остальное — Встреча назначена / Сделка / Контроль оплаты и т.д.
     return {
-      verdict: 'ALARM',
-      reason: `Лид ${lead.id} в активной стадии продаж (pipeline=${lead.pipeline_id}, status=${lead.status_id}). Требуется ручная проверка КЦ.`,
-      triggerType: 'ACTIVE_SALES',
-      triggerLeadId: lead.id,
+      rule: 'NO_CONFLICT',
+      verdict: 'UNIQUE',
+      reason: 'Контакт в amoCRM не найден или нет лидов',
     };
   }
 
-  return { verdict: 'UNIQUE', reason: 'Все лиды контакта проверены — конфликта нет' };
+  // Идём по всем лидам. Самое строгое побеждает:
+  //   RULE_REJECT_SALES_DEAL > RULE_EXCEPTION_AFTER_SALES_MEETING > RULE_2 > RULE_1 > RULE_3
+  let rejectDealTriggerLeadId: number | undefined;
+  let rejectDealReason = '';
+  let exceptionTriggerLeadId: number | undefined;
+  let exceptionReason = '';
+  // 2026-06-17 fix: КЦ-триггер для RULE_2 хранится отдельно от sales-триггера,
+  // чтобы КЦ ВСЕГДА побеждал. Раньше первый встреченный (часто sales-дочерний)
+  // занимал rule2TriggerLeadId и алармы не доходили до КЦ-карточки.
+  // Лид 32216245 (КЦ Встреча назначена) + 32216249 (sales Встреча назначена):
+  // sales побеждал, handleRule1Or2Alarm видел sales-pipeline и early-return.
+  let rule2KcTriggerLeadId: number | undefined;
+  let rule2KcReason = '';
+  let rule2SalesTriggerLeadId: number | undefined;
+  let rule2SalesReason = '';
+  let rule1TriggerLeadId: number | undefined;
+  let rule1Reason = '';
+
+  for (const lead of leads) {
+    // 143 / 142 — финал, не блокирует.
+    if (isClosedLostStatus(lead.status_id)) continue;
+
+    // 2026-06-16: разные стадии sales-pipeline → разные правила.
+    if (isSalesPipeline(lead.pipeline_id)) {
+      if (!rejectDealTriggerLeadId && isSalesDealStatus(lead.pipeline_id, lead.status_id)) {
+        rejectDealTriggerLeadId = lead.id;
+        rejectDealReason = `Лид ${lead.id} уже в сделке (pipeline=${lead.pipeline_id}, status=${lead.status_id}). Брокер B не уникален.`;
+      } else if (!exceptionTriggerLeadId && isSalesExceptionStatus(lead.pipeline_id, lead.status_id)) {
+        exceptionTriggerLeadId = lead.id;
+        exceptionReason = `Лид ${lead.id} в средней стадии sales-pipeline (pipeline=${lead.pipeline_id}, status=${lead.status_id}). Брокер A на финишной прямой, B = UNDER_REVIEW.`;
+      } else if (!rule2SalesTriggerLeadId && isSalesMeetingScheduledStatus(lead.pipeline_id, lead.status_id)) {
+        // «Встреча назначена» в продажах = аналог КЦ RULE_2 (UNDER_REVIEW
+        // без новой карточки). См. ответ пользователя 2026-06-16.
+        rule2SalesTriggerLeadId = lead.id;
+        rule2SalesReason = `Лид ${lead.id} в стадии «Встреча назначена» воронки продаж. Брокер не прикрепляется, требуется подтверждение от КЦ.`;
+      }
+      // Прочие статусы (если есть) — игнорим.
+      continue;
+    }
+
+    if (!rule2KcTriggerLeadId && isFixationRule2Lead(lead.pipeline_id, lead.status_id)) {
+      rule2KcTriggerLeadId = lead.id;
+      rule2KcReason = `Лид ${lead.id} в активной стадии (pipeline=${lead.pipeline_id}, status=${lead.status_id}). Требуется подтверждение уникальности от КЦ.`;
+    } else if (!rule1TriggerLeadId && isFixationRule1Lead(lead.pipeline_id, lead.status_id)) {
+      rule1TriggerLeadId = lead.id;
+      rule1Reason = `Лид ${lead.id} в КЦ-воронке (status=${lead.status_id}). Новый брокер добавлен контактом, КЦ-задача аларм.`;
+    }
+  }
+
+  // КЦ-триггер всегда побеждает sales-триггер для RULE_2 — alarm должен попадать
+  // в КЦ-карточку, где сидит менеджер.
+  const rule2TriggerLeadId = rule2KcTriggerLeadId ?? rule2SalesTriggerLeadId;
+  const rule2Reason = rule2KcTriggerLeadId ? rule2KcReason : rule2SalesReason;
+
+  if (rejectDealTriggerLeadId) {
+    return {
+      rule: 'RULE_REJECT_SALES_DEAL',
+      verdict: 'ALARM',
+      triggerType: 'ACTIVE_SALES',
+      triggerLeadId: rejectDealTriggerLeadId,
+      reason: rejectDealReason,
+    };
+  }
+  if (exceptionTriggerLeadId) {
+    return {
+      rule: 'RULE_EXCEPTION_AFTER_SALES_MEETING',
+      verdict: 'ALARM',
+      triggerType: 'ACTIVE_SALES',
+      triggerLeadId: exceptionTriggerLeadId,
+      reason: exceptionReason,
+    };
+  }
+  if (rule2TriggerLeadId) {
+    return {
+      rule: 'RULE_2',
+      verdict: 'ALARM',
+      triggerType: 'ACTIVE_SALES',
+      triggerLeadId: rule2TriggerLeadId,
+      reason: rule2Reason,
+    };
+  }
+  if (rule1TriggerLeadId) {
+    return {
+      rule: 'RULE_1',
+      verdict: 'ALARM',
+      triggerType: 'NEW_REQUEST_NO_BROKER',
+      triggerLeadId: rule1TriggerLeadId,
+      reason: rule1Reason,
+    };
+  }
+  // Все лиды контакта либо закрыты (143), либо у контакта вообще не было активных лидов.
+  return {
+    rule: 'RULE_3',
+    verdict: 'UNIQUE',
+    reason: 'Все активные лиды контакта закрыты, создаём новый',
+  };
 }
 
 export const BROKER_PIPELINE_ID = AMO_PIPELINES.BROKERS;
@@ -318,7 +587,82 @@ export const AMO_CONTACT_FIELDS = {
   REGION: 589265,
   PRESENTATION_SENT: 835955,
   ADDITIONAL_COMPANIES: 842329,
+  CORRESPONDENCE_ADDRESS: 558637,   // 2026-07-03: адрес корреспонденции агентства
 } as const;
+
+/**
+ * 2026-07-03: реквизиты юр.лица агентства.
+ * Обнаружены через inspect-amo-fields.js --entity companies.
+ * Используются в agencyToAmoCompanyFields для синка Agency → amoCRM Company.
+ */
+export const AMO_COMPANY_FIELDS = {
+  PHONE: 557903,               // multitext "Телефон"
+  EMAIL: 557905,               // multitext "Email"
+  ADDRESS: 557909,             // textarea "Адрес" (корреспонденции)
+  LEGAL_NAME: 663905,          // text "Юр. лицо"
+  LEGAL_ADDRESS: 663907,       // text "Юр. адрес"
+  OGRN: 663909,                // text "ОГРН"
+  INN: 663911,                 // text "ИНН"
+  KPP: 663913,                 // text "КПП"
+  BANK_BIK: 663915,            // text "БИК"
+  BANK_NAME: 663917,           // text "Название банка"
+  CORRESPONDENT_ACCOUNT: 663919, // text "Кор.счет"
+  BANK_ACCOUNT: 663929,        // text "Рас.счет"
+} as const;
+
+/**
+ * Маппинг Agency (Prisma) → массив custom_fields_values для amoCRM company
+ * (POST /companies или PATCH /companies/{id}). Мапим только заполненные поля,
+ * пустые пропускаем — amoCRM не любит пустые значения, они очищают поле.
+ */
+export function agencyToAmoCompanyFields(
+  agency: {
+    legalName?: string | null;
+    legalAddress?: string | null;
+    address?: string | null;
+    inn?: string | null;
+    ogrn?: string | null;
+    kpp?: string | null;
+    bankName?: string | null;
+    bankBik?: string | null;
+    bankAccount?: string | null;
+    correspondentAccount?: string | null;
+    phone?: string | null;
+    email?: string | null;
+  },
+): any[] {
+  const fields: any[] = [];
+  const pushText = (field_id: number, value: string | null | undefined) => {
+    if (value != null && String(value).trim().length > 0) {
+      fields.push({ field_id, values: [{ value: String(value).trim() }] });
+    }
+  };
+  pushText(AMO_COMPANY_FIELDS.LEGAL_NAME, agency.legalName);
+  pushText(AMO_COMPANY_FIELDS.LEGAL_ADDRESS, agency.legalAddress);
+  pushText(AMO_COMPANY_FIELDS.ADDRESS, agency.address);
+  pushText(AMO_COMPANY_FIELDS.INN, agency.inn);
+  pushText(AMO_COMPANY_FIELDS.OGRN, agency.ogrn);
+  pushText(AMO_COMPANY_FIELDS.KPP, agency.kpp);
+  pushText(AMO_COMPANY_FIELDS.BANK_NAME, agency.bankName);
+  pushText(AMO_COMPANY_FIELDS.BANK_BIK, agency.bankBik);
+  pushText(AMO_COMPANY_FIELDS.BANK_ACCOUNT, agency.bankAccount);
+  pushText(AMO_COMPANY_FIELDS.CORRESPONDENT_ACCOUNT, agency.correspondentAccount);
+  // Телефон/email — multitext, требуют enum_code (WORK) чтобы попасть в амо
+  // в правильную «строчку» (WORK/HOME/OTHER).
+  if (agency.phone && agency.phone.trim()) {
+    fields.push({
+      field_id: AMO_COMPANY_FIELDS.PHONE,
+      values: [{ value: agency.phone.trim(), enum_code: 'WORK' }],
+    });
+  }
+  if (agency.email && agency.email.trim()) {
+    fields.push({
+      field_id: AMO_COMPANY_FIELDS.EMAIL,
+      values: [{ value: agency.email.trim(), enum_code: 'WORK' }],
+    });
+  }
+  return fields;
+}
 
 /**
  * Маппинг Broker (Prisma модель) в массив custom_fields_values для amoCRM
@@ -351,13 +695,23 @@ export function brokerToAmoContactFields(
     brokerTourDate?: Date | string | null;
     doNotCall?: boolean | null;
   },
-  agency?: { name?: string | null; inn?: string | null } | null,
+  agency?: { name?: string | null; inn?: string | null; address?: string | null } | null,
 ): any[] {
   const fields: any[] = [];
 
   // Контакт всегда помечается флагом "Брокер" — это критерий поиска
   // в /admin/brokers/import-from-amo.
   fields.push({ field_id: AMO_CONTACT_FIELDS.IS_BROKER, values: [{ value: true }] });
+
+  // 2026-07-03: адрес корреспонденции агентства → поле "Адрес корреспонденции"
+  // в карточке контакта (id=558637). Остальные реквизиты юр.лица идут в
+  // связанную компанию (см. agencyToAmoCompanyFields).
+  if (agency?.address) {
+    fields.push({
+      field_id: AMO_CONTACT_FIELDS.CORRESPONDENCE_ADDRESS,
+      values: [{ value: String(agency.address) }],
+    });
+  }
 
   if (broker.phone) {
     fields.push({
@@ -532,9 +886,11 @@ export function brokerLeadMarkerFields(brokerRequestNumber?: string | number): a
     { field_id: AMO_LEAD_FIELDS.UTM_CAMPAIGN,         values: [{ value: TEXT }] },
     { field_id: AMO_LEAD_FIELDS.UTM_CONTENT,          values: [{ value: TEXT }] },
     { field_id: AMO_LEAD_FIELDS.UTM_TERM,             values: [{ value: TEXT }] },
-    // Тема/комментарий/email
-    { field_id: AMO_LEAD_FIELDS.EMAIL_MARKER,         values: [{ value: TEXT }] },
+    // 2026-06-14: COMMENT_TO_REQUEST тоже маркер «Заявка от брокера» —
+    // как у эталонных Морикит-лидов. Реальный комментарий брокера уходит
+    // в ноту лида, а не в это поле трекинга.
     { field_id: AMO_LEAD_FIELDS.COMMENT_TO_REQUEST,   values: [{ value: TEXT }] },
+    { field_id: AMO_LEAD_FIELDS.EMAIL_MARKER,         values: [{ value: TEXT }] },
     { field_id: AMO_LEAD_FIELDS.REQUEST_THEME,        values: [{ value: TEXT }] },
     { field_id: AMO_LEAD_FIELDS.CREATED_FROM,         values: [{ value: TEXT }] },
     { field_id: AMO_LEAD_FIELDS.UPDATED_FROM,         values: [{ value: TEXT }] },

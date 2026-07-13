@@ -20,6 +20,7 @@ on:
           - both
           - leads
           - contacts
+          - companies
           - pipelines
           - task_types
 

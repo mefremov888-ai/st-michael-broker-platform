@@ -7,6 +7,7 @@ import {
   Users,
   CalendarPlus,
   Building,
+  Heart,
   HeartHandshake,
   Calculator,
   BookOpen,
@@ -25,13 +26,14 @@ import { cn } from '@/lib/utils';
 import { useAuth } from '@/lib/auth';
 
 const navigation = [
-  { name: 'Фиксация', href: '/fixation', icon: UserCheck },
-  { name: 'Клиенты / Заявки', href: '/clients', icon: Users },
+  { name: 'Проверить клиента на уникальность', href: '/fixation', icon: UserCheck },
+  { name: 'Мои клиенты / заявки', href: '/clients', icon: Users },
   { name: 'Записаться на встречу', href: '/meetings', icon: CalendarPlus },
   { name: 'Подбор квартир', href: '/catalog', icon: Building },
-  { name: 'Сделки', href: '/deals', icon: HeartHandshake },
+  { name: 'Избранное', href: '/favorites', icon: Heart },
+  { name: 'Мои сделки', href: '/deals', icon: HeartHandshake },
   { name: 'Комиссия', href: '/commission', icon: Calculator },
-  { name: 'Материалы для брокеров', href: '/materials', icon: BookOpen },
+  { name: 'Материалы для работы', href: '/materials', icon: BookOpen },
   { name: 'Документы', href: '/documents', icon: FileText },
 ];
 
@@ -39,7 +41,10 @@ const adminNavigation = [
   { name: 'Аналитика платформы', href: '/admin/analytics', icon: BarChart3 },
   { name: 'Колл-центр', href: '/admin/call-center', icon: PhoneCall },
   { name: 'Конфликты уникальности', href: '/admin/uniqueness-conflicts', icon: AlertTriangle },
-  { name: 'Заявки без amoCRM', href: '/admin/amo-failed', icon: AlertTriangle },
+  // 2026-07-09: заменяет «Заявки без amoCRM» — теперь тут все типы
+  // заявок брокеров (фиксации + встречи + звонки + акцепты) с фильтром
+  // по статусу amo. См. /admin/broker-applications.
+  { name: 'Все заявки от брокеров', href: '/admin/broker-applications', icon: AlertTriangle },
   { name: 'Админка — Брокеры', href: '/admin/brokers', icon: Shield },
   { name: 'Комиссия — политики', href: '/admin/commission-policies', icon: Calculator },
   { name: 'Управление встречами', href: '/admin/meetings', icon: CalendarPlus },
@@ -58,7 +63,13 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
   const pathname = usePathname();
   const { broker } = useAuth();
   const isAdmin = broker?.role === 'ADMIN' || broker?.role === 'MANAGER';
-  const items = isAdmin ? [...navigation, ...adminNavigation] : navigation;
+  // 2026-07-01: временно скрываем «Мои сделки» для роли BROKER — раздел
+  // дорабатывается. Для ADMIN/MANAGER оставляем видимым, чтобы можно было
+  // смотреть сделки других брокеров.
+  const baseNav = broker?.role === 'BROKER'
+    ? navigation.filter((n) => n.href !== '/deals')
+    : navigation;
+  const items = isAdmin ? [...baseNav, ...adminNavigation] : baseNav;
 
   return (
     <>

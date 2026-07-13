@@ -27,6 +27,13 @@ export class MeetingsController {
     });
   }
 
+  // 2026-07-01: календарь встреч из amoCRM (read-only) для кабинета брокера.
+  @Get('amocrm-calendar')
+  @ApiOperation({ summary: 'amoCRM tasks (task_type=Meeting) for broker leads' })
+  async getAmoCalendar(@CurrentUser() user: CurrentUserPayload) {
+    return this.meetingsService.getAmoCrmCalendar(user.id);
+  }
+
   // ─── Slots: list available slots (broker-facing) ─────────
 
   @Get('slots/available')

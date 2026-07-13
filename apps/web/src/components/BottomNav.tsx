@@ -6,7 +6,7 @@ import { UserCheck, Users, CalendarPlus, Building, Calculator } from 'lucide-rea
 
 // Compact set of essential navigation items for mobile bottom bar (TZ §16 — мобильная навигация)
 const items = [
-  { name: 'Фиксация', href: '/fixation', icon: UserCheck },
+  { name: 'Уникальность', href: '/fixation', icon: UserCheck },
   { name: 'Клиенты', href: '/clients', icon: Users },
   { name: 'Встречи', href: '/meetings', icon: CalendarPlus },
   { name: 'Каталог', href: '/catalog', icon: Building },

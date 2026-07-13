@@ -3,7 +3,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID } from '@st-michael/integrations';
+import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate } from '@st-michael/integrations';
+import { getSystemSetting } from '../common/system-setting';
 /**
  * Чистит имя клиента от служебных суффиксов amoCRM: "от брокера", "от Владимира",
  * "от боркера" (опечатка) и т.п. Убираем всё начиная от слова "от ".
@@ -17,16 +18,305 @@ function cleanClientName(raw: string | null | undefined): string {
 import { CatalogService } from '../catalog/catalog.service';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
 import { GoogleSheetsSyncService } from '../admin/google-sheets-sync.service';
+import { AdminService } from '../admin/admin.service';
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
   private readonly amo = new AmoCrmAdapter();
+  private readonly morekit = new MorekitAdapter();
   constructor(
     @Inject('PrismaClient') private prisma: PrismaClient,
     @InjectQueue('notifications') private notificationQueue: Queue,
     private readonly catalogService: CatalogService,
     private readonly gsheets: GoogleSheetsSyncService,
+    private readonly adminService: AdminService,
   ) {}
+
+  // 2026-07-01: каждые 10 минут — автосинк задач-встреч из amoCRM в наши
+  // Meeting. Менеджер ставит в amoCRM задачу типа «Встреча» (task_type_id=2)
+  // с датой на лиде клиента брокера — в кабинете брокера сразу появляется
+  // соответствующая Meeting запись. Раньше синк шёл только раз в 30 мин
+  // через handleAmoCrmSync и только из custom_field «Дата и время встречи»
+  // лида — задачи-встречи не подхватывались, брокер не видел новые встречи.
+  @Cron('*/10 * * * *')
+  async handleAmoMeetingTasksSync() {
+    if (!process.env.AMO_ACCESS_TOKEN) return;
+    const MEETING_TASK_TYPE = 2;
+
+    // Берём только клиентов с amoLeadId, чей лид был обновлён за 60 дней
+    // (иначе тянем весь исторический список — тяжело).
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+    const clients = await this.prisma.client.findMany({
+      where: {
+        amoLeadId: { not: null },
+        OR: [
+          { amoUpdatedAt: { gte: sixtyDaysAgo } },
+          { amoUpdatedAt: null }, // старые записи без даты — проверим
+        ],
+      },
+      select: { id: true, brokerId: true, amoLeadId: true },
+      take: 500, // лимит на прогон
+    });
+    if (clients.length === 0) return;
+
+    let created = 0;
+    let skipped = 0;
+    let errors = 0;
+    for (const c of clients) {
+      const leadId = Number(c.amoLeadId);
+      if (!leadId) continue;
+      try {
+        const tasks = await this.amo.getTasksByEntity('leads', leadId);
+        for (const t of tasks) {
+          if (t.task_type_id !== MEETING_TASK_TYPE) continue;
+          if (!t.complete_till) continue;
+          const meetingDate = new Date(t.complete_till * 1000);
+          if (isNaN(meetingDate.getTime())) continue;
+
+          // Уже есть Meeting с этой датой у этого брокера/клиента? Skip.
+          const existing = await this.prisma.meeting.findFirst({
+            where: {
+              brokerId: c.brokerId,
+              clientId: c.id,
+              date: meetingDate,
+            },
+          });
+          if (existing) {
+            // Синк статуса: если task завершена → COMPLETED.
+            if (t.is_completed && existing.status !== 'COMPLETED') {
+              await this.prisma.meeting.update({
+                where: { id: existing.id },
+                data: { status: 'COMPLETED' as any },
+              });
+            }
+            skipped++;
+            continue;
+          }
+
+          // Определяем тип встречи по тексту задачи.
+          const textLower = (t.text || '').toLowerCase();
+          const type = textLower.includes('онлайн') ? 'ONLINE'
+            : textLower.includes('тур') ? 'BROKER_TOUR'
+            : 'OFFICE_VISIT';
+
+          await this.prisma.meeting.create({
+            data: {
+              brokerId: c.brokerId,
+              clientId: c.id,
+              type: type as any,
+              status: (t.is_completed ? 'COMPLETED' : 'PENDING') as any,
+              date: meetingDate,
+              comment: null,
+            },
+          });
+          created++;
+        }
+      } catch (e: any) {
+        errors++;
+        if (errors <= 3) this.logger.warn(`[amo-meeting-tasks] lead ${leadId} failed: ${e?.message || e}`);
+      }
+    }
+    if (created > 0 || errors > 0) {
+      this.logger.log(`[amo-meeting-tasks] clients=${clients.length} created=${created} skipped=${skipped} errors=${errors}`);
+    }
+  }
+
+  // 2026-07-01: каждые 10 минут — синк СТАТУСОВ активных встреч из amoCRM.
+  // Логика:
+  //   - берём Meeting.status ∈ (PENDING, CONFIRMED) и date за последние 7
+  //     дней или в будущем (не имеет смысла обновлять старые);
+  //   - вытягиваем client.amoLeadId → getLead(id) → mapMeetingStatus(lead.status_id);
+  //   - если статус изменился, обновляем Meeting.status.
+  //   - оптимизация: если несколько встреч у одного клиента (amoLeadId) —
+  //     один запрос к amoCRM.
+  @Cron('*/10 * * * *')
+  async handleMeetingsStatusSync() {
+    // 2026-07-02: одноразовое устранение дублей Client с одинаковым phone.
+    // Раньше scheduler синка мог создать дубль: fixClient создавал Client с
+    // brokerId=А (creator), а cron синка Б натыкался на findFirst(phone,
+    // brokerId=Б) → не находил → создавал ВТОРОГО Client с brokerId=Б.
+    // Правка исправляет причину, но старые дубли остаются в БД.
+    //
+    // Логика: группируем по phone → в каждой группе оставляем самого старого
+    // (первичная фиксация), у него ставим responsibleBrokerId = brokerId
+    // самого нового (тот кто ведёт). Более новые удаляем.
+    // Идемпотентно: после первой очистки — дублей нет, UPDATE 0.
+    try {
+      const dupes = await this.prisma.$queryRaw<Array<{ phone: string; cnt: bigint }>>`
+        SELECT "phone", COUNT(*) AS cnt
+        FROM "Client"
+        GROUP BY "phone"
+        HAVING COUNT(*) > 1
+        LIMIT 100
+      `;
+      for (const d of dupes) {
+        const rows = await this.prisma.client.findMany({
+          where: { phone: d.phone },
+          orderBy: { createdAt: 'asc' },
+          select: {
+            id: true, brokerId: true, responsibleBrokerId: true,
+            createdAt: true,
+            _count: { select: { deals: true, meetings: true, calls: true } },
+          },
+        });
+        if (rows.length < 2) continue;
+        const keep = rows[0];
+        const drops = rows.slice(1);
+        // Если у самого старого нет responsibleBrokerId — берём brokerId
+        // самого свежего дубля как designated (последняя фиксация выиграла).
+        const latestOtherBrokerId = [...drops].reverse().find((r) => r.brokerId !== keep.brokerId)?.brokerId;
+        if (!keep.responsibleBrokerId && latestOtherBrokerId) {
+          await this.prisma.client.update({
+            where: { id: keep.id },
+            data: { responsibleBrokerId: latestOtherBrokerId },
+          });
+        }
+        for (const drop of drops) {
+          // Не удаляем если есть связанные сущности (deals/meetings/calls),
+          // чтобы не потерять историю. Перепривязываем их на keep.
+          if (drop._count.deals > 0) {
+            await this.prisma.deal.updateMany({
+              where: { clientId: drop.id },
+              data: { clientId: keep.id },
+            });
+          }
+          if (drop._count.meetings > 0) {
+            await this.prisma.meeting.updateMany({
+              where: { clientId: drop.id },
+              data: { clientId: keep.id },
+            });
+          }
+          if (drop._count.calls > 0) {
+            await this.prisma.call.updateMany({
+              where: { clientId: drop.id },
+              data: { clientId: keep.id },
+            });
+          }
+          await this.prisma.client.delete({ where: { id: drop.id } });
+        }
+      }
+      if (dupes.length > 0) {
+        this.logger.log(`[client-dedupe] merged ${dupes.length} duplicate groups`);
+      }
+    } catch (e: any) {
+      this.logger.error(`[client-dedupe] error: ${e?.message || e}`);
+    }
+
+    // 2026-07-01: одноразовая очистка старых comment «Тип из amoCRM: X».
+    // До PR #207 синк писал этот бесполезный текст в comment. После PR #207
+    // новые встречи такое уже не пишут, но старые записи в БД остались —
+    // засоряли UI в /meetings. Один UPDATE, потом всегда UPDATE 0.
+    try {
+      await this.prisma.$executeRaw`
+        UPDATE "Meeting"
+        SET "comment" = NULL
+        WHERE "comment" LIKE 'Тип из amoCRM:%'
+      `;
+    } catch (e: any) {
+      this.logger.error(`[meetings-status-sync] cleanup «Тип из amoCRM» error: ${e?.message || e}`);
+    }
+
+    // 2026-07-01: одноразовая очистка старых записей «[timestamp] amoCRM
+    // статус: XXX» в client.comment. Webhook перестал писать это в PR #218,
+    // но старые записи остались и брокер видит их в карточке клиента.
+    // Regexp удаляет все такие строки (с необязательным \n). Потом NULLим
+    // пустые comment. Идемпотентно.
+    try {
+      await this.prisma.$executeRaw`
+        UPDATE "Client"
+        SET "comment" = regexp_replace(
+          "comment",
+          E'\\n?\\[\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}\\] amoCRM статус: \\d+',
+          '',
+          'g'
+        )
+        WHERE "comment" ~ 'amoCRM статус: \\d+'
+      `;
+      await this.prisma.$executeRaw`
+        UPDATE "Client"
+        SET "comment" = NULL
+        WHERE "comment" IS NOT NULL AND TRIM("comment") = ''
+      `;
+    } catch (e: any) {
+      this.logger.error(`[meetings-status-sync] cleanup «amoCRM статус» error: ${e?.message || e}`);
+    }
+
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    try {
+      const meetings = await this.prisma.meeting.findMany({
+        where: {
+          status: { in: ['PENDING' as any, 'CONFIRMED' as any] },
+          date: { gte: sevenDaysAgo },
+        },
+        include: { client: { select: { amoLeadId: true } } },
+      });
+      // Группируем по amoLeadId, чтобы 1 запрос — 1 лид.
+      const byLeadId = new Map<number, typeof meetings>();
+      for (const m of meetings) {
+        const leadId = m.client?.amoLeadId ? Number(m.client.amoLeadId) : null;
+        if (!leadId) continue;
+        if (!byLeadId.has(leadId)) byLeadId.set(leadId, []);
+        byLeadId.get(leadId)!.push(m);
+      }
+      if (byLeadId.size === 0) {
+        this.logger.log('[meetings-status-sync] нечего синкать');
+        return;
+      }
+      let updated = 0;
+      let checked = 0;
+      let errors = 0;
+      for (const [leadId, group] of byLeadId.entries()) {
+        try {
+          const lead = await this.amo.getLead(leadId);
+          checked++;
+          if (!lead) continue;
+          const newStatus = mapMeetingStatus((lead as any).status_id);
+          for (const m of group) {
+            if (m.status !== newStatus) {
+              await this.prisma.meeting.update({
+                where: { id: m.id },
+                data: { status: newStatus as any },
+              });
+              updated++;
+            }
+          }
+        } catch (e: any) {
+          errors++;
+          if (errors <= 3) this.logger.warn(`[meetings-status-sync] lead ${leadId} failed: ${e?.message || e}`);
+        }
+      }
+      this.logger.log(`[meetings-status-sync] leads=${byLeadId.size} checked=${checked} updated=${updated} errors=${errors}`);
+    } catch (e: any) {
+      this.logger.error(`[meetings-status-sync] fatal: ${e?.message || e}`);
+    }
+  }
+
+  // 2026-07-06: раз в сутки — синк брокеров из amoCRM (воронка «БРОКЕРЫ»
+  // pipeline 10787390). Существующие в БД брокеры обновляются в consistent
+  // manner (fullName/email заполняем только если у нас пусто — не перетираем
+  // то, что брокер сам ввёл в кабинете). Новые — создаются со статусом
+  // PENDING. Плюс: у каждого брокера контакт линкуется с amoCRM Company
+  // по ИНН — «Компания» на карточке заполняется автоматически.
+  // Время: 03:00 UTC = 06:00 МСК. Google-синк идёт раньше (02:00 UTC).
+  @Cron('0 3 * * *')
+  async handleAmoBrokersSync() {
+    if (!process.env.AMO_ACCESS_TOKEN) {
+      this.logger.warn('[amo-brokers] AMO_ACCESS_TOKEN не задан — skip');
+      return;
+    }
+    this.logger.log('[amo-brokers] запускаю importBrokersFromAmo...');
+    try {
+      const r = await this.adminService.importBrokersFromAmo();
+      this.logger.log(
+        `[amo-brokers] OK: leads=${r.foundLeads} contacts=${r.uniqueContacts} `
+          + `created=${r.created} updated=${r.updated} skipped=${r.skipped}`
+          + (r.errors?.length ? ` errors=${r.errors.length}` : ''),
+      );
+    } catch (e: any) {
+      this.logger.error(`[amo-brokers] FAILED: ${e?.message || e}`);
+    }
+  }
 
   // 2026-06-09: каждые 30 минут — синк брокерской базы из Google Sheet.
   // URL читается из SystemSetting.GSHEETS_BROKERS_URL. Если URL пуст —
@@ -381,6 +671,28 @@ export class SchedulerService {
             const leadCreatedAt = lead.created_at ? new Date(lead.created_at * 1000) : null;
             const leadUpdatedAt = lead.updated_at ? new Date(lead.updated_at * 1000) : null;
             let client = await this.prisma.client.findFirst({ where: { phone, brokerId: broker.id } });
+            // 2026-07-02: если клиент есть в системе (у ДРУГОГО брокера — например,
+            // фиксация А → на Б создала Client с brokerId=А), то cron синка Б НЕ
+            // должен создавать дубль. Переиспользуем существующего и назначаем
+            // Б как responsibleBrokerId (если ещё не назначен).
+            if (!client) {
+              const existingAnyBroker = await this.prisma.client.findFirst({
+                where: { phone },
+                orderBy: { createdAt: 'asc' },
+              });
+              if (existingAnyBroker) {
+                client = existingAnyBroker;
+                if (!client.responsibleBrokerId || client.responsibleBrokerId === client.brokerId) {
+                  if (client.brokerId !== broker.id) {
+                    await this.prisma.client.update({
+                      where: { id: client.id },
+                      data: { responsibleBrokerId: broker.id },
+                    });
+                    client = { ...client, responsibleBrokerId: broker.id } as any;
+                  }
+                }
+              }
+            }
             if (!client) {
               client = await this.prisma.client.create({
                 data: {
@@ -388,7 +700,6 @@ export class SchedulerService {
                   project: project as any,
                   amoLeadId: BigInt(lead.id),
                   uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
-                  // Уникальность = 40 дней от даты создания лида в amoCRM (правка 2026-05-14).
                   // Уникальность = 30 дней от даты создания лида в amoCRM (правка 2026-05-14).
                   uniquenessExpiresAt: new Date((leadCreatedAt ? leadCreatedAt.getTime() : Date.now()) + 30 * 24 * 60 * 60 * 1000),
                   amoCreatedAt: leadCreatedAt,
@@ -521,12 +832,21 @@ export class SchedulerService {
                       data: { type: mType as any, status: mStatus as any },
                     });
                   } else {
+                    // 2026-07-01: мини-детали клиента в комментарии.
+                    const projectLabel = (client as any)?.project === 'ZORGE9' ? 'Зорге 9'
+                      : (client as any)?.project === 'SILVER_BOR' ? 'Серебряный Бор'
+                      : ((client as any)?.project || '');
+                    const commentLines = [
+                      `Клиент: ${client.fullName}`,
+                      `Телефон: ${client.phone}`,
+                      ...(projectLabel ? [`Проект: ${projectLabel}`] : []),
+                    ];
                     await this.prisma.meeting.create({
                       data: {
                         brokerId: broker.id, clientId: client.id,
                         type: mType as any, status: mStatus as any,
                         date: mDate,
-                        comment: rawType ? `Тип из amoCRM: ${rawType}` : null,
+                        comment: commentLines.join('\n'),
                       },
                     });
                   }
@@ -588,7 +908,7 @@ export class SchedulerService {
       const agency = await this.prisma.agency.findUnique({ where: { id: client.fixationAgencyId } });
       if (!agency) continue;
       try {
-        await this.amo.createFixationRequest({
+        const resultLead = await this.amo.createFixationRequest({
           clientPhone: client.phone,
           clientEmail: client.email || undefined,
           clientName: client.fullName,
@@ -600,6 +920,7 @@ export class SchedulerService {
           project: client.project as any,
           fromBroker: true,
         });
+        const createdAmoLeadId = resultLead?.id ? Number(resultLead.id) : null;
         await this.prisma.client.update({
           where: { id: client.id },
           data: {
@@ -607,8 +928,46 @@ export class SchedulerService {
             amoSyncError: null,
             amoSyncAttempts: { increment: 1 },
             amoSyncLastAttemptAt: new Date(),
-          },
+            // 2026-06-11: без этого retry успешно создавал лид в amoCRM,
+            // но id не возвращался обратно в БД — UI продолжал показывать
+            // «не передано в amoCRM», и retry-cron больше не запускался
+            // (статус SYNCED). Webhook от amoCRM искал Client по amoLeadId
+            // и не находил.
+            ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
+          } as any,
         });
+
+        // 2026-06-11: первый createFixationRequest упал — значит
+        // ClientFixationService Морикит НЕ уведомил. Лид в amoCRM теперь
+        // существует, но без responsible_user_id висит на авторе OAuth
+        // (= админ). Дёргаем Морикит здесь, чтобы он распределил менеджера
+        // КЦ по своему графику смен. Fire-and-forget — ошибка Морикита не
+        // должна перезапускать amo-retry.
+        if (createdAmoLeadId) {
+          const morekitUrl = await getSystemSetting(this.prisma, 'MOREKIT_WEBHOOK_URL');
+          if (morekitUrl) {
+            const amount = client.amount ? Number(client.amount) : 0;
+            this.morekit.notifyFixation({
+              id: String(createdAmoLeadId),
+              agency: agency.name,
+              broker_id: client.broker.amoContactId ? String(client.broker.amoContactId) : '',
+              agent_name: client.broker.fullName,
+              agent_phone: morekitPhone(client.broker.phone),
+              agent_mail: client.broker.email || '',
+              budget: amount ? String(amount) : '0',
+              clients: [{ name: client.fullName, phone: morekitPhone(client.phone) }],
+              type: client.propertyType || 'Квартира',
+              lead_date: morekitLeadDate(),
+              project: morekitProjectName(String(client.project)),
+            }, morekitUrl).catch((e) => this.logger.error(`[amo-retry] morekit notify error: ${e?.message || e}`));
+
+            // 2026-06-16: убрали syncLeadResponsibleFromLatestTask.
+            // Раньше синкали responsible_user_id с самой свежей задачи,
+            // но при каждой новой ALARM-задаче ответственный лида
+            // менялся (что нежелательно). Морикит сам ставит responsible
+            // при создании лида/задачи — не перетираем.
+          }
+        }
         ok++;
       } catch (e: any) {
         const error = String(e?.message || e).slice(0, 500);
@@ -631,6 +990,13 @@ export class SchedulerService {
     }
     this.logger.log(`amo auto-retry: ${ok} success, ${failed} failed`);
   }
+
+  // 2026-06-16: отключён. Раньше каждые 3 мин синкали responsible_user_id
+  // лида с самой свежей задачи — но при каждой новой ALARM-задаче (от
+  // повторных фиксаций / handleRule1Or2Alarm / прикрепления брокеров)
+  // ответственный лида менялся, чего не хотелось. Морикит сам ставит
+  // responsible при создании лида/задачи. Если кто-то меняет вручную в
+  // amo — оставляем его выбор.
 
   // 2026-05-27 ROBUST AMO #2: periodic health-check. Каждые 5 минут дёргает
   // /account amocrm. Если упал — пишет в audit + один раз шлёт Telegram
@@ -716,6 +1082,74 @@ export class SchedulerService {
       }
     } catch (e: any) {
       console.error('[alertAmoDown] failed:', e?.message || e);
+    }
+  }
+
+  // 2026-06-18: SMTP health-check каждые 5 мин (был кейс — auth провалился,
+  // forgot-password и welcome-email тихо не уходили несколько часов).
+  // nodemailer.verify() делает connect + EHLO + AUTH без отправки —
+  // ловим и connection-fail, и auth-fail. Первый раз — лог-error + Telegram
+  // менеджерам; повтор — раз в час.
+  private smtpHealthState: { lastOk: boolean; lastErrorAt: number } = { lastOk: true, lastErrorAt: 0 };
+
+  @Cron('*/5 * * * *')
+  async handleSmtpHealthCheck() {
+    if (!process.env.SMTP_HOST || !process.env.SMTP_USER) return;
+    let nodemailer: any;
+    try { nodemailer = require('nodemailer'); } catch { return; }
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: process.env.SMTP_SECURE !== 'false',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      tls: { rejectUnauthorized: false },
+    });
+    try {
+      await transporter.verify();
+      if (!this.smtpHealthState.lastOk) {
+        this.logger.log('smtp health: восстановился ✓');
+        this.smtpHealthState.lastOk = true;
+      }
+    } catch (e: any) {
+      const error = String(e?.message || e).slice(0, 200);
+      if (this.smtpHealthState.lastOk) {
+        this.logger.error(`smtp health: упал — ${error}`);
+        this.smtpHealthState.lastOk = false;
+        this.smtpHealthState.lastErrorAt = Date.now();
+        await this.alertSmtpDown(error);
+      } else if (Date.now() - this.smtpHealthState.lastErrorAt > 60 * 60 * 1000) {
+        await this.alertSmtpDown(error);
+        this.smtpHealthState.lastErrorAt = Date.now();
+      }
+    } finally {
+      try { transporter.close?.(); } catch {}
+    }
+  }
+
+  private async alertSmtpDown(error: string) {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'SMTP_DOWN',
+          entity: 'System',
+          entityId: 'smtp',
+          payload: { error, at: new Date().toISOString() },
+        },
+      });
+      const managers = await this.prisma.broker.findMany({
+        where: { role: 'MANAGER', status: 'ACTIVE' },
+        select: { id: true },
+      });
+      for (const m of managers) {
+        await this.notificationQueue.add('send', {
+          brokerId: m.id,
+          channel: 'TELEGRAM',
+          subject: '⚠ SMTP недоступен',
+          body: `SMTP (mail.stmichael.ru) не отвечает: ${error}. Forgot-password и welcome-email не уходят. Проверь .env и Exchange.`,
+        }).catch(() => {});
+      }
+    } catch (e: any) {
+      console.error('[alertSmtpDown] failed:', e?.message || e);
     }
   }
 }

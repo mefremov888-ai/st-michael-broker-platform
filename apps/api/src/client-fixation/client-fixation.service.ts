@@ -1,11 +1,12 @@
 import { Injectable, Inject, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { Project } from '@st-michael/shared';
-import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate } from '@st-michael/integrations';
+import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, AMO_CONTACT_FIELDS, brokerToAmoContactFields } from '@st-michael/integrations';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { getSystemSetting } from '../common/system-setting';
+import { buildPhoneSearchConditions } from '../admin/brokers-import.helper';
 
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
@@ -43,10 +44,32 @@ export class ClientFixationService {
       readinessLevel?: string;     // «Готовность к сделке» (Холодный/Тёплый/Горячий)
       // 2026-05-26: брокер подтвердил что хочет создать дубль своего клиента
       confirmDuplicate?: boolean;
+      // 2026-06-19: для координаторов — реальный брокер, ведущий клиента.
+      responsibleBrokerId?: string;
     },
   ) {
-    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+    const broker = await this.prisma.broker.findUnique({
+      where: { id: brokerId },
+      include: { brokerAgencies: { select: { agencyId: true } } },
+    });
     if (!broker) throw new BadRequestException('Broker not found');
+
+    // 2026-07-01 (refactor): роль координатора убрана. Любой брокер может
+    // фиксировать клиента на другого — новый брокер создаётся через
+    // /create-new-broker перед fixClient, его id прилетает как
+    // responsibleBrokerId. Если responsibleBrokerId прислан — проверяем что
+    // этот брокер существует и активен. Если не прислан — responsibleBroker =
+    // сам вызывающий (фиксация на себя).
+    let responsibleBroker = broker as any;
+    if (data.responsibleBrokerId && data.responsibleBrokerId !== broker.id) {
+      const candidate = await this.prisma.broker.findUnique({
+        where: { id: data.responsibleBrokerId },
+      });
+      if (!candidate) {
+        throw new BadRequestException('Указанный ответственный брокер не найден');
+      }
+      responsibleBroker = candidate;
+    }
 
     // 2026-06-09: блок полей формы фиксации, общий для всех 4 веток create.
     // Раньше эти данные склеивались в comment; теперь храним структурированно
@@ -90,178 +113,111 @@ export class ClientFixationService {
       });
     }
 
+    // 2026-06-11: ПРОВЕРКА УНИКАЛЬНОСТИ В amoCRM ВСЕГДА И ПЕРВОЙ.
+    // Раньше эта проверка была ВНУТРИ `if (!existingClient)` — то есть при
+    // повторной фиксации того же клиента тем же брокером (existingClient
+    // найден в нашей БД) логика RULE_1/RULE_2/RULE_3 НЕ срабатывала, и
+    // создавался дубль amoCRM-лида через duplicate-confirmation flow.
+    // Тест 2026-06-11 (Efremov Mikhail 32209267 + Тест47 32209273):
+    // лид 1 уже был в КЦ «Классифицировали» (62907282 = RULE_1) → должны
+    // были только повесить alarm-задачу, но создали лид 2.
+    let amoVerdict: {
+      rule: 'RULE_1' | 'RULE_2' | 'RULE_3' | 'NO_CONFLICT' | 'RULE_EXCEPTION_AFTER_SALES_MEETING' | 'RULE_REJECT_SALES_DEAL';
+      verdict: 'UNIQUE' | 'ALARM';
+      reason: string;
+      contactId?: number;
+      leads?: any[];
+      triggerType?: 'DEFERRED_DEMAND' | 'NEW_REQUEST_NO_BROKER' | 'ACTIVE_SALES';
+      triggerLeadId?: number;
+    } | null = null;
+    try {
+      amoVerdict = await this.amoCrmAdapter.checkUniqueness(data.phone);
+      console.log(`[fixClient] amo uniqueness rule=${amoVerdict.rule} — ${amoVerdict.reason}${amoVerdict.triggerLeadId ? ` — triggerLeadId=${amoVerdict.triggerLeadId}` : ''}`);
+    } catch (e: any) {
+      console.error('[fixClient] amo checkUniqueness failed, fallback to local DB only:', e?.message || e);
+    }
+
     // Проверяем сначала запись ЭТОГО брокера — если он уже фиксировал, обновляем её.
-    // Правка 2026-05-22 (bug-репорт): глобально смотрим ВСЕХ клиентов с этим
-    // телефоном, чтобы выявить конфликт с уникальностью другого брокера.
-    // Раньше другой брокер «не мешал» — но если у него клиент в активной
-    // CONDITIONALLY_UNIQUE / FIXED уникальности (или есть проведённая встреча)
-    // — это конфликт, фиксацию надо ставить на UNDER_REVIEW и уведомить
-    // менеджеров. Иначе создавали дубль без предупреждения.
     const existingClient = await this.prisma.client.findFirst({
       where: { phone: data.phone, brokerId },
       include: { deals: true, broker: true },
     });
 
-    if (!existingClient) {
-      // 2026-06-03: ПРОВЕРКА УНИКАЛЬНОСТИ ПО amoCRM — по 4 правилам пользователя.
-      // Раньше смотрели только в нашу БД (Client table) — а в amo контакт мог
-      // уже иметь активный лид с другим брокером, и мы это не видели.
-      // Теперь: запрашиваем у amo вердикт UNIQUE / ALARM. Если ALARM — создаём
-      // Client с UNDER_REVIEW + задача в amo для КЦ.
-      // Если amo упал — fallback на старую логику (only local DB).
-      let amoVerdict: {
-        verdict: 'UNIQUE' | 'ALARM';
-        reason: string;
-        contactId?: number;
-        leads?: any[];
-        reusableLeadId?: number;
-        triggerType?: 'DEFERRED_DEMAND' | 'NEW_REQUEST_NO_BROKER' | 'ACTIVE_SALES';
-        triggerLeadId?: number;
-      } | null = null;
+    // 2026-06-11: RULE_1/RULE_2 — alarm-flow, не создаём новый amoCRM лид,
+    // не выпускаем duplicate-confirmation. Срабатывает независимо от того,
+    // есть ли existingClient. Если есть — оставляем как есть (НЕ меняем
+    // его статус: брокер не должен видеть «На проверке» если просто
+    // переподал свою же фиксацию). Если нет — создаём новый Client UNDER_REVIEW.
+    if (amoVerdict && (amoVerdict.rule === 'RULE_1' || amoVerdict.rule === 'RULE_2')) {
+      return await this.handleRule1Or2Alarm({
+        amoVerdict,
+        data,
+        broker,
+        responsibleBroker,
+        agency,
+        brokerId,
+        existingClient,
+        fixationFormFields,
+      });
+    }
+
+    // 2026-06-16: RULE_REJECT_SALES_DEAL — клиент уже в стадии сделки
+    // (Платная бронь / Подготовка / Сделка / Зарегистрирована / Контроль
+    // оплаты) у брокера A. Брокер B даже не пытается — REJECTED сразу,
+    // новой карточки не создаём.
+    if (amoVerdict && amoVerdict.rule === 'RULE_REJECT_SALES_DEAL') {
+      const client = await this.prisma.client.create({
+        data: {
+          brokerId,
+          responsibleBrokerId: responsibleBroker.id,
+          phone: data.phone,
+          fullName: data.fullName,
+          email: data.email || null,
+          comment: data.comment,
+          project: data.project as any,
+          fixationAgencyId: agency?.id,
+          uniquenessStatus: UniquenessStatus.REJECTED,
+          uniquenessReason: `Клиент уже в стадии сделки (lead=${amoVerdict.triggerLeadId}). Уникальность отклонена.`,
+          ...fixationFormFields,
+        },
+      });
       try {
-        amoVerdict = await this.amoCrmAdapter.checkUniqueness(data.phone);
-        console.log(`[fixClient] amo uniqueness verdict: ${amoVerdict.verdict} — ${amoVerdict.reason}${amoVerdict.reusableLeadId ? ` — reusableLeadId=${amoVerdict.reusableLeadId}` : ''}${amoVerdict.triggerType ? ` — triggerType=${amoVerdict.triggerType}` : ''}`);
-      } catch (e: any) {
-        console.error('[fixClient] amo checkUniqueness failed, fallback to local DB only:', e?.message || e);
-      }
-
-      if (amoVerdict && amoVerdict.verdict === 'ALARM') {
-        const client = await this.prisma.client.create({
-          data: {
-            brokerId,
-            phone: data.phone,
-            fullName: data.fullName,
-            email: data.email || null,
-            comment: data.comment,
-            project: data.project as any,
-            fixationAgencyId: agency.id,
-            uniquenessStatus: UniquenessStatus.UNDER_REVIEW,
-            uniquenessReason: `АЛАРМ из amoCRM: ${amoVerdict.reason}`,
-            ...fixationFormFields,
-          },
+        await this.logAudit(brokerId, 'CLIENT_FIXATION_CONFLICT', 'Client', client.id, {
+          scenario: 'SALES_DEAL_REJECT',
+          amoReason: amoVerdict.reason,
+          amoLeadId: amoVerdict.triggerLeadId,
         });
-        try {
-          await this.logAudit(brokerId, 'CLIENT_FIXATION_CONFLICT', 'Client', client.id, {
-            scenario: 'AMO_UNIQUENESS_ALARM',
-            amoReason: amoVerdict.reason,
-            amoContactId: amoVerdict.contactId,
-            amoLeads: amoVerdict.leads,
-          });
-        } catch (e: any) {
-          console.error('[fixClient amo-alarm] audit failed:', e?.message || e);
-        }
-        // 2026-06-03: формат по требованию пользователя:
-        // - длинная нота с дублированием всей заявки из кабинета
-        // - задача с типом «Аларм», срок 30 мин
-        // - распределение через Морикит (responsibleUserId не задаём)
-        // 2026-06-05: для triggerType=DEFERRED_DEMAND текст задачи специфичен —
-        // КЦ должен УТОЧНИТЬ у клиента, действительно ли он сейчас работает
-        // с этим брокером (клиент ранее сам говорил «не готов»).
-        if (amoVerdict.leads && amoVerdict.leads.length > 0) {
-          // Если есть конкретный лид-триггер (DEFERRED / NEW_REQUEST / ACTIVE_SALES) —
-          // нота и задача идут на него, иначе на первый активный.
-          const targetLead =
-            amoVerdict.leads.find((l: any) => l.id === amoVerdict?.triggerLeadId) ||
-            amoVerdict.leads[0];
-          const projectName = ({ ZORGE9: 'Зорге 9', SILVER_BOR: 'Берзарина 37' } as Record<string, string>)[String(data.project)] || String(data.project);
-          const isDeferred = amoVerdict.triggerType === 'DEFERRED_DEMAND';
-          // Длинная нота — полная копия заявки
-          const lines: string[] = [];
-          if (isDeferred) {
-            lines.push(`Брокер заявляет на клиента. Связаться с клиентом.`);
-          } else {
-            lines.push(`⚠️ АЛАРМ уникальности — требуется ручная проверка КЦ`);
-          }
-          lines.push(`Причина: ${amoVerdict.reason}`);
-          lines.push(``);
-          lines.push(`Клиент: ${data.fullName}`);
-          lines.push(`Телефон: ${data.phone}`);
-          if (data.email) lines.push(`Email: ${data.email}`);
-          if (data.clientRegion) lines.push(`Регион: ${data.clientRegion}`);
-          lines.push(``);
-          lines.push(`Проект: ${projectName}`);
-          if (data.propertyType) lines.push(`Тип: ${data.propertyType}`);
-          if (data.roomsCount) lines.push(`Комнат: ${data.roomsCount}`);
-          if (data.sqm) lines.push(`Метраж: ${data.sqm} м²`);
-          if (data.amount) lines.push(`Бюджет: ${data.amount.toLocaleString('ru-RU')} ₽`);
-          if (data.purchaseTiming) lines.push(`Планирует покупку: ${data.purchaseTiming}`);
-          if (data.readinessLevel) lines.push(`Готовность к сделке: ${data.readinessLevel}`);
-          lines.push(``);
-          lines.push(`Брокер-агент: ${broker.fullName} (${broker.phone})`);
-          lines.push(`Агентство: ${agency.name} (ИНН ${agency.inn})`);
-          if (data.comment) {
-            lines.push(``);
-            lines.push(`Комментарий брокера: ${data.comment}`);
-          }
-          try {
-            await this.amoCrmAdapter.addNoteToLead(targetLead.id, lines.join('\n'));
-          } catch (e: any) {
-            console.error('[fixClient amo-alarm] note failed:', e?.message || e);
-          }
-          // Задача типа «Аларм», срок 30 минут. Текст зависит от triggerType.
-          // 2026-06-03: ID 2393839 = «Alarm» в stmichael.amocrm.ru (цвет E00000).
-          const ALARM_TASK_TYPE_ID = Number(process.env.AMO_ALARM_TASK_TYPE_ID || 2393839);
-          const taskText = isDeferred
-            ? `Брокер заявляет на клиента ${data.fullName} (${data.phone}). Связаться с клиентом.`
-            : `Связаться по сделке брокера — клиент ${data.fullName} (${data.phone}), брокер ${broker.phone}.`;
-          try {
-            // 2026-06-10: ответственный за ALARM-задачу = ответственный
-            // триггер-лида (Морикит уже распределил его на менеджера КЦ).
-            // Раньше зашивали Юлию 9796826 — это давало «задача висит на
-            // том кто не работает сегодня». Теперь читаем актуального
-            // ответственного из лида. Если по какой-то причине не вытянули
-            // (lid удалён / amo ответил 5xx) — fallback на env или undefined
-            // (amo поставит автора токена, но это лучше чем падать).
-            let leadResponsibleUserId: number | undefined;
-            try {
-              const fullLead = await this.amoCrmAdapter.getLead(targetLead.id);
-              leadResponsibleUserId = (fullLead as any)?.responsible_user_id;
-            } catch (e: any) {
-              console.warn('[fixClient amo-alarm] getLead failed, fallback:', e?.message || e);
-            }
-            const envFallback = process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
-            const taskResponsibleUserId = leadResponsibleUserId
-              || (envFallback ? Number(envFallback) : undefined);
-            await this.amoCrmAdapter.createTask({
-              text: taskText,
-              entityType: 'leads',
-              entityId: targetLead.id,
-              taskTypeId: ALARM_TASK_TYPE_ID,
-              completeTillSec: Math.floor(Date.now() / 1000) + 30 * 60,
-              responsibleUserId: taskResponsibleUserId,
-            });
-          } catch (e: any) {
-            console.error('[fixClient amo-alarm] task failed:', e?.message || e);
-          }
-        }
-        return {
-          client,
-          status: 'UNDER_REVIEW',
-          message: `Клиент требует ручной проверки КЦ. ${amoVerdict.reason}`,
-        };
+      } catch (e: any) {
+        console.error('[fixClient sales-deal-reject] audit failed:', e?.message || e);
       }
+      return {
+        client,
+        status: 'REJECTED',
+        message: 'Клиент уже на стадии сделки у другого брокера. Уникальность невозможна.',
+      };
+    }
 
-      // Перед созданием — проверим что нет других брокеров у этого клиента
-      // с активной фиксацией или встречей. Если есть — поднимаем UNDER_REVIEW
-      // и НЕ создаём новый Client до решения менеджера.
-      // Валидные enum-значения (по schema.prisma):
-      //   UniquenessStatus: CONDITIONALLY_UNIQUE, REJECTED, UNDER_REVIEW, EXPIRED — НЕТ CONFIRMED
-      //   FixationStatus:   NOT_FIXED, FIXED, EXPIRED, ANNULLED
-      //   MeetingStatus:    PENDING, CONFIRMED, COMPLETED, CANCELLED
-      // Раньше тут было `['CONDITIONALLY_UNIQUE', 'CONFIRMED']` — невалидный
-      // CONFIRMED валил весь Prisma-запрос с ошибкой, поэтому ВООБЩЕ
-      // не работала фиксация. Bug-репорт 2026-05-22.
+    if (!existingClient) {
+      // 2026-06-11: amoVerdict + RULE_1/RULE_2 теперь обрабатываются ВЫШЕ
+      // через handleRule1Or2Alarm — сюда попадаем только при RULE_3 или
+      // NO_CONFLICT (либо если amoCRM упал и amoVerdict=null).
+
+      // 2026-06-14: пока встреча у другого брокера не ПРОВЕДЕНА — несколько
+      // брокеров могут одновременно быть условно уникальными. Блокируем
+      // только если у другого брокера встреча COMPLETED или статус FIXED
+      // (акт осмотра подписан — клиент окончательно за ним).
+      //
+      // Раньше блокировали также любое активное CONDITIONALLY_UNIQUE и любую
+      // CONFIRMED-встречу (запланированную, но ещё не проведённую) — это
+      // давало преждевременное «На проверке» при первой же параллельной
+      // фиксации, ещё до встречи.
       const conflictingClient = await this.prisma.client.findFirst({
         where: {
           phone: data.phone,
           NOT: { brokerId },
           OR: [
-            {
-              uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
-              uniquenessExpiresAt: { gt: new Date() },
-            },
             { fixationStatus: 'FIXED' as any },
-            { meetings: { some: { status: { in: ['CONFIRMED', 'COMPLETED'] as any } } } },
+            { meetings: { some: { status: 'COMPLETED' as any } } },
           ],
         },
         include: { broker: true, meetings: true },
@@ -272,6 +228,7 @@ export class ClientFixationService {
         const client = await this.prisma.client.create({
           data: {
             brokerId,
+            responsibleBrokerId: responsibleBroker.id,
             phone: data.phone,
             fullName: data.fullName,
             email: data.email || null,
@@ -322,18 +279,33 @@ export class ClientFixationService {
         };
       }
 
+      // 2026-06-16: RULE_EXCEPTION_AFTER_SALES_MEETING — клиент уже в
+      // средней стадии sales-pipeline у брокера A (думают/отложенный/
+      // устная/снята бронь). Создаём L2 и прикрепляем B как обычно, но
+      // в кабинете B статус UNDER_REVIEW. Снимется когда L2 дойдёт до
+      // 62907282 «Квалифицировали» (webhook) или старая sales-карточка
+      // закроется 143. Маркер для webhook: префикс в uniquenessReason.
+      const isExceptionAfterSalesMeeting = amoVerdict?.rule === 'RULE_EXCEPTION_AFTER_SALES_MEETING';
       // Scenario 1: New client
       const client = await this.prisma.client.create({
         data: {
           brokerId,
+          responsibleBrokerId: responsibleBroker.id,
           phone: data.phone,
           fullName: data.fullName,
           email: data.email || null,
           comment: data.comment,
           project: data.project as any,
           fixationAgencyId: agency.id,
-          uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
-          uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
+          uniquenessStatus: isExceptionAfterSalesMeeting
+            ? UniquenessStatus.UNDER_REVIEW
+            : UniquenessStatus.CONDITIONALLY_UNIQUE,
+          uniquenessExpiresAt: isExceptionAfterSalesMeeting
+            ? null
+            : new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
+          uniquenessReason: isExceptionAfterSalesMeeting
+            ? `EXCEPTION_AFTER_SALES_MEETING:${amoVerdict?.triggerLeadId || ''} ${amoVerdict?.reason || ''}`
+            : null,
           ...fixationFormFields,
         },
       });
@@ -361,14 +333,16 @@ export class ClientFixationService {
       let amoSyncError: string | null = null;
       let createdAmoLeadId: number | null = null;
       try {
+        // 2026-06-19: используем responsibleBroker (для координатора — выбранный
+        // реальный брокер, для обычного брокера — он сам).
         const resultLead = await this.amoCrmAdapter.createFixationRequest({
           clientPhone: data.phone,
           clientEmail: data.email,
           clientName: data.fullName,
           clientRegion: data.clientRegion,
           presentationSent: data.presentationSent,
-          brokerPhone: broker.phone,
-          brokerAmoContactId: broker.amoContactId ? Number(broker.amoContactId) : undefined,
+          brokerPhone: responsibleBroker.phone,
+          brokerAmoContactId: responsibleBroker.amoContactId ? Number(responsibleBroker.amoContactId) : undefined,
           agencyName: agency.name,
           agencyInn: agency.inn,
           comment: fullComment,
@@ -380,11 +354,10 @@ export class ClientFixationService {
           purchaseTiming: data.purchaseTiming,
           readinessLevel: data.readinessLevel,
           fromBroker: true, // фиксация ВСЕГДА от брокера
-          // 2026-06-03: если amo-проверка нашла активный лид в КЦ
-          // (Новое обращение / Квалифицировали выв. на встречу) —
-          // прикрепляем нашего брокера к нему вторым контактом, без
-          // дубля лида. Логика «конкурирующие брокеры до акта осмотра».
-          reuseLeadId: amoVerdict?.reusableLeadId,
+          // 2026-06-11: reuseLeadId больше не используется — логика
+          // «конкурирующие брокеры» перенесена в Правило 1 (handled выше
+          // в ALARM-ветке: брокер прикрепляется контактом, нового лида нет).
+          // Сюда попадаем только при RULE_3 / NO_CONFLICT → всегда новый лид.
         });
         createdAmoLeadId = resultLead?.id ? Number(resultLead.id) : null;
       } catch (e: any) {
@@ -394,25 +367,32 @@ export class ClientFixationService {
       }
 
       // 2026-06-04: прямой webhook в Morekit (без Salesbot в amo).
-      // Только для НОВОГО лида (reuse — у того лида уже есть распределение).
       // Fire-and-forget: ошибка Morekit'а не валит фиксацию у брокера.
       // URL берём из админ-настроек (SystemSetting) с env-fallback.
-      if (amoSyncOk && createdAmoLeadId && !amoVerdict?.reusableLeadId) {
+      if (amoSyncOk && createdAmoLeadId) {
         const morekitUrl = await getSystemSetting(this.prisma, 'MOREKIT_WEBHOOK_URL');
         if (morekitUrl) {
           this.morekit.notifyFixation({
             id: String(createdAmoLeadId),
             agency: agency.name,
-            broker_id: broker.amoContactId ? String(broker.amoContactId) : '',
-            agent_name: broker.fullName,
-            agent_phone: morekitPhone(broker.phone),
-            agent_mail: broker.email || '',
+            broker_id: responsibleBroker.amoContactId ? String(responsibleBroker.amoContactId) : '',
+            agent_name: responsibleBroker.fullName,
+            agent_phone: morekitPhone(responsibleBroker.phone),
+            agent_mail: responsibleBroker.email || '',
             budget: data.amount ? String(data.amount) : '0',
             clients: [{ name: data.fullName, phone: morekitPhone(data.phone) }],
             type: data.propertyType || 'Квартира',
             lead_date: morekitLeadDate(),
             project: morekitProjectName(String(data.project)),
           }, morekitUrl).catch((e) => console.error('[fixClient] morekit notify error:', e?.message || e));
+
+          // 2026-06-16: первичная фиксация (новый лид) — синкаем
+          // responsible_user_id с Морикит-задачи на сам лид. Это
+          // ОДНОКРАТНО, при создании. Повторные ALARM-задачи
+          // (handleRule1Or2Alarm) ответственного лида НЕ меняют.
+          this.amoCrmAdapter
+            .syncLeadResponsibleFromLatestTask(createdAmoLeadId)
+            .catch((e) => console.error('[fixClient] sync lead responsible error:', e?.message || e));
         }
       }
 
@@ -432,8 +412,6 @@ export class ClientFixationService {
             amoSyncLastAttemptAt: new Date(),
             // 2026-06-04: критично сохранять lead id, иначе webhook от amoCRM
             // на этот лид не сможет найти Client (искал по amoLeadId).
-            // В reuseLeadId-режиме сохраняется тот же лид, к которому
-            // мы прикрепились вторым контактом.
             ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
           } as any,
         });
@@ -492,199 +470,125 @@ export class ClientFixationService {
       };
     }
 
-    // Check deal status
-    const hasClosedDeal = existingClient.deals.some(
-      (deal) => deal.status === 'CANCELLED' && deal.contractType === null,
-    );
+    // 2026-06-14: единое правило для повторной фиксации того же брокера.
+    // К этой точке мы попадаем когда:
+    //   - existingClient есть (этот брокер уже фиксировал клиента)
+    //   - amoVerdict НЕ RULE_1/RULE_2 (старый лид НЕ активный — обработали бы выше
+    //     в handleRule1Or2Alarm с тихим мержем без нового лида)
+    // То есть amoVerdict здесь либо RULE_3 / NO_CONFLICT (старый лид закрыт
+    // или контакта в amo нет), либо null (amo упал).
+    //
+    // Правило пользователя 2026-06-14:
+    //   • Если старая фиксация ещё активна — merge (просто отдаём existingClient).
+    //   • Если старая закрыта (любая причина: 142/143/CANCELLED/EXPIRED) —
+    //     создаём НОВЫЙ Client + НОВЫЙ amo лид со ссылкой на старую карточку.
+    //
+    // amoVerdict = null → не можем проверить, fallback на локальный статус:
+    //   CONDITIONALLY_UNIQUE + uniquenessExpiresAt > now → считаем активной.
+    const localActive =
+      existingClient.uniquenessStatus === UniquenessStatus.CONDITIONALLY_UNIQUE &&
+      !!existingClient.uniquenessExpiresAt &&
+      new Date(existingClient.uniquenessExpiresAt) > new Date();
+    const amoSaysOldClosed =
+      !!amoVerdict && (amoVerdict.rule === 'RULE_3' || amoVerdict.rule === 'NO_CONFLICT');
 
-    if (hasClosedDeal) {
-      // Scenario 2: Reopen closed deal
-      const client = await this.prisma.client.update({
-        where: { id: existingClient.id },
+    if (!amoSaysOldClosed && localActive) {
+      // amo упал, но локально фиксация активна. Создаём отдельный Client
+      // на повторную фиксацию (без amoLeadId — amo сам не доступен), чтобы
+      // брокер видел свою заявку в кабинете. Никаких диалогов «всё равно
+      // создать?». 2026-06-14: раньше тут был тихий merge (return existingClient),
+      // но брокер не видел повторную попытку в списке.
+      const refixClient = await this.prisma.client.create({
         data: {
           brokerId,
-          uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
-          uniquenessReason: 'Переоткрыта закрытая сделка',
-          uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
-          fixationAgencyId: agency.id,
-        },
-      });
-
-      // Bug fix 2026-05-25: reopenLead тоже изолируем (см. createFixationRequest).
-      let amoSyncOk = true;
-      let amoSyncError: string | null = null;
-      if (existingClient.amoLeadId) {
-        try {
-          await this.amoCrmAdapter.reopenLead(
-            Number(existingClient.amoLeadId),
-            broker.amoContactId ? Number(broker.amoContactId) : 0,
-          );
-        } catch (e: any) {
-          amoSyncOk = false;
-          amoSyncError = String(e?.message || e).slice(0, 500);
-          console.error('[fixClient] amo reopenLead failed:', amoSyncError);
-        }
-      }
-
-      // Bug fix 2026-05-26: тоже оборачиваем — миграция могла не пройти.
-      try {
-        await this.prisma.client.update({
-          where: { id: client.id },
-          data: {
-            amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
-            amoSyncError: amoSyncOk ? null : amoSyncError,
-            amoSyncAttempts: { increment: 1 },
-            amoSyncLastAttemptAt: new Date(),
-          } as any,
-        });
-      } catch (e: any) {
-        console.error('[fixClient reopen] amoSyncStatus update failed (миграция?):', e?.message || e);
-      }
-
-      if (!amoSyncOk) {
-        try {
-          await this.logAudit(brokerId, 'AMO_SYNC_FAILED', 'Client', client.id, {
-            step: 'reopenLead',
-            amoLeadId: existingClient.amoLeadId,
-            error: amoSyncError,
-          });
-        } catch (e: any) {
-          console.error('[fixClient reopen] audit failed:', e?.message || e);
-        }
-        try {
-          await this.notifyAmoSyncFailed(client.id, broker, data.phone, amoSyncError || '');
-        } catch (e: any) {
-          console.error('[fixClient reopen] notify failed:', e?.message || e);
-        }
-      }
-
-      try {
-        await this.logAudit(brokerId, 'CLIENT_FIXATION', 'Client', client.id, {
-          scenario: 'REOPEN_CLOSED',
+          responsibleBrokerId: responsibleBroker.id,
           phone: data.phone,
-        });
-      } catch (e: any) {
-        console.error('[fixClient reopen] CLIENT_FIXATION audit failed:', e?.message || e);
-      }
-
-      let managerContacts: any = undefined;
-      if (!amoSyncOk) {
-        try { managerContacts = await this.getManagerContacts(); }
-        catch (e: any) { console.error('[fixClient reopen] getManagerContacts failed:', e?.message || e); }
-      }
-
-      return {
-        client,
-        status: 'CONDITIONALLY_UNIQUE',
-        amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
-        message: amoSyncOk
-          ? 'Closed deal reopened. Client conditionally fixed.'
-          : 'Клиент переоткрыт в кабинете, но изменение не передалось в amoCRM. Менеджеры уведомлены.',
-        managerContacts,
-      };
-    }
-
-    // Check if in qualification stage
-    const inQualification = existingClient.deals.some((deal) =>
-      ['PENDING', 'SIGNED'].includes(deal.status),
-    );
-
-    if (inQualification) {
-      // Scenario 3: Conflict with another broker
-      const client = await this.prisma.client.update({
-        where: { id: existingClient.id },
-        data: {
-          uniquenessStatus: UniquenessStatus.UNDER_REVIEW,
-          uniquenessReason: `Конфликт: брокер ${broker.fullName} (${broker.phone}) запросил фиксацию`,
+          fullName: data.fullName,
+          email: data.email || null,
+          comment: data.comment,
+          project: data.project as any,
+          fixationAgencyId: agency.id,
+          uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
+          uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
+          uniquenessReason: 'Повторная фиксация (amoCRM недоступен, синхронизируется позже)',
+          ...fixationFormFields,
         },
       });
-
-      // 2026-05-26: TG менеджерам / SMS брокеру отключены — менеджер видит
-      // UNDER_REVIEW клиентов в /admin/uniqueness-conflicts. Двойное
-      // оповещение раздражало.
-
       try {
-        await this.logAudit(brokerId, 'CLIENT_FIXATION_CONFLICT', 'Client', client.id, {
-          scenario: 'BROKER_CONFLICT',
-          existingBrokerId: existingClient.brokerId,
+        await this.logAudit(brokerId, 'CLIENT_FIXATION', 'Client', refixClient.id, {
+          scenario: 'REFIX_AMO_DOWN',
+          phone: data.phone,
+          previousClientId: existingClient.id,
         });
       } catch (e: any) {
-        console.error('[fixClient broker-conflict] audit failed:', e?.message || e);
+        console.error('[fixClient refix-merge] audit failed:', e?.message || e);
       }
-
       return {
-        client,
-        status: 'UNDER_REVIEW',
-        message: 'Client in qualification with another broker. Manager notified.',
+        client: refixClient,
+        status: 'CONDITIONALLY_UNIQUE',
+        message: 'Клиент зафиксирован повторно. Синхронизация с amoCRM произойдёт автоматически.',
       };
     }
 
-    // 2026-05-26: existingClient есть (твой), без CANCELLED-сделок и без
-    // PENDING/SIGNED. То есть это просто активная (или истёкшая) фиксация
-    // без сделок. Раньше тут был REJECTED; теперь — спрашиваем у брокера
-    // подтверждение «создать ещё одну фиксацию того же клиента?».
-    if (!data.confirmDuplicate) {
-      const dl = existingClient.deals?.length || 0;
-      return {
-        status: 'REQUIRES_CONFIRMATION',
-        existingClientId: existingClient.id,
-        existingClient: {
-          fullName: existingClient.fullName,
-          phone: existingClient.phone,
-          uniquenessStatus: existingClient.uniquenessStatus,
-          uniquenessExpiresAt: existingClient.uniquenessExpiresAt,
-          createdAt: existingClient.createdAt,
-          dealsCount: dl,
-        },
-        message: `У вас уже есть фиксация этого клиента (${existingClient.fullName}, статус ${existingClient.uniquenessStatus}). Хотите всё равно создать новую фиксацию?`,
-      };
+    // Старая закрыта (или не активна локально + amo не подтверждает активность).
+    // Создаём НОВЫЙ Client + НОВЫЙ amo лид с ссылкой на старую карточку.
+    const previousLeadId = existingClient.amoLeadId ? Number(existingClient.amoLeadId) : undefined;
+    const previousFixDate = existingClient.createdAt
+      ? new Date(existingClient.createdAt).toLocaleDateString('ru-RU')
+      : '';
+    const previousLeadInfoParts: string[] = [];
+    if (previousFixDate) previousLeadInfoParts.push(`фиксация от ${previousFixDate}`);
+    if (amoVerdict?.rule === 'RULE_3') {
+      previousLeadInfoParts.push('закрыт в amoCRM');
+    } else if (existingClient.uniquenessStatus !== UniquenessStatus.CONDITIONALLY_UNIQUE) {
+      previousLeadInfoParts.push(`статус ${existingClient.uniquenessStatus}`);
     }
+    const previousLeadInfo = previousLeadInfoParts.join(', ') || undefined;
 
-    // confirmDuplicate=true → создаём вторую запись Client с тем же
-    // phone+brokerId. Это разрешено (нет unique constraint в schema).
     const newClient = await this.prisma.client.create({
       data: {
         brokerId,
+        responsibleBrokerId: responsibleBroker.id,
         phone: data.phone,
         fullName: data.fullName,
         email: data.email || null,
         comment: data.comment,
         project: data.project as any,
-        fixationAgencyId: existingClient.fixationAgencyId,
+        fixationAgencyId: agency.id,
         uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
         uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
+        uniquenessReason: previousLeadId
+          ? `Повторная фиксация. Предыдущий лид #${previousLeadId} (${previousLeadInfo || 'закрыт'})`
+          : 'Повторная фиксация после закрытой',
         ...fixationFormFields,
       },
     });
 
-    // 2026-06-08: bug fix — раньше этот путь возвращал amoSyncStatus='SYNCED'
-    // без реальной отправки в amoCRM. В результате при повторной фиксации
-    // того же клиента (test 28) новый лид в amo НЕ создавался, а карточка
-    // в кабинете показывала «Уникален» без блока ошибки. Теперь шлём в amo
-    // как обычно + сохраняем amoLeadId.
+    const refixCommentParts: string[] = [];
+    if (data.propertyType) refixCommentParts.push(`Тип: ${data.propertyType}`);
+    if (data.roomsCount) refixCommentParts.push(`Комнат: ${data.roomsCount}`);
+    if (data.sqm) refixCommentParts.push(`Метраж: ${data.sqm} м²`);
+    if (data.amount) refixCommentParts.push(`Бюджет: ${data.amount.toLocaleString('ru-RU')} ₽`);
+    if (data.comment) refixCommentParts.unshift(data.comment);
+    const refixFullComment = refixCommentParts.join('. ');
+
     let amoSyncOk = true;
     let amoSyncError: string | null = null;
     let createdAmoLeadId: number | null = null;
-    const dupCommentParts: string[] = [];
-    if (data.propertyType) dupCommentParts.push(`Тип: ${data.propertyType}`);
-    if (data.roomsCount) dupCommentParts.push(`Комнат: ${data.roomsCount}`);
-    if (data.sqm) dupCommentParts.push(`Метраж: ${data.sqm} м²`);
-    if (data.amount) dupCommentParts.push(`Бюджет: ${data.amount.toLocaleString('ru-RU')} ₽`);
-    if (data.comment) dupCommentParts.unshift(data.comment);
-    dupCommentParts.push(`(повторная фиксация того же клиента, предыдущий Client ${existingClient.id})`);
-    const dupFullComment = dupCommentParts.join('. ');
     try {
+      // 2026-06-19: responsibleBroker — для координатора выбранный реальный,
+      // для обычного брокера = он сам.
       const resultLead = await this.amoCrmAdapter.createFixationRequest({
         clientPhone: data.phone,
         clientEmail: data.email,
         clientName: data.fullName,
         clientRegion: data.clientRegion,
         presentationSent: data.presentationSent,
-        brokerPhone: broker.phone,
-        brokerAmoContactId: broker.amoContactId ? Number(broker.amoContactId) : undefined,
+        brokerPhone: responsibleBroker.phone,
+        brokerAmoContactId: responsibleBroker.amoContactId ? Number(responsibleBroker.amoContactId) : undefined,
         agencyName: agency.name,
         agencyInn: agency.inn,
-        comment: dupFullComment,
+        comment: refixFullComment,
         project: data.project as Project,
         propertyType: data.propertyType,
         roomsCount: data.roomsCount,
@@ -693,12 +597,14 @@ export class ClientFixationService {
         purchaseTiming: data.purchaseTiming,
         readinessLevel: data.readinessLevel,
         fromBroker: true,
+        previousLeadId,
+        previousLeadInfo,
       });
       createdAmoLeadId = resultLead?.id ? Number(resultLead.id) : null;
     } catch (e: any) {
       amoSyncOk = false;
       amoSyncError = String(e?.message || e).slice(0, 500);
-      console.error('[fixClient duplicate] amo createFixationRequest failed:', amoSyncError);
+      console.error('[fixClient refix] amo createFixationRequest failed:', amoSyncError);
     }
 
     try {
@@ -713,45 +619,50 @@ export class ClientFixationService {
         } as any,
       });
     } catch (e: any) {
-      console.error('[fixClient duplicate] failed to update amoSyncStatus:', e?.message || e);
+      console.error('[fixClient refix] failed to update amoSyncStatus:', e?.message || e);
     }
 
-    // Прямой webhook в Morekit — как и в основном пути сценария 1.
     if (amoSyncOk && createdAmoLeadId) {
       const morekitUrl = await getSystemSetting(this.prisma, 'MOREKIT_WEBHOOK_URL');
       if (morekitUrl) {
         this.morekit.notifyFixation({
           id: String(createdAmoLeadId),
           agency: agency.name,
-          broker_id: broker.amoContactId ? String(broker.amoContactId) : '',
-          agent_name: broker.fullName,
-          agent_phone: morekitPhone(broker.phone),
-          agent_mail: broker.email || '',
+          broker_id: responsibleBroker.amoContactId ? String(responsibleBroker.amoContactId) : '',
+          agent_name: responsibleBroker.fullName,
+          agent_phone: morekitPhone(responsibleBroker.phone),
+          agent_mail: responsibleBroker.email || '',
           budget: data.amount ? String(data.amount) : '0',
           clients: [{ name: data.fullName, phone: morekitPhone(data.phone) }],
           type: data.propertyType || 'Квартира',
           lead_date: morekitLeadDate(),
           project: morekitProjectName(String(data.project)),
-        }, morekitUrl).catch((e) => console.error('[fixClient duplicate] morekit notify error:', e?.message || e));
+        }, morekitUrl).catch((e) => console.error('[fixClient refix] morekit notify error:', e?.message || e));
+        // 2026-06-16: refix-after-closed создаёт НОВЫЙ лид — синкаем
+        // responsible как и при первичной фиксации.
+        this.amoCrmAdapter
+          .syncLeadResponsibleFromLatestTask(createdAmoLeadId)
+          .catch((e) => console.error('[fixClient refix] sync lead responsible error:', e?.message || e));
       }
     }
 
     try {
       await this.logAudit(brokerId, 'CLIENT_FIXATION', 'Client', newClient.id, {
-        scenario: 'CONFIRMED_DUPLICATE',
+        scenario: 'REFIX_AFTER_CLOSED',
         phone: data.phone,
         previousClientId: existingClient.id,
+        previousLeadId,
         amoLeadId: createdAmoLeadId,
         amoSyncOk,
       });
     } catch (e: any) {
-      console.error('[fixClient duplicate] audit failed:', e?.message || e);
+      console.error('[fixClient refix] audit failed:', e?.message || e);
     }
 
     let managerContacts: any = undefined;
     if (!amoSyncOk) {
       try { managerContacts = await this.getManagerContacts(); }
-      catch (e: any) { console.error('[fixClient duplicate] getManagerContacts failed:', e?.message || e); }
+      catch (e: any) { console.error('[fixClient refix] getManagerContacts failed:', e?.message || e); }
     }
 
     return {
@@ -759,9 +670,262 @@ export class ClientFixationService {
       status: 'CONDITIONALLY_UNIQUE',
       amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
       message: amoSyncOk
-        ? 'Создана новая фиксация (дубликат). Истекает через 30 дней.'
-        : 'Создана новая фиксация (дубликат), но не передана в amoCRM. Менеджеры уведомлены.',
+        ? `Создана новая фиксация со ссылкой на предыдущую (${previousFixDate || 'закрыта'}). Истекает через 30 дней.`
+        : 'Создана новая фиксация, но не передана в amoCRM. Менеджеры уведомлены.',
       managerContacts,
+    };
+  }
+
+  /**
+   * 2026-06-11: Обработка RULE_1 / RULE_2 — выделено из fixClient чтобы
+   * срабатывать и для путей с existingClient (повторная фиксация того же
+   * брокера) и без него (новая фиксация). Раньше эта логика была вшита
+   * внутрь `if (!existingClient) {...}` — в результате при повторной
+   * фиксации того же клиента тем же брокером duplicate-confirmation flow
+   * создавал дубль amoCRM-лида минуя проверку amoVerdict.
+   *
+   * Что делает:
+   *   - existingClient есть → возвращаем его БЕЗ изменения статуса (брокер
+   *     не должен видеть «На проверке» если просто переподал свою же фиксацию).
+   *   - existingClient нет → создаём новый Client UNDER_REVIEW.
+   *   - На стороне amoCRM (target = trigger lead):
+   *     • RULE_1: прикрепить нового брокера контактом (POST /leads/{id}/link)
+   *     • Обоим правилам: длинная нота с заявкой + alarm-задача на ответственного триггер-лида
+   */
+  private async handleRule1Or2Alarm(params: {
+    amoVerdict: {
+      rule: 'RULE_1' | 'RULE_2' | 'RULE_3' | 'NO_CONFLICT' | 'RULE_EXCEPTION_AFTER_SALES_MEETING' | 'RULE_REJECT_SALES_DEAL';
+      reason: string;
+      contactId?: number;
+      leads?: any[];
+      triggerLeadId?: number;
+    };
+    data: any;
+    broker: any;
+    responsibleBroker: any;
+    agency: any;
+    brokerId: string;
+    existingClient: any | null;
+    fixationFormFields: any;
+  }): Promise<any> {
+    const { amoVerdict, data, broker, responsibleBroker, agency, brokerId, existingClient, fixationFormFields } = params;
+
+    // 2026-06-14: для RULE_1 (старый лид в КЦ до «Встреча проведена») новый
+    // брокер видит в кабинете «Уникален» — оба брокера могут параллельно
+    // фиксировать клиента, пока встреча не проведена. КЦ всё равно получает
+    // прикрепление контактом + ALARM-задачу. Для RULE_2 поведение прежнее
+    // («На проверке»).
+    //
+    // 2026-06-14 fix-2: КАЖДАЯ попытка фиксации создаёт отдельную запись
+    // Client — даже повторная от того же брокера. Раньше при существующем
+    // existingClient мы возвращали его как есть, и брокер не видел вторую
+    // попытку в списке кабинета (хотя в amoCRM прилетал второй ALARM).
+    //
+    // 2026-06-15 fix-3: повторным Client ОБЯЗАТЕЛЬНО ставим amoLeadId =
+    // triggerLeadId.
+    //
+    // 2026-06-17: для RULE_2 (КЦ 62907286 «Встреча назначена») вводим
+    // маркер RULE_2_KC_PENDING — он защищает Client от лифта в webhook
+    // PR #148 (attached → CONDITIONALLY_UNIQUE). Лифт сработает только
+    // когда КЦ продвинет лид к 142 «Встреча проведена» (и брокер всё
+    // ещё прикреплён). Это даёт КЦ время разобраться: проигравшего
+    // отдетачить (тогда он → REJECTED), победителя оставить.
+    const isRule1 = amoVerdict.rule === 'RULE_1';
+    const isRule2Kc =
+      amoVerdict.rule === 'RULE_2' &&
+      Array.isArray(amoVerdict.leads) &&
+      amoVerdict.leads.some(
+        (l: any) => l.id === amoVerdict.triggerLeadId && l.pipeline_id === 7600542 && l.status_id === 62907286,
+      );
+    const triggerLeadIdNum = amoVerdict.triggerLeadId ? Number(amoVerdict.triggerLeadId) : null;
+    const baseReason = existingClient
+      ? `Повторная фиксация. ${amoVerdict.reason}`
+      : `АЛАРМ из amoCRM: ${amoVerdict.reason}`;
+    const reasonWithMarker = isRule2Kc
+      ? `RULE_2_KC_PENDING:${triggerLeadIdNum || ''} ${baseReason}`
+      : baseReason;
+    const client = await this.prisma.client.create({
+      data: {
+        brokerId,
+        responsibleBrokerId: responsibleBroker.id,
+        phone: data.phone,
+        fullName: data.fullName,
+        email: data.email || null,
+        comment: data.comment,
+        project: data.project as any,
+        fixationAgencyId: agency?.id,
+        uniquenessStatus: isRule1
+          ? UniquenessStatus.CONDITIONALLY_UNIQUE
+          : UniquenessStatus.UNDER_REVIEW,
+        ...(isRule1 && {
+          uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
+        }),
+        ...(triggerLeadIdNum && { amoLeadId: BigInt(triggerLeadIdNum) }),
+        uniquenessReason: reasonWithMarker,
+        ...fixationFormFields,
+      },
+    });
+
+    try {
+      await this.logAudit(brokerId, 'CLIENT_FIXATION_CONFLICT', 'Client', client.id, {
+        scenario: 'AMO_UNIQUENESS_ALARM',
+        amoReason: amoVerdict.reason,
+        amoContactId: amoVerdict.contactId,
+        amoLeads: amoVerdict.leads,
+        isDuplicateFixation: !!existingClient,
+      });
+    } catch (e: any) {
+      console.error('[handleRule1Or2Alarm] audit failed:', e?.message || e);
+    }
+
+    if (amoVerdict.leads && amoVerdict.leads.length > 0) {
+      const targetLead =
+        amoVerdict.leads.find((l: any) => l.id === amoVerdict?.triggerLeadId) ||
+        amoVerdict.leads[0];
+      const projectName = ({ ZORGE9: 'Зорге 9', SILVER_BOR: 'Берзарина 37' } as Record<string, string>)[String(data.project)] || String(data.project);
+
+      // 2026-06-17: если триггер-лид в воронке продаж (например, sales
+      // «Встреча назначена» 62907158) — не пишем туда ничего. Правило
+      // от 15.06 «воронку продаж не трогаем» + уточнение 17.06: аларм
+      // создаётся только в КЦ-карточках 62907286. Client всё равно
+      // получит UNDER_REVIEW (уже создан выше).
+      const targetIsSalesPipeline = (
+        targetLead.pipeline_id === 7600546 ||  // Берзарина
+        targetLead.pipeline_id === 7600550 ||  // Зорге9
+        targetLead.pipeline_id === 7600554     // Толбухина
+      );
+      if (targetIsSalesPipeline) {
+        console.log(`[handleRule1Or2Alarm] targetLead ${targetLead.id} в sales-pipeline ${targetLead.pipeline_id} — пропускаем amo-записи (note/task/link)`);
+        return {
+          client,
+          status: isRule1 ? 'CONDITIONALLY_UNIQUE' : 'UNDER_REVIEW',
+          message: isRule1
+            ? `Клиент зафиксирован. КЦ уведомлены о параллельной фиксации.`
+            : `Клиент требует ручной проверки КЦ. ${amoVerdict.reason}`,
+        };
+      }
+
+      // Повторная фиксация ТЕМ ЖЕ брокером — он уже на лиде, не делаем
+      // повторный POST /leads/{id}/link (amo всё равно идемпотентно вернёт
+      // успех, но семантически бессмысленно).
+      //
+      // 2026-06-17: для RULE_2 КЦ MEETING_SCHEDULED (62907286) тоже
+      // прикрепляем брокера B контактом — чтобы КЦ-менеджер сразу видел
+      // в карточке всех претендентов. Маркер RULE_2_KC_PENDING защищает
+      // от автолифта в webhook.
+      // 2026-06-19: к лиду цепляем РЕАЛЬНОГО брокера (responsibleBroker),
+      // а не координатора. Для обычного брокера responsibleBroker = он сам.
+      const isSameBrokerRefix = !!(existingClient && existingClient.brokerId === brokerId);
+      const shouldAttach = (isRule1 || isRule2Kc) && responsibleBroker.amoContactId && !isSameBrokerRefix;
+      if (shouldAttach) {
+        try {
+          await this.amoCrmAdapter.linkContactToLead(
+            targetLead.id,
+            Number(responsibleBroker.amoContactId),
+          );
+          console.log(`[handleRule1Or2Alarm] брокер ${responsibleBroker.amoContactId} прикреплён к лиду ${targetLead.id} (rule=${amoVerdict.rule})`);
+        } catch (e: any) {
+          console.error(`[handleRule1Or2Alarm] linkContactToLead failed для лида ${targetLead.id}:`, e?.message || e);
+        }
+      }
+
+      // 2026-06-14: заголовок ноты зависит от того, кто фиксирует —
+      // ДРУГОЙ брокер пришёл на чужого клиента (новый контакт на лиде)
+      // ИЛИ тот же брокер заново подал заявку (нужно КЦ уведомление,
+      // но это не «новый брокер» — текст другой).
+      // 2026-07-03: отдельная ветка для «Фиксирую на другого брокера» —
+      // creator (А, broker) и executor (Б, responsibleBroker) разные, но
+      // с точки зрения brokerId у клиента это тот же А. Раньше это
+      // попадало в isSameBrokerRefix и в ноте писалось «повторная
+      // фиксация тем же брокером», что вводило КЦ в заблуждение.
+      const isDelegatedRefix = isSameBrokerRefix && responsibleBroker.id !== broker.id;
+      const lines: string[] = [];
+      if (isDelegatedRefix) {
+        lines.push(`⚠️ АЛАРМ — брокер ${broker.fullName} фиксирует уникальность на клиента через брокера ${responsibleBroker.fullName} (делегирование).`);
+      } else if (isSameBrokerRefix) {
+        lines.push(`⚠️ АЛАРМ — повторная фиксация ТЕМ ЖЕ брокером на этого клиента.`);
+      } else if (isRule1) {
+        lines.push(`⚠️ АЛАРМ — новый брокер на этом клиенте. Прикреплён к лиду контактом.`);
+      } else {
+        lines.push(`⚠️ ПОДТВЕРДИТЬ УНИКАЛЬНОСТЬ — клиент уже активен в этом или другом лиде`);
+      }
+      lines.push(`Причина: ${amoVerdict.reason}`);
+      lines.push(``);
+      lines.push(`Клиент: ${data.fullName}`);
+      lines.push(`Телефон: ${data.phone}`);
+      if (data.email) lines.push(`Email: ${data.email}`);
+      lines.push(``);
+      lines.push(`Проект: ${projectName}`);
+      if (data.propertyType) lines.push(`Тип: ${data.propertyType}`);
+      if (data.roomsCount) lines.push(`Комнат: ${data.roomsCount}`);
+      if (data.sqm) lines.push(`Метраж: ${data.sqm} м²`);
+      if (data.amount) lines.push(`Бюджет: ${data.amount.toLocaleString('ru-RU')} ₽`);
+      if (data.purchaseTiming) lines.push(`Планирует покупку: ${data.purchaseTiming}`);
+      if (data.readinessLevel) lines.push(`Готовность к сделке: ${data.readinessLevel}`);
+      lines.push(``);
+      // 2026-06-19: для координатора пишем РЕАЛЬНОГО брокера, плюс кто
+      // фактически нажал submit (если это разные люди).
+      lines.push(`Брокер-агент: ${responsibleBroker.fullName} (${responsibleBroker.phone})`);
+      if (broker.id !== responsibleBroker.id) {
+        lines.push(`Подал координатор: ${broker.fullName} (${broker.phone})`);
+      }
+      lines.push(`Агентство: ${agency.name} (ИНН ${agency.inn})`);
+      if (data.comment) {
+        lines.push(``);
+        lines.push(`Комментарий брокера: ${data.comment}`);
+      }
+      console.log(`[handleRule1Or2Alarm] пишу alarm-нота + задача в КЦ-лид ${targetLead.id} (pipeline=${targetLead.pipeline_id} status=${targetLead.status_id})`);
+      try {
+        await this.amoCrmAdapter.addNoteToLead(targetLead.id, lines.join('\n'));
+        console.log(`[handleRule1Or2Alarm] note записана в лид ${targetLead.id}`);
+      } catch (e: any) {
+        console.error(`[handleRule1Or2Alarm] note failed для лида ${targetLead.id}:`, e?.message || e);
+      }
+
+      // 2026-07-06: КЦ попросил обычную зелёную задачу «Звонок» (taskTypeId=1)
+      // вместо кастомного розового «Аларм» (2393839) — читается легче,
+      // не пугает. Env AMO_ALARM_TASK_TYPE_ID оставлен как override, если
+      // понадобится вернуть красный вид.
+      const ALARM_TASK_TYPE_ID = Number(process.env.AMO_ALARM_TASK_TYPE_ID || 1);
+      const taskText = isDelegatedRefix
+        ? `Делегированная фиксация: ${broker.fullName} (${broker.phone}) оформил уникальность на клиента ${data.fullName} (${data.phone}) на брокера ${responsibleBroker.fullName} (${responsibleBroker.phone}). Проверить, нужно ли вмешательство КЦ.`
+        : isSameBrokerRefix
+          ? `Повторная фиксация тем же брокером — ${responsibleBroker.fullName} (${responsibleBroker.phone}) ещё раз подал клиента ${data.fullName} (${data.phone}). Проверить, нужно ли вмешательство КЦ.`
+          : isRule1
+            ? `Новый брокер на клиенте ${data.fullName} (${data.phone}). Брокер ${responsibleBroker.fullName} (${responsibleBroker.phone}) прикреплён к лиду контактом.`
+            : `Подтвердить уникальность — клиент ${data.fullName} (${data.phone}) уже в активной стадии, новый брокер ${responsibleBroker.fullName} (${responsibleBroker.phone}) пытается зафиксировать.`;
+      try {
+        let leadResponsibleUserId: number | undefined;
+        try {
+          const fullLead = await this.amoCrmAdapter.getLead(targetLead.id);
+          leadResponsibleUserId = (fullLead as any)?.responsible_user_id;
+        } catch (e: any) {
+          console.warn('[handleRule1Or2Alarm] getLead failed, fallback:', e?.message || e);
+        }
+        const envFallback = process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
+        const taskResponsibleUserId = leadResponsibleUserId
+          || (envFallback ? Number(envFallback) : undefined);
+        await this.amoCrmAdapter.createTask({
+          text: taskText,
+          entityType: 'leads',
+          entityId: targetLead.id,
+          taskTypeId: ALARM_TASK_TYPE_ID,
+          completeTillSec: Math.floor(Date.now() / 1000) + 30 * 60,
+          responsibleUserId: taskResponsibleUserId,
+        });
+      } catch (e: any) {
+        console.error('[handleRule1Or2Alarm] task failed:', e?.message || e);
+      }
+    }
+
+    return {
+      client,
+      status: isRule1 ? 'CONDITIONALLY_UNIQUE' : 'UNDER_REVIEW',
+      message: existingClient
+        ? `Клиент зафиксирован повторно. КЦ уведомлены о вашем запросе.`
+        : (isRule1
+          ? `Клиент зафиксирован. КЦ уведомлены о параллельной фиксации.`
+          : `Клиент требует ручной проверки КЦ. ${amoVerdict.reason}`),
     };
   }
 
@@ -781,14 +945,32 @@ export class ClientFixationService {
     const limit = Number(query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    const where: any = { brokerId };
+    // 2026-06-29: брокер видит свои клиенты (brokerId == свой) И клиенты,
+    // которых ему назначили координатором (responsibleBrokerId == свой,
+    // brokerId != свой). До этой правки responsibleBroker не видел клиентов
+    // которые ему назначил координатор — это был баг.
+    const ownershipFilter: any = {
+      OR: [
+        { brokerId },
+        { responsibleBrokerId: brokerId },
+      ],
+    };
+    const where: any = { ...ownershipFilter };
     if (query.status) where.uniquenessStatus = query.status;
     if (query.project) where.project = query.project;
     if (query.search) {
-      where.OR = [
-        { fullName: { contains: query.search, mode: 'insensitive' } },
-        { phone: { contains: query.search } },
+      // 2026-06-29: phone-поиск через нормализацию (см. brokers-import.helper).
+      // "8925" и "+7925" дают одинаковый результат.
+      // Search OR должен идти ВНУТРИ AND с ownership-фильтром, иначе нарушим
+      // ownership (брокер увидит чужих клиентов с похожим телефоном).
+      where.AND = [
+        ownershipFilter,
+        { OR: [
+          { fullName: { contains: query.search, mode: 'insensitive' } },
+          ...buildPhoneSearchConditions(query.search),
+        ]},
       ];
+      delete where.OR;
     }
 
     const orderBy: any = {};
@@ -797,7 +979,13 @@ export class ClientFixationService {
     const [clients, total] = await Promise.all([
       this.prisma.client.findMany({
         where,
-        include: { deals: { select: { id: true, status: true, amount: true } } },
+        include: {
+          deals: { select: { id: true, status: true, amount: true } },
+          // 2026-06-29: тянем broker и responsibleBroker — нужны для
+          // подписи «Завёл координатор X» / «Зафиксировано на Y» в UI.
+          broker: { select: { id: true, fullName: true, phone: true, isCoordinator: true } },
+          responsibleBroker: { select: { id: true, fullName: true, phone: true } },
+        },
         skip,
         take: limit,
         orderBy,
@@ -814,13 +1002,252 @@ export class ClientFixationService {
     };
   }
 
+  // 2026-06-19: список брокеров для выбора «реального ответственного» в
+  // форме фиксации у координатора.
+  // 2026-06-29 (правка): координатор может выбирать брокера из ЛЮБОГО
+  // агентства, не только своего. Плюс поиск по телефону теперь работает
+  // через нормализацию: «8925…», «+7925…», «79255724188» — все одинаково
+  // находят брокера с phone='+79255724188' в БД.
+  async getAgencyColleagues(currentBrokerId: string, search: string) {
+    const me = await this.prisma.broker.findUnique({
+      where: { id: currentBrokerId },
+      select: { id: true },
+    });
+    if (!me) return { brokers: [] };
+
+    const searchTrim = (search || '').trim();
+    const where: any = {
+      status: 'ACTIVE',
+      // Сам себя в списке тоже показываем — координатор может зафиксировать
+      // и на себя через тот же интерфейс. Фронт сам помечает «это вы».
+    };
+    if (searchTrim.length >= 2) {
+      where.OR = [
+        { fullName: { contains: searchTrim, mode: 'insensitive' } },
+        // 2026-06-29: используем единый helper (см. brokers-import.helper).
+        ...buildPhoneSearchConditions(searchTrim),
+      ];
+    }
+    const brokers = await this.prisma.broker.findMany({
+      where,
+      select: { id: true, fullName: true, phone: true, isCoordinator: true },
+      orderBy: { fullName: 'asc' },
+      take: 50,
+    });
+    return { brokers };
+  }
+
+  // 2026-06-29 (refactor): список агентств брокера для формы «создать
+  // нового брокера» при фиксации. Доступно любому брокеру — флаг
+  // координатора убран по решению заказчика.
+  async getMyAgencies(currentBrokerId: string) {
+    const me = await this.prisma.broker.findUnique({
+      where: { id: currentBrokerId },
+      select: {
+        brokerAgencies: {
+          select: {
+            isPrimary: true,
+            agency: { select: { id: true, name: true, inn: true } },
+          },
+        },
+      },
+    });
+    if (!me) return { agencies: [] };
+    const agencies = me.brokerAgencies.map((ba) => ({
+      id: ba.agency.id,
+      name: ba.agency.name,
+      inn: ba.agency.inn,
+      isPrimary: ba.isPrimary,
+    }));
+    return { agencies };
+  }
+
+  // 2026-06-29 (refactor): любой брокер может создать нового брокера
+  // прямо из формы фиксации (раздел «Брокер» с вариантом «на другого»).
+  // Новый привязывается к выбранному агентству создателя. Если брокер
+  // с этим номером уже существует — молча возвращаем его (вариант
+  // согласованный с заказчиком).
+  async createBrokerByCreator(
+    creatorId: string,
+    data: { fullName: string; phone: string; email?: string },
+  ) {
+    // 2026-07-01: agencyId и customInn убраны — новый брокер автоматически
+    // привязывается к PRIMARY агентству того кто фиксирует.
+    const creator = await this.prisma.broker.findUnique({
+      where: { id: creatorId },
+      select: {
+        id: true,
+        fullName: true,
+        brokerAgencies: {
+          include: { agency: { select: { id: true, name: true, inn: true } } },
+          orderBy: { isPrimary: 'desc' },
+        },
+      },
+    });
+    if (!creator) throw new NotFoundException('Creator not found');
+
+    // 2026-07-02: дубль по телефону ИЛИ по email → молча возвращаем existing.
+    // Раньше email давал 400 → блокировало фиксацию. Теперь одинаково с телефоном:
+    // если брокер уже есть в системе, просто используем его как ответственного
+    // (как и написано в подсказке под формой — «Если брокер с этим номером уже
+    // зарегистрирован — заявка автоматически уйдёт на него»).
+    const existingByPhone = await this.prisma.broker.findUnique({
+      where: { phone: data.phone },
+      select: { id: true, fullName: true, phone: true, email: true, isCoordinator: true },
+    });
+    if (existingByPhone) {
+      return { broker: existingByPhone, created: false };
+    }
+    if (data.email) {
+      const existingByEmail = await this.prisma.broker.findFirst({
+        where: { email: data.email },
+        select: { id: true, fullName: true, phone: true, email: true, isCoordinator: true },
+      });
+      if (existingByEmail) {
+        return { broker: existingByEmail, created: false };
+      }
+    }
+
+    // Primary агентство creator — сначала isPrimary=true, потом первое.
+    const primaryLink = creator.brokerAgencies.find((ba) => ba.isPrimary) || creator.brokerAgencies[0];
+    if (!primaryLink) {
+      throw new BadRequestException({
+        message: 'У вас не привязано агентство — сначала укажите ИНН агентства в профиле',
+      });
+    }
+    const agency = primaryLink.agency;
+    if (!agency) throw new NotFoundException('Primary agency not found');
+
+    // 2026-07-01: сначала создаём Broker в БД + BrokerAgency, потом
+    // единый amo-синк через brokerToAmoContactFields (все 13 полей,
+    // без дублей контакта по phone), потом отдельно лид в воронке.
+    const broker = await this.prisma.broker.create({
+      data: {
+        phone: data.phone,
+        fullName: data.fullName,
+        email: data.email || null,
+        status: 'PENDING' as any,
+        source: 'BROKER_CABINET',
+      },
+    });
+    await this.prisma.brokerAgency.create({
+      data: { brokerId: broker.id, agencyId: agency.id, isPrimary: true },
+    });
+
+    // Синк контакта в amoCRM. Ищем по phone → если есть, обновляем; если
+    // нет, создаём. Дубля контакта не будет. Все 13 полей передаются
+    // через brokerToAmoContactFields.
+    let amoContactId: number | undefined;
+    try {
+      const brokerWithAgency = await this.prisma.broker.findUnique({
+        where: { id: broker.id },
+        include: {
+          brokerAgencies: { where: { isPrimary: true }, include: { agency: true }, take: 1 },
+        },
+      });
+      if (brokerWithAgency) {
+        const primaryAgency = brokerWithAgency.brokerAgencies[0]?.agency || null;
+        const customFields = brokerToAmoContactFields(brokerWithAgency, primaryAgency);
+        const payload = { name: brokerWithAgency.fullName, custom_fields_values: customFields } as any;
+
+        const existingAmo = await this.amoCrmAdapter.findBrokerContactByPhone(data.phone);
+        if (existingAmo) {
+          amoContactId = existingAmo.id;
+          await this.amoCrmAdapter.updateContact(existingAmo.id, payload);
+        } else {
+          const created = await this.amoCrmAdapter.createContact(payload);
+          if (created?.id) amoContactId = created.id;
+        }
+
+        if (amoContactId) {
+          await this.prisma.broker.update({
+            where: { id: broker.id },
+            data: { amoContactId: BigInt(amoContactId) },
+          });
+        }
+      }
+    } catch (e: any) {
+      console.error('[createBrokerByCreator] amo contact sync failed:', e?.message || e);
+    }
+
+    // Отдельно: лид в воронке брокеров + note + задача КЦ.
+    // Название лида — «{новый брокер} (завёл {creator})» — чтобы КЦ
+    // сразу видел откуда лид. Задача КЦ создаётся ВСЕГДА, даже если
+    // контакт уже был в amoCRM.
+    try {
+      await this.amoCrmAdapter.createBrokerLeadFromLanding({
+        brokerName: data.fullName,
+        brokerPhone: data.phone,
+        brokerEmail: data.email || null,
+        source: 'FIXATION_BY_OTHER_BROKER',
+        note: `Брокера зарегистрировал партнёр ${creator.fullName}. Агентство: ${agency.name} (ИНН ${agency.inn}).`,
+        existingContactId: amoContactId,
+        leadName: `${data.fullName} (завёл ${creator.fullName})`,
+      });
+    } catch (e: any) {
+      console.error('[createBrokerByCreator] amo lead+task failed:', e?.message || e);
+    }
+
+    // Аудит: брокер завёл другого брокера.
+    try {
+      await this.logAudit(creatorId, 'BROKER_CREATE_BROKER', 'Broker', broker.id, {
+        creatorName: creator.fullName,
+        agencyId: agency.id,
+        agencyName: agency.name,
+        phone: data.phone,
+      });
+    } catch (e: any) {
+      console.error('[createBrokerByCreator] audit failed:', e?.message || e);
+    }
+
+    // Welcome-email с приглашением через очередь нотификаций (если email есть).
+    if (data.email) {
+      try {
+        await this.notificationQueue.add('email', {
+          to: data.email,
+          subject: 'Вас зарегистрировали в St Michael',
+          body: `Здравствуйте, ${data.fullName}!\n\n`
+            + `Вас зарегистрировал партнёр агентства "${agency.name}" — ${creator.fullName}.\n\n`
+            + `Чтобы войти в личный кабинет:\n`
+            + `1. Перейдите на https://broker.stmichael.ru/forgot-password\n`
+            + `2. Введите ваш телефон ${data.phone}\n`
+            + `3. На этот email придёт ссылка для установки пароля\n`
+            + `4. После установки пароля войдите на https://broker.stmichael.ru/login\n\n`
+            + `Если возникнут вопросы — горячая линия отдела партнёров: +7 (499) 226-22-49 (ежедневно с 9:00 до 21:00).\n\n`
+            + `С уважением,\nкоманда St Michael`,
+        });
+      } catch (e: any) {
+        console.error('[createBrokerByCreator] welcome email enqueue failed:', e?.message || e);
+      }
+    }
+
+    return {
+      broker: {
+        id: broker.id,
+        fullName: broker.fullName,
+        phone: broker.phone,
+        email: broker.email,
+      },
+      created: true,
+    };
+  }
+
+  // 2026-06-29 (refactor): методы getMyCreatedBrokers /
+  // resendCoordinatorWelcomeEmail / deleteCreatedBroker удалены вместе
+  // со страницей /my-brokers. История доступна в git: PR #194 / #197.
+
   async getClient(id: string, brokerId: string) {
     const client = await this.prisma.client.findUnique({
       where: { id },
       include: {
         deals: { include: { lot: true, agency: true } },
         meetings: true,
-        broker: { select: { id: true, fullName: true, phone: true } },
+        // 2026-06-29: broker — это тот кто создал заявку (как правило
+        // координатор), а responsibleBroker — фактический ответственный
+        // (тот, на кого фиксируем). Нужны оба чтобы показать «Завёл я» /
+        // «Завёл координатор X» в карточке клиента.
+        broker: { select: { id: true, fullName: true, phone: true, isCoordinator: true } },
+        responsibleBroker: { select: { id: true, fullName: true, phone: true } },
       },
     });
 
@@ -828,8 +1255,12 @@ export class ClientFixationService {
       throw new NotFoundException('Client not found');
     }
 
-    // Brokers can only see their own clients; managers/admins can see all
-    if (client.brokerId !== brokerId) {
+    // Brokers can only see their own clients; managers/admins can see all.
+    // 2026-06-29: also allow access if I am responsibleBroker (case when
+    // a coordinator created this client and assigned me as responsible).
+    const iAmOwner = client.brokerId === brokerId;
+    const iAmResponsible = client.responsibleBrokerId === brokerId;
+    if (!iAmOwner && !iAmResponsible) {
       const requester = await this.prisma.broker.findUnique({ where: { id: brokerId } });
       if (requester?.role === 'BROKER') {
         throw new NotFoundException('Client not found');

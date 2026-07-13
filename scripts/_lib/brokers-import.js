@@ -95,7 +95,23 @@ function mapRow(row) {
     resultStr === 'Отказ от коммуникации' ||
     zorgeStr === 'Просил не звонить';
 
-  return { name, phoneRaw, callFlag, category, callResult: mapped.result, zorgeResult, comment, doNotCall, resultStr, zorgeStr };
+  // 2026-07-06: специализация — ищем коммерческие маркеры в комментарии,
+  // имени, поле «Результат». Одного совпадения достаточно, чтобы пометить
+  // брокера как COMM. Иначе null (не трогаем то, что уже стоит в БД).
+  const COMM_KEYWORDS = /(комм(?:ерц|\.|ерческ)|komm|commercial|офис|склад|торгов|нежил|ритейл|retail)/i;
+  const specialization = [comment, name, resultStr, zorgeStr]
+    .some((s) => s && COMM_KEYWORDS.test(String(s)))
+    ? 'COMM'
+    : null;
+
+  // 2026-07-09: региональный признак — КЦ пишет «регион», «региональ» в
+  // комментарии. Отдельно от specialization: региональный может быть
+  // одновременно коммерческим или жилым.
+  const REGIONAL_KEYWORDS = /(регион(?:аль|ы|а|)?|из\s+регион|региональ)/i;
+  const isRegional = [comment, name, resultStr, zorgeStr]
+    .some((s) => s && REGIONAL_KEYWORDS.test(String(s)));
+
+  return { name, phoneRaw, callFlag, category, callResult: mapped.result, zorgeResult, comment, doNotCall, resultStr, zorgeStr, specialization, isRegional };
 }
 
 function mapCoordRow(row) {
@@ -230,6 +246,19 @@ async function runImport(opts) {
             baseSource,
             doNotCall: existing.doNotCall || c.doNotCall,
             fullName: existing.fullName || c.name || '(без имени)',
+            // 2026-07-06: специализация — если Google говорит COMM, а у нас
+            // ещё не задана, ставим. Не затираем существующее (например
+            // RESIDENTIAL или BOTH — брокер сам мог указать).
+            ...(c.specialization && !existing.specialization
+              ? { specialization: c.specialization }
+              : {}),
+            // 2026-07-09: региональный признак — OR. Если Google сказал
+            // regional и у нас ещё false — ставим true. Обратно не
+            // «размагничиваем»: если брокер уже помечен как регионал,
+            // отсутствие ключевого слова в новой строке не сбрасывает.
+            ...(c.isRegional && !existing.isRegional
+              ? { isRegional: true }
+              : {}),
           },
         });
         brokerId = existing.id;
@@ -245,6 +274,8 @@ async function runImport(opts) {
             isInBase: true,
             baseSource,
             doNotCall: c.doNotCall,
+            ...(c.specialization ? { specialization: c.specialization } : {}),
+            ...(c.isRegional ? { isRegional: true } : {}),
           },
         });
         brokerId = created.id;

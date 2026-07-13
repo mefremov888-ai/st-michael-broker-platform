@@ -17,6 +17,8 @@ import { AuthModule } from '../auth/auth.module';
   ],
   controllers: [AdminController],
   providers: [AdminService, BrokerImportJobsService, GoogleSheetsSyncService],
-  exports: [GoogleSheetsSyncService],
+  // 2026-07-06: AdminService экспортируется — SchedulerService дёргает его
+  // importBrokersFromAmo раз в сутки (см. handleAmoBrokersSync).
+  exports: [GoogleSheetsSyncService, AdminService],
 })
 export class AdminModule {}

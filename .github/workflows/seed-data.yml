@@ -27,6 +27,18 @@ on:
           - list-amo-users
           - inspect-contact
           - list-contact-fields
+          - inspect-recent-fixations
+          - inspect-broker-attachment
+          - inspect-amo-webhooks
+          - setup-amo-webhook
+          - test-smtp-send
+          - update-smtp-creds
+          - update-amo-meetings-manager
+          - backfill-client-amo-lead-id
+          - force-sync-lead
+          - api-logs
+          - find-test-leads
+          - full-backup
       admin_phone:
         description: 'Телефон админа (для task=create-admin), формат +7XXXXXXXXXX'
         required: false
@@ -46,6 +58,29 @@ on:
       contact_id:
         description: 'ID контакта amoCRM (для task=inspect-contact)'
         required: false
+      email:
+        description: 'Email брокера (для task=inspect-broker-attachment, проверка forgot-password)'
+        required: false
+      smtp_user:
+        description: 'SMTP логин (для update-smtp-creds). Для Exchange формат stmichael\broker_st'
+        required: false
+      smtp_pass:
+        description: 'SMTP пароль (для update-smtp-creds). Скрыт в логах.'
+        required: false
+      amo_user_id:
+        description: 'amoCRM user_id (для update-amo-meetings-manager). Узнать через task=list-amo-users.'
+        required: false
+      amo_meeting_task_type_id:
+        description: 'amoCRM task_type_id «Встреча» (опционально, default=2)'
+        required: false
+      apply:
+        description: 'true = реально применить backfill. По умолчанию dry-run.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   run:
@@ -121,6 +156,177 @@ jobs:
                 exit 1
               fi
               $COMPOSE_CMD exec -T -e LEAD_ID="${{ inputs.lead_id }}" api node /app/scripts/inspect-lead.js
+            fi
+
+            if [ "$TASK" = "inspect-recent-fixations" ]; then
+              echo "=== inspect-recent-fixations (последние 5 Client из БД с amoSyncError) ==="
+              $COMPOSE_CMD exec -T -e LIMIT=5 api node /app/scripts/inspect-recent-fixations.js
+            fi
+
+            if [ "$TASK" = "inspect-broker-attachment" ]; then
+              echo "=== inspect-broker-attachment (диагностика прикрепления брокера или forgot-password) ==="
+              if [ -z "${{ inputs.phone }}" ] && [ -z "${{ inputs.email }}" ]; then
+                echo "ERROR: укажи phone (для проверки фиксации) ИЛИ email (для проверки forgot-password)"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T \
+                -e PHONE="${{ inputs.phone }}" \
+                -e EMAIL="${{ inputs.email }}" \
+                api node /app/scripts/inspect-broker-attachment.js
+            fi
+
+            if [ "$TASK" = "inspect-amo-webhooks" ]; then
+              echo "=== inspect-amo-webhooks (список настроенных webhook'ов в amoCRM) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/inspect-amo-webhooks.js
+            fi
+
+            if [ "$TASK" = "setup-amo-webhook" ]; then
+              echo "=== setup-amo-webhook (регистрация webhook'а amoCRM → /api/webhooks/amo/lead-update) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/setup-amo-webhook.js
+            fi
+
+            if [ "$TASK" = "test-smtp-send" ]; then
+              echo "=== test-smtp-send (реальная отправка тестового SMTP-письма) ==="
+              if [ -z "${{ inputs.email }}" ]; then
+                echo "ERROR: email обязателен — на этот адрес попробуем отправить тестовое письмо"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e TEST_EMAIL="${{ inputs.email }}" api node /app/scripts/test-smtp-send.js
+            fi
+
+            if [ "$TASK" = "update-smtp-creds" ]; then
+              echo "=== update-smtp-creds (обновить SMTP_USER/SMTP_PASS в .env + restart api) ==="
+              if [ -z "${{ inputs.smtp_user }}" ] || [ -z "${{ inputs.smtp_pass }}" ]; then
+                echo "ERROR: smtp_user и smtp_pass обязательны"
+                exit 1
+              fi
+              echo "::add-mask::${{ inputs.smtp_pass }}"
+              if [ ! -f .env ]; then
+                echo "ERROR: .env не найден в $(pwd)"
+                exit 1
+              fi
+              # Бэкап перед правкой — на случай отката.
+              cp .env ".env.bak.$(date +%s)"
+              # Экранирование значений для sed replacement: \, &, |, / → \X.
+              # Для Exchange логина 'stmichael\broker_st' это критично, иначе \b сожрётся.
+              SMTP_USER_NEW='${{ inputs.smtp_user }}'
+              SMTP_PASS_NEW='${{ inputs.smtp_pass }}'
+              SMTP_USER_ESC=$(printf '%s' "$SMTP_USER_NEW" | sed -e 's/[&|\\/]/\\&/g')
+              SMTP_PASS_ESC=$(printf '%s' "$SMTP_PASS_NEW" | sed -e 's/[&|\\/]/\\&/g')
+              if grep -q '^SMTP_USER=' .env; then
+                sed -i "s|^SMTP_USER=.*|SMTP_USER=$SMTP_USER_ESC|" .env
+              else
+                printf '\nSMTP_USER=%s\n' "$SMTP_USER_NEW" >> .env
+              fi
+              if grep -q '^SMTP_PASS=' .env; then
+                sed -i "s|^SMTP_PASS=.*|SMTP_PASS=$SMTP_PASS_ESC|" .env
+              else
+                printf 'SMTP_PASS=%s\n' "$SMTP_PASS_NEW" >> .env
+              fi
+              echo "SMTP_USER/SMTP_PASS записаны в .env"
+              # 2026-06-15 fix: docker compose restart НЕ перечитывает .env —
+              # env-переменные подставляются в config при СОЗДАНИИ контейнера.
+              # Нужно --force-recreate чтобы compose заново подставил ${SMTP_USER}.
+              echo "Recreate api container с новыми env..."
+              $COMPOSE_CMD up -d --force-recreate --no-deps api
+              echo "Готово. Запусти test-smtp-send чтобы проверить, что AUTH проходит."
+            fi
+
+            if [ "$TASK" = "update-amo-meetings-manager" ]; then
+              echo "=== update-amo-meetings-manager (set AMO_BROKER_MEETINGS_MANAGER_ID) ==="
+              AMO_USER_ID='${{ inputs.amo_user_id }}'
+              AMO_TASK_TYPE_ID='${{ inputs.amo_meeting_task_type_id }}'
+              test -n "$AMO_USER_ID" || { echo "ERROR: amo_user_id is required"; exit 1; }
+              test -f .env || { echo "ERROR: .env not found in $(pwd)"; exit 1; }
+              cp .env ".env.bak.$(date +%s)"
+              grep -q '^AMO_BROKER_MEETINGS_MANAGER_ID=' .env \
+                && sed -i "s|^AMO_BROKER_MEETINGS_MANAGER_ID=.*|AMO_BROKER_MEETINGS_MANAGER_ID=$AMO_USER_ID|" .env \
+                || printf '\nAMO_BROKER_MEETINGS_MANAGER_ID=%s\n' "$AMO_USER_ID" >> .env
+              echo "AMO_BROKER_MEETINGS_MANAGER_ID=$AMO_USER_ID written"
+              if [ -n "$AMO_TASK_TYPE_ID" ]; then
+                grep -q '^AMO_MEETING_TASK_TYPE_ID=' .env \
+                  && sed -i "s|^AMO_MEETING_TASK_TYPE_ID=.*|AMO_MEETING_TASK_TYPE_ID=$AMO_TASK_TYPE_ID|" .env \
+                  || printf 'AMO_MEETING_TASK_TYPE_ID=%s\n' "$AMO_TASK_TYPE_ID" >> .env
+                echo "AMO_MEETING_TASK_TYPE_ID=$AMO_TASK_TYPE_ID written"
+              fi
+              echo "Recreate api container..."
+              $COMPOSE_CMD up -d --force-recreate --no-deps api
+              echo "Done. Brokers will see Ksenia's busy slots from amoCRM and meeting tasks will be created in her calendar."
+            fi
+
+            if [ "$TASK" = "api-logs" ]; then
+              echo "=== api-logs ==="
+              FILTER='${{ inputs.phone }}'
+              : ${FILTER:=__noFilter__}
+              echo "--- filter: $FILTER ---"
+              $COMPOSE_CMD logs --tail 2000 api 2>&1 | tail -300 | grep -i -E "(handleRule|fixClient|Alarm|alarm|note|task|amo |webhook|$FILTER)" | tail -150 || true
+            fi
+
+            if [ "$TASK" = "force-sync-lead" ]; then
+              echo "=== force-sync-lead ==="
+              LEAD_ID_VAL='${{ inputs.lead_id }}'
+              : ${LEAD_ID_VAL:=}
+              if [ -z "$LEAD_ID_VAL" ]; then
+                echo "ERROR: укажи lead_id"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e LEAD_ID="$LEAD_ID_VAL" api node /app/scripts/force-sync-lead.js
+            fi
+
+            if [ "$TASK" = "backfill-client-amo-lead-id" ]; then
+              echo "=== backfill-client-amo-lead-id ==="
+              APPLY_VAL='${{ inputs.apply }}'
+              : ${APPLY_VAL:=false}
+              $COMPOSE_CMD exec -T -e APPLY="$APPLY_VAL" api node /app/scripts/backfill-client-amo-lead-id.js
+            fi
+
+            if [ "$TASK" = "full-backup" ]; then
+              # 2026-06-18: `set -e` + script_stop:true валят весь скрипт когда
+              # `tar uploads` возвращает 2 (даже внутри if). Бэкап делает best-effort
+              # — лучше пропустить отсутствующий uploads чем потерять весь dump.
+              set +e
+              echo "=== full-backup (БД + uploads + .env → /var/backups/stmichael) ==="
+              BACKUP_DIR=/var/backups/stmichael
+              sudo mkdir -p "$BACKUP_DIR"
+              TS=$(date -u +%Y%m%d-%H%M%S)
+              TMP=$(mktemp -d)
+
+              echo "→ pg_dump (через postgres-контейнер — env \$POSTGRES_USER/DB доступны внутри)"
+              $COMPOSE_CMD exec -T postgres bash -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
+                | gzip > "$TMP/db-$TS.sql.gz"
+              echo "  размер dump: $(du -h "$TMP/db-$TS.sql.gz" | cut -f1)"
+
+              echo "→ tar uploads (если есть)"
+              if tar -czf "$TMP/uploads-$TS.tar.gz" uploads 2>/dev/null; then
+                echo "  размер uploads: $(du -h "$TMP/uploads-$TS.tar.gz" | cut -f1)"
+              else
+                rm -f "$TMP/uploads-$TS.tar.gz"
+                echo "  uploads/ не найден или пустой — пропускаю"
+              fi
+
+              echo "→ копирую .env"
+              if cp .env "$TMP/.env.$TS" 2>/dev/null; then
+                echo "  .env скопирован"
+              else
+                echo "  .env не найден — пропускаю"
+              fi
+
+              echo "→ собираю tarball"
+              tar -czf "$BACKUP_DIR/backup-$TS.tar.gz" -C "$TMP" .
+              rm -rf "$TMP"
+
+              # Чистим бэкапы старше 14 дней
+              find "$BACKUP_DIR" -name "backup-*.tar.gz" -mtime +14 -delete 2>/dev/null || true
+
+              ls -lh "$BACKUP_DIR/backup-$TS.tar.gz"
+              sha256sum "$BACKUP_DIR/backup-$TS.tar.gz"
+              echo "✓ Бэкап готов: $BACKUP_DIR/backup-$TS.tar.gz"
+              set -e
+            fi
+
+            if [ "$TASK" = "find-test-leads" ]; then
+              echo "=== find-test-leads (поиск тестовых лидов в amoCRM — НИЧЕГО НЕ УДАЛЯЕТ) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/find-test-leads.js
             fi
 
             if [ "$TASK" = "list-broker-leads" ]; then

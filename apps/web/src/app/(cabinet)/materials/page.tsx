@@ -148,7 +148,7 @@ export default function MaterialsPage() {
         <div className="card text-center py-12 text-text-muted">
           <BookOpen className="w-12 h-12 mx-auto mb-3 text-text-muted/50" />
           <p>Материалы пока не добавлены</p>
-          <p className="text-xs mt-2">По вопросам обращайтесь в отдел партнёров: <a href="tel:+74951504010" className="text-accent">+7 (495) 150-40-10</a></p>
+          <p className="text-xs mt-2">По вопросам обращайтесь в отдел партнёров: <a href="tel:+74992262249" className="text-accent">+7 (499) 226-22-49</a></p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -297,9 +297,9 @@ export default function MaterialsPage() {
       <div className="card mt-6 text-center py-6 bg-surface-secondary">
         <p className="text-text-muted text-sm">
           По вопросам получения материалов:&nbsp;
-          <a href="tel:+74951504010" className="text-accent font-medium">+7 (495) 150-40-10</a>
+          <a href="tel:+74992262249" className="text-accent font-medium">+7 (499) 226-22-49</a>
           <span className="text-text-muted mx-3">•</span>
-          <a href="mailto:broker@stmichael.ru" className="text-accent font-medium">broker@stmichael.ru</a>
+          <a href="mailto:info@zorge9.com" className="text-accent font-medium">info@zorge9.com</a>
         </p>
       </div>
 

@@ -73,6 +73,8 @@ services:
       SMTP_FROM: ${SMTP_FROM:-}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
       BROKER_SHEET_ID: ${BROKER_SHEET_ID:-}
+      # 2026-06-26: Dadata Suggestions API — автодополнение ИНН в форме регистрации.
+      DADATA_API_KEY: ${DADATA_API_KEY:-}
     ports:
       - "4000:4000"
     volumes:
@@ -96,6 +98,12 @@ services:
       NEXT_PUBLIC_API_URL: /api
     ports:
       - "3000:3000"
+    # 2026-06-24: shared volume для disk-snapshot CMS-данных.
+    # page.tsx пишет /app/data/cms-snapshot.json после каждого
+    # успешного fetch к API. При падении API лендинг отдаёт его
+    # вместо захардкоженных DEFAULT_* из JS-бандла.
+    volumes:
+      - web-data:/app/data
     depends_on:
       - api
     networks:
@@ -124,6 +132,7 @@ volumes:
   pgdata:
   redisdata:
   uploads:
+  web-data:
 
 networks:
   st-michael-network:

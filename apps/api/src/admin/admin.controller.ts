@@ -168,6 +168,15 @@ export class AdminController {
     return this.adminService.logCall(user.id, body);
   }
 
+  // ─── issue #2: звонок менеджера КЦ брокеру через Mango ────
+  @Post('mango-call')
+  @ApiOperation({ summary: 'Менеджер КЦ звонит брокеру через Mango (callback)' })
+  async mangoCall(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() body: { brokerId: string },
+  ) {
+    return this.adminService.mangoCallBroker(user.id, body.brokerId);
+  }
   @Get('call-center/stats')
   @ApiOperation({ summary: 'KPI оператора и команды на сегодня/неделю/месяц' })
   async callCenterStats(@CurrentUser() user: CurrentUserPayload) {
@@ -197,11 +206,24 @@ export class AdminController {
     return this.adminService.checkAmoHealth();
   }
 
-  // 2026-05-25: заявки без передачи в amo (для менеджеров/координаторов).
-  @Get('amo-failed-clients')
-  @ApiOperation({ summary: 'Клиенты с amoSyncStatus=FAILED — заявки, не переданные в amoCRM' })
-  async amoFailedClients() {
-    return this.adminService.getAmoFailedClients();
+  // 2026-07-09: заменяет старый /admin/amo-failed-clients. Показывает
+  // все заявки от брокеров (Client + Meeting + Call + OfferAcceptance)
+  // с фильтрами по типу, статусу amo, периоду и поиску.
+  // Доступ: MANAGER + ADMIN.
+  @Get('broker-applications')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.MANAGER, UserRole.ADMIN)
+  @ApiOperation({ summary: 'Все заявки от брокеров: фиксации, встречи, звонки, акцепты' })
+  async brokerApplications(@Query() query: any) {
+    return this.adminService.getBrokerApplications({
+      page: Number(query.page) || 1,
+      limit: Number(query.limit) || 50,
+      type: query.type,
+      amoStatus: query.amoStatus,
+      search: query.search,
+      startDate: query.startDate,
+      endDate: query.endDate,
+    });
   }
 
   @Post('clients/:id/retry-amo-sync')
@@ -330,6 +352,32 @@ export class AdminController {
     @Body() body: { newBrokerId: string; reason: string },
   ) {
     return this.adminService.reassignClient(id, body.newBrokerId, body.reason, user.id);
+  }
+
+  // 2026-06-19: пометить/снять флаг «координатор» у брокера. У координатора
+  // в форме фиксации становится обязательным выбор реального брокера, ведущего
+  // клиента (из брокеров его агентства).
+  @Patch('brokers/:id/coordinator')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Пометить брокера как координатора (только ADMIN)' })
+  async setBrokerCoordinator(
+    @Param('id') id: string,
+    @Body() body: { isCoordinator: boolean },
+  ) {
+    return this.adminService.setBrokerCoordinator(id, !!body.isCoordinator);
+  }
+
+  // 2026-06-17: ручная смена uniquenessStatus админом из кабинета брокера.
+  // Только для критических случаев — когда автоматика не довела клиента до
+  // правильного статуса.
+  @Patch('clients/:id/uniqueness-status')
+  @ApiOperation({ summary: 'Смена uniquenessStatus клиента (admin only, критические случаи)' })
+  async setClientUniquenessStatus(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id') id: string,
+    @Body() body: { status: 'CONDITIONALLY_UNIQUE' | 'UNDER_REVIEW' | 'REJECTED'; reason: string },
+  ) {
+    return this.adminService.setClientUniquenessStatus(id, body.status, body.reason, user.id);
   }
 
 }

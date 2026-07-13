@@ -29,13 +29,15 @@ export class CommissionController {
   @Post('calculate')
   @ApiOperation({ summary: 'Calculate commission for a deal' })
   @ApiResponse({ status: 200, description: 'Calculated commission' })
-  async calculateCommission(@Body() body: unknown) {
+  async calculateCommission(
+    @Body() body: unknown,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
     const data = commissionCalculationDtoSchema.parse(body) as {
       amount: number;
       project: string;
-      agencyInn: string;
-      isInstallment?: boolean;
+      paymentMode: 'FULL' | 'INSTALLMENT' | 'SUBSIDIZED_MORTGAGE';
     };
-    return this.commissionService.calculateCommission(data);
+    return this.commissionService.calculateCommission({ ...data, brokerId: user.id });
   }
 }
