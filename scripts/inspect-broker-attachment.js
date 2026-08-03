@@ -9,9 +9,10 @@
  *
  * Скрипт по PHONE показывает:
  *   1. Client в БД (id, brokerId, amoLeadId, uniquenessStatus, uniquenessReason)
- *   2. Broker.amoContactId
+ *   2. Ответственный Broker и его amoContactId (для делегированной фиксации
+ *      это responsibleBroker, иначе владелец client.broker)
  *   3. Текущее состояние lead в amoCRM (если amoLeadId есть): список contact_id
- *   4. Прикреплён ли broker.amoContactId к лиду сейчас → YES/NO
+ *   4. Прикреплён ли amoContactId ответственного брокера к лиду → YES/NO
  *   5. Записи AuditLog UNIQUENESS_RESOLVED для этого Client'а
  *   6. Recent CLIENT_FIXATION audit
  *
@@ -113,6 +114,7 @@
       where: { phone: normalizedPhone },
       include: {
         broker: { select: { id: true, fullName: true, phone: true, amoContactId: true } },
+        responsibleBroker: { select: { id: true, fullName: true, phone: true, amoContactId: true } },
         deals: { select: { id: true, status: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -124,13 +126,17 @@
     }
 
     for (const c of clients) {
+      const responsibleBroker = c.responsibleBroker || c.broker;
+      const isDelegated = Boolean(c.responsibleBrokerId && c.responsibleBrokerId !== c.brokerId);
       console.log(`\nClient ${c.id}`);
       console.log(`  createdAt:        ${c.createdAt.toISOString()}`);
       console.log(`  updatedAt:        ${c.updatedAt.toISOString()}`);
       console.log(`  fullName:         ${c.fullName}`);
       console.log(`  brokerId:         ${c.brokerId}`);
-      console.log(`  broker:           ${c.broker?.fullName} (${c.broker?.phone})`);
-      console.log(`  broker.amoContactId: ${c.broker?.amoContactId}`);
+      console.log(`  owner broker:     ${c.broker?.fullName} (${c.broker?.phone})`);
+      console.log(`  responsibleBrokerId: ${c.responsibleBrokerId || '(не задан)'}`);
+      console.log(`  responsible broker: ${responsibleBroker?.fullName} (${responsibleBroker?.phone})${isDelegated ? ' [делегированная фиксация]' : ''}`);
+      console.log(`  responsible broker.amoContactId: ${responsibleBroker?.amoContactId}`);
       console.log(`  amoLeadId:        ${c.amoLeadId}`);
       console.log(`  uniquenessStatus: ${c.uniquenessStatus}`);
       console.log(`  uniquenessReason: ${c.uniquenessReason}`);
@@ -150,15 +156,19 @@
           console.log(`  responsible_user_id: ${lead.responsible_user_id}`);
           const contactIds = ((lead?._embedded?.contacts) || []).map((x) => Number(x.id));
           console.log(`  contacts на лиде: [${contactIds.join(', ')}]`);
-          const brokerAmoId = c.broker?.amoContactId ? Number(c.broker.amoContactId) : null;
+          const brokerAmoId = responsibleBroker?.amoContactId ? Number(responsibleBroker.amoContactId) : null;
           if (brokerAmoId) {
             const isAttached = contactIds.includes(brokerAmoId);
-            console.log(`  Брокер (amoContactId=${brokerAmoId}) сейчас прикреплён к лиду: ${isAttached ? 'ДА ✅' : 'НЕТ ❌'}`);
+            console.log(`  Ответственный брокер (amoContactId=${brokerAmoId}) сейчас прикреплён к лиду: ${isAttached ? 'ДА ✅' : 'НЕТ ❌'}`);
             if (!isAttached && c.uniquenessStatus === 'CONDITIONALLY_UNIQUE') {
-              console.log(`  ⚠️  НЕСООТВЕТСТВИЕ: в БД status=CONDITIONALLY_UNIQUE, но в amoCRM брокера на лиде нет → должно быть REJECTED. Webhook не дошёл / не сработал.`);
+              if (isDelegated) {
+                console.log(`  ⚠️  НЕСООТВЕТСТВИЕ: ответственный брокер делегированной фиксации отсутствует среди контактов amoCRM-лида.`);
+              } else {
+                console.log(`  ⚠️  НЕСООТВЕТСТВИЕ: в БД status=CONDITIONALLY_UNIQUE, но в amoCRM брокера на лиде нет → должно быть REJECTED. Webhook не дошёл / не сработал.`);
+              }
             }
           } else {
-            console.log(`  ⚠️  broker.amoContactId не задан — sync не может сравнить`);
+            console.log(`  ⚠️  responsible broker.amoContactId не задан — sync не может сравнить`);
           }
         }
       }

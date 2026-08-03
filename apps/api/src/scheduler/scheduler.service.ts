@@ -949,7 +949,7 @@ export class SchedulerService {
         amoSyncStatus: 'FAILED' as any,
         amoSyncAttempts: { lt: 10 },
       },
-      include: { broker: true },
+      include: { broker: true, responsibleBroker: true },
       orderBy: { amoSyncLastAttemptAt: 'asc' },
       take: 20,
     });
@@ -958,17 +958,36 @@ export class SchedulerService {
 
     let ok = 0;
     let failed = 0;
+    let deferred = 0;
     for (const client of candidates) {
       if (!client.fixationAgencyId) continue;
       const agency = await this.prisma.agency.findUnique({ where: { id: client.fixationAgencyId } });
       if (!agency) continue;
+      // Для делегированной фиксации client.broker — владелец кабинета,
+      // а в amoCRM должен уходить фактический ответственный брокер.
+      const responsibleBroker = client.responsibleBroker || client.broker;
+      if (!responsibleBroker.amoContactId) {
+        const error = 'Responsible broker is not linked to an amoCRM contact; retry deferred';
+        await this.prisma.client.update({
+          where: { id: client.id },
+          data: {
+            amoSyncError: error,
+            amoSyncLastAttemptAt: new Date(),
+          },
+        });
+        // Это не попытка обращения к amoCRM: не сжигаем лимит retry.
+        // После синхронизации amoContactId клиент автоматически снова попадёт сюда.
+        deferred++;
+        this.logger.warn(`[amo-retry] client=${client.id}: ${error}`);
+        continue;
+      }
       try {
         const resultLead = await this.amo.createFixationRequest({
           clientPhone: client.phone,
           clientEmail: client.email || undefined,
           clientName: client.fullName,
-          brokerPhone: client.broker.phone,
-          brokerAmoContactId: client.broker.amoContactId ? Number(client.broker.amoContactId) : undefined,
+          brokerPhone: responsibleBroker.phone,
+          brokerAmoContactId: Number(responsibleBroker.amoContactId),
           agencyName: agency.name,
           agencyInn: agency.inn,
           comment: client.comment || '',
@@ -1005,10 +1024,10 @@ export class SchedulerService {
             this.morekit.notifyFixation({
               id: String(createdAmoLeadId),
               agency: agency.name,
-              broker_id: client.broker.amoContactId ? String(client.broker.amoContactId) : '',
-              agent_name: client.broker.fullName,
-              agent_phone: morekitPhone(client.broker.phone),
-              agent_mail: client.broker.email || '',
+              broker_id: responsibleBroker.amoContactId ? String(responsibleBroker.amoContactId) : '',
+              agent_name: responsibleBroker.fullName,
+              agent_phone: morekitPhone(responsibleBroker.phone),
+              agent_mail: responsibleBroker.email || '',
               budget: amount ? String(amount) : '0',
               clients: [{ name: client.fullName, phone: morekitPhone(client.phone) }],
               type: client.propertyType || 'Квартира',
@@ -1043,7 +1062,7 @@ export class SchedulerService {
         }
       }
     }
-    this.logger.log(`amo auto-retry: ${ok} success, ${failed} failed`);
+    this.logger.log(`amo auto-retry: ${ok} success, ${failed} failed, ${deferred} deferred`);
   }
 
   // 2026-06-16: отключён. Раньше каждые 3 мин синкали responsible_user_id

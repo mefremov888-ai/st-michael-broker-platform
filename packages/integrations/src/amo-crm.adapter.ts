@@ -85,6 +85,7 @@ export interface UpdateLeadDto {
 // hook → setAmoTokenRefreshHook(). Если в БД пусто — fallback на env.
 type AmoTokens = { access: string; refresh: string };
 type AmoTokenRefreshHook = (tokens: AmoTokens) => Promise<void> | void;
+type AmoRequestOptions = { retryTransient?: boolean };
 
 let amoTokens: AmoTokens = {
   access: process.env.AMO_ACCESS_TOKEN || '',
@@ -196,11 +197,11 @@ export class AmoCrmAdapter {
   // 429 (наблюдали 776 amoErrors на coverage-анализ).
   // 2026-06-05: на 401 пробуем refresh access_token через AMO_REFRESH_TOKEN
   // и retry один раз. При пустом access — тоже пробуем refresh.
-  private async request<T = any>(path: string, init: RequestInit = {}, attempt = 1, didRefresh = false): Promise<T> {
+  private async request<T = any>(path: string, init: RequestInit = {}, options: AmoRequestOptions = {}, attempt = 1, didRefresh = false): Promise<T> {
     if (!this.token) {
       if (!didRefresh && amoTokens.refresh) {
         const ok = await this.refreshAccessToken();
-        if (ok) return this.request<T>(path, init, attempt, true);
+        if (ok) return this.request<T>(path, init, options, attempt, true);
       }
       throw new Error('AMO_ACCESS_TOKEN not configured');
     }
@@ -222,9 +223,9 @@ export class AmoCrmAdapter {
       });
     } catch (e: any) {
       // Network-level (timeout, ECONNRESET) — ретраим до 3 раз.
-      if (attempt < 3) {
+      if (options.retryTransient !== false && attempt < 3) {
         await sleep(500 * attempt);
-        return this.request<T>(path, init, attempt + 1, didRefresh);
+        return this.request<T>(path, init, options, attempt + 1, didRefresh);
       }
       throw e;
     }
@@ -236,15 +237,15 @@ export class AmoCrmAdapter {
     if (res.status === 401 && !didRefresh) {
       console.warn(`[amo] 401 на ${path}, пробуем refresh access_token`);
       const ok = await this.refreshAccessToken();
-      if (ok) return this.request<T>(path, init, attempt, true);
+      if (ok) return this.request<T>(path, init, options, attempt, true);
     }
 
     // 429 (rate-limit) и 5xx — retry. Уважаем Retry-After если пришёл.
-    if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+    if (options.retryTransient !== false && (res.status === 429 || res.status >= 500) && attempt < 4) {
       const retryAfter = Number(res.headers.get('Retry-After')) || 0;
       const wait = retryAfter > 0 ? retryAfter * 1000 : 300 * Math.pow(2, attempt); // 300 / 600 / 1200ms
       await sleep(wait);
-      return this.request<T>(path, init, attempt + 1, didRefresh);
+      return this.request<T>(path, init, options, attempt + 1, didRefresh);
     }
 
     if (!res.ok) {
@@ -291,19 +292,32 @@ export class AmoCrmAdapter {
     }
   }
 
-  async findBrokerContactByPhone(phone: string): Promise<AmoContact | null> {
-    const query = encodeURIComponent(phone);
+  async findBrokerContactByPhone(
+    phone: string,
+    options: { strict?: boolean } = {},
+  ): Promise<AmoContact | null> {
+    const target = last10Digits(phone);
+    if (target.length < 10) return null;
     try {
-      const data = await this.request<any>(`/contacts?query=${query}&limit=50`);
+      const data = await this.request<any>(`/contacts?query=${target}&limit=50`);
       const contacts: any[] = data?._embedded?.contacts || [];
-      // Filter contacts with "Брокер" checkbox = true
       const brokerCandidates = contacts.filter((c: any) => {
         const fields = c.custom_fields_values || [];
-        const brokerField = fields.find((f: any) => f.field_id === 835415);
-        return brokerField?.values?.[0]?.value === true;
+        const brokerField = fields.find((f: any) => f.field_id === AMO_CONTACT_FIELDS.IS_BROKER);
+        const phoneField = fields.find(
+          (f: any) => f.field_id === AMO_CONTACT_FIELDS.PHONE || f.field_code === 'PHONE',
+        );
+        const hasExactPhone = (phoneField?.values || []).some(
+          (v: any) => last10Digits(v?.value) === target,
+        );
+        return brokerField?.values?.[0]?.value === true && hasExactPhone;
       });
       if (brokerCandidates.length === 0) return null;
       if (brokerCandidates.length === 1) return brokerCandidates[0];
+      if (options.strict) {
+        const ids = brokerCandidates.map((c: any) => c.id).join(',');
+        throw new Error(`AMBIGUOUS_BROKER_CONTACT phone=${target} ids=${ids}`);
+      }
 
       // Multiple broker candidates — pick the one with the most linked leads
       let best: any = null;
@@ -317,7 +331,8 @@ export class AmoCrmAdapter {
         }
       }
       return best;
-    } catch {
+    } catch (e) {
+      if (options.strict) throw e;
       return null;
     }
   }
@@ -356,7 +371,7 @@ export class AmoCrmAdapter {
     const result = await this.request<any>('/contacts', {
       method: 'POST',
       body: JSON.stringify([data]),
-    });
+    }, { retryTransient: false });
     return result?._embedded?.contacts?.[0];
   }
 
@@ -616,7 +631,7 @@ export class AmoCrmAdapter {
     const result = await this.request<any>('/leads', {
       method: 'POST',
       body: JSON.stringify([payload]),
-    });
+    }, { retryTransient: false });
     return result?._embedded?.leads?.[0];
   }
 
@@ -1196,12 +1211,13 @@ export class AmoCrmAdapter {
     // старое «Заявка с лендинга — X» для обратной совместимости.
     leadName?: string;
   }): Promise<{ contactId?: number; leadId?: number } | null> {
+    let contact: { id: number } | null | undefined;
     try {
       // 1) Контакт с IS_BROKER=true. Если передан existingContactId — не
       // создаём новый (контакт уже настроен через syncBrokerProfileToAmo).
-      let contact: { id: number } | null | undefined = data.existingContactId
+      contact = data.existingContactId
         ? { id: data.existingContactId }
-        : null;
+        : await this.findBrokerContactByPhone(data.brokerPhone, { strict: true });
       if (!contact) {
         contact = await this.createContact({
           name: data.brokerName,
@@ -1260,7 +1276,7 @@ export class AmoCrmAdapter {
       return { contactId: contact?.id, leadId: lead?.id };
     } catch (e: any) {
       console.error('[createBrokerLeadFromLanding] failed:', e?.message || e);
-      return null;
+      return contact?.id ? { contactId: contact.id } : null;
     }
   }
 

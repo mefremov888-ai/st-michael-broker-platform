@@ -1,4 +1,4 @@
-import { Injectable, Inject, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Injectable, Inject, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { Project } from '@st-michael/shared';
 import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, AMO_CONTACT_FIELDS, brokerToAmoContactFields } from '@st-michael/integrations';
@@ -15,6 +15,10 @@ const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
 export class ClientFixationService {
   // 2026-06-04: прямой webhook в Morekit (без посредничества Salesbot).
   private readonly morekit = new MorekitAdapter();
+  // Single-flight protects one API process. We deliberately avoid holding a
+  // DB lock across amo HTTP calls; strict lookup + DB re-check protect the
+  // normal single-replica deployment without tying up a DB connection.
+  private readonly brokerAmoSyncInFlight = new Map<string, Promise<any>>();
 
   constructor(
     @Inject('PrismaClient') private prisma: PrismaClient,
@@ -69,6 +73,19 @@ export class ClientFixationService {
         throw new BadRequestException('Указанный ответственный брокер не найден');
       }
       responsibleBroker = candidate;
+    }
+
+    // Never create a client-only amo lead. For a fresh/imported broker the
+    // contact is resolved by that broker's own id and phone before any Client
+    // row is persisted. A transient amo failure is therefore safe to retry.
+    try {
+      responsibleBroker = await this.ensureBrokerAmoContact(responsibleBroker.id);
+    } catch (e: any) {
+      console.error('[fixClient] responsible broker amo sync failed:', e?.message || e);
+      throw new ServiceUnavailableException({
+        message: 'Не удалось связать брокера с amoCRM. Повторите фиксацию через несколько минут.',
+        code: 'BROKER_AMO_CONTACT_UNAVAILABLE',
+      });
     }
 
     // 2026-06-09: блок полей формы фиксации, общий для всех 4 веток create.
@@ -360,6 +377,9 @@ export class ClientFixationService {
           // Сюда попадаем только при RULE_3 / NO_CONFLICT → всегда новый лид.
         });
         createdAmoLeadId = resultLead?.id ? Number(resultLead.id) : null;
+        if (!createdAmoLeadId) {
+          throw new Error('amoCRM did not return a lead id');
+        }
       } catch (e: any) {
         amoSyncOk = false;
         amoSyncError = String(e?.message || e).slice(0, 500);
@@ -601,6 +621,9 @@ export class ClientFixationService {
         previousLeadInfo,
       });
       createdAmoLeadId = resultLead?.id ? Number(resultLead.id) : null;
+      if (!createdAmoLeadId) {
+        throw new Error('amoCRM did not return a lead id');
+      }
     } catch (e: any) {
       amoSyncOk = false;
       amoSyncError = String(e?.message || e).slice(0, 500);
@@ -1062,6 +1085,80 @@ export class ClientFixationService {
     return { agencies };
   }
 
+  private async ensureBrokerAmoContact(brokerId: string): Promise<any> {
+    const inFlight = this.brokerAmoSyncInFlight.get(brokerId);
+    if (inFlight) return inFlight;
+
+    const sync = this.syncBrokerAmoContact(brokerId);
+    const tracked = sync.finally(() => {
+      if (this.brokerAmoSyncInFlight.get(brokerId) === tracked) {
+        this.brokerAmoSyncInFlight.delete(brokerId);
+      }
+    });
+    this.brokerAmoSyncInFlight.set(brokerId, tracked);
+    return tracked;
+  }
+
+  private async syncBrokerAmoContact(brokerId: string): Promise<any> {
+    const broker = await this.prisma.broker.findUnique({
+      where: { id: brokerId },
+      include: {
+        brokerAgencies: { where: { isPrimary: true }, include: { agency: true }, take: 1 },
+      },
+    });
+    if (!broker) throw new NotFoundException('Broker not found');
+    if (broker.amoContactId) return broker;
+    if (!broker.phone) throw new Error(`Broker ${brokerId} has no phone`);
+
+    const agency = broker.brokerAgencies[0]?.agency || null;
+    const payload = {
+      name: broker.fullName,
+      custom_fields_values: brokerToAmoContactFields(broker, agency),
+    } as any;
+
+    let amoContact = await this.amoCrmAdapter.findBrokerContactByPhone(
+      broker.phone,
+      { strict: true },
+    );
+    if (amoContact) {
+      // Linking is critical; enriching an already found contact is best effort.
+      try {
+        await this.amoCrmAdapter.updateContact(amoContact.id, payload);
+      } catch (e: any) {
+        console.error('[ensureBrokerAmoContact] contact update failed:', e?.message || e);
+      }
+    } else {
+      // Another request/process may have completed the sync after our first read.
+      const latest = await this.prisma.broker.findUnique({
+        where: { id: brokerId },
+        select: { amoContactId: true },
+      });
+      if (latest?.amoContactId) {
+        return { ...broker, amoContactId: latest.amoContactId };
+      }
+
+      try {
+        amoContact = await this.amoCrmAdapter.createContact(payload);
+      } catch (createError) {
+        // The POST response can be lost after amo accepted it. Resolve by exact
+        // phone before surfacing the error; never issue a blind second POST here.
+        const foundAfterError = await this.amoCrmAdapter.findBrokerContactByPhone(
+          broker.phone,
+          { strict: true },
+        );
+        if (!foundAfterError) throw createError;
+        amoContact = foundAfterError;
+      }
+    }
+
+    if (!amoContact?.id) throw new Error(`amoCRM contact was not resolved for broker ${brokerId}`);
+    await this.prisma.broker.update({
+      where: { id: brokerId },
+      data: { amoContactId: BigInt(amoContact.id) },
+    });
+    return { ...broker, amoContactId: BigInt(amoContact.id) };
+  }
+
   // 2026-06-29 (refactor): любой брокер может создать нового брокера
   // прямо из формы фиксации (раздел «Брокер» с вариантом «на другого»).
   // Новый привязывается к выбранному агентству создателя. Если брокер
@@ -1096,6 +1193,12 @@ export class ClientFixationService {
       select: { id: true, fullName: true, phone: true, email: true, isCoordinator: true },
     });
     if (existingByPhone) {
+      try {
+        await this.ensureBrokerAmoContact(existingByPhone.id);
+      } catch (e: any) {
+        console.error('[createBrokerByCreator] existing broker amo sync failed:', e?.message || e);
+        throw new ServiceUnavailableException('Не удалось связать брокера с amoCRM');
+      }
       return { broker: existingByPhone, created: false };
     }
     if (data.email) {
@@ -1104,6 +1207,12 @@ export class ClientFixationService {
         select: { id: true, fullName: true, phone: true, email: true, isCoordinator: true },
       });
       if (existingByEmail) {
+        try {
+          await this.ensureBrokerAmoContact(existingByEmail.id);
+        } catch (e: any) {
+          console.error('[createBrokerByCreator] existing broker amo sync failed:', e?.message || e);
+          throw new ServiceUnavailableException('Не удалось связать брокера с amoCRM');
+        }
         return { broker: existingByEmail, created: false };
       }
     }
@@ -1134,39 +1243,15 @@ export class ClientFixationService {
       data: { brokerId: broker.id, agencyId: agency.id, isPrimary: true },
     });
 
-    // Синк контакта в amoCRM. Ищем по phone → если есть, обновляем; если
-    // нет, создаём. Дубля контакта не будет. Все 13 полей передаются
-    // через brokerToAmoContactFields.
     let amoContactId: number | undefined;
+    let contactSyncError: any;
     try {
-      const brokerWithAgency = await this.prisma.broker.findUnique({
-        where: { id: broker.id },
-        include: {
-          brokerAgencies: { where: { isPrimary: true }, include: { agency: true }, take: 1 },
-        },
-      });
-      if (brokerWithAgency) {
-        const primaryAgency = brokerWithAgency.brokerAgencies[0]?.agency || null;
-        const customFields = brokerToAmoContactFields(brokerWithAgency, primaryAgency);
-        const payload = { name: brokerWithAgency.fullName, custom_fields_values: customFields } as any;
-
-        const existingAmo = await this.amoCrmAdapter.findBrokerContactByPhone(data.phone);
-        if (existingAmo) {
-          amoContactId = existingAmo.id;
-          await this.amoCrmAdapter.updateContact(existingAmo.id, payload);
-        } else {
-          const created = await this.amoCrmAdapter.createContact(payload);
-          if (created?.id) amoContactId = created.id;
-        }
-
-        if (amoContactId) {
-          await this.prisma.broker.update({
-            where: { id: broker.id },
-            data: { amoContactId: BigInt(amoContactId) },
-          });
-        }
-      }
+      const syncedBroker = await this.ensureBrokerAmoContact(broker.id);
+      amoContactId = syncedBroker.amoContactId
+        ? Number(syncedBroker.amoContactId)
+        : undefined;
     } catch (e: any) {
+      contactSyncError = e;
       console.error('[createBrokerByCreator] amo contact sync failed:', e?.message || e);
     }
 
@@ -1174,8 +1259,11 @@ export class ClientFixationService {
     // Название лида — «{новый брокер} (завёл {creator})» — чтобы КЦ
     // сразу видел откуда лид. Задача КЦ создаётся ВСЕГДА, даже если
     // контакт уже был в amoCRM.
+    let brokerLeadResult: { contactId?: number; leadId?: number } | null = null;
+    const safeMinimalFallback = !contactSyncError
+      || /^amoCRM (400|422)\b/.test(String(contactSyncError?.message || ''));
     try {
-      await this.amoCrmAdapter.createBrokerLeadFromLanding({
+      if (amoContactId || safeMinimalFallback) brokerLeadResult = await this.amoCrmAdapter.createBrokerLeadFromLanding({
         brokerName: data.fullName,
         brokerPhone: data.phone,
         brokerEmail: data.email || null,
@@ -1186,6 +1274,17 @@ export class ClientFixationService {
       });
     } catch (e: any) {
       console.error('[createBrokerByCreator] amo lead+task failed:', e?.message || e);
+    }
+
+    if (!amoContactId && brokerLeadResult?.contactId) {
+      amoContactId = brokerLeadResult.contactId;
+      await this.prisma.broker.update({
+        where: { id: broker.id },
+        data: { amoContactId: BigInt(amoContactId) },
+      });
+    }
+    if (!amoContactId) {
+      throw new ServiceUnavailableException('Не удалось создать контакт брокера в amoCRM');
     }
 
     // Аудит: брокер завёл другого брокера.
