@@ -1461,7 +1461,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 .sh{margin-bottom:48px}.sh-center{text-align:center}.sh-tag{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold);margin-bottom:14px}.sh h2{font-size:var(--fs-h2);font-weight:300;line-height:1.1;letter-spacing:-0.5px}.sh h2 strong{font-weight:700}.sh h2 em{font-style:normal;color:var(--gold);font-weight:700}.sh-sub{color:var(--muted);font-size:15px;max-width:560px;margin-top:14px;line-height:1.7;font-weight:400}.sh-center .sh-sub{margin-left:auto;margin-right:auto}
 /* КБ7 (2026-05-26): grid-auto-rows:1fr выравнивает карточки по высоте
    самой высокой — Зорге и Серебряный Бор стоят одинаковыми. */
-.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;align-items:stretch}.proj-card{border-radius:var(--r-card);padding:36px 32px;display:flex;flex-direction:column;justify-content:flex-end;min-height:240px;height:100%;transition:all .3s ease;cursor:pointer;background:var(--bg)}.proj-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.06)}.proj-tag{font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);margin-bottom:10px}.proj-name{font-size:28px;font-weight:300;margin-bottom:8px;letter-spacing:-0.3px}.proj-name strong{font-weight:700}.proj-info{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.7}.proj-link{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);display:inline-flex;align-items:center;gap:6px}
+.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;align-items:stretch}.proj-grid>div{height:100%}.proj-card{border-radius:var(--r-card);padding:36px 32px;display:flex;flex-direction:column;justify-content:flex-start;min-height:240px;height:100%;transition:all .3s ease;cursor:pointer;background:var(--bg)}.proj-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.06)}.proj-card-head{flex:0 0 auto;align-self:stretch}.proj-status-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;min-height:18px;margin:0 0 10px}.proj-tag{font-size:9px;font-weight:700;line-height:1;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);margin:0}.proj-name{font-size:28px;font-weight:300;margin-bottom:8px;letter-spacing:-0.3px}.proj-name strong{font-weight:700}.proj-info{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.7}.proj-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11px;color:var(--muted);margin-top:8px;margin-bottom:12px}.proj-link{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);display:inline-flex;align-items:center;gap:6px;margin-top:auto}
 .comm-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:28px;align-items:start}.comm-table{border-radius:var(--r-card);overflow:hidden;background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,0.04)}.ct-head{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;background:var(--bg);gap:8px}.ct-head span{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}.ct-row{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;border-top:1px solid var(--bw);gap:8px;transition:background var(--t)}.ct-row:hover{background:var(--gold-bg)}.ct-level{font-size:14px;font-weight:500}.ct-range{font-size:13px;color:var(--muted)}.ct-rate{font-size:14px;font-weight:600;text-align:right}
 .comm-info{display:flex;flex-direction:column;gap:10px}.comm-card{padding:18px 22px;background:var(--bg);border-radius:var(--r-card);transition:background var(--t)}.comm-card:hover{background:var(--gold-bg)}.comm-card-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);margin-bottom:8px}.comm-card p{font-size:13px;color:var(--light);line-height:1.6;font-weight:400;margin:0}
 .s-adv{background:var(--black);color:var(--white);padding:64px 60px;position:relative;overflow:hidden}.s-adv .sh{margin-bottom:32px}.s-adv .sh-tag{color:var(--gold)}.s-adv h2{color:var(--white)}.s-adv h2 em{color:var(--gold)}.adv-bg-glow{position:absolute;inset:0;background:radial-gradient(circle at 20% 30%,rgba(180,147,111,0.18),transparent 45%),radial-gradient(circle at 85% 80%,rgba(180,147,111,0.12),transparent 50%);pointer-events:none;z-index:0}.s-adv .sh,.s-adv .adv-grid{position:relative;z-index:1}/* 2026-05-28: grid-auto-rows:1fr выравнивает строки по высоте.
@@ -1608,21 +1608,26 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             {projects.map((p: any, i: number) => (
               <Reveal key={p.id} delay={i * 120}>
               <div className="proj-card" onClick={() => handleProjectClick(p)}>
-                {/* Правка КБ5 (2026-05-25): бейдж «Готовый» для проектов, сдача
-                    которых уже наступила (readyYear ≤ текущий год). */}
-                <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:10}}>
-                  {p.tag && <div className="proj-tag" style={{margin:0}}>{p.tag}</div>}
-                  {p.readyYear && Number(p.readyYear) <= new Date().getFullYear() && (
-                    <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',color:'#fff',background:'var(--gold)',padding:'4px 10px',borderRadius:999}}>Готовый</span>
-                  )}
+                {/* Статус и название собраны в отдельную верхнюю секцию:
+                    обе карточки начинаются строго на одной горизонтали,
+                    независимо от количества характеристик ниже. */}
+                <div className="proj-card-head">
+                  {/* Правка КБ5 (2026-05-25): бейдж «Готовый» для проектов, сдача
+                      которых уже наступила (readyYear ≤ текущий год). */}
+                  <div className="proj-status-row">
+                    {p.tag && <div className="proj-tag">{p.tag}</div>}
+                    {p.readyYear && Number(p.readyYear) <= new Date().getFullYear() && (
+                      <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',color:'#fff',background:'var(--gold)',padding:'4px 10px',borderRadius:999}}>Готовый</span>
+                    )}
+                  </div>
+                  {/* Bug fix 2026-06-02: subtitle тоже жирным — иначе «Квартал»
+                      был жирный, а «Серебряный Бор» — нет, визуально некрасиво. */}
+                  <div className="proj-name"><strong>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</strong></div>
                 </div>
-                {/* Bug fix 2026-06-02: subtitle тоже жирным — иначе «Квартал»
-                    был жирный, а «Серебряный Бор» — нет, визуально некрасиво. */}
-                <div className="proj-name"><strong>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</strong></div>
                 {p.description && <div className="proj-info">{p.description}</div>}
 
                 {(p.classType || p.address || p.readyYear || p.totalUnits || p.commissionFrom) && (
-                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'6px 16px',fontSize:11,color:'var(--muted)',marginTop:8,marginBottom:12}}>
+                  <div className="proj-meta">
                     {p.classType && <div><span style={{color:'var(--muted2)'}}>Класс:</span> <strong style={{color:'var(--black)'}}>{p.classType}</strong></div>}
                     {p.address && <div><span style={{color:'var(--muted2)'}}>Адрес:</span> <strong style={{color:'var(--black)'}}>{p.address}</strong></div>}
                     {p.readyYear && (() => {
