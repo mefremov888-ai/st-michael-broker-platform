@@ -1044,6 +1044,11 @@ function renderAccent(text: string | undefined | null, accent?: string | null): 
   return (<>{renderWithLineBreaks(text.slice(0, i))}<em>{renderWithLineBreaks(accent)}</em>{renderWithLineBreaks(text.slice(i + accent.length))}</>);
 }
 
+// 2026-08-11: скрыты по просьбе пользователя — промо-слайдер ("Апартаменты от 12 млн")
+// и секция "Комиссия и условия выплаты". Данные остаются в CMS, чтобы вернуть блоки — верните true.
+const SHOW_PROMO_SLIDER = false;
+const SHOW_COMMISSION_SECTION = false;
+
 const DEFAULT_HERO = {
   tag: 'Партнёрская программа',
   // Жёсткие переносы (\n) задают форму "треугольника": каждая строка чуть
@@ -1670,7 +1675,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         {/* PROMO SLIDER — full-width стиль с картинкой во весь блок.
             Если у промо нет imageUrl — fallback на дефолтное здание Зорге 9
             (правка 2026-05-07: каждый слайд должен быть с картинкой). */}
-        {promos.length > 0 && (
+        {SHOW_PROMO_SLIDER && promos.length > 0 && (
           <section id="promos" style={{padding:'40px 60px'}}>
             <div className="hero-slides" style={{height:340}}>
               {promos.map((p, i) => {
@@ -1736,6 +1741,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </section>
         )}
 
+        {SHOW_COMMISSION_SECTION && (
+        <>
         <hr className="sep" />
 
         {/* COMMISSION
@@ -1800,6 +1807,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             </div>
           </div>
         </section>
+        </>
+        )}
 
         <hr className="sep" />
 
