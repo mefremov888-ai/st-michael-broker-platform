@@ -95,7 +95,7 @@ export default async function Page() {
   const unwrapDocs = (d: any): any[] =>
     Array.isArray(d?.documents) ? d.documents : Array.isArray(d) ? d : [];
 
-  const fresh: LandingInitialData = {
+  let fresh: LandingInitialData = {
     content: content || undefined,
     events: Array.isArray(events) ? events : [],
     projects: Array.isArray(projects) ? projects : [],
@@ -111,6 +111,14 @@ export default async function Page() {
   // content — основной блок текстов админки. Если он пришёл — API живой,
   // считаем выдачу "хорошей" и обновляем слепок на диске.
   if (fresh.content) {
+    // Политики запрашиваются отдельным endpoint. Его частичный сбой не должен
+    // затирать последний рабочий источник комиссии пустым массивом.
+    if (!fresh.activePolicies?.length) {
+      const snapshot = await loadSnapshot();
+      if (snapshot?.activePolicies?.length) {
+        fresh = { ...fresh, activePolicies: snapshot.activePolicies };
+      }
+    }
     await saveSnapshot(fresh);
     return <LandingClient initialData={fresh} />;
   }

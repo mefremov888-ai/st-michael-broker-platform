@@ -49,7 +49,7 @@ const adminNavigation = [
   // 2026-07-17: ручное слияние дублей ФИО (аудит: 839 групп). Только ADMIN —
   // страница сама покажет заглушку менеджеру.
   { name: 'Дубли брокеров', href: '/admin/broker-dedup', icon: Users },
-  { name: 'Комиссия — политики', href: '/admin/commission-policies', icon: Calculator },
+  { name: 'Комиссия и рассрочка', href: '/admin/commission-policies', icon: Calculator },
   { name: 'Управление встречами', href: '/admin/meetings', icon: CalendarPlus },
   { name: 'Расписание встреч', href: '/admin/meeting-slots', icon: Calendar },
   { name: 'Рассылки', href: '/admin/mailings', icon: Megaphone },

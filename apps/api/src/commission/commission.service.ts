@@ -119,7 +119,56 @@ export function rateFor(project: string, level: CommissionLevel | string): numbe
   return projectRates[level as string] ?? projectRates.START ?? 5.0;
 }
 
-const INSTALLMENT_DISCOUNT = 0.5;
+export const DEFAULT_PAYMENT_TERMS = {
+  installmentEnabled: true,
+  installmentDiscount: 0.5,
+  subsidizedMortgageEnabled: true,
+  subsidizedMortgageRate: 4,
+} as const;
+
+export type CommissionPaymentTerms = {
+  installmentEnabled: boolean;
+  installmentDiscount: number;
+  subsidizedMortgageEnabled: boolean;
+  subsidizedMortgageRate: number;
+};
+
+/**
+ * Нормализует условия оплаты из той же CommissionPolicy, что задаёт ставку.
+ * CMS читается только как совместимый fallback для политик, созданных до
+ * появления структурированных полей. После первого сохранения в новой
+ * админке все четыре значения живут непосредственно в CommissionPolicy.
+ */
+export function paymentTermsForPolicy(
+  policy: any | null,
+  project: string,
+  legacyCmsValue: any = {},
+): CommissionPaymentTerms {
+  const installmentEnabledByProject = legacyCmsValue?.installmentEnabledByProject || {};
+  const installmentDiscountByProject = legacyCmsValue?.installmentDiscountByProject || {};
+  const subsidizedEnabledByProject = legacyCmsValue?.subsidizedMortgageEnabledByProject || {};
+  const subsidizedRateByProject = legacyCmsValue?.subsidizedMortgageRateByProject || {};
+
+  const legacyInstallmentEnabled = installmentEnabledByProject[project]
+    ?? legacyCmsValue?.installmentEnabled
+    ?? DEFAULT_PAYMENT_TERMS.installmentEnabled;
+  const legacyInstallmentDiscount = installmentDiscountByProject[project]
+    ?? legacyCmsValue?.installmentDiscount
+    ?? DEFAULT_PAYMENT_TERMS.installmentDiscount;
+  const legacySubsidizedEnabled = subsidizedEnabledByProject[project]
+    ?? legacyCmsValue?.subsidizedMortgageEnabled
+    ?? DEFAULT_PAYMENT_TERMS.subsidizedMortgageEnabled;
+  const legacySubsidizedRate = subsidizedRateByProject[project]
+    ?? legacyCmsValue?.subsidizedMortgageRate
+    ?? DEFAULT_PAYMENT_TERMS.subsidizedMortgageRate;
+
+  return {
+    installmentEnabled: policy?.installmentEnabled ?? (legacyInstallmentEnabled !== false),
+    installmentDiscount: Number(policy?.installmentDiscount ?? legacyInstallmentDiscount),
+    subsidizedMortgageEnabled: policy?.subsidizedMortgageEnabled ?? (legacySubsidizedEnabled !== false),
+    subsidizedMortgageRate: Number(policy?.subsidizedMortgageRate ?? legacySubsidizedRate),
+  };
+}
 
 @Injectable()
 export class CommissionService {
@@ -150,12 +199,18 @@ export class CommissionService {
     const modes: Record<string, string> = {};
     const scales: Record<string, Array<{ level: string; minSqm: number; rate: number }> | null> = {};
     const flatRates: Record<string, number | null> = {};
+    const paymentTerms: Record<string, CommissionPaymentTerms> = {};
+    const displayNotes: Record<string, string | null> = {};
+    const commissionCms = await this.prisma.siteContent.findUnique({ where: { key: 'commission' } });
+    const legacyCmsValue = (commissionCms?.value || {}) as any;
     for (const project of ['ZORGE9', 'SILVER_BOR']) {
       const r = await rateForWithPolicy(this.prisma, project, totalSqmSold);
       rates[project] = r.rate;
       modes[project] = r.mode;
 
       const policy = await findActivePolicy(this.prisma, project);
+      paymentTerms[project] = paymentTermsForPolicy(policy, project, legacyCmsValue);
+      displayNotes[project] = policy?.displayNote || null;
       if (policy?.mode === 'FLAT') {
         scales[project] = null;
         flatRates[project] = Number(policy.flatRate || 0);
@@ -179,31 +234,52 @@ export class CommissionService {
       }
     }
 
-    // Правка 2026-07-01: прогресс к следующему уровню считаем по порогам
-    // активной политики, а не по хардкоду. Для FLAT прогресс скрываем.
-    let level: any = null;
-    let nextLevel: any = null;
-    let nextLevelSqm: number | null = null;
-    let progress = 0;
-    if (modes.ZORGE9 !== 'FLAT') {
-      const zorgeScale = scales.ZORGE9 || [];
-      const ascending = [...zorgeScale].sort((a, b) => a.minSqm - b.minSqm);
-      // Текущий уровень = самый высокий, для которого totalSqmSold >= minSqm.
-      let current = ascending[0] || null;
-      for (const s of ascending) {
-        if (totalSqmSold >= s.minSqm) current = s;
+    // Уровень/прогресс считаются отдельно для каждой проектной шкалы.
+    // Раньше API всегда возвращал состояние только ZORGE9, поэтому вкладка
+    // Серебряного Бора подсвечивала чужой уровень.
+    const byProject: Record<string, {
+      level: string | null;
+      rate: number;
+      mode: string;
+      progress: number;
+      nextLevel: string | null;
+      nextLevelSqm: number | null;
+      totalSqmSold: number;
+    }> = {};
+    for (const project of ['ZORGE9', 'SILVER_BOR']) {
+      let level: string | null = null;
+      let nextLevel: string | null = null;
+      let nextLevelSqm: number | null = null;
+      let progress = modes[project] === 'FLAT' ? 100 : 0;
+      if (modes[project] !== 'FLAT') {
+        const ascending = [...(scales[project] || [])].sort((a, b) => a.minSqm - b.minSqm);
+        let current = ascending[0] || null;
+        for (const scale of ascending) {
+          if (totalSqmSold >= scale.minSqm) current = scale;
+        }
+        level = current?.level || 'START';
+        const currentIndex = ascending.findIndex((scale) => scale.level === level);
+        const next = ascending[currentIndex + 1];
+        if (next) {
+          nextLevel = next.level;
+          nextLevelSqm = next.minSqm;
+          progress = Math.min(100, Math.round((totalSqmSold / next.minSqm) * 100));
+        } else {
+          progress = 100;
+        }
       }
-      level = current?.level || 'START';
-      const currentIdx = ascending.findIndex((s) => s.level === level);
-      const next = ascending[currentIdx + 1];
-      if (next) {
-        nextLevel = next.level;
-        nextLevelSqm = next.minSqm;
-        progress = Math.min(100, Math.round((totalSqmSold / next.minSqm) * 100));
-      } else {
-        progress = 100;
-      }
+      byProject[project] = {
+        level,
+        rate: rates[project],
+        mode: modes[project],
+        progress,
+        nextLevel,
+        nextLevelSqm,
+        totalSqmSold,
+      };
     }
+
+    const legacyZorgeState = byProject.ZORGE9;
 
     // Get commission stats
     const deals = await this.prisma.deal.findMany({
@@ -215,15 +291,19 @@ export class CommissionService {
     const quarterlyBonus = primaryAgency?.quarterlyBonusStreak || 0;
 
     return {
-      level,
+      // Legacy top-level поля оставлены для старых клиентов API.
+      level: legacyZorgeState.level,
       rates,
       modes, // { ZORGE9: 'FLAT' | 'PROGRESSIVE' | 'FALLBACK', SILVER_BOR: ... }
       scales, // 2026-07-01: шкала уровней из активной политики (null для FLAT).
       flatRates, // 2026-07-01: фикс-ставка из FLAT политики (null для PROGRESSIVE).
+      paymentTerms, // Условия рассрочки/ипотеки из той же активной политики.
+      displayNotes,
       totalSqmSold,
-      progress,
-      nextLevel,
-      nextLevelSqm,
+      progress: legacyZorgeState.progress,
+      nextLevel: legacyZorgeState.nextLevel,
+      nextLevelSqm: legacyZorgeState.nextLevelSqm,
+      byProject,
       totalEarned,
       quarterlyBonusStreak: quarterlyBonus,
       agency: primaryAgency
@@ -254,19 +334,18 @@ export class CommissionService {
     const agency = broker?.brokerAgencies[0]?.agency;
     const totalSqm = agency ? Number(agency.totalSqmSold) : 0;
 
-    // 2026-07-02: параметры «Рассрочка» и «Субсидированная ипотека» теперь
-    // свои для каждого проекта — читаем *ByProject[project], fallback на
-    // старое общее поле, затем на константу (0.5% и 4%).
+    // Условия оплаты теперь являются частью активной CommissionPolicy.
+    // CMS остаётся только fallback для старых политик с null в новых полях.
+    const policy = await findActivePolicy(this.prisma, data.project);
     const commissionCms = await this.prisma.siteContent.findUnique({ where: { key: 'commission' } });
     const cmsValue = (commissionCms?.value || {}) as any;
-    const iep = cmsValue?.installmentEnabledByProject || {};
-    const idp = cmsValue?.installmentDiscountByProject || {};
-    const sep = cmsValue?.subsidizedMortgageEnabledByProject || {};
-    const srp = cmsValue?.subsidizedMortgageRateByProject || {};
-    const installmentDiscount = Number(idp?.[data.project] ?? cmsValue?.installmentDiscount ?? INSTALLMENT_DISCOUNT);
-    const subsidizedMortgageRate = Number(srp?.[data.project] ?? cmsValue?.subsidizedMortgageRate ?? 4);
-    const installmentEnabled = (iep?.[data.project] !== undefined ? iep[data.project] : cmsValue?.installmentEnabled) !== false;
-    const subsidizedMortgageEnabled = (sep?.[data.project] !== undefined ? sep[data.project] : cmsValue?.subsidizedMortgageEnabled) !== false;
+    const paymentTerms = paymentTermsForPolicy(policy, data.project, cmsValue);
+    const {
+      installmentDiscount,
+      subsidizedMortgageRate,
+      installmentEnabled,
+      subsidizedMortgageEnabled,
+    } = paymentTerms;
 
     // Учитываем активную политику (FLAT / PROGRESSIVE) из /admin/commission-policies.
     const r = await rateForWithPolicy(this.prisma, data.project, totalSqm);
@@ -275,7 +354,7 @@ export class CommissionService {
     const mode = r.mode; // 'FLAT' | 'PROGRESSIVE' | 'FALLBACK'
 
     // Применяем модификатор по типу оплаты (после ставки из политики).
-    // Если админ выключил вариант в CMS — модификатор не применяем
+    // Если админ выключил вариант в политике — модификатор не применяем
     // (клиент выберет вариант, а на бэке отработает как FULL).
     let effectivePaymentMode: typeof data.paymentMode = data.paymentMode;
     if (data.paymentMode === 'INSTALLMENT' && installmentEnabled) {

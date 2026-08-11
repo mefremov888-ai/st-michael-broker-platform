@@ -16,6 +16,10 @@ import {
   type Candidate,
 } from './brokers-import.helper';
 import { BrokerImportJobsService } from './broker-import-jobs.service';
+import {
+  DEFAULT_PAYMENT_TERMS,
+  paymentTermsForPolicy,
+} from '../commission/commission.service';
 
 interface MailingFilters {
   project?: string;        // ZORGE9 / SILVER_BOR
@@ -579,14 +583,43 @@ export class AdminService {
     const where: any = {};
     if (query.project) where.project = query.project;
     if (query.isActive !== undefined) where.isActive = query.isActive === 'true' || query.isActive === true;
-    return this.prisma.commissionPolicy.findMany({
-      where,
-      orderBy: [{ project: 'asc' }, { startDate: 'desc' }],
-    });
+    const [policies, commissionContent] = await Promise.all([
+      this.prisma.commissionPolicy.findMany({
+        where,
+        orderBy: [{ project: 'asc' }, { startDate: 'desc' }],
+      }),
+      this.prisma.siteContent.findUnique({ where: { key: 'commission' } }),
+    ]);
+    const legacyCmsValue = (commissionContent?.value || {}) as any;
+    return policies.map((policy) => ({
+      ...policy,
+      ...paymentTermsForPolicy(policy, policy.project, legacyCmsValue),
+      paymentSettingsSource:
+        policy.installmentEnabled != null
+        && policy.installmentDiscount != null
+        && policy.subsidizedMortgageEnabled != null
+        && policy.subsidizedMortgageRate != null
+          ? 'POLICY'
+          : 'LEGACY_CMS',
+    }));
   }
 
   async createCommissionPolicy(body: any) {
-    const { project, mode, flatRate, levels, startDate, endDate, isActive, notes } = body;
+    const {
+      project,
+      mode,
+      flatRate,
+      levels,
+      installmentEnabled,
+      installmentDiscount,
+      subsidizedMortgageEnabled,
+      subsidizedMortgageRate,
+      displayNote,
+      startDate,
+      endDate,
+      isActive,
+      notes,
+    } = body;
     if (!project || !mode || !startDate || !endDate) {
       throw new BadRequestException('project, mode, startDate, endDate обязательны');
     }
@@ -596,18 +629,27 @@ export class AdminService {
     if (mode === 'PROGRESSIVE' && (!Array.isArray(levels) || levels.length === 0)) {
       throw new BadRequestException('Для mode=PROGRESSIVE нужен массив levels');
     }
+    this.validateCommissionPolicyValues({
+      mode,
+      flatRate,
+      levels,
+      installmentDiscount: installmentDiscount ?? DEFAULT_PAYMENT_TERMS.installmentDiscount,
+      subsidizedMortgageRate: subsidizedMortgageRate ?? DEFAULT_PAYMENT_TERMS.subsidizedMortgageRate,
+    });
     const start = new Date(startDate);
     const end = new Date(endDate);
     if (start >= end) throw new BadRequestException('startDate должна быть раньше endDate');
     // Проверка пересечения с другими активными политиками этого же project.
-    const overlap = await this.prisma.commissionPolicy.findFirst({
-      where: {
-        project,
-        isActive: true,
-        startDate: { lte: end },
-        endDate: { gte: start },
-      },
-    });
+    const overlap = isActive === false
+      ? null
+      : await this.prisma.commissionPolicy.findFirst({
+          where: {
+            project,
+            isActive: true,
+            startDate: { lte: end },
+            endDate: { gte: start },
+          },
+        });
     if (overlap) {
       throw new BadRequestException(
         `Период пересекается с активной политикой ${overlap.id} (${overlap.startDate.toISOString().slice(0, 10)} — ${overlap.endDate.toISOString().slice(0, 10)})`,
@@ -619,6 +661,11 @@ export class AdminService {
         mode,
         flatRate: mode === 'FLAT' ? Number(flatRate) : null,
         levels: mode === 'PROGRESSIVE' ? levels : null,
+        installmentEnabled: installmentEnabled !== false,
+        installmentDiscount: Number(installmentDiscount ?? DEFAULT_PAYMENT_TERMS.installmentDiscount),
+        subsidizedMortgageEnabled: subsidizedMortgageEnabled !== false,
+        subsidizedMortgageRate: Number(subsidizedMortgageRate ?? DEFAULT_PAYMENT_TERMS.subsidizedMortgageRate),
+        displayNote: displayNote?.trim() || null,
         startDate: start,
         endDate: end,
         isActive: isActive !== false,
@@ -634,28 +681,79 @@ export class AdminService {
     const newEnd = body.endDate ? new Date(body.endDate) : existing.endDate;
     if (newStart >= newEnd) throw new BadRequestException('startDate должна быть раньше endDate');
     const project = body.project || existing.project;
-    const overlap = await this.prisma.commissionPolicy.findFirst({
-      where: {
-        id: { not: id },
-        project,
-        isActive: true,
-        startDate: { lte: newEnd },
-        endDate: { gte: newStart },
-      },
-    });
-    if (overlap && body.isActive !== false) {
+    const willBeActive = body.isActive ?? existing.isActive;
+    const overlap = !willBeActive
+      ? null
+      : await this.prisma.commissionPolicy.findFirst({
+          where: {
+            id: { not: id },
+            project,
+            isActive: true,
+            startDate: { lte: newEnd },
+            endDate: { gte: newStart },
+          },
+        });
+    if (overlap) {
       throw new BadRequestException(`Период пересекается с активной политикой ${overlap.id}`);
     }
+    const effectiveMode = body.mode || existing.mode;
+    this.validateCommissionPolicyValues({
+      mode: effectiveMode,
+      flatRate: body.flatRate !== undefined ? body.flatRate : existing.flatRate,
+      levels: body.levels !== undefined ? body.levels : existing.levels,
+      installmentDiscount: body.installmentDiscount !== undefined
+        ? body.installmentDiscount
+        : existing.installmentDiscount ?? DEFAULT_PAYMENT_TERMS.installmentDiscount,
+      subsidizedMortgageRate: body.subsidizedMortgageRate !== undefined
+        ? body.subsidizedMortgageRate
+        : existing.subsidizedMortgageRate ?? DEFAULT_PAYMENT_TERMS.subsidizedMortgageRate,
+    });
     const data: any = {};
     if (body.project) data.project = body.project;
     if (body.mode) data.mode = body.mode;
     if (body.flatRate !== undefined) data.flatRate = body.flatRate != null ? Number(body.flatRate) : null;
     if (body.levels !== undefined) data.levels = body.levels;
+    if (body.installmentEnabled !== undefined) data.installmentEnabled = !!body.installmentEnabled;
+    if (body.installmentDiscount !== undefined) data.installmentDiscount = Number(body.installmentDiscount);
+    if (body.subsidizedMortgageEnabled !== undefined) data.subsidizedMortgageEnabled = !!body.subsidizedMortgageEnabled;
+    if (body.subsidizedMortgageRate !== undefined) data.subsidizedMortgageRate = Number(body.subsidizedMortgageRate);
+    if (body.displayNote !== undefined) data.displayNote = body.displayNote?.trim() || null;
     if (body.startDate) data.startDate = newStart;
     if (body.endDate) data.endDate = newEnd;
     if (body.isActive !== undefined) data.isActive = body.isActive;
     if (body.notes !== undefined) data.notes = body.notes;
     return this.prisma.commissionPolicy.update({ where: { id }, data });
+  }
+
+  private validateCommissionPolicyValues(values: {
+    mode: string;
+    flatRate: any;
+    levels: any;
+    installmentDiscount: any;
+    subsidizedMortgageRate: any;
+  }) {
+    const percent = (value: any, label: string) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100) {
+        throw new BadRequestException(`${label} должен быть числом от 0 до 100`);
+      }
+    };
+
+    if (values.mode === 'FLAT') percent(values.flatRate, 'Ставка');
+    if (values.mode === 'PROGRESSIVE') {
+      if (!Array.isArray(values.levels) || values.levels.length === 0) {
+        throw new BadRequestException('Для mode=PROGRESSIVE нужен массив levels');
+      }
+      for (const level of values.levels) {
+        const minSqm = Number(level?.minSqm);
+        if (!level?.level || !Number.isFinite(minSqm) || minSqm < 0) {
+          throw new BadRequestException('Каждый уровень должен содержать level и minSqm ≥ 0');
+        }
+        percent(level?.rate, `Ставка уровня ${level.level}`);
+      }
+    }
+    percent(values.installmentDiscount, 'Скидка при рассрочке');
+    percent(values.subsidizedMortgageRate, 'Ставка субсидированной ипотеки');
   }
 
   async deleteCommissionPolicy(id: string) {

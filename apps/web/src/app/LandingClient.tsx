@@ -10,29 +10,19 @@ import {
   FileText, Download as DownloadIcon, ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { HintIcon } from '@/components/HintIcon';
+import {
+  ActiveCommissionPolicy,
+  buildPaymentTermsText,
+  findActiveCommissionPolicy,
+  getCommissionRateLabel,
+  resolveCommissionText,
+  type CommissionProject,
+} from '@/lib/commission-display';
 
 // ─── мини-компоненты для оживления лендинга ──────────────────
 
-// Правка КБ5 (2026-05-25): единый источник истины для % комиссии.
-// Возвращает max ставку (число) из активной политики проекта. Используется
-// в карточках проектов, чтобы не зашивать % в БД LandingProject.
-// null — если активной политики нет (тогда UI должен показать «—» или
-// fallback из p.commissionFrom).
-function maxRateFromActivePolicies(
-  activePolicies: Array<{ project: string; mode: 'PROGRESSIVE' | 'FLAT'; flatRate: number | null; levels: any[] | null }>,
-  project: string,
-): number | null {
-  const p = activePolicies.find((x) => x.project === project);
-  if (!p) return null;
-  if (p.mode === 'FLAT' && p.flatRate != null) return Number(p.flatRate);
-  if (p.mode === 'PROGRESSIVE' && Array.isArray(p.levels) && p.levels.length > 0) {
-    return p.levels.reduce((mx, lv: any) => Math.max(mx, Number(lv.rate) || 0), 0);
-  }
-  return null;
-}
-
 // Slug LandingProject → enum Project (для матчинга с commission-policy).
-function slugToProject(slug: string | undefined): string | null {
+function slugToProject(slug: string | undefined): CommissionProject | null {
   if (!slug) return null;
   const s = slug.toLowerCase();
   if (s.includes('zorge')) return 'ZORGE9';
@@ -40,31 +30,52 @@ function slugToProject(slug: string | undefined): string | null {
   return null;
 }
 
-// Шкала комиссии — динамически рендерится из commission_policies (БД).
-// Если для проекта активная политика mode=FLAT — показываем «Фиксированная X%»,
-// иначе таблица levels из политики. Fallback на CMS levelsByProject если в
-// БД нет активной политики (например для свежего инстанса).
+function projectFromCommissionContext(text: string): CommissionProject | undefined {
+  const normalized = String(text || '').toLowerCase();
+  if (/зорге\s*9/.test(normalized)) return 'ZORGE9';
+  if (/серебрян|\bксб\b/.test(normalized)) return 'SILVER_BOR';
+  return undefined;
+}
+
+function landingProjectKey(project: any): CommissionProject | null {
+  if (project?.project === 'ZORGE9' || project?.project === 'SILVER_BOR') {
+    return project.project;
+  }
+  return slugToProject(project?.slug);
+}
+
+function resolveLandingCopy(
+  value: unknown,
+  activePolicies: ActiveCommissionPolicy[],
+  contextText?: string,
+  project?: CommissionProject,
+): string {
+  const text = String(value || '');
+  const context = String(contextText ?? text);
+  const isCommissionContext = /комисси|вознаграждени|ставк|шкал/i.test(context);
+  const inferredProject = project || projectFromCommissionContext(context);
+
+  return resolveCommissionText(text, activePolicies, {
+    project: inferredProject || (isCommissionContext ? 'overall' : undefined),
+    commissionContext: isCommissionContext,
+  });
+}
+
+// Единственный источник числовых условий — активная CommissionPolicy.
 function CommissionScale({
-  project, activePolicies, cmsLevelsByProject, cmsLevels, cmsModeByProject, cmsFlatRateByProject, cmsFlatNoteByProject,
+  project,
+  activePolicies,
 }: {
-  project: string;
-  activePolicies: Array<{ project: string; mode: 'PROGRESSIVE' | 'FLAT'; flatRate: number | null; levels: any[] | null }>;
-  cmsLevelsByProject?: Record<string, any[]>;
-  cmsLevels?: any[];
-  cmsModeByProject?: Record<string, 'FLAT' | 'PROGRESSIVE'>;
-  cmsFlatRateByProject?: Record<string, number>;
-  cmsFlatNoteByProject?: Record<string, string>;
+  project: CommissionProject;
+  activePolicies: ActiveCommissionPolicy[];
 }) {
-  // 2026-07-01: единый источник истины по процентам — БД commission-policies
-  // (что видит админ в /admin/commission-policies и брокер в кабинете).
-  // CMS оставлен только для необязательной подписи под FLAT-ставкой
-  // (cmsFlatNoteByProject). Раньше приоритет был у CMS → админ правил
-  // политику, а лендинг показывал старую цифру из CMS.
-  const policy = activePolicies.find((p) => p.project === project);
+  const policy = findActiveCommissionPolicy(activePolicies, project);
 
   // 1) Активная FLAT-политика в БД.
   if (policy && policy.mode === 'FLAT' && policy.flatRate != null) {
-    const note = cmsFlatNoteByProject?.[project] || 'при 100% оплате или ипотеке';
+    const note = policy.displayNote
+      ? resolveLandingCopy(policy.displayNote, activePolicies, policy.displayNote, project)
+      : 'единая ставка для всех сделок проекта';
     return (
       <div className="comm-table">
         <div className="ct-head"><span>Условие</span><span></span><span>Ставка</span></div>
@@ -100,44 +111,11 @@ function CommissionScale({
     );
   }
 
-  // 3) Политики в БД нет — fallback на CMS. Сначала CMS-режим FLAT.
-  const cmsMode = cmsModeByProject?.[project];
-  if (cmsMode === 'FLAT') {
-    const rate = cmsFlatRateByProject?.[project];
-    const note = cmsFlatNoteByProject?.[project] || '';
-    return (
-      <div className="comm-table">
-        <div className="ct-head"><span>Условие</span><span></span><span>Ставка</span></div>
-        <div className="ct-row active">
-          <span className="ct-level">Все сделки проекта</span>
-          <span className="ct-range">{note || 'единая ставка'}</span>
-          <span className="ct-rate">{rate != null ? `${String(rate).replace('.', ',')}%` : '—'}</span>
-        </div>
-      </div>
-    );
-  }
-
-  // 4) Потом CMS-шкала (если админ настроил в /admin/content).
-  const cmsRows = cmsLevelsByProject?.[project] || cmsLevels || [];
-  if (Array.isArray(cmsRows) && cmsRows.length > 0) {
-    return (
-      <div className="comm-table">
-        <div className="ct-head"><span>Уровень</span><span>Объём м2/кв.</span><span>Ставка</span></div>
-        {cmsRows.map((lv: any, i: number) => (
-          <div key={i} className={`ct-row${lv.active ? ' active' : ''}`}>
-            <span className="ct-level">{lv.name}</span>
-            <span className="ct-range">{lv.range}</span>
-            <span className="ct-rate">{lv.rate}</span>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  // Ничего не настроено — пустая таблица.
+  // API всегда возвращает общий fallback для чистой БД. Этот текст виден
+  // только при полном отсутствии и политики, и аварийного fallback.
   return (
     <div className="comm-table">
-      <div className="ct-head"><span>Уровень</span><span>Объём м2/кв.</span><span>Ставка</span></div>
+      <div className="ct-row"><span className="ct-level">Условия временно недоступны</span></div>
     </div>
   );
 }
@@ -1060,9 +1038,9 @@ const DEFAULT_HERO = {
   // Метраж считается в рамках одного проекта. Текст переписан: фокус на
   // ставке вознаграждения, а не на суммировании.
   // 2026-05-26: возврат ксениных текстов КБ4 (моя КБ5-правка их стёрла).
-  description: 'Прогрессивная шкала комиссии: до 8% по Зорге 9 и до 6,25% по Кварталу Серебряный Бор. Чем больше квадратных метров продаёте в одном проекте — тем выше ваша ставка.',
+  description: 'Актуальные ставки комиссии по Зорге 9 и Кварталу Серебряный Бор всегда доступны в разделе ниже.',
   stats: [
-    { number: 'до 8%', label: 'Максимальная ставка по Зорге 9' },
+    { number: '—', label: 'Максимальная ставка по Зорге 9' },
     { number: '7 дней', label: 'Выплата вознаграждения' },
     { number: '30 дней', label: 'Срок уникальности клиента' },
     { number: '2', label: 'Активных проекта' },
@@ -1086,7 +1064,7 @@ const DEFAULT_HERO = {
     {
       tag: 'Готовый дом бизнес-класса · м. Полежаевская',
       title: 'Апартаменты от 12 млн ₽',
-      description: 'Комиссия до 8%, выплаты вознаграждения до 7 рабочих дней.',
+      description: 'Актуальная комиссия и быстрые выплаты вознаграждения.',
       imageUrl: 'https://optim.tildacdn.com/tild3333-6538-4231-a437-613537353665/-/format/webp/2026-05-04_145437.jpg.webp',
     },
     {
@@ -1106,64 +1084,19 @@ const DEFAULT_ADVANTAGES = {
     { title: 'Выделенный отдел партнёров', description: 'Сопровождение на всех этапах сделки.' },
     { title: 'Выделенная линия', description: 'Ответ без ожидания с 9:00 до 21:00.' },
     { title: 'Быстрые выплаты', description: 'Вознаграждение — до 7 рабочих дней.' },
-    { title: 'Высокая комиссия', description: 'До 8% — одна из лучших на рынке.' },
+    { title: 'Высокая комиссия', description: 'Актуальные ставки по каждому проекту — одна из лучших программ на рынке.' },
     { title: 'Партнёрство', description: 'Работаем на общий результат.' },
     { title: 'Обучение', description: 'Брокер-туры для быстрого старта продаж.' },
   ],
 };
 const DEFAULT_COMMISSION = {
   tag: 'Комиссия и условия выплаты',
-  title: 'Прогрессивная шкала вознаграждения',
-  titleAccent: 'шкала',
+  title: 'Условия вознаграждения',
+  titleAccent: 'вознаграждения',
   // Подзаголовок переписан 2026-05-07 (корректировка 2): метраж суммируется
   // в рамках одного проекта, не по обоим. Сообщение под клиента: больше
   // продаёшь — выше ставка.
-  subtitle: 'Чем больше квадратных метров продаёте в рамках одного проекта — тем выше ваша ставка комиссии. Действует с 1 января по 30 июня 2026 года.',
-  // 2026-06-16: режим комиссии по проекту. По умолчанию для ZORGE9 — FLAT 4%
-  // (действует с 07.05.2026, см. seed-commission-policies.js).
-  // Для SILVER_BOR — PROGRESSIVE с шкалой ниже.
-  modeByProject: {
-    ZORGE9: 'FLAT' as 'FLAT' | 'PROGRESSIVE',
-    SILVER_BOR: 'PROGRESSIVE' as 'FLAT' | 'PROGRESSIVE',
-  },
-  flatRateByProject: {
-    ZORGE9: 4.0,
-    SILVER_BOR: 0,
-  },
-  flatNoteByProject: {
-    ZORGE9: 'Единая ставка по проекту Зорге 9 с 07 мая 2026 года.',
-    SILVER_BOR: '',
-  },
-  // Per-project levels (используется только для проектов с modeByProject = 'PROGRESSIVE').
-  levelsByProject: {
-    ZORGE9: [
-      { name: 'Start', range: '0–59 м²', rate: '5,0%', active: false },
-      { name: 'Basic', range: '60–119 м²', rate: '5,5%', active: false },
-      { name: 'Strong', range: '120–199 м²', rate: '6,0%', active: false },
-      { name: 'Premium', range: '200–319 м²', rate: '6,5%', active: false },
-      { name: 'Elite', range: '320–499 м²', rate: '7,0%', active: false },
-      { name: 'Champion', range: '500–699 м²', rate: '7,5%', active: false },
-      { name: 'Legend', range: '700+ м²', rate: '8,0%', active: false },
-    ],
-    SILVER_BOR: [
-      { name: 'Start', range: '0–47 м²', rate: '5,0%', active: false },
-      { name: 'Basic', range: '48–95 м²', rate: '5,25%', active: false },
-      { name: 'Strong', range: '96–170 м²', rate: '5,5%', active: false },
-      { name: 'Premium', range: '171–279 м²', rate: '5,75%', active: false },
-      { name: 'Elite', range: '280–399 м²', rate: '6,0%', active: false },
-      { name: 'Champion', range: '400+ м²', rate: '6,25%', active: false },
-    ],
-  },
-  // Legacy fallback
-  levels: [
-    { name: 'Start', range: '0–59 м²', rate: '5,0%', active: false },
-    { name: 'Basic', range: '60–119 м²', rate: '5,5%', active: false },
-    { name: 'Strong', range: '120–199 м²', rate: '6,0%', active: true },
-    { name: 'Premium', range: '200–319 м²', rate: '6,5%', active: false },
-    { name: 'Elite', range: '320–499 м²', rate: '7,0%', active: false },
-    { name: 'Champion', range: '500–699 м²', rate: '7,5%', active: false },
-    { name: 'Legend', range: '700+ м²', rate: '8,0%', active: false },
-  ],
+  subtitle: 'Актуальная ставка, шкала и условия оплаты для каждого проекта.',
   // Карточки правой колонки — содержание из "Условия вознаграждения.docx"
   // (правка 2026-05-06): 3 ключевых блока. Возврат к ксениным текстам 2026-05-26.
   cards: [
@@ -1263,7 +1196,7 @@ export type LandingInitialData = {
   marketingDocs?: any[];
   materialsDocs?: any[];
   news?: any[];
-  activePolicies?: any[];
+  activePolicies?: ActiveCommissionPolicy[];
 };
 
 export default function LandingPage({ initialData }: { initialData?: LandingInitialData } = {}) {
@@ -1285,9 +1218,9 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [howto, setHowto] = useState<any>(() => ic?.howto ? { ...DEFAULT_HOWTO, ...ic.howto } : DEFAULT_HOWTO);
   const [projectsSection, setProjectsSection] = useState<any>(() => ic?.projectsSection ? { ...DEFAULT_PROJECTS_SECTION, ...ic.projectsSection } : DEFAULT_PROJECTS_SECTION);
   const [cooperation, setCooperation] = useState<any>(() => ic?.cooperation ? { ...DEFAULT_COOPERATION, ...ic.cooperation } : DEFAULT_COOPERATION);
-  const [activePolicies, setActivePolicies] = useState<Array<{
-    project: string; mode: 'PROGRESSIVE' | 'FLAT'; flatRate: number | null; levels: any[] | null;
-  }>>(() => Array.isArray(initialData?.activePolicies) ? (initialData!.activePolicies as any) : []);
+  const [activePolicies, setActivePolicies] = useState<ActiveCommissionPolicy[]>(
+    () => Array.isArray(initialData?.activePolicies) ? (initialData!.activePolicies as ActiveCommissionPolicy[]) : [],
+  );
   const [projects, setProjects] = useState<any[]>(() => {
     if (Array.isArray(initialData?.projects) && initialData!.projects!.length > 0) {
       return initialData!.projects!.map((p: any) => {
@@ -1351,7 +1284,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
         safeFetch('/api/public/cms/news'),
         safeFetch('/api/public/cms/commission-policies/active'),
       ]);
-      if (Array.isArray(policies)) setActivePolicies(policies);
+      if (Array.isArray(policies) && policies.length > 0) setActivePolicies(policies);
       if (Array.isArray(nws)) setNews(nws);
       if (content) {
         if (content.hero) setHero({ ...DEFAULT_HERO, ...content.hero });
@@ -1557,10 +1490,13 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             3) ПОД ним — слайдер с картинками
             4) ПОТОМ — stats band со скруглёнными углами */}
         <div className="hero hero-compact">
-          <div className="hero-tag"><span>{hero.tag}</span></div>
+          <div className="hero-tag"><span>{resolveLandingCopy(hero.tag, activePolicies)}</span></div>
           <div className="hero-2col">
-            <h1><strong>{renderAccent(hero.title, hero.titleAccent)}</strong></h1>
-            <p className="hero-desc">{hero.description}</p>
+            <h1><strong>{renderAccent(
+              resolveLandingCopy(hero.title, activePolicies),
+              resolveLandingCopy(hero.titleAccent, activePolicies),
+            )}</strong></h1>
+            <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
           </div>
           <div className="hero-btns">
             <button className="btn-gold btn-lg" onClick={handleRegister}>Стать партнёром</button>
@@ -1579,19 +1515,30 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 
         {Array.isArray(hero.slides) && hero.slides.length > 0 && (
           <div className="hero-banner">
-            <HeroSlides slides={hero.slides} />
+            <HeroSlides slides={hero.slides.map((slide: any) => {
+              const context = [slide.tag, slide.title, slide.description].filter(Boolean).join(' ');
+              return {
+                ...slide,
+                tag: resolveLandingCopy(slide.tag, activePolicies, context),
+                title: resolveLandingCopy(slide.title, activePolicies, context),
+                description: resolveLandingCopy(slide.description, activePolicies, context),
+              };
+            })} />
           </div>
         )}
 
         <Reveal>
           <div className="stats-band">
-            {(hero.stats || []).map((s: any, i: number) => (
-              <div key={i} className="hst">
-                <div className="hst-n"><StatNumber raw={s.number} /></div>
-                <div className="hst-l">{s.label}</div>
-                {s.sublabel && <div className="hst-sub" style={{fontSize:11,color:'var(--muted2)',marginTop:2}}>{s.sublabel}</div>}
-              </div>
-            ))}
+            {(hero.stats || []).map((s: any, i: number) => {
+              const context = [s.number, s.label, s.sublabel].filter(Boolean).join(' ');
+              return (
+                <div key={i} className="hst">
+                  <div className="hst-n"><StatNumber raw={resolveLandingCopy(s.number, activePolicies, context)} /></div>
+                  <div className="hst-l">{resolveLandingCopy(s.label, activePolicies, context)}</div>
+                  {s.sublabel && <div className="hst-sub" style={{fontSize:11,color:'var(--muted2)',marginTop:2}}>{resolveLandingCopy(s.sublabel, activePolicies, context)}</div>}
+                </div>
+              );
+            })}
           </div>
         </Reveal>
 
@@ -1610,7 +1557,16 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             {projectsSection.subtitle && <p className="sh-sub">{projectsSection.subtitle}</p>}
           </div>
           <div className="proj-grid">
-            {projects.map((p: any, i: number) => (
+            {projects.map((p: any, i: number) => {
+              const projectKey = landingProjectKey(p);
+              const projectPolicy = projectKey
+                ? findActiveCommissionPolicy(activePolicies, projectKey)
+                : undefined;
+              const commissionLabel = getCommissionRateLabel(projectPolicy, {
+                progressive: 'range',
+                fallback: '',
+              });
+              return (
               <Reveal key={p.id} delay={i * 120}>
               <div className="proj-card" onClick={() => handleProjectClick(p)}>
                 {/* Статус и название собраны в отдельную верхнюю секцию:
@@ -1629,9 +1585,13 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                       был жирный, а «Серебряный Бор» — нет, визуально некрасиво. */}
                   <div className="proj-name"><strong>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</strong></div>
                 </div>
-                {p.description && <div className="proj-info">{p.description}</div>}
+                {p.description && (
+                  <div className="proj-info">
+                    {resolveLandingCopy(p.description, activePolicies, p.description, projectKey || undefined)}
+                  </div>
+                )}
 
-                {(p.classType || p.address || p.readyYear || p.totalUnits || p.commissionFrom) && (
+                {(p.classType || p.address || p.readyYear || p.totalUnits || projectPolicy) && (
                   <div className="proj-meta">
                     {p.classType && <div><span style={{color:'var(--muted2)'}}>Класс:</span> <strong style={{color:'var(--black)'}}>{p.classType}</strong></div>}
                     {p.address && <div><span style={{color:'var(--muted2)'}}>Адрес:</span> <strong style={{color:'var(--black)'}}>{p.address}</strong></div>}
@@ -1647,28 +1607,17 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                     })()}
                     {p.floorsTotal && <div><span style={{color:'var(--muted2)'}}>Этажей:</span> <strong style={{color:'var(--black)'}}>{p.floorsTotal}</strong></div>}
                     {p.totalUnits && <div><span style={{color:'var(--muted2)'}}>Лотов:</span> <strong style={{color:'var(--black)'}}>{p.totalUnits}</strong></div>}
-                    {/* Правка КБ5 (2026-05-25): % берём из активной commission-policy
-                    (которую правит админ в /admin/commission-policies). Если
-                    политики нет — fallback на старые поля проекта. */}
-                {(() => {
-                  const projectEnum = slugToProject((p as any).slug) || (p as any).project || '';
-                  const rateFromPolicy = maxRateFromActivePolicies(activePolicies, projectEnum);
-                  const display = rateFromPolicy != null
-                    ? `до ${String(rateFromPolicy).replace('.', ',')}%`
-                    : (p.commissionFrom || p.commissionTo)
-                      ? `${p.commissionFrom}${p.commissionTo && p.commissionTo !== p.commissionFrom ? `–${p.commissionTo}` : ''}%`
-                      : null;
-                  return display ? (
-                    <div><span style={{color:'var(--muted2)'}}>Комиссия:</span> <strong style={{color:'var(--gold)'}}>{display}</strong></div>
-                  ) : null;
-                })()}
+                    {commissionLabel && (
+                      <div><span style={{color:'var(--muted2)'}}>Комиссия:</span> <strong style={{color:'var(--gold)'}}>{commissionLabel}</strong></div>
+                    )}
                   </div>
                 )}
 
                 <div className="proj-link">{p.ctaText || 'Смотреть каталог'} &rarr;</div>
               </div>
               </Reveal>
-            ))}
+              );
+            })}
           </div>
         </section>
 
@@ -1681,6 +1630,9 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               {promos.map((p, i) => {
                 const FALLBACK = 'https://storage.yandexcloud.net/st-michael-media/media/p/p/i/bd2e855b408722fb61fa362b50d7f83282d3a86e.jpg';
                 const img = p.imageUrl || FALLBACK;
+                const context = [p.tag, p.title, p.subtitle, p.description].filter(Boolean).join(' ');
+                const promoProject: CommissionProject | undefined =
+                  p.project === 'ZORGE9' || p.project === 'SILVER_BOR' ? p.project : undefined;
                 return (
                 <div key={p.id} className="hero-slide" style={{
                   opacity: i === promoIdx ? 1 : 0,
@@ -1689,10 +1641,10 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                   backgroundImage: `linear-gradient(95deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0.1) 100%), url(${img})`,
                 }}>
                   <div className="hero-slide-content">
-                    {p.tag && <div className="hero-slide-tag">{p.tag}</div>}
-                    <h3 className="hero-slide-title">{p.title}</h3>
-                    {p.subtitle && <p className="hero-slide-desc" style={{marginBottom:6}}>{p.subtitle}</p>}
-                    {p.description && <p className="hero-slide-desc">{p.description}</p>}
+                    {p.tag && <div className="hero-slide-tag">{resolveLandingCopy(p.tag, activePolicies, context, promoProject)}</div>}
+                    <h3 className="hero-slide-title">{resolveLandingCopy(p.title, activePolicies, context, promoProject)}</h3>
+                    {p.subtitle && <p className="hero-slide-desc" style={{marginBottom:6}}>{resolveLandingCopy(p.subtitle, activePolicies, context, promoProject)}</p>}
+                    {p.description && <p className="hero-slide-desc">{resolveLandingCopy(p.description, activePolicies, context, promoProject)}</p>}
                     {(p.ctaText || p.ctaHref) && (
                       <a
                         href={p.ctaHref || '#projects'}
@@ -1746,12 +1698,17 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         <hr className="sep" />
 
         {/* COMMISSION
-            Источник шкалы — commission_policies (БД, /admin/commission-policies).
-            Это позволяет админу переключать проект между FLAT/PROGRESSIVE
-            и сразу видеть на лендинге. Маркетинговые тексты (tag/title/cards)
-            остаются из CMS commission. */}
+            Числовые условия, шкала и рассрочка берутся только из активной
+            commission-policy. CMS хранит лишь редакционные тексты без ставок. */}
         <section id="commission">
-          <div className="sh"><div className="sh-tag">{commission.tag}</div><h2>{renderAccent(commission.title, commission.titleAccent)}</h2>{commission.subtitle && <p className="sh-sub">{commission.subtitle}</p>}</div>
+          <div className="sh">
+            <div className="sh-tag">{resolveLandingCopy(commission.tag, activePolicies)}</div>
+            <h2>{renderAccent(
+              resolveLandingCopy(commission.title, activePolicies),
+              resolveLandingCopy(commission.titleAccent, activePolicies),
+            )}</h2>
+            {commission.subtitle && <p className="sh-sub">{resolveLandingCopy(commission.subtitle, activePolicies)}</p>}
+          </div>
 
           <div style={{display:'flex',justifyContent:'center',gap:8,marginBottom:24}}>
             {(['ZORGE9', 'SILVER_BOR'] as const).map((proj) => (
@@ -1782,25 +1739,25 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               <CommissionScale
                 project={commissionProject}
                 activePolicies={activePolicies}
-                cmsLevelsByProject={commission.levelsByProject}
-                cmsLevels={commission.levels}
-                cmsModeByProject={commission.modeByProject}
-                cmsFlatRateByProject={commission.flatRateByProject}
-                cmsFlatNoteByProject={commission.flatNoteByProject}
               />
             </div>
             <div className="comm-info">
-              {/* 2026-07-03: карточки условий тоже переключаются по проекту.
-                  Fallback на старый общий commission.cards для совместимости. */}
               {(() => {
                 const byProject = commission?.cardsByProject?.[commissionProject];
-                const list = Array.isArray(byProject) && byProject.length > 0
+                const source = Array.isArray(byProject)
                   ? byProject
                   : (commission?.cards || []);
+                const list = source.filter((card: any) => !/рассроч|ипотек/i.test(String(card?.title || '')));
+                const paymentText = buildPaymentTermsText(
+                  findActiveCommissionPolicy(activePolicies, commissionProject),
+                );
+                if (paymentText) {
+                  list.push({ title: 'Рассрочка и ипотека', text: paymentText });
+                }
                 return list.map((c: any, i: number) => (
                   <div key={i} className="comm-card">
-                    <div className="comm-card-title">{c.title}</div>
-                    <p>{c.text}</p>
+                    <div className="comm-card-title">{resolveLandingCopy(c.title, activePolicies, `${c.title} ${c.text}`, commissionProject)}</div>
+                    <p>{resolveLandingCopy(c.text, activePolicies, `${c.title} ${c.text}`, commissionProject)}</p>
                   </div>
                 ));
               })()}
@@ -1902,7 +1859,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         {/* ADVANTAGES */}
         <section className="s-adv">
           <div className="adv-bg-glow" />
-          <div className="sh"><div className="sh-tag">{advantages.tag}</div><h2>{renderAccent(advantages.title, advantages.titleAccent)}</h2>{advantages.subtitle && <p className="sh-sub" style={{color:'rgba(255,255,255,0.6)'}}>{advantages.subtitle}</p>}</div>
+          <div className="sh"><div className="sh-tag">{resolveLandingCopy(advantages.tag, activePolicies)}</div><h2>{renderAccent(resolveLandingCopy(advantages.title, activePolicies), resolveLandingCopy(advantages.titleAccent, activePolicies))}</h2>{advantages.subtitle && <p className="sh-sub" style={{color:'rgba(255,255,255,0.6)'}}>{resolveLandingCopy(advantages.subtitle, activePolicies)}</p>}</div>
           <div className="adv-grid">
             {(advantages.items || []).map((it: any, i: number) => {
               const Icon = pickAdvantageIcon(it);
@@ -1914,8 +1871,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                         <Icon style={{ width: 20, height: 20, color: 'var(--gold)' }} />
                       </div>
                     )}
-                    <div className="adv-title">{it.title}</div>
-                    <div className="adv-desc">{it.description}</div>
+                    <div className="adv-title">{resolveLandingCopy(it.title, activePolicies, `${it.title} ${it.description}`)}</div>
+                    <div className="adv-desc">{resolveLandingCopy(it.description, activePolicies, `${it.title} ${it.description}`)}</div>
                   </div>
                 </Reveal>
               );
