@@ -5,6 +5,8 @@ import { SchedulerService } from './scheduler.service';
 import { DatabaseModule } from '../database/database.module';
 import { CatalogModule } from '../catalog/catalog.module';
 import { AdminModule } from '../admin/admin.module';
+import { AmocrmModule } from '../amocrm/amocrm.module';
+import { CmsModule } from '../cms/cms.module';
 
 @Module({
   imports: [
@@ -13,6 +15,9 @@ import { AdminModule } from '../admin/admin.module';
     CatalogModule,
     // 2026-06-09: scheduler дёргает GoogleSheetsSyncService раз в 30 мин.
     AdminModule,
+    AmocrmModule,
+    // 2026-08-12: CmsService нужен для syncNewsFromStm в handleStmNewsSync.
+    CmsModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
   providers: [SchedulerService],

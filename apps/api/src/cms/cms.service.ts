@@ -2,6 +2,12 @@ import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitLeadDate } from '@st-michael/integrations';
 import { getSystemSetting } from '../common/system-setting';
+import {
+  COMMISSION_RATES,
+  LEVEL_THRESHOLDS_BY_PROJECT,
+  paymentTermsForPolicy,
+  rateFor,
+} from '../commission/commission.service';
 
 const KNOWN_KEYS = ['hero', 'advantages', 'commission', 'contact', 'howto', 'projectsSection', 'cooperation'] as const;
 
@@ -10,13 +16,10 @@ const DEFAULT_CONTENT: Record<string, any> = {
     tag: 'Партнёрская программа',
     title: 'Доход растёт вместе с объёмом продаж агентства',
     titleAccent: 'продаж агентства',
-    // 2026-05-26: возврат к ксениным текстам КБ4 (моя КБ5-правка стёрла их —
-    // пользователь сказал откатить). % зашиты в текст осознанно — Ксеня их
-    // редактирует руками когда меняются.
     description:
-      'Суммируем сделки по Зорге 9 и Кварталу Серебряный Бор — вы быстрее выходите на более высокий уровень комиссии. До 8% по Зорге 9 и до 6,25% по Серебряному Бору.',
+      'Актуальная комиссия: {{commission.ZORGE9.range}} по Зорге 9 и {{commission.SILVER_BOR.range}} по Серебряному Бору.',
     stats: [
-      { number: 'до 8%', label: 'Максимальная ставка по Зорге 9' },
+      { number: '{{commission.ZORGE9.max}}', label: 'Максимальная ставка по Зорге 9' },
       { number: '7 дней', label: 'Выплата вознаграждения' },
       { number: '30 дней', label: 'Срок уникальности клиента' },
       { number: '2', label: 'Активных проекта' },
@@ -31,7 +34,7 @@ const DEFAULT_CONTENT: Record<string, any> = {
       { icon: 'headphones', title: 'Выделенный отдел партнёров', description: 'Сопровождение на всех этапах сделки.' },
       { icon: 'shield', title: 'Защищаем брокера от увода клиента', description: 'С клиентами, которые пришли через вас, мы не работаем напрямую.' },
       { icon: 'wallet', title: 'Быстрые выплаты', description: 'Вознаграждение — до 7 рабочих дней.' },
-      { icon: 'trending-up', title: 'Высокая комиссия', description: 'Прогрессивная шкала по КСБ — до 6,25% за сделку. Фиксированная ставка 5% по Зорге 9. Плюс квартальный и годовой бонусы.' },
+      { icon: 'trending-up', title: 'Высокая комиссия', description: 'По КСБ — {{commission.SILVER_BOR.range}} за сделку, по Зорге 9 — {{commission.ZORGE9.range}}. Плюс квартальный и годовой бонусы.' },
       { icon: 'sparkles', title: 'Не цепляемся за формальности', description: 'Регламент уникальности у нас гибче, чем у большинства застройщиков. Подтверждаем работу с клиентом, даже когда другие отказали бы.' },
       { icon: 'graduation-cap', title: 'Обучение', description: 'Брокер-туры для быстрого старта продаж.' },
     ],
@@ -67,50 +70,15 @@ const DEFAULT_CONTENT: Record<string, any> = {
   },
   commission: {
     tag: 'Комиссия и условия выплаты',
-    title: 'Прогрессивная шкала вознаграждения',
-    titleAccent: 'шкала',
-    subtitle: 'Метраж суммируется по обоим проектам в рамках одного агентства. Действует с 1 января по 30 июня 2026 года.',
-    // 2026-07-01: параметры калькулятора комиссии /commission/calculate.
-    // *Enabled=false → вариант оплаты скрыт на форме калькулятора.
-    installmentDiscount: 0.5,
-    installmentEnabled: true,
-    subsidizedMortgageRate: 4,
-    subsidizedMortgageEnabled: true,
-    levelsByProject: {
-      ZORGE9: [
-        { name: 'Start', range: '0–59 м²', rate: '5,0%', active: false },
-        { name: 'Basic', range: '60–119 м²', rate: '5,5%', active: false },
-        { name: 'Strong', range: '120–199 м²', rate: '6,0%', active: true },
-        { name: 'Premium', range: '200–319 м²', rate: '6,5%', active: false },
-        { name: 'Elite', range: '320–499 м²', rate: '7,0%', active: false },
-        { name: 'Champion', range: '500–699 м²', rate: '7,5%', active: false },
-        { name: 'Legend', range: '700+ м²', rate: '8,0%', active: false },
-      ],
-      SILVER_BOR: [
-        { name: 'Start', range: '0–47 м²', rate: '5,0%', active: false },
-        { name: 'Basic', range: '48–95 м²', rate: '5,25%', active: false },
-        { name: 'Strong', range: '96–170 м²', rate: '5,5%', active: true },
-        { name: 'Premium', range: '171–279 м²', rate: '5,75%', active: false },
-        { name: 'Elite', range: '280–399 м²', rate: '6,0%', active: false },
-        { name: 'Champion', range: '400+ м²', rate: '6,25%', active: false },
-      ],
-    },
-    levels: [
-      { name: 'Start', range: '0–59 м²', rate: '5,0%', active: false },
-      { name: 'Basic', range: '60–119 м²', rate: '5,5%', active: false },
-      { name: 'Strong', range: '120–199 м²', rate: '6,0%', active: true },
-      { name: 'Premium', range: '200–319 м²', rate: '6,5%', active: false },
-      { name: 'Elite', range: '320–499 м²', rate: '7,0%', active: false },
-      { name: 'Champion', range: '500–699 м²', rate: '7,5%', active: false },
-      { name: 'Legend', range: '700+ м²', rate: '8,0%', active: false },
-    ],
+    title: 'Условия вознаграждения',
+    titleAccent: 'вознаграждения',
+    subtitle: 'Актуальная ставка, шкала и условия оплаты задаются одной политикой для каждого проекта.',
     // 2026-05-26: возвращён «Квартальный бонус» (был ксенин текст КБ4).
     cards: [
       { title: 'Условия выплаты', text: 'Вознаграждение выплачивается в течение 7 рабочих дней после оплаты клиентом. ПВ ≥ 50% (Зорге 9) или ≥ 30% (Серебряный Бор) — единовременно.' },
       { title: 'Квартальный бонус', text: 'При уровне Strong+ несколько кварталов подряд: +0,1% → +0,15% → +0,2% → +0,25% (максимум). Обнуляется при отсутствии продаж в квартале.' },
       { title: 'Бонус за скорость', text: '+0,1% к ставке, если от заявки клиента до платной брони проходит не более 10 рабочих дней. Действует на оба проекта.' },
       { title: 'Годовой бонус', text: '100 000 ₽ + памятный кубок за минимум одну сделку раз в 2 месяца в течение года.' },
-      { title: 'Рассрочка и ипотека', text: 'При рассрочке —0,5% от базовой ставки. Субсидированная ипотека — 4% (м² идут в общий зачёт).' },
       { title: 'Коммерческие помещения', text: 'Продажа: помещения и фитнес — 3%, отдельно стоящие здания — 2%. Аренда: ритейл — 100% мес. платежа, фитнес/офис — 50%.' },
       { title: 'Реферальная программа', text: 'Дополнительное вознаграждение за привлечение новых партнёров в программу.' },
     ],
@@ -299,7 +267,9 @@ export class CmsService {
     for (const k of ['totalUnits', 'floorsTotal', 'buildingsCount', 'readyQuarter', 'readyYear'] as const) {
       if (data[k] !== undefined) patch[k] = data[k] === null ? null : Number(data[k]);
     }
-    for (const k of ['pricePerSqmFrom', 'commissionFrom', 'commissionTo'] as const) {
+    // commissionFrom/commissionTo — legacy-колонки. Новые ставки меняются
+    // только через CommissionPolicy и здесь намеренно больше не записываются.
+    for (const k of ['pricePerSqmFrom'] as const) {
       if (data[k] !== undefined) patch[k] = data[k] === null ? null : Number(data[k]);
     }
     if (data.gallery !== undefined) patch.gallery = data.gallery;
@@ -354,6 +324,81 @@ export class CmsService {
   async deleteNews(id: string) {
     await this.prisma.landingNews.delete({ where: { id } });
     return { deleted: true };
+  }
+
+  // 2026-08-12: ручной/плановый синк новостей с stmichael.ru/news.
+  // Та же логика, что в SchedulerService.handleStmNewsSync, вынесена сюда
+  // чтобы не создавать циклическую зависимость CmsModule ↔ SchedulerModule.
+  async syncNewsFromStm(): Promise<{ created: number; updated: number; total: number }> {
+    const html = await this.fetchStmNewsHtml();
+    const items = this.parseStmNewsHtml(html);
+    let created = 0;
+    let updated = 0;
+    for (const item of items) {
+      const existing = await this.prisma.landingNews.findFirst({ where: { url: item.url } });
+      if (!existing) {
+        await this.prisma.landingNews.create({ data: item });
+        created++;
+      } else if (existing.title !== item.title || existing.imageUrl !== item.imageUrl) {
+        await this.prisma.landingNews.update({
+          where: { id: existing.id },
+          data: { title: item.title, imageUrl: item.imageUrl, publishedAt: item.publishedAt },
+        });
+        updated++;
+      }
+    }
+    return { created, updated, total: items.length };
+  }
+
+  private fetchStmNewsHtml(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const https = require('https');
+      const req = https.get(
+        'https://stmichael.ru/news',
+        { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; STMBrokerBot/1.0)' }, timeout: 15000 },
+        (res: any) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+          res.on('error', reject);
+        },
+      );
+      req.on('timeout', () => { req.destroy(); reject(new Error('stm-news: request timeout')); });
+      req.on('error', reject);
+    });
+  }
+
+  private parseStmNewsHtml(html: string): any[] {
+    const MONTHS: Record<string, number> = {
+      'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4, 'мая': 5, 'июня': 6,
+      'июля': 7, 'августа': 8, 'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12,
+    };
+    const cardRe = /<a\s[^>]*href="(\/news\/[^"]+)"[^>]*class="NewsCard_\w+">([\s\S]*?)(?=<a\s[^>]*href="\/news\/|<\/ul>|<\/section>|$)/g;
+    const items: any[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = cardRe.exec(html)) !== null && items.length < 12) {
+      const slug = m[1];
+      const body = m[2];
+      const url = `https://stmichael.ru${slug}`;
+      const imgM = body.match(/(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/);
+      const imageUrl = imgM ? imgM[1] : null;
+      const dateM = body.match(/class="date_\w+"[^>]*>\s*(\d{1,2})\s+([а-яёА-ЯЁ]+)\s+(\d{4})/u);
+      let publishedAt: Date = new Date();
+      if (dateM) {
+        const day = parseInt(dateM[1], 10);
+        const monthNum = MONTHS[dateM[2].toLowerCase()] ?? 1;
+        const year = parseInt(dateM[3], 10);
+        publishedAt = new Date(year, monthNum - 1, day);
+      }
+      const titleM = body.match(/class="title_\w+"[^>]*>([\s\S]*?)<\/div>/);
+      const title = titleM
+        ? titleM[1].replace(/<[^>]+>/g, '').trim()
+        : slug.replace(/^\/news\//, '').replace(/-/g, ' ');
+      if (!title) continue;
+      items.push({ title, source: 'stmichael.ru', publishedAt, imageUrl, url, isActive: true, sortOrder: 0 });
+    }
+    return items;
   }
 
   // ─── Promos (slider — block 3) ──────────────────
@@ -594,26 +639,71 @@ export class CmsService {
   // для Зорге через /admin/commission-policies, лендинг должен это отразить).
   async getActiveCommissionPolicies() {
     const now = new Date();
-    const rows = await this.prisma.commissionPolicy.findMany({
-      where: {
-        isActive: true,
-        startDate: { lte: now },
-        endDate: { gte: now },
-      },
-      orderBy: [{ project: 'asc' }, { startDate: 'desc' }],
-    });
+    const [rows, commissionContent] = await Promise.all([
+      this.prisma.commissionPolicy.findMany({
+        where: {
+          isActive: true,
+          startDate: { lte: now },
+          endDate: { gte: now },
+        },
+        orderBy: [{ project: 'asc' }, { startDate: 'desc' }],
+      }),
+      this.getContent('commission'),
+    ]);
     const byProject: Record<string, any> = {};
     for (const r of rows) {
       if (!byProject[r.project]) {
+        const levels = Array.isArray(r.levels) ? (r.levels as any[]) : null;
+        const rates = r.mode === 'FLAT'
+          ? [Number(r.flatRate || 0)]
+          : (levels || []).map((level: any) => Number(level.rate));
         byProject[r.project] = {
+          id: r.id,
           project: r.project,
           mode: r.mode,
-          flatRate: r.flatRate ? Number(r.flatRate) : null,
-          levels: r.levels || null,
+          flatRate: r.flatRate != null ? Number(r.flatRate) : null,
+          levels,
+          minRate: rates.length ? Math.min(...rates) : null,
+          maxRate: rates.length ? Math.max(...rates) : null,
+          ...paymentTermsForPolicy(r, r.project, commissionContent),
+          displayNote: r.displayNote || null,
+          startDate: r.startDate,
+          endDate: r.endDate,
+          source: 'POLICY',
         };
       }
     }
-    return Object.values(byProject);
+
+    // Один и тот же fallback используется всеми публичными отображениями.
+    // Он нужен только для чистой БД/аварийного случая, когда админ ещё не
+    // создал политику; старые CMS-шкалы и LandingProject-комиссии не читаем.
+    for (const project of ['ZORGE9', 'SILVER_BOR']) {
+      if (byProject[project]) continue;
+      const thresholds = [...(LEVEL_THRESHOLDS_BY_PROJECT[project] || [])]
+        .sort((a, b) => a.minSqm - b.minSqm);
+      const levels = thresholds.map((threshold) => ({
+        level: threshold.level,
+        minSqm: threshold.minSqm,
+        rate: rateFor(project, threshold.level),
+      }));
+      const rates = Object.values(COMMISSION_RATES[project] || {}).map(Number);
+      byProject[project] = {
+        id: null,
+        project,
+        mode: 'PROGRESSIVE',
+        flatRate: null,
+        levels,
+        minRate: rates.length ? Math.min(...rates) : null,
+        maxRate: rates.length ? Math.max(...rates) : null,
+        ...paymentTermsForPolicy(null, project, commissionContent),
+        displayNote: null,
+        startDate: null,
+        endDate: null,
+        source: 'FALLBACK',
+      };
+    }
+
+    return ['ZORGE9', 'SILVER_BOR'].map((project) => byProject[project]);
   }
 
   // Seeds default content (idempotent — only inserts if missing)
