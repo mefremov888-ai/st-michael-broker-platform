@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiGet } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import AmoHealthBanner from '@/components/AmoHealthBanner';
 import {
   ArrowUpDown,
   BarChart3,
@@ -53,6 +54,10 @@ interface FixationsByBrokerRow {
   selfSubmitted?: number;
   submittedByOthers?: number;
   submitters?: Array<{ brokerId: string; fullName: string; count: number }>;
+  brokerTourVisited: boolean;
+  brokerTourDate: string | null;
+  brokerTourInPeriod: boolean;
+  fixationAfterTour: boolean;
 }
 
 type FixationSortKey =
@@ -67,8 +72,11 @@ type FixationSortKey =
   | 'submittedByOthers';
 
 type FixationSort = { key: FixationSortKey; direction: 'asc' | 'desc' };
+type FixationStatusFilter = 'total' | 'conditionallyUnique' | 'underReview' | 'rejected' | 'expired' | 'fixed';
+type BrokerTourFilter = 'all' | 'visited' | 'converted';
 
 const FIXATION_PAGE_SIZE = 50;
+const MOSCOW_TIME_ZONE = 'Europe/Moscow';
 
 interface Overview {
   period: { from: string; to: string };
@@ -120,53 +128,88 @@ function fmtRub(n: number) {
   return Math.round(n).toLocaleString('ru-RU') + ' ₽';
 }
 
+function moscowDateOnly(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: MOSCOW_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const value = (type: 'year' | 'month' | 'day') => parts.find((part) => part.type === type)?.value ?? '';
+  return value('year') + '-' + value('month') + '-' + value('day');
+}
+
+function shiftDateOnly(value: string, days: number) {
+  const [year, month, day] = value.split('-').map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  return shifted.toISOString().slice(0, 10);
+}
+
+function formatBrokerTourDate(value: string | null) {
+  if (!value) return '\u2014';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '\u2014';
+  return date.toLocaleDateString('ru-RU', { timeZone: MOSCOW_TIME_ZONE });
+}
+
 export default function AdminAnalyticsPage() {
   const { broker } = useAuth();
   const [data, setData] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
-  const [from, setFrom] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - 90);
-    return d.toISOString().slice(0, 10);
-  });
-  const [to, setTo] = useState(() => new Date().toISOString().slice(0, 10));
-  const [fixationSearch, setFixationSearch] = useState('');
+  const [from, setFrom] = useState(() => shiftDateOnly(moscowDateOnly(), -89));
+  const [to, setTo] = useState(() => moscowDateOnly());
+  const [brokerSearch, setBrokerSearch] = useState('');
+  const [submitterSearch, setSubmitterSearch] = useState('');
+  const [fixationStatusFilter, setFixationStatusFilter] = useState<FixationStatusFilter>('total');
+  const [brokerTourFilter, setBrokerTourFilter] = useState<BrokerTourFilter>('all');
   const [fixationSort, setFixationSort] = useState<FixationSort>({ key: 'total', direction: 'desc' });
   const [fixationPage, setFixationPage] = useState(1);
+  const requestIdRef = useRef(0);
+  const invalidDateRange = !from || !to || from > to;
 
   const applyPreset = (preset: 'today' | 'week' | 'month' | 'quarter' | 'year' | 'ytd' | 'all') => {
-    const now = new Date();
-    const toStr = now.toISOString().slice(0, 10);
-    const back = (days: number) => {
-      const d = new Date(); d.setDate(d.getDate() - days);
-      return d.toISOString().slice(0, 10);
-    };
+    const toStr = moscowDateOnly();
+    const back = (days: number) => shiftDateOnly(toStr, -days);
     if (preset === 'today') { setFrom(toStr); setTo(toStr); }
-    else if (preset === 'week') { setFrom(back(7)); setTo(toStr); }
-    else if (preset === 'month') { setFrom(back(30)); setTo(toStr); }
-    else if (preset === 'quarter') { setFrom(back(90)); setTo(toStr); }
-    else if (preset === 'year') { setFrom(back(365)); setTo(toStr); }
+    else if (preset === 'week') { setFrom(back(6)); setTo(toStr); }
+    else if (preset === 'month') { setFrom(back(29)); setTo(toStr); }
+    else if (preset === 'quarter') { setFrom(back(89)); setTo(toStr); }
+    else if (preset === 'year') { setFrom(back(364)); setTo(toStr); }
     else if (preset === 'ytd') {
-      setFrom(`${now.getFullYear()}-01-01`);
+      setFrom(toStr.slice(0, 4) + '-01-01');
       setTo(toStr);
     } else if (preset === 'all') {
       setFrom('2020-01-01'); setTo(toStr);
     }
   };
 
-  if (broker && broker.role !== 'ADMIN' && broker.role !== 'MANAGER') {
-    return <div className="card">Доступ запрещён</div>;
-  }
-
   useEffect(() => {
+    const requestId = ++requestIdRef.current;
     setFixationPage(1);
-    setLoading(true);
-    apiGet<Overview>(`/analytics/admin/overview?startDate=${from}T00:00:00.000Z&endDate=${to}T23:59:59.999Z`)
-      .then(setData)
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
-  }, [from, to]);
 
-  const maxTrend = data ? Math.max(1, ...data.brokers.registrationTrend.map((p) => p.count)) : 1;
+    if (invalidDateRange) {
+      setData(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setData(null);
+    apiGet<Overview>('/analytics/admin/overview?startDate=' + encodeURIComponent(from) + '&endDate=' + encodeURIComponent(to))
+      .then((nextData) => {
+        if (requestId === requestIdRef.current) setData(nextData);
+      })
+      .catch(() => {
+        if (requestId === requestIdRef.current) setData(null);
+      })
+      .finally(() => {
+        if (requestId === requestIdRef.current) setLoading(false);
+      });
+
+    return () => {
+      if (requestId === requestIdRef.current) requestIdRef.current += 1;
+    };
+  }, [from, invalidDateRange, to]);
   const tourWithAnyFixation = data
     ? data.brokerTourFunnel.withAnyFixation ?? data.brokerTourFunnel.withFixation ?? 0
     : 0;
@@ -178,30 +221,39 @@ export default function AdminAnalyticsPage() {
         : 0)
     : 0;
 
-  const fixationRows = (data?.fixationsByBroker ?? []).map((row) => ({
+  const fixationRows = useMemo(() => (data?.fixationsByBroker ?? []).map((row) => ({
     ...row,
     submittedBySelf: row.submittedBySelf ?? row.selfSubmitted ?? 0,
     submittedByOthers: row.submittedByOthers ?? 0,
     submitters: row.submitters ?? [],
-  }));
-  const normalizedFixationSearch = fixationSearch.trim().toLocaleLowerCase('ru-RU');
-  const visibleFixationRows = fixationRows
-    .filter((row) => {
-      if (!normalizedFixationSearch) return true;
-      const submitterNames = (row.submitters ?? []).map((submitter) => submitter.fullName).join(' ');
-      return `${row.fullName} ${row.phone || ''} ${submitterNames}`
-        .toLocaleLowerCase('ru-RU')
-        .includes(normalizedFixationSearch);
-    })
-    .sort((a, b) => {
-      const aValue = a[fixationSort.key];
-      const bValue = b[fixationSort.key];
-      const direction = fixationSort.direction === 'asc' ? 1 : -1;
-      const compared = typeof aValue === 'string' && typeof bValue === 'string'
-        ? aValue.localeCompare(bValue, 'ru-RU')
-        : Number(aValue) - Number(bValue);
-      return compared !== 0 ? compared * direction : a.fullName.localeCompare(b.fullName, 'ru-RU');
-    });
+  })), [data?.fixationsByBroker]);
+  const visibleFixationRows = useMemo(() => {
+    const normalizedBrokerSearch = brokerSearch.trim().toLocaleLowerCase('ru-RU');
+    const normalizedSubmitterSearch = submitterSearch.trim().toLocaleLowerCase('ru-RU');
+
+    return fixationRows
+      .filter((row) => {
+        if (normalizedBrokerSearch && !(row.fullName + ' ' + (row.phone || ''))
+          .toLocaleLowerCase('ru-RU')
+          .includes(normalizedBrokerSearch)) return false;
+        if (normalizedSubmitterSearch && !(row.submitters ?? []).some((submitter) => submitter.fullName
+          .toLocaleLowerCase('ru-RU')
+          .includes(normalizedSubmitterSearch))) return false;
+        if (fixationStatusFilter !== 'total' && Number(row[fixationStatusFilter]) <= 0) return false;
+        if (brokerTourFilter === 'visited' && !row.brokerTourInPeriod) return false;
+        if (brokerTourFilter === 'converted' && !row.fixationAfterTour) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const aValue = a[fixationSort.key];
+        const bValue = b[fixationSort.key];
+        const direction = fixationSort.direction === 'asc' ? 1 : -1;
+        const compared = typeof aValue === 'string' && typeof bValue === 'string'
+          ? aValue.localeCompare(bValue, 'ru-RU')
+          : Number(aValue) - Number(bValue);
+        return compared !== 0 ? compared * direction : a.fullName.localeCompare(b.fullName, 'ru-RU');
+      });
+  }, [brokerSearch, brokerTourFilter, fixationRows, fixationSort, fixationStatusFilter, submitterSearch]);
   const fixationTotalPages = Math.max(1, Math.ceil(visibleFixationRows.length / FIXATION_PAGE_SIZE));
   const safeFixationPage = Math.min(fixationPage, fixationTotalPages);
   const fixationPageStart = (safeFixationPage - 1) * FIXATION_PAGE_SIZE;
@@ -217,30 +269,78 @@ export default function AdminAnalyticsPage() {
     setFixationPage(1);
   };
 
+  const selectFixationStatus = (status: FixationStatusFilter) => {
+    setFixationStatusFilter((current) => current === status && status !== 'total' ? 'total' : status);
+    setFixationPage(1);
+  };
+
+  const selectBrokerTour = (filter: BrokerTourFilter) => {
+    setBrokerTourFilter(filter);
+    setFixationPage(1);
+  };
+
+  if (broker && broker.role !== 'ADMIN' && broker.role !== 'MANAGER') {
+    return <div className="card">Доступ запрещён</div>;
+  }
+
   return (
     <div>
-      <div className="flex flex-wrap items-center justify-between mb-2 gap-3">
+      <div className="flex flex-col gap-3 mb-2 lg:flex-row lg:items-end lg:justify-between">
         <h1 className="text-2xl md:text-3xl font-bold flex items-center gap-2">
           <BarChart3 className="w-7 h-7 text-accent" /> Аналитика платформы
         </h1>
-        <div className="flex items-center gap-2">
-          <input className="input w-auto text-sm" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-          <span className="text-text-muted">—</span>
-          <input className="input w-auto text-sm" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        </div>
+        <fieldset className="min-w-0">
+          <legend className="mb-1 text-xs font-medium text-text-muted">
+            Дата фиксации (amo: дата создания карточки; кабинет: дата подачи)
+          </legend>
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="analytics-date-from" className="sr-only">Дата фиксации с</label>
+            <input
+              id="analytics-date-from"
+              className="input w-auto text-sm"
+              type="date"
+              required
+              max={to || undefined}
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+            />
+            <span className="text-text-muted">—</span>
+            <label htmlFor="analytics-date-to" className="sr-only">Дата фиксации по</label>
+            <input
+              id="analytics-date-to"
+              className="input w-auto text-sm"
+              type="date"
+              required
+              min={from || undefined}
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+            />
+          </div>
+        </fieldset>
       </div>
-      <div className="flex flex-wrap gap-2 mb-6 text-sm">
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('today')}>Сегодня</button>
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('week')}>Неделя</button>
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('month')}>Месяц</button>
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('quarter')}>Квартал</button>
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('year')}>Год</button>
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('ytd')}>С начала года</button>
-        <button className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('all')}>За всё время</button>
+      <div className="flex flex-wrap gap-2 mb-4 text-sm">
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('today')}>Сегодня</button>
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('week')}>Неделя</button>
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('month')}>Месяц</button>
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('quarter')}>Квартал</button>
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('year')}>Год</button>
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('ytd')}>С начала года</button>
+        <button type="button" className="px-3 py-1 rounded border border-border hover:bg-surface-secondary" onClick={() => applyPreset('all')}>За всё время</button>
       </div>
 
-      {loading && <div className="text-text-muted">Загрузка…</div>}
-      {!loading && !data && <div className="text-error">Не удалось загрузить</div>}
+      <div className="mb-4 rounded border border-border bg-surface-secondary p-3 text-sm text-text-muted">
+        Источник отчёта — локальная БД: заявки из кабинета и только уже синхронизированные данные amoCRM.
+        Это не live-представление полного amoCRM.
+      </div>
+      <AmoHealthBanner />
+
+      {invalidDateRange && (
+        <div className="mb-4 text-sm text-error" role="alert">
+          Укажите обе даты и убедитесь, что начальная дата не позже конечной.
+        </div>
+      )}
+      {!invalidDateRange && loading && <div className="text-text-muted">Загрузка…</div>}
+      {!invalidDateRange && !loading && !data && <div className="text-error">Не удалось загрузить</div>}
 
       {data && (
         <>
@@ -253,42 +353,31 @@ export default function AdminAnalyticsPage() {
               icon={DollarSign}
               label="Комиссия выплачена"
               value={fmtRub(data.deals.funnel.find((d) => d.status === 'COMMISSION_PAID')?.totalCommission || 0)}
-              hint="за всё время"
+              hint="за выбранный период"
               isString
             />
-          </div>
-
-          {/* Registration trend */}
-          <div className="card mb-6">
-            <h2 className="text-lg font-semibold mb-4">Динамика регистраций</h2>
-            {data.brokers.registrationTrend.length === 0 ? (
-              <div className="text-text-muted text-sm">Нет регистраций в выбранном периоде</div>
-            ) : (
-              <div className="space-y-1">
-                {data.brokers.registrationTrend.slice(-30).map((p) => (
-                  <div key={p.date} className="flex items-center gap-3 text-sm">
-                    <div className="w-24 text-text-muted text-xs">
-                      {new Date(p.date).toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' })}
-                    </div>
-                    <div className="flex-1 bg-surface-secondary rounded-full h-3 overflow-hidden">
-                      <div className="bg-accent h-full transition-all" style={{ width: `${(p.count / maxTrend) * 100}%` }} />
-                    </div>
-                    <div className="w-8 text-right font-medium">{p.count}</div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
             {/* Fixations */}
             <div className="card">
               <h2 className="text-lg font-semibold mb-4">Фиксации: уникальные vs не уникальные</h2>
-              <div className="space-y-3">
-                <FixationRow label="✅ Уникальные" count={data.fixations.conditionallyUnique} total={data.fixations.total} color="bg-success" />
-                <FixationRow label="⚠️ На проверке" count={data.fixations.underReview} total={data.fixations.total} color="bg-warning" />
-                <FixationRow label="❌ Отклонены" count={data.fixations.rejected} total={data.fixations.total} color="bg-error" />
-                <FixationRow label="⏰ Истекли" count={data.fixations.expired} total={data.fixations.total} color="bg-text-muted" />
+              <div className="mb-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => selectFixationStatus('total')} className={`px-3 py-1 rounded border text-xs ${fixationStatusFilter === 'total' ? 'border-accent bg-accent/10 text-accent' : 'border-border'}`}>
+                  Все статусы · {data.fixations.total}
+                </button>
+                <button type="button" onClick={() => selectFixationStatus('fixed')} className={`px-3 py-1 rounded border text-xs ${fixationStatusFilter === 'fixed' ? 'border-accent bg-accent/10 text-accent' : 'border-border'}`}>
+                  Окончательно зафиксированы · {data.fixations.fixed}
+                </button>
+              </div>
+              <div className="space-y-2">
+                <FixationRow label="✅ Уникальные" count={data.fixations.conditionallyUnique} total={data.fixations.total} color="bg-success" active={fixationStatusFilter === 'conditionallyUnique'} onClick={() => selectFixationStatus('conditionallyUnique')} />
+                <FixationRow label="⚠️ На проверке" count={data.fixations.underReview} total={data.fixations.total} color="bg-warning" active={fixationStatusFilter === 'underReview'} onClick={() => selectFixationStatus('underReview')} />
+                <FixationRow label="❌ Отклонены" count={data.fixations.rejected} total={data.fixations.total} color="bg-error" active={fixationStatusFilter === 'rejected'} onClick={() => selectFixationStatus('rejected')} />
+                <FixationRow label="⏰ Истекли" count={data.fixations.expired} total={data.fixations.total} color="bg-text-muted" active={fixationStatusFilter === 'expired'} onClick={() => selectFixationStatus('expired')} />
+              </div>
+              <div className="mt-3 text-xs text-text-muted">
+                Нажмите на статус, чтобы увидеть соответствующих брокеров в таблице ниже.
               </div>
             </div>
 
@@ -315,30 +404,77 @@ export default function AdminAnalyticsPage() {
             </div>
           </div>
 
+          <div className="card mb-6">
+            <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">
+              <TrendingUp className="w-5 h-5 text-accent" /> Брокер-тур → фиксация → сделка
+            </h2>
+            <div className="text-xs text-text-muted mb-4">
+              Когорта — брокеры с отметкой amoCRM «Был на брокер-туре» и датой тура в выбранном периоде. Фиксация и оплаченная сделка учитываются только строго после даты тура. Нажмите карточку, чтобы увидеть брокеров в таблице.
+            </div>
+            {data.brokerTourFunnel.tourVisited === 0 ? (
+              <div className="text-text-muted text-sm">В выбранном периоде нет синхронизированных посещений брокер-тура</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <button
+                  type="button"
+                  onClick={() => selectBrokerTour('visited')}
+                  aria-pressed={brokerTourFilter === 'visited'}
+                  className={`rounded-lg bg-surface-secondary p-4 text-left transition hover:ring-2 hover:ring-accent/50 ${brokerTourFilter === 'visited' ? 'ring-2 ring-accent' : ''}`}
+                >
+                  <div className="text-sm text-text-muted mb-1">Посетили брокер-тур</div>
+                  <div className="text-3xl font-bold">{data.brokerTourFunnel.tourVisited}</div>
+                  <div className="text-xs text-accent mt-1">показать список</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => selectBrokerTour('converted')}
+                  aria-pressed={brokerTourFilter === 'converted'}
+                  className={`rounded-lg bg-surface-secondary p-4 text-left transition hover:ring-2 hover:ring-accent/50 ${brokerTourFilter === 'converted' ? 'ring-2 ring-accent' : ''}`}
+                >
+                  <div className="text-sm text-text-muted mb-1">Сделали фиксацию после тура</div>
+                  <div className="text-3xl font-bold">{tourWithAnyFixation}</div>
+                  <div className="text-xs text-accent mt-1">{tourToAnyFixationPct}% · показать список</div>
+                </button>
+                <div className="rounded-lg bg-surface-secondary p-4">
+                  <div className="text-sm text-text-muted mb-1">Довели до оплаченной сделки после тура</div>
+                  <div className="text-3xl font-bold">{data.brokerTourFunnel.withDeal}</div>
+                  <div className="text-xs text-accent mt-1">{data.brokerTourFunnel.toDealPct}% от посетивших</div>
+                </div>
+              </div>
+            )}
+          </div>
           {/* Full fixation report by the broker who owns the application. */}
           <div className='card mb-6'>
-            <div className='flex flex-col gap-3 md:flex-row md:items-end md:justify-between mb-4'>
+            <div className='mb-4 space-y-3'>
               <div>
                 <h2 className='text-lg font-semibold'>Фиксации по брокерам</h2>
                 <div className='text-xs text-text-muted mt-1'>
-                  Все заявки за выбранный период с разбивкой по статусам и авторам подачи
+                  Все заявки за выбранный период. Брокер — фактический ответственный; автор подачи показан отдельно.
                 </div>
               </div>
-              <div className='w-full md:w-80'>
-                <label htmlFor='fixation-broker-search' className='sr-only'>Найти брокера или автора подачи</label>
-                <div className='relative'>
-                  <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted' />
-                  <input
-                    id='fixation-broker-search'
-                    className='input pl-9'
-                    placeholder='Брокер или автор подачи...'
-                    value={fixationSearch}
-                    onChange={(e) => {
-                      setFixationSearch(e.target.value);
-                      setFixationPage(1);
-                    }}
-                  />
-                </div>
+              <div className='grid grid-cols-1 gap-3 lg:grid-cols-3'>
+                <label className='text-xs text-text-muted'>
+                  Брокер
+                  <span className='relative mt-1 block'>
+                    <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted' />
+                    <input className='input pl-9' placeholder='ФИО или телефон брокера' value={brokerSearch} onChange={(e) => { setBrokerSearch(e.target.value); setFixationPage(1); }} />
+                  </span>
+                </label>
+                <label className='text-xs text-text-muted'>
+                  Автор подачи
+                  <span className='relative mt-1 block'>
+                    <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted' />
+                    <input className='input pl-9' placeholder='ФИО автора подачи' value={submitterSearch} onChange={(e) => { setSubmitterSearch(e.target.value); setFixationPage(1); }} />
+                  </span>
+                </label>
+                <label className='text-xs text-text-muted'>
+                  Брокер-тур
+                  <select className='input mt-1' value={brokerTourFilter} onChange={(e) => selectBrokerTour(e.target.value as BrokerTourFilter)}>
+                    <option value='all'>Все брокеры</option>
+                    <option value='visited'>Были на брокер-туре в периоде</option>
+                    <option value='converted'>Были на туре и сделали фиксацию после</option>
+                  </select>
+                </label>
               </div>
             </div>
             {fixationRows.length === 0 ? (
@@ -351,10 +487,13 @@ export default function AdminAnalyticsPage() {
                   Найдено: {visibleFixationRows.length} из {fixationRows.length}
                 </div>
                 <div className='overflow-x-auto'>
-                  <table className='w-full min-w-[1280px] text-sm'>
+                  <table className='w-full min-w-[1600px] text-sm'>
                     <thead>
                       <tr className='border-b border-border text-text-muted'>
                         <SortableFixationHeader label='Брокер' sortKey='fullName' sort={fixationSort} onSort={toggleFixationSort} align='left' />
+                        <th className='py-2 px-2 text-left font-medium'>Был на туре</th>
+                        <th className='py-2 px-2 text-left font-medium'>Дата тура</th>
+                        <th className='py-2 px-2 text-left font-medium'>Фиксация после тура</th>
                         <SortableFixationHeader label='Всего' sortKey='total' sort={fixationSort} onSort={toggleFixationSort} />
                         <SortableFixationHeader label='Уникальные' sortKey='conditionallyUnique' sort={fixationSort} onSort={toggleFixationSort} />
                         <SortableFixationHeader label='На проверке' sortKey='underReview' sort={fixationSort} onSort={toggleFixationSort} />
@@ -372,6 +511,17 @@ export default function AdminAnalyticsPage() {
                           <td className='py-3 pr-3'>
                             <div className='font-medium'>{row.fullName}</div>
                             <div className='text-xs text-text-muted'>{row.phone || '—'}</div>
+                          </td>
+                          <td className='py-3 px-2'>
+                            <span className={row.brokerTourVisited ? 'text-success font-medium' : 'text-text-muted'}>
+                              {row.brokerTourVisited ? 'Да' : 'Нет'}
+                            </span>
+                          </td>
+                          <td className='py-3 px-2 whitespace-nowrap'>{formatBrokerTourDate(row.brokerTourDate)}</td>
+                          <td className='py-3 px-2'>
+                            <span className={row.fixationAfterTour ? 'text-success font-medium' : 'text-text-muted'}>
+                              {row.fixationAfterTour ? 'Да' : '—'}
+                            </span>
                           </td>
                           <td className='py-3 px-2 text-right font-bold text-accent'>{row.total}</td>
                           <td className='py-3 px-2 text-right text-success'>{row.conditionallyUnique}</td>
@@ -481,37 +631,6 @@ export default function AdminAnalyticsPage() {
                     </div>
                   ));
                 })()}
-              </div>
-            )}
-          </div>
-
-          {/* 2026-07-07: Сквозная воронка брокер-туров.
-              Показывает, сколько брокеров, посетивших тур в выбранном
-              периоде, потом сделали фиксацию и довели её до
-              оплаченной сделки. Считается по Broker.brokerTourDate. */}
-          <div className="card mb-6">
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-              <TrendingUp className="w-5 h-5 text-accent" /> Сквозная воронка: Брокер-тур → Фиксация → Сделка
-            </h2>
-            {data.brokerTourFunnel.tourVisited === 0 ? (
-              <div className="text-text-muted text-sm">Нет брокеров, посетивших тур в выбранном периоде</div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="rounded-lg bg-surface-secondary p-4">
-                  <div className="text-sm text-text-muted mb-1">Посетили брокер-тур</div>
-                  <div className="text-3xl font-bold">{data.brokerTourFunnel.tourVisited}</div>
-                  <div className="text-xs text-text-muted mt-1">за выбранный период</div>
-                </div>
-                <div className="rounded-lg bg-surface-secondary p-4">
-                  <div className="text-sm text-text-muted mb-1">Сделали фиксацию</div>
-                  <div className="text-3xl font-bold">{tourWithAnyFixation}</div>
-                  <div className="text-xs text-accent mt-1">{tourToAnyFixationPct}% от тех, кто был на туре</div>
-                </div>
-                <div className="rounded-lg bg-surface-secondary p-4">
-                  <div className="text-sm text-text-muted mb-1">Довели до оплаченной сделки</div>
-                  <div className="text-3xl font-bold">{data.brokerTourFunnel.withDeal}</div>
-                  <div className="text-xs text-accent mt-1">{data.brokerTourFunnel.toDealPct}% от тех, кто был на туре</div>
-                </div>
               </div>
             )}
           </div>
@@ -627,10 +746,22 @@ function KpiCard({ icon: Icon, label, value, hint, isString }: { icon: any; labe
   );
 }
 
-function FixationRow({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
+function FixationRow({ label, count, total, color, active, onClick }: {
+  label: string;
+  count: number;
+  total: number;
+  color: string;
+  active: boolean;
+  onClick: () => void;
+}) {
   const pct = total > 0 ? Math.round((count / total) * 100) : 0;
   return (
-    <div>
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`w-full rounded p-2 text-left transition hover:bg-surface-secondary ${active ? 'ring-2 ring-accent bg-accent/5' : ''}`}
+    >
       <div className="flex justify-between text-sm mb-1">
         <span>{label}</span>
         <span className="text-text-muted">{count} · {pct}%</span>
@@ -638,10 +769,9 @@ function FixationRow({ label, count, total, color }: { label: string; count: num
       <div className="bg-surface-secondary rounded-full h-2">
         <div className={`${color} h-full rounded-full`} style={{ width: `${pct}%` }} />
       </div>
-    </div>
+    </button>
   );
 }
-
 function Stat({ label, value, highlight }: { label: string; value: any; highlight?: boolean }) {
   return (
     <div>
