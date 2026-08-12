@@ -153,16 +153,89 @@ export class AnalyticsService {
       .map(([date, count]) => ({ date, count }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    // ─── Fixations: unique vs not (внутри периода) ───────
-    // A1 fix 2026-05-24: раньше считалось за всё время, теперь по createdAt
-    // в выбранном from/to. uniqueRatio тоже становится релевантным к периоду.
-    const periodFilter = { createdAt: { gte: from, lte: to } };
-    const [conditionallyUnique, rejected, underReview, expired] = await Promise.all([
-      this.prisma.client.count({ where: { uniquenessStatus: 'CONDITIONALLY_UNIQUE', ...periodFilter } }),
-      this.prisma.client.count({ where: { uniquenessStatus: 'REJECTED', ...periodFilter } }),
-      this.prisma.client.count({ where: { uniquenessStatus: 'UNDER_REVIEW', ...periodFilter } }),
-      this.prisma.client.count({ where: { uniquenessStatus: 'EXPIRED', ...periodFilter } }),
-    ]);
+    // ─── Fixations by effective broker (внутри периода) ───────
+    // Для импортированных amo-заявок бизнес-дата — amoCreatedAt;
+    // createdAt остаётся fallback для заявок из кабинета/импорта.
+    // Для делегированной фиксации эффективный брокер = responsibleBrokerId,
+    // а brokerId хранится как автор подачи.
+    const fixationDateFilter = {
+      OR: [
+        { amoCreatedAt: { gte: from, lte: to } },
+        { amoCreatedAt: null, createdAt: { gte: from, lte: to } },
+      ],
+    } as any;
+    const fixationGroups = await this.prisma.client.groupBy({
+      by: ['brokerId', 'responsibleBrokerId', 'uniquenessStatus', 'fixationStatus'],
+      where: fixationDateFilter,
+      _count: true,
+    });
+
+    type BrokerFixationAggregate = {
+      brokerId: string;
+      total: number;
+      conditionallyUnique: number;
+      rejected: number;
+      underReview: number;
+      expired: number;
+      fixed: number;
+      submittedBySelf: number;
+      submittedByOthers: number;
+      submitterCounts: Map<string, number>;
+    };
+
+    const fixationByEffectiveBroker = new Map<string, BrokerFixationAggregate>();
+    let conditionallyUnique = 0;
+    let rejected = 0;
+    let underReview = 0;
+    let expired = 0;
+    let fixed = 0;
+
+    for (const group of fixationGroups as any[]) {
+      const count = Number(group._count || 0);
+      const effectiveBrokerId = group.responsibleBrokerId || group.brokerId;
+      let aggregate = fixationByEffectiveBroker.get(effectiveBrokerId);
+      if (!aggregate) {
+        aggregate = {
+          brokerId: effectiveBrokerId,
+          total: 0,
+          conditionallyUnique: 0,
+          rejected: 0,
+          underReview: 0,
+          expired: 0,
+          fixed: 0,
+          submittedBySelf: 0,
+          submittedByOthers: 0,
+          submitterCounts: new Map<string, number>(),
+        };
+        fixationByEffectiveBroker.set(effectiveBrokerId, aggregate);
+      }
+
+      aggregate.total += count;
+      if (group.uniquenessStatus === 'CONDITIONALLY_UNIQUE') {
+        aggregate.conditionallyUnique += count;
+        conditionallyUnique += count;
+      } else if (group.uniquenessStatus === 'REJECTED') {
+        aggregate.rejected += count;
+        rejected += count;
+      } else if (group.uniquenessStatus === 'UNDER_REVIEW') {
+        aggregate.underReview += count;
+        underReview += count;
+      } else if (group.uniquenessStatus === 'EXPIRED') {
+        aggregate.expired += count;
+        expired += count;
+      }
+      if (group.fixationStatus === 'FIXED') {
+        aggregate.fixed += count;
+        fixed += count;
+      }
+
+      if (group.brokerId === effectiveBrokerId) aggregate.submittedBySelf += count;
+      else aggregate.submittedByOthers += count;
+      aggregate.submitterCounts.set(
+        group.brokerId,
+        (aggregate.submitterCounts.get(group.brokerId) || 0) + count,
+      );
+    }
     const totalFixations = conditionallyUnique + rejected + underReview + expired;
 
     // ─── Deals funnel (в периоде) ────────────────────────
@@ -265,21 +338,33 @@ export class AnalyticsService {
     // управления — раньше в аналитике не было вообще.
     const brokersOnTour = await this.prisma.broker.findMany({
       where: {
+        role: 'BROKER',
+        mergedIntoId: null,
         brokerTourVisited: true,
         brokerTourDate: { gte: from, lte: to },
       },
-      select: { id: true },
+      select: { id: true, brokerTourDate: true },
     });
     const tourBrokerIds = brokersOnTour.map((b) => b.id);
     let tourWithFixation = 0;
     let tourWithDeal = 0;
     if (tourBrokerIds.length > 0) {
-      const [fixationGroups, dealGroups] = await Promise.all([
-        this.prisma.client.groupBy({
-          by: ['brokerId'],
+      // Когорта задаётся датой тура в выбранном периоде, а конверсия —
+      // lifetime после тура (верхнюю границу `to` намеренно не применяем).
+      // Для делегированной заявки считаем responsibleBrokerId, иначе brokerId.
+      const [tourFixationCandidates, dealGroups] = await Promise.all([
+        this.prisma.client.findMany({
           where: {
-            brokerId: { in: tourBrokerIds },
-            uniquenessStatus: 'CONDITIONALLY_UNIQUE',
+            OR: [
+              { responsibleBrokerId: { in: tourBrokerIds } },
+              { responsibleBrokerId: null, brokerId: { in: tourBrokerIds } },
+            ],
+          },
+          select: {
+            brokerId: true,
+            responsibleBrokerId: true,
+            amoCreatedAt: true,
+            createdAt: true,
           },
         }),
         this.prisma.deal.groupBy({
@@ -290,13 +375,29 @@ export class AnalyticsService {
           },
         }),
       ]);
-      tourWithFixation = fixationGroups.length;
+      const tourDateByBroker = new Map(
+        brokersOnTour
+          .filter((broker) => broker.brokerTourDate)
+          .map((broker) => [broker.id, broker.brokerTourDate as Date]),
+      );
+      const convertedBrokerIds = new Set<string>();
+      for (const client of tourFixationCandidates) {
+        const effectiveBrokerId = client.responsibleBrokerId || client.brokerId;
+        const tourDate = tourDateByBroker.get(effectiveBrokerId);
+        const fixationDate = client.amoCreatedAt || client.createdAt;
+        if (tourDate && fixationDate >= tourDate) convertedBrokerIds.add(effectiveBrokerId);
+      }
+      tourWithFixation = convertedBrokerIds.size;
       tourWithDeal = dealGroups.length;
     }
     const brokerTourFunnel = {
       tourVisited: tourBrokerIds.length,
+      withAnyFixation: tourWithFixation,
       withFixation: tourWithFixation,
       withDeal: tourWithDeal,
+      toAnyFixationPct: tourBrokerIds.length > 0
+        ? Math.round((tourWithFixation / tourBrokerIds.length) * 100)
+        : 0,
       toFixationPct: tourBrokerIds.length > 0
         ? Math.round((tourWithFixation / tourBrokerIds.length) * 100)
         : 0,
@@ -319,33 +420,70 @@ export class AnalyticsService {
       .map((s) => ({ source: s.source as string, count: s._count }))
       .sort((a, b) => b.count - a.count);
 
-    // ─── Топ-10 брокеров по уникальным фиксациям (в периоде) ─
-    // 2026-07-07: раньше был только топ по комиссии — а нужно видеть кто
-    // приносит фиксации, даже если сделка ещё не закрыта.
-    const topFixationRows = await this.prisma.client.groupBy({
-      by: ['brokerId'],
-      where: {
-        uniquenessStatus: 'CONDITIONALLY_UNIQUE',
-        ...periodFilter,
-      },
-      _count: true,
-      orderBy: { _count: { brokerId: 'desc' } },
-      take: 10,
+    // ─── Полная статистика по canonical brokers ───────────
+    // В выдаче остаются и брокеры с нулём фиксаций; слитые карточки и
+    // служебные роли не показываем. Для авторов подачи отдаём только ФИО.
+    const canonicalBrokers: Array<{ id: string; fullName: string; phone: string }> = await this.prisma.broker.findMany({
+      where: { role: 'BROKER', mergedIntoId: null },
+      select: { id: true, fullName: true, phone: true },
     });
-    const fixationBrokerIds = topFixationRows.map((r) => r.brokerId);
-    const fixationBrokerMeta = fixationBrokerIds.length
+    const canonicalBrokerIds = new Set(canonicalBrokers.map((broker) => broker.id));
+    const missingSubmitterIds = Array.from(
+      new Set((fixationGroups as any[]).map((group) => group.brokerId as string)),
+    ).filter((id) => !canonicalBrokerIds.has(id));
+    const extraSubmitters: Array<{ id: string; fullName: string }> = missingSubmitterIds.length
       ? await this.prisma.broker.findMany({
-          where: { id: { in: fixationBrokerIds } },
-          select: { id: true, fullName: true, phone: true },
+          where: { id: { in: missingSubmitterIds } },
+          select: { id: true, fullName: true },
         })
       : [];
-    const fixationBrokerMap = new Map(fixationBrokerMeta.map((b) => [b.id, b]));
-    const topFixationBrokers = topFixationRows.map((r) => ({
-      brokerId: r.brokerId,
-      fullName: fixationBrokerMap.get(r.brokerId)?.fullName || '—',
-      phone: fixationBrokerMap.get(r.brokerId)?.phone || '',
-      uniqueFixations: r._count,
-    }));
+    const brokerNameById = new Map<string, string>([
+      ...canonicalBrokers.map((broker) => [broker.id, broker.fullName] as [string, string]),
+      ...extraSubmitters.map((broker) => [broker.id, broker.fullName] as [string, string]),
+    ]);
+
+    const fixationsByBroker = canonicalBrokers
+      .map((broker) => {
+        const aggregate = fixationByEffectiveBroker.get(broker.id);
+        const submitters = aggregate
+          ? Array.from(aggregate.submitterCounts.entries())
+              .map(([submitterId, count]) => ({
+                brokerId: submitterId,
+                fullName: brokerNameById.get(submitterId) || '—',
+                count,
+              }))
+              .sort((a, b) => b.count - a.count || a.fullName.localeCompare(b.fullName, 'ru'))
+          : [];
+        return {
+          brokerId: broker.id,
+          fullName: broker.fullName,
+          phone: broker.phone,
+          total: aggregate?.total || 0,
+          conditionallyUnique: aggregate?.conditionallyUnique || 0,
+          rejected: aggregate?.rejected || 0,
+          underReview: aggregate?.underReview || 0,
+          expired: aggregate?.expired || 0,
+          fixed: aggregate?.fixed || 0,
+          submittedBySelf: aggregate?.submittedBySelf || 0,
+          submittedByOthers: aggregate?.submittedByOthers || 0,
+          submitters,
+        };
+      })
+      .sort((a, b) => b.total - a.total || a.fullName.localeCompare(b.fullName, 'ru'));
+
+    // Сохраняем старый контракт UI, но строим его из новой корректной
+    // агрегации: effective broker + effective fixation date.
+    const canonicalBrokerById = new Map(canonicalBrokers.map((broker) => [broker.id, broker]));
+    const topFixationBrokers = fixationsByBroker
+      .filter((broker) => broker.conditionallyUnique > 0)
+      .sort((a, b) => b.conditionallyUnique - a.conditionallyUnique)
+      .slice(0, 10)
+      .map((broker) => ({
+        brokerId: broker.brokerId,
+        fullName: broker.fullName,
+        phone: canonicalBrokerById.get(broker.brokerId)?.phone || '',
+        uniqueFixations: broker.conditionallyUnique,
+      }));
 
     return {
       period: { from: from.toISOString(), to: to.toISOString() },
@@ -363,6 +501,7 @@ export class AnalyticsService {
         rejected,
         underReview,
         expired,
+        fixed,
         uniqueRatio: totalFixations > 0 ? Math.round((conditionallyUnique / totalFixations) * 100) : 0,
       },
       deals: { funnel: dealsFunnel },
@@ -370,6 +509,7 @@ export class AnalyticsService {
       // 2026-07-07: новые блоки — сквозная воронка брокер-туров и топ по
       // уникальным фиксациям. UI должен добавить их в /admin/analytics.
       brokerTourFunnel,
+      fixationsByBroker,
       topFixationBrokers,
       bySource,
       projects: Object.values(projectStats),
