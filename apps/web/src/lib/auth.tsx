@@ -87,7 +87,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       pathname === '/reset-password' ||
       pathname === '/forgot-password' ||
       pathname === '/offer' ||
-      pathname === '/privacy';
+      pathname === '/privacy' ||
+      pathname.startsWith('/materials');
 
     // Unauthenticated users can only see landing / public legal & auth-helper pages
     if (!broker && !isAuthPage && !isLanding && !isPublic) {
