@@ -1,9 +1,68 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { BadRequestException, Injectable, Inject } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 
 @Injectable()
 export class AnalyticsService {
   constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
+
+  private parseAdminPeriod(filters: { startDate?: string; endDate?: string }) {
+    const now = new Date();
+    const from = filters.startDate !== undefined
+      ? this.parsePeriodDate(filters.startDate, false)
+      : new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+    let to: Date;
+    let toExclusive: Date;
+    if (filters.endDate !== undefined) {
+      const parsedEnd = this.parsePeriodDate(filters.endDate, true);
+      if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(filters.endDate)) {
+        toExclusive = new Date(parsedEnd.getTime() + 24 * 60 * 60 * 1000);
+        to = new Date(toExclusive.getTime() - 1);
+      } else {
+        to = parsedEnd;
+        toExclusive = new Date(to.getTime() + 1);
+      }
+    } else {
+      to = now;
+      toExclusive = new Date(now.getTime() + 1);
+    }
+
+    if (from.getTime() > to.getTime()) {
+      throw new BadRequestException('startDate must be before or equal to endDate');
+    }
+
+    return { from, to, toExclusive };
+  }
+
+  private parsePeriodDate(value: string, isEnd: boolean) {
+    const dateOnlyMatch = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(value);
+    if (dateOnlyMatch) {
+      const year = Number(dateOnlyMatch[1]);
+      const month = Number(dateOnlyMatch[2]);
+      const day = Number(dateOnlyMatch[3]);
+      const check = new Date(Date.UTC(year, month - 1, day));
+      if (
+        check.getUTCFullYear() !== year ||
+        check.getUTCMonth() !== month - 1 ||
+        check.getUTCDate() !== day
+      ) {
+        throw new BadRequestException(`Invalid ${isEnd ? 'endDate' : 'startDate'}`);
+      }
+      // Europe/Moscow has a fixed UTC+03:00 offset for the reporting period.
+      return new Date(`${value}T00:00:00.000+03:00`);
+    }
+
+    const isoDateTime = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:[.][0-9]{1,9})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})$/;
+    const parsed = new Date(value);
+    if (!isoDateTime.test(value) || Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(`Invalid ${isEnd ? 'endDate' : 'startDate'}`);
+    }
+    return parsed;
+  }
+
+  private toMoscowDateKey(date: Date) {
+    return new Date(date.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
 
   async getDashboard(brokerId: string) {
     // 2026-07-03: на дашборде показываем ТОЛЬКО клиентов-владельцев (creator).
@@ -127,26 +186,46 @@ export class AnalyticsService {
 
   // Admin overview — implements ТЗ §15.6
   async getAdminOverview(filters: { startDate?: string; endDate?: string }) {
-    const from = filters.startDate ? new Date(filters.startDate) : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-    const to = filters.endDate ? new Date(filters.endDate) : new Date();
+    const { from, to, toExclusive } = this.parseAdminPeriod(filters);
+    const canonicalBrokerFilter = { role: 'BROKER', mergedIntoId: null } as const;
+    const canonicalBrokers: Array<{
+      id: string;
+      fullName: string;
+      phone: string;
+      brokerTourVisited: boolean;
+      brokerTourDate: Date | null;
+    }> = await this.prisma.broker.findMany({
+      where: canonicalBrokerFilter,
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        brokerTourVisited: true,
+        brokerTourDate: true,
+      },
+    });
+    const canonicalBrokerIdList = canonicalBrokers.map((broker) => broker.id);
+    const canonicalBrokerIds = new Set(canonicalBrokerIdList);
 
     // ─── Broker registrations ────────────────────────────
     const [totalBrokers, activeBrokers, blockedBrokers, newInPeriod] = await Promise.all([
-      this.prisma.broker.count(),
-      this.prisma.broker.count({ where: { status: 'ACTIVE' } }),
-      this.prisma.broker.count({ where: { status: 'BLOCKED' } }),
-      this.prisma.broker.count({ where: { createdAt: { gte: from, lte: to } } }),
+      this.prisma.broker.count({ where: canonicalBrokerFilter }),
+      this.prisma.broker.count({ where: { ...canonicalBrokerFilter, status: 'ACTIVE' } }),
+      this.prisma.broker.count({ where: { ...canonicalBrokerFilter, status: 'BLOCKED' } }),
+      this.prisma.broker.count({
+        where: { ...canonicalBrokerFilter, createdAt: { gte: from, lt: toExclusive } },
+      }),
     ]);
 
     // Registration trend — group by day for the period
     const allBrokersInPeriod = await this.prisma.broker.findMany({
-      where: { createdAt: { gte: from, lte: to } },
+      where: { ...canonicalBrokerFilter, createdAt: { gte: from, lt: toExclusive } },
       select: { createdAt: true },
       orderBy: { createdAt: 'asc' },
     });
     const regByDay = new Map<string, number>();
     for (const b of allBrokersInPeriod) {
-      const day = b.createdAt.toISOString().slice(0, 10);
+      const day = this.toMoscowDateKey(b.createdAt);
       regByDay.set(day, (regByDay.get(day) || 0) + 1);
     }
     const registrationTrend = [...regByDay.entries()]
@@ -159,9 +238,19 @@ export class AnalyticsService {
     // Для делегированной фиксации эффективный брокер = responsibleBrokerId,
     // а brokerId хранится как автор подачи.
     const fixationDateFilter = {
-      OR: [
-        { amoCreatedAt: { gte: from, lte: to } },
-        { amoCreatedAt: null, createdAt: { gte: from, lte: to } },
+      AND: [
+        {
+          OR: [
+            { amoCreatedAt: { gte: from, lt: toExclusive } },
+            { amoCreatedAt: null, createdAt: { gte: from, lt: toExclusive } },
+          ],
+        },
+        {
+          OR: [
+            { responsibleBrokerId: { in: canonicalBrokerIdList } },
+            { responsibleBrokerId: null, brokerId: { in: canonicalBrokerIdList } },
+          ],
+        },
       ],
     } as any;
     const fixationGroups = await this.prisma.client.groupBy({
@@ -192,7 +281,8 @@ export class AnalyticsService {
 
     for (const group of fixationGroups as any[]) {
       const count = Number(group._count || 0);
-      const effectiveBrokerId = group.responsibleBrokerId || group.brokerId;
+      const effectiveBrokerId = group.responsibleBrokerId ?? group.brokerId;
+      if (!canonicalBrokerIds.has(effectiveBrokerId)) continue;
       let aggregate = fixationByEffectiveBroker.get(effectiveBrokerId);
       if (!aggregate) {
         aggregate = {
@@ -243,8 +333,8 @@ export class AnalyticsService {
     // которые были засинканы позже фактической даты подписания)
     const dealPeriodFilter = {
       OR: [
-        { signedAt: { gte: from, lte: to } },
-        { AND: [{ signedAt: null }, { createdAt: { gte: from, lte: to } }] },
+        { signedAt: { gte: from, lt: toExclusive } },
+        { AND: [{ signedAt: null }, { createdAt: { gte: from, lt: toExclusive } }] },
       ],
     };
     const dealStatusCounts = await this.prisma.deal.groupBy({
@@ -326,7 +416,7 @@ export class AnalyticsService {
     // «Новых в периоде» и графиком регистраций.
     const funnelGroups = await this.prisma.broker.groupBy({
       by: ['funnelStage'],
-      where: { createdAt: { gte: from, lte: to } },
+      where: { ...canonicalBrokerFilter, createdAt: { gte: from, lt: toExclusive } },
       _count: true,
     });
     const funnelByStage = funnelGroups.map((f) => ({ stage: f.funnelStage, count: f._count }));
@@ -341,24 +431,43 @@ export class AnalyticsService {
         role: 'BROKER',
         mergedIntoId: null,
         brokerTourVisited: true,
-        brokerTourDate: { gte: from, lte: to },
+        brokerTourDate: { gte: from, lt: toExclusive },
       },
       select: { id: true, brokerTourDate: true },
     });
     const tourBrokerIds = brokersOnTour.map((b) => b.id);
+    const tourBrokerIdSet = new Set(tourBrokerIds);
+    const convertedBrokerIds = new Set<string>();
     let tourWithFixation = 0;
     let tourWithDeal = 0;
     if (tourBrokerIds.length > 0) {
       // Когорта задаётся датой тура в выбранном периоде, а конверсия —
       // lifetime после тура (верхнюю границу `to` намеренно не применяем).
       // Для делегированной заявки считаем responsibleBrokerId, иначе brokerId.
-      const [tourFixationCandidates, dealGroups] = await Promise.all([
+      const tourDateByBroker = new Map(
+        brokersOnTour
+          .filter((broker) => broker.brokerTourDate)
+          .map((broker) => [broker.id, broker.brokerTourDate as Date]),
+      );
+      const earliestTourDate = new Date(
+        Math.min(...Array.from(tourDateByBroker.values()).map((date) => date.getTime())),
+      );
+      const effectiveTourBrokerFilter = {
+        OR: [
+          { responsibleBrokerId: { in: tourBrokerIds } },
+          { responsibleBrokerId: null, brokerId: { in: tourBrokerIds } },
+        ],
+      };
+      const postEarliestTourFixationFilter = {
+        OR: [
+          { amoCreatedAt: { gt: earliestTourDate } },
+          { amoCreatedAt: null, createdAt: { gt: earliestTourDate } },
+        ],
+      };
+      const [tourFixationCandidates, tourDealCandidates] = await Promise.all([
         this.prisma.client.findMany({
           where: {
-            OR: [
-              { responsibleBrokerId: { in: tourBrokerIds } },
-              { responsibleBrokerId: null, brokerId: { in: tourBrokerIds } },
-            ],
+            AND: [effectiveTourBrokerFilter, postEarliestTourFixationFilter],
           },
           select: {
             brokerId: true,
@@ -367,28 +476,55 @@ export class AnalyticsService {
             createdAt: true,
           },
         }),
-        this.prisma.deal.groupBy({
-          by: ['brokerId'],
+        this.prisma.deal.findMany({
           where: {
-            brokerId: { in: tourBrokerIds },
             status: { in: ['PAID', 'COMMISSION_PAID'] },
+            AND: [
+              {
+                OR: [
+                  { signedAt: { gt: earliestTourDate } },
+                  { signedAt: null, createdAt: { gt: earliestTourDate } },
+                ],
+              },
+              {
+                client: {
+                  AND: [effectiveTourBrokerFilter, postEarliestTourFixationFilter],
+                },
+              },
+            ],
+          },
+          select: {
+            signedAt: true,
+            createdAt: true,
+            client: {
+              select: {
+                brokerId: true,
+                responsibleBrokerId: true,
+                amoCreatedAt: true,
+                createdAt: true,
+              },
+            },
           },
         }),
       ]);
-      const tourDateByBroker = new Map(
-        brokersOnTour
-          .filter((broker) => broker.brokerTourDate)
-          .map((broker) => [broker.id, broker.brokerTourDate as Date]),
-      );
-      const convertedBrokerIds = new Set<string>();
       for (const client of tourFixationCandidates) {
-        const effectiveBrokerId = client.responsibleBrokerId || client.brokerId;
+        const effectiveBrokerId = client.responsibleBrokerId ?? client.brokerId;
         const tourDate = tourDateByBroker.get(effectiveBrokerId);
-        const fixationDate = client.amoCreatedAt || client.createdAt;
-        if (tourDate && fixationDate >= tourDate) convertedBrokerIds.add(effectiveBrokerId);
+        const fixationDate = client.amoCreatedAt ?? client.createdAt;
+        if (tourDate && fixationDate > tourDate) convertedBrokerIds.add(effectiveBrokerId);
+      }
+      const dealBrokerIds = new Set<string>();
+      for (const deal of tourDealCandidates) {
+        const effectiveBrokerId = deal.client.responsibleBrokerId ?? deal.client.brokerId;
+        const tourDate = tourDateByBroker.get(effectiveBrokerId);
+        const fixationDate = deal.client.amoCreatedAt ?? deal.client.createdAt;
+        const dealDate = deal.signedAt ?? deal.createdAt;
+        if (tourDate && fixationDate > tourDate && dealDate > tourDate) {
+          dealBrokerIds.add(effectiveBrokerId);
+        }
       }
       tourWithFixation = convertedBrokerIds.size;
-      tourWithDeal = dealGroups.length;
+      tourWithDeal = dealBrokerIds.size;
     }
     const brokerTourFunnel = {
       tourVisited: tourBrokerIds.length,
@@ -412,7 +548,7 @@ export class AnalyticsService {
     // холодный обзвон vs брокер-туры.
     const sourceGroups = await this.prisma.broker.groupBy({
       by: ['source'],
-      where: { createdAt: { gte: from, lte: to } },
+      where: { ...canonicalBrokerFilter, createdAt: { gte: from, lt: toExclusive } },
       _count: true,
     });
     const bySource = sourceGroups
@@ -423,11 +559,6 @@ export class AnalyticsService {
     // ─── Полная статистика по canonical brokers ───────────
     // В выдаче остаются и брокеры с нулём фиксаций; слитые карточки и
     // служебные роли не показываем. Для авторов подачи отдаём только ФИО.
-    const canonicalBrokers: Array<{ id: string; fullName: string; phone: string }> = await this.prisma.broker.findMany({
-      where: { role: 'BROKER', mergedIntoId: null },
-      select: { id: true, fullName: true, phone: true },
-    });
-    const canonicalBrokerIds = new Set(canonicalBrokers.map((broker) => broker.id));
     const missingSubmitterIds = Array.from(
       new Set((fixationGroups as any[]).map((group) => group.brokerId as string)),
     ).filter((id) => !canonicalBrokerIds.has(id));
@@ -458,6 +589,10 @@ export class AnalyticsService {
           brokerId: broker.id,
           fullName: broker.fullName,
           phone: broker.phone,
+          brokerTourVisited: broker.brokerTourVisited,
+          brokerTourDate: broker.brokerTourDate,
+          brokerTourInPeriod: tourBrokerIdSet.has(broker.id),
+          fixationAfterTour: convertedBrokerIds.has(broker.id),
           total: aggregate?.total || 0,
           conditionallyUnique: aggregate?.conditionallyUnique || 0,
           rejected: aggregate?.rejected || 0,
