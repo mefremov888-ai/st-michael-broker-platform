@@ -1022,11 +1022,6 @@ function renderAccent(text: string | undefined | null, accent?: string | null): 
   return (<>{renderWithLineBreaks(text.slice(0, i))}<em>{renderWithLineBreaks(accent)}</em>{renderWithLineBreaks(text.slice(i + accent.length))}</>);
 }
 
-// 2026-08-11: скрыты по просьбе пользователя — промо-слайдер ("Апартаменты от 12 млн")
-// и секция "Комиссия и условия выплаты". Данные остаются в CMS, чтобы вернуть блоки — верните true.
-const SHOW_PROMO_SLIDER = false;
-const SHOW_COMMISSION_SECTION = false;
-
 const DEFAULT_HERO = {
   tag: 'Партнёрская программа',
   // Жёсткие переносы (\n) задают форму "треугольника": каждая строка чуть
@@ -1050,28 +1045,28 @@ const DEFAULT_HERO = {
   // Редактируется через /admin/content (вкладка Hero, поле slides).
   slides: [
     {
-      tag: 'Активное строительство Большого Сити',
-      title: 'Доходность до 25%',
-      description: 'Спрос на аренду и рост стоимости объекта. Опция доверительного управления.',
+      tag: 'Зорге 9 · Субсидированная ипотека',
+      title: '12,49% на весь срок',
+      description: 'Готовый дом бизнес-класса у м. Полежаевская. Актуальная комиссия и быстрые выплаты.',
       imageUrl: 'https://optim.tildacdn.com/tild3439-6364-4532-b563-663530663865/-/format/webp/__1_-4_1.jpg.webp',
     },
     {
-      tag: 'Клубная инфраструктура',
-      title: 'Премиальные сервисы',
-      description: 'Беллмен и консьерж. Фитнес 3000 м² с бассейном 25 м. Широкий выбор ритейла.',
+      tag: 'Квартал Серебряный Бор · Рассрочка',
+      title: 'Платёж 0,5%/месяц',
+      description: 'Рассрочка на премиальные резиденции у Серебряного бора. Беспроцентная рассрочка от застройщика.',
+      imageUrl: 'https://storage.yandexcloud.net/st-michael-media/media/p/p/i/bd2e855b408722fb61fa362b50d7f83282d3a86e.jpg',
+    },
+    {
+      tag: 'Серебряный бор · Траншевая ипотека',
+      title: 'Уникальные резиденции от 15 млн ₽',
+      description: 'Траншевая ипотека от застройщика. Премиум-класс рядом с природным заповедником.',
+      imageUrl: 'https://storage.yandexcloud.net/st-michael-media/media/p/p/i/bd2e855b408722fb61fa362b50d7f83282d3a86e.jpg',
+    },
+    {
+      tag: 'Активное строительство Большого Сити',
+      title: 'Доходность до 25%',
+      description: 'Спрос на аренду и рост стоимости объекта. Опция доверительного управления.',
       imageUrl: 'https://optim.tildacdn.com/tild6336-3562-4638-b166-623430323566/-/format/webp/2026-04-16_152634.jpg.webp',
-    },
-    {
-      tag: 'Готовый дом бизнес-класса · м. Полежаевская',
-      title: 'Апартаменты от 12 млн ₽',
-      description: 'Актуальная комиссия и быстрые выплаты вознаграждения.',
-      imageUrl: 'https://optim.tildacdn.com/tild3333-6538-4231-a437-613537353665/-/format/webp/2026-05-04_145437.jpg.webp',
-    },
-    {
-      tag: 'Рассрочка 0% — ПВ 30%, 0,5%/мес на 12 мес',
-      title: 'Платеж от 65 тыс ₽/мес',
-      description: 'Индивидуальные программы рассрочки с ПВ от 10% и сроком до 18 месяцев.',
-      imageUrl: 'https://optim.tildacdn.com/tild3436-3066-4862-b537-393363373965/-/format/webp/15.jpg.webp',
     },
   ],
 };
@@ -1591,6 +1586,12 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 return true;
               })
               .map((p: any, i: number) => {
+              // Ссылка «подробнее»: берём из CMS-поля detailHref, иначе slug-маппинг.
+              const DETAIL_URLS: Record<string, string> = {
+                'zorge9': 'https://stmichael.ru/zorge9',
+                'silver-bor': 'https://stmichael.ru/kvartaly-serebryanyj-bor',
+              };
+              const detailUrl: string | null = p.detailHref || DETAIL_URLS[(p.slug || '').toLowerCase()] || null;
               const projectKey = landingProjectKey(p);
               const projectPolicy = projectKey
                 ? findActiveCommissionPolicy(activePolicies, projectKey)
@@ -1647,9 +1648,9 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:'auto',gap:8}}>
                   <div className="proj-link">{p.ctaText || 'Смотреть каталог'} &rarr;</div>
-                  {p.detailHref && (
+                  {detailUrl && (
                     <a
-                      href={p.detailHref}
+                      href={detailUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
@@ -1669,7 +1670,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         {/* PROMO SLIDER — full-width стиль с картинкой во весь блок.
             Если у промо нет imageUrl — fallback на дефолтное здание Зорге 9
             (правка 2026-05-07: каждый слайд должен быть с картинкой). */}
-        {SHOW_PROMO_SLIDER && promos.length > 0 && (
+        {promos.length > 0 && (
           <section id="promos" style={{padding:'40px 60px'}}>
             <div className="hero-slides" style={{height:340}}>
               {promos.map((p, i) => {
@@ -1738,8 +1739,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </section>
         )}
 
-        {SHOW_COMMISSION_SECTION && (
-        <>
         <hr className="sep" />
 
         {/* COMMISSION
@@ -1809,8 +1808,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             </div>
           </div>
         </section>
-        </>
-        )}
 
         <hr className="sep" />
 
@@ -1933,7 +1930,10 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           <div className="coop-grid">
             <div className="coop-left">
               <p>{cooperation.description}</p>
-              <button className="btn-gold" onClick={handleRegister}>{cooperation.ctaText || 'Стать партнёром'}</button>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                <button className="btn-gold" onClick={handleRegister}>{cooperation.ctaText || 'Стать партнёром'}</button>
+                <a href="#commission" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>
+              </div>
             </div>
             <div className="doc-list">
               {cooperationDocs.length === 0 ? (
