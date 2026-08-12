@@ -234,7 +234,7 @@ export default function BrokerApplicationsPage() {
 
         {/* Мультиселект по статусу amo. */}
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-text-muted mr-1">Статус amo:</span>
+          <span className="text-xs text-text-muted mr-1">Передача в amoCRM:</span>
           <button
             type="button"
             onClick={() => { setAmoStatusFilter(new Set(ALL_STATUSES)); setPage(1); }}
@@ -312,7 +312,7 @@ export default function BrokerApplicationsPage() {
                     <th className="pb-3 font-medium">Телефон</th>
                     <th className="pb-3 font-medium">Дата</th>
                     <th className="pb-3 font-medium">Брокер</th>
-                    <th className="pb-3 font-medium">Статус amo</th>
+                    <th className="pb-3 font-medium">Передача в amoCRM</th>
                     <th className="pb-3 font-medium text-right">Действия</th>
                   </tr>
                 </thead>
@@ -333,6 +333,19 @@ export default function BrokerApplicationsPage() {
                                 : 'Регистрация'
                               : meta.label}
                           </span>
+                          {isLogin && (() => {
+                            const src = item.extra?.source;
+                            const base = item.extra?.baseSource;
+                            let label = '';
+                            let cls = 'text-text-muted/70 bg-surface-secondary';
+                            if (src === 'AMO_IMPORT') { label = 'AmoCRM синк'; cls = 'text-purple-400 bg-purple-400/10'; }
+                            else if (src === 'CRM_MANUAL') { label = 'CRM вручную'; cls = 'text-blue-400 bg-blue-400/10'; }
+                            else if (base === 'google_sheet') { label = 'Google Sheets'; cls = 'text-green-400 bg-green-400/10'; }
+                            else if (base === 'xlsx_upload') { label = 'XLSX импорт'; cls = 'text-orange-400 bg-orange-400/10'; }
+                            else if (src === 'BROKER_CABINET' || (!src && !base)) { label = 'Кабинет'; cls = 'text-accent bg-accent/10'; }
+                            if (!label) return null;
+                            return <div className={`text-xs px-1.5 py-0.5 rounded mt-1 inline-block ${cls}`}>{label}</div>;
+                          })()}
                         </td>
                         <td className="py-3">
                           <div className="font-medium">{item.personName}</div>

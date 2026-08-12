@@ -4,6 +4,7 @@ import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { AmocrmService } from '../amocrm/amocrm.service';
+import { AmoReconciliationService } from '../amocrm/amo-reconciliation.service';
 import { AmoCrmAdapter, MangoAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig, isSalesPipeline } from '@st-michael/integrations';
 import {
   VALID_CATEGORIES,
@@ -38,9 +39,18 @@ export class AdminService {
   constructor(
     @Inject('PrismaClient') private prisma: PrismaClient,
     private amocrmService: AmocrmService,
+    private amoReconciliation: AmoReconciliationService,
     @InjectQueue('notifications') private notificationQueue: Queue,
     private importJobs: BrokerImportJobsService,
   ) {}
+
+  getUniquenessControl(query: any) {
+    return this.amoReconciliation.list(query);
+  }
+
+  recheckUniquenessControl(clientId: string, actorId: string) {
+    return this.amoReconciliation.recheckClient(clientId, 'MANUAL', actorId);
+  }
 
   // ─── Mailings (broadcasts) ─────────────────────────────────
 
@@ -932,6 +942,8 @@ export class AdminService {
     const data: any = {
       uniquenessStatus: newStatus,
       uniquenessReason: `[Ручная правка админом] ${reason.trim()} (было: ${oldStatus})`,
+      amoReconciliationStatus: 'STALE',
+      amoReconciliationReason: 'Статус изменён вручную; требуется повторная сверка с amoCRM',
     };
     if (newStatus === 'CONDITIONALLY_UNIQUE') {
       data.uniquenessExpiresAt = new Date(Date.now() + UNIQUENESS_DAYS * 86400 * 1000);
@@ -939,15 +951,17 @@ export class AdminService {
       data.uniquenessExpiresAt = null;
     }
 
-    await this.prisma.client.update({ where: { id: clientId }, data });
-    await this.prisma.auditLog.create({
-      data: {
-        userId: executorId,
-        action: 'CLIENT_UNIQUENESS_STATUS_MANUAL_CHANGE',
-        entity: 'Client',
-        entityId: clientId,
-        payload: { oldStatus, newStatus, reason: reason.trim(), clientName: client.fullName, phone: client.phone },
-      } as any,
+    await this.prisma.$transaction(async (tx) => {
+      await tx.client.update({ where: { id: clientId }, data });
+      await tx.auditLog.create({
+        data: {
+          userId: executorId,
+          action: 'CLIENT_UNIQUENESS_STATUS_MANUAL_CHANGE',
+          entity: 'Client',
+          entityId: clientId,
+          payload: { oldStatus, newStatus, reason: reason.trim(), clientName: client.fullName, phone: client.phone },
+        } as any,
+      });
     });
     return { success: true, clientId, oldStatus, newStatus };
   }
@@ -1589,6 +1603,7 @@ export class AdminService {
               createdAt: true,
               reactivatedAt: true,
               baseSource: true,
+              source: true,
               _count: { select: { offerAcceptances: true } },
               // Для импортных, зарегистрировавшихся позже: дата регистрации =
               // момент акцепта оферты (createdAt у них — дата импорта).
@@ -1692,6 +1707,8 @@ export class AdminService {
         extra: {
           subType: isReactivation ? 'REACTIVATED' : 'REGISTERED',
           noOffer,
+          source: (b as any).source || null,
+          baseSource: (b as any).baseSource || null,
         },
       });
     }
@@ -1741,8 +1758,11 @@ export class AdminService {
 
     // 2026-06-19: для координаторских фиксаций берём реального брокера.
     const responsibleBroker = (client as any).responsibleBroker || client.broker;
+    if (!responsibleBroker.amoContactId) {
+      throw new BadRequestException('Ответственный брокер не связан с контактом amoCRM');
+    }
     try {
-      await this.amo.createFixationRequest({
+      const resultLead = await this.amo.createFixationRequest({
         clientPhone: client.phone,
         clientEmail: client.email || undefined,
         clientName: client.fullName,
@@ -1754,6 +1774,8 @@ export class AdminService {
         project: client.project as any,
         fromBroker: true,
       });
+      const amoLeadId = resultLead?.id ? Number(resultLead.id) : null;
+      if (!amoLeadId) throw new Error('amoCRM не вернула id созданной сделки');
       await this.prisma.client.update({
         where: { id: clientId },
         data: {
@@ -1761,6 +1783,8 @@ export class AdminService {
           amoSyncError: null,
           amoSyncAttempts: { increment: 1 },
           amoSyncLastAttemptAt: new Date(),
+          amoLeadId: BigInt(amoLeadId),
+          amoReconciliationStatus: 'STALE' as any,
         },
       });
       return { ok: true, message: 'Заявка передана в amoCRM' };
