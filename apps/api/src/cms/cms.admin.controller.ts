@@ -159,6 +159,13 @@ export class AdminCmsController {
     return this.cms.deleteNews(id);
   }
 
+  // 2026-08-12: ручной запуск синка новостей с stmichael.ru
+  @Post('news/sync-stm')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async syncNewsFromStm() {
+    return this.cms.syncNewsFromStm();
+  }
+
   // ─── Contact requests ──────────────────
 
   @Get('contact-requests')

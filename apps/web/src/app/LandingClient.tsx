@@ -1206,6 +1206,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [contactModal, setContactModal] = useState<{ open: boolean; source?: string; eventId?: string; title?: string; defaultMessage?: string }>({ open: false });
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [commissionProject, setCommissionProject] = useState<'ZORGE9' | 'SILVER_BOR'>('ZORGE9');
+  const [projectTab, setProjectTab] = useState<'all' | 'flat' | 'apartments'>('all');
 
   // useState с lazy initializer — выполняется только при первом render.
   // Если SSR передал данные — берём их + merge с DEFAULT_ (на случай если
@@ -1556,8 +1557,40 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             <h2>{renderAccent(projectsSection.title, projectsSection.titleAccent)}</h2>
             {projectsSection.subtitle && <p className="sh-sub">{projectsSection.subtitle}</p>}
           </div>
+          {/* Табы "Выбрать квартиру / апартамент" */}
+          <div style={{display:'flex',gap:8,marginBottom:24,flexWrap:'wrap'}}>
+            {[
+              { key: 'all', label: 'Все проекты' },
+              { key: 'flat', label: 'Выбрать квартиру' },
+              { key: 'apartments', label: 'Выбрать апартамент' },
+            ].map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setProjectTab(tab.key as 'all' | 'flat' | 'apartments')}
+                style={{
+                  padding:'9px 20px',fontSize:11,fontWeight:700,letterSpacing:1,textTransform:'uppercase',
+                  borderRadius:999,border:'1.5px solid',cursor:'pointer',transition:'all .18s',
+                  background: projectTab === tab.key ? 'var(--gold)' : 'transparent',
+                  borderColor: projectTab === tab.key ? 'var(--gold)' : 'var(--bw)',
+                  color: projectTab === tab.key ? '#fff' : 'var(--black)',
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
           <div className="proj-grid">
-            {projects.map((p: any, i: number) => {
+            {projects
+              .filter((p: any) => {
+                if (projectTab === 'all') return true;
+                const slug = (p.slug || '').toLowerCase();
+                const href = (p.ctaHref || '').toLowerCase();
+                if (projectTab === 'apartments') return slug.includes('zorge') || href.includes('apartments');
+                if (projectTab === 'flat') return slug.includes('silver') || href.includes('flat');
+                return true;
+              })
+              .map((p: any, i: number) => {
               const projectKey = landingProjectKey(p);
               const projectPolicy = projectKey
                 ? findActiveCommissionPolicy(activePolicies, projectKey)
@@ -1605,7 +1638,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                       const display = done ? 'Сдан' : `${p.readyQuarter ? `${p.readyQuarter} кв. ` : ''}${p.readyYear}`;
                       return <div><span style={{color:'var(--muted2)'}}>Сдача:</span> <strong style={{color:'var(--black)'}}>{display}</strong></div>;
                     })()}
-                    {p.floorsTotal && <div><span style={{color:'var(--muted2)'}}>Этажей:</span> <strong style={{color:'var(--black)'}}>{p.floorsTotal}</strong></div>}
                     {p.totalUnits && <div><span style={{color:'var(--muted2)'}}>Лотов:</span> <strong style={{color:'var(--black)'}}>{p.totalUnits}</strong></div>}
                     {commissionLabel && (
                       <div><span style={{color:'var(--muted2)'}}>Комиссия:</span> <strong style={{color:'var(--gold)'}}>{commissionLabel}</strong></div>
@@ -1613,7 +1645,20 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                   </div>
                 )}
 
-                <div className="proj-link">{p.ctaText || 'Смотреть каталог'} &rarr;</div>
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:'auto',gap:8}}>
+                  <div className="proj-link">{p.ctaText || 'Смотреть каталог'} &rarr;</div>
+                  {p.detailHref && (
+                    <a
+                      href={p.detailHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      style={{fontSize:11,color:'var(--muted)',textDecoration:'underline',whiteSpace:'nowrap'}}
+                    >
+                      Подробнее →
+                    </a>
+                  )}
+                </div>
               </div>
               </Reveal>
               );
@@ -1976,6 +2021,38 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </div>
         </section>
 
+        {/* NEWS — новости с stmichael.ru, позиция: после FAQ */}
+        {news.length > 0 && (
+          <>
+            <hr className="sep" />
+            <section id="news" style={{background:'var(--bg)'}}>
+              <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
+                <div>
+                  <div className="sh-tag">Новости</div>
+                  <h2>Новости</h2>
+                </div>
+                <a href="https://stmichael.ru/news" target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'10px 24px',fontSize:10,marginBottom:4,whiteSpace:'nowrap'}}>
+                  Все новости &rarr;
+                </a>
+              </div>
+              <div className="news-grid">
+                {news.slice(0, 6).map((n: any) => (
+                  <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card">
+                    {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
+                    <div className="news-body">
+                      {n.source && <div className="news-source">{n.source}</div>}
+                      <div className="news-title">{n.title}</div>
+                      <div className="news-meta">
+                        {n.publishedAt && new Date(n.publishedAt).toLocaleDateString('ru-RU', {day:'numeric',month:'long',year:'numeric'})}
+                      </div>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            </section>
+          </>
+        )}
+
         {/* COMMUNITY — Партнёрская программа */}
         <section className="s-comm">
           <div><div className="sh-tag">Партнёрская программа</div><h2><strong>ST MICHAEL</strong> Партнёры</h2></div>
@@ -2020,6 +2097,17 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                   <div style={{display:'grid',gridTemplateColumns: list.length > 1 ? '1fr 1fr' : '1fr',gap:10}}>
                     {list.map((m: any, i: number) => (
                       <div key={i} style={{padding:'14px 16px',background:'var(--white)',borderRadius:'var(--r-card)',border:'1px solid var(--gold-border)'}}>
+                        {/* Фото: m.photo из CMS; если нет — серый круг с инициалами */}
+                        <div style={{marginBottom:10}}>
+                          {m.photo ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={m.photo} alt={m.name} style={{width:52,height:52,borderRadius:'50%',objectFit:'cover',border:'2px solid var(--gold-border)'}} />
+                          ) : (
+                            <div style={{width:52,height:52,borderRadius:'50%',background:'var(--bg)',border:'2px solid var(--bw)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,fontWeight:700,color:'var(--muted)',letterSpacing:0.5}}>
+                              {m.name ? m.name.split(' ').slice(0,2).map((n: string) => n[0]).join('') : '?'}
+                            </div>
+                          )}
+                        </div>
                         <div style={{fontSize:9,fontWeight:700,letterSpacing:2,textTransform:'uppercase',color:'var(--muted)',marginBottom:6}}>Персональный контакт</div>
                         <div style={{fontSize:15,fontWeight:600,color:'var(--black)',marginBottom:2}}>{m.name}</div>
                         {m.role && <div style={{fontSize:11,color:'var(--muted)',marginBottom:6,lineHeight:1.5}}>{m.role}</div>}
@@ -2041,38 +2129,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             </div>
           </div>
         </section>
-
-        {/* NEWS — упоминания / статьи (как у Stone). Скрыт если БД пуста. */}
-        {news.length > 0 && (
-          <>
-            <hr className="sep" />
-            <section id="news" style={{background:'var(--bg)'}}>
-              <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
-                <div>
-                  <div className="sh-tag">СМИ о нас</div>
-                  <h2>Новости</h2>
-                </div>
-                <a href="https://t.me/stmichaelBroker" target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'10px 24px',fontSize:10,marginBottom:4,whiteSpace:'nowrap'}}>
-                  Все новости &rarr;
-                </a>
-              </div>
-              <div className="news-grid">
-                {news.slice(0, 6).map((n: any) => (
-                  <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card">
-                    {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
-                    <div className="news-body">
-                      {n.source && <div className="news-source">{n.source}</div>}
-                      <div className="news-title">{n.title}</div>
-                      <div className="news-meta">
-                        {n.publishedAt && new Date(n.publishedAt).toLocaleDateString('ru-RU', {day:'numeric',month:'long',year:'numeric'})}
-                      </div>
-                    </div>
-                  </a>
-                ))}
-              </div>
-            </section>
-          </>
-        )}
 
         <hr className="sep" />
 

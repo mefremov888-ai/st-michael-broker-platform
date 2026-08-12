@@ -326,6 +326,81 @@ export class CmsService {
     return { deleted: true };
   }
 
+  // 2026-08-12: ручной/плановый синк новостей с stmichael.ru/news.
+  // Та же логика, что в SchedulerService.handleStmNewsSync, вынесена сюда
+  // чтобы не создавать циклическую зависимость CmsModule ↔ SchedulerModule.
+  async syncNewsFromStm(): Promise<{ created: number; updated: number; total: number }> {
+    const html = await this.fetchStmNewsHtml();
+    const items = this.parseStmNewsHtml(html);
+    let created = 0;
+    let updated = 0;
+    for (const item of items) {
+      const existing = await this.prisma.landingNews.findFirst({ where: { url: item.url } });
+      if (!existing) {
+        await this.prisma.landingNews.create({ data: item });
+        created++;
+      } else if (existing.title !== item.title || existing.imageUrl !== item.imageUrl) {
+        await this.prisma.landingNews.update({
+          where: { id: existing.id },
+          data: { title: item.title, imageUrl: item.imageUrl, publishedAt: item.publishedAt },
+        });
+        updated++;
+      }
+    }
+    return { created, updated, total: items.length };
+  }
+
+  private fetchStmNewsHtml(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const https = require('https');
+      const req = https.get(
+        'https://stmichael.ru/news',
+        { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; STMBrokerBot/1.0)' }, timeout: 15000 },
+        (res: any) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+          res.on('error', reject);
+        },
+      );
+      req.on('timeout', () => { req.destroy(); reject(new Error('stm-news: request timeout')); });
+      req.on('error', reject);
+    });
+  }
+
+  private parseStmNewsHtml(html: string): any[] {
+    const MONTHS: Record<string, number> = {
+      'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4, 'мая': 5, 'июня': 6,
+      'июля': 7, 'августа': 8, 'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12,
+    };
+    const cardRe = /<a\s[^>]*href="(\/news\/[^"]+)"[^>]*class="NewsCard_\w+">([\s\S]*?)(?=<a\s[^>]*href="\/news\/|<\/ul>|<\/section>|$)/g;
+    const items: any[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = cardRe.exec(html)) !== null && items.length < 12) {
+      const slug = m[1];
+      const body = m[2];
+      const url = `https://stmichael.ru${slug}`;
+      const imgM = body.match(/(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/);
+      const imageUrl = imgM ? imgM[1] : null;
+      const dateM = body.match(/class="date_\w+"[^>]*>\s*(\d{1,2})\s+([а-яёА-ЯЁ]+)\s+(\d{4})/u);
+      let publishedAt: Date = new Date();
+      if (dateM) {
+        const day = parseInt(dateM[1], 10);
+        const monthNum = MONTHS[dateM[2].toLowerCase()] ?? 1;
+        const year = parseInt(dateM[3], 10);
+        publishedAt = new Date(year, monthNum - 1, day);
+      }
+      const titleM = body.match(/class="title_\w+"[^>]*>([\s\S]*?)<\/div>/);
+      const title = titleM
+        ? titleM[1].replace(/<[^>]+>/g, '').trim()
+        : slug.replace(/^\/news\//, '').replace(/-/g, ' ');
+      if (!title) continue;
+      items.push({ title, source: 'stmichael.ru', publishedAt, imageUrl, url, isActive: true, sortOrder: 0 });
+    }
+    return items;
+  }
+
   // ─── Promos (slider — block 3) ──────────────────
 
   async listPromos(onlyActive = false) {
