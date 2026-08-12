@@ -708,64 +708,56 @@ function BrokerToursCalendarModal({ events, onClose }: { events: any[]; onClose:
   );
 }
 
-// Раздел "Материалы для продвижения" — компактные группы по папкам Я.Диска.
-// Каждая группа сворачивается в одну карточку: иконка + имя папки + счётчик +
-// "Скачать с Я.Диска" (открывает родительскую папку). По клику разворачивается
-// и показывает все файлы. Правка "Корректировка 16:06" 2026-05-07.
+// Раздел "Материалы для продвижения" — карточки-категории, клик → внутренняя страница.
 function MaterialsSection({ materials }: { materials: any[] }) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const groups = materials.reduce((acc: Record<string, any[]>, d: any) => {
     const key = d.subcategory?.trim() || 'Материалы';
     (acc[key] = acc[key] || []).push(d);
     return acc;
   }, {});
   const groupNames = Object.keys(groups).sort();
-  const toggle = (g: string) => setExpanded((e) => ({ ...e, [g]: !e[g] }));
+
+  const MATERIAL_ICONS: Record<string, string> = {
+    'Reels': '🎬',
+    'Презентации': '📊',
+    'Фотографии': '🖼️',
+    'Рендеры': '🏗️',
+    'Тексты': '📝',
+  };
+
   return (
     <section id="materials" style={{background:'var(--bg)'}}>
-      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Изображения, рендеры, видео и презентации — сгруппированы по папкам Яндекс.Диска. Кликните на группу, чтобы развернуть.</p></div>
+      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Изображения, рендеры, видео и презентации для брокеров ST Michael.</p></div>
       {materials.length === 0 ? (
-        <div className="doc-item" style={{cursor:'default'}}><div className="doc-name" style={{color:'var(--muted)'}}>Скоро здесь появятся материалы</div></div>
+        <div className="mat-groups">
+          {['Reels', 'Презентации', 'Фотографии', 'Рендеры', 'Тексты'].map((group) => (
+            <a key={group} href={`/materials/${encodeURIComponent(group)}`} className="mat-group" style={{textDecoration:'none',display:'block'}}>
+              <div className="mat-group-header" style={{pointerEvents:'none'}}>
+                <div className="mat-group-icon" style={{fontSize:20}}>{MATERIAL_ICONS[group] || '📁'}</div>
+                <div className="mat-group-info">
+                  <div className="mat-group-name">{group}</div>
+                  <div className="mat-group-meta">Скоро появятся материалы</div>
+                </div>
+                <ChevronRight className="mat-group-chev" size={20} />
+              </div>
+            </a>
+          ))}
+        </div>
       ) : (
         <div className="mat-groups">
           {groupNames.map((group) => {
             const docs = groups[group];
-            const isOpen = !!expanded[group];
-            // Берём первый publicUrl из группы — если все файлы из одной папки
-            // Я.Диска, ссылка приведёт прямо в эту папку (можно "Скачать всё").
-            const folderUrl = docs[0]?.fileUrl || '';
             return (
-              <div key={group} className={`mat-group${isOpen ? ' open' : ''}`}>
-                <button type="button" className="mat-group-header" onClick={() => toggle(group)}>
-                  <div className="mat-group-icon"><FileText size={18} /></div>
+              <a key={group} href={`/materials/${encodeURIComponent(group)}`} className="mat-group" style={{textDecoration:'none',display:'block'}}>
+                <div className="mat-group-header" style={{pointerEvents:'none'}}>
+                  <div className="mat-group-icon" style={{fontSize:20}}>{MATERIAL_ICONS[group] || '📁'}</div>
                   <div className="mat-group-info">
                     <div className="mat-group-name">{group}</div>
                     <div className="mat-group-meta">{docs.length} {docs.length === 1 ? 'файл' : docs.length < 5 ? 'файла' : 'файлов'}</div>
                   </div>
                   <ChevronRight className="mat-group-chev" size={20} />
-                </button>
-                {isOpen && (
-                  <div className="mat-group-body">
-                    <div className="mat-grid">
-                      {docs.map((d: any) => (
-                        <a key={d.id} href={d.fileUrl} target="_blank" rel="noopener noreferrer" className="mat-card">
-                          <div className="mat-card-icon"><FileText size={18} /></div>
-                          <div className="mat-card-body">
-                            <div className="mat-card-name">{d.name}</div>
-                            {d.type && <div className="mat-card-type">{d.type}</div>}
-                          </div>
-                          <DownloadIcon className="mat-card-dl" size={16} />
-                        </a>
-                      ))}
-                    </div>
-                    {folderUrl && (
-                      <a href={folderUrl} target="_blank" rel="noopener noreferrer" className="btn-outline" style={{display:'inline-flex',marginTop:14,padding:'10px 22px',fontSize:11}}>
-                        Открыть папку на Я.Диске →
-                      </a>
-                    )}
-                  </div>
-                )}
-              </div>
+                </div>
+              </a>
             );
           })}
         </div>
@@ -1045,28 +1037,28 @@ const DEFAULT_HERO = {
   // Редактируется через /admin/content (вкладка Hero, поле slides).
   slides: [
     {
-      tag: 'Активное строительство Большого Сити',
-      title: 'Доходность до 25%',
-      description: 'Спрос на аренду и рост стоимости объекта. Опция доверительного управления.',
+      tag: 'Зорге 9 · Субсидированная ипотека',
+      title: '12,49% на весь срок',
+      description: 'Готовый дом бизнес-класса у м. Полежаевская. Актуальная комиссия и быстрые выплаты.',
       imageUrl: 'https://optim.tildacdn.com/tild3439-6364-4532-b563-663530663865/-/format/webp/__1_-4_1.jpg.webp',
     },
     {
-      tag: 'Клубная инфраструктура',
-      title: 'Премиальные сервисы',
-      description: 'Беллмен и консьерж. Фитнес 3000 м² с бассейном 25 м. Широкий выбор ритейла.',
+      tag: 'Квартал Серебряный Бор · Рассрочка',
+      title: 'Платёж 0,5%/месяц',
+      description: 'Рассрочка на премиальные резиденции у Серебряного бора. Беспроцентная рассрочка от застройщика.',
+      imageUrl: 'https://storage.yandexcloud.net/st-michael-media/media/p/p/i/bd2e855b408722fb61fa362b50d7f83282d3a86e.jpg',
+    },
+    {
+      tag: 'Серебряный бор · Траншевая ипотека',
+      title: 'Уникальные резиденции от 15 млн ₽',
+      description: 'Траншевая ипотека от застройщика. Премиум-класс рядом с природным заповедником.',
+      imageUrl: 'https://storage.yandexcloud.net/st-michael-media/media/p/p/i/bd2e855b408722fb61fa362b50d7f83282d3a86e.jpg',
+    },
+    {
+      tag: 'Активное строительство Большого Сити',
+      title: 'Доходность до 25%',
+      description: 'Спрос на аренду и рост стоимости объекта. Опция доверительного управления.',
       imageUrl: 'https://optim.tildacdn.com/tild6336-3562-4638-b166-623430323566/-/format/webp/2026-04-16_152634.jpg.webp',
-    },
-    {
-      tag: 'Готовый дом бизнес-класса · м. Полежаевская',
-      title: 'Апартаменты от 12 млн ₽',
-      description: 'Актуальная комиссия и быстрые выплаты вознаграждения.',
-      imageUrl: 'https://optim.tildacdn.com/tild3333-6538-4231-a437-613537353665/-/format/webp/2026-05-04_145437.jpg.webp',
-    },
-    {
-      tag: 'Рассрочка 0% — ПВ 30%, 0,5%/мес на 12 мес',
-      title: 'Платеж от 65 тыс ₽/мес',
-      description: 'Индивидуальные программы рассрочки с ПВ от 10% и сроком до 18 месяцев.',
-      imageUrl: 'https://optim.tildacdn.com/tild3436-3066-4862-b537-393363373965/-/format/webp/15.jpg.webp',
     },
   ],
 };
@@ -1160,6 +1152,15 @@ const DEFAULT_COOPERATION = {
   ctaText: 'Стать партнёром',
 };
 
+const DEFAULT_NEWS = [
+  { id: 'default-1', url: 'https://stmichael.ru/news/s-dnem-stroitelya-2026', imageUrl: 'https://stmichael.ru/proxy/insecure/w:960/q:80/plain/https://storage.yandexcloud.net/st-michael-media/media/p/p/img/17971f9f824f8caa11b3c8ffd93c6e7ac1ef81aa.jpg@webp', title: 'С Днем строителя!', publishedAt: '2026-08-09', source: null },
+  { id: 'default-2', url: 'https://stmichael.ru/news/zvezdnyj-parking-v-zorge-9', imageUrl: 'https://stmichael.ru/proxy/insecure/w:960/q:80/plain/https://storage.yandexcloud.net/st-michael-media/media/p/p/img/54f49a1968a020a5d78a145bddba2b1aa98575cb.png@webp', title: '«Звездный паркинг» в Зорге 9', publishedAt: '2026-08-07', source: null },
+  { id: 'default-3', url: 'https://stmichael.ru/news/kvartal-serebryanyj-bor-dinamika-stroitelstv-il26', imageUrl: 'https://stmichael.ru/proxy/insecure/w:960/q:80/plain/https://storage.yandexcloud.net/st-michael-media/media/p/p/img/b44022e75c4b4580610902984a5d2da026fb8e85.jpg@webp', title: '«Квартал Серебряный бор»: динамика строительства в июле 2026', publishedAt: '2026-07-31', source: null },
+  { id: 'default-4', url: 'https://stmichael.ru/news/nedvizhimost-st-michael-teper-dostupna-v-lizing', imageUrl: 'https://stmichael.ru/proxy/insecure/w:960/q:80/plain/https://storage.yandexcloud.net/st-michael-media/media/p/p/img/a5be1ac6ca49a575b35b2aaaea16a6db7ce2bfd2.jpg@webp', title: 'Недвижимость St Michael теперь доступна в лизинг', publishedAt: '2026-07-30', source: null },
+  { id: 'default-5', url: 'https://stmichael.ru/news/turone-novyj-adres-muzhskogo-stilya-v-moskve', imageUrl: 'https://stmichael.ru/proxy/insecure/w:960/q:80/plain/https://storage.yandexcloud.net/st-michael-media/media/p/p/img/3449d659cac6eb5c7288bd2ee94776f331011dbb.jpg@webp', title: 'TURONE — новый адрес мужского стиля в Москве', publishedAt: '2026-07-23', source: null },
+  { id: 'default-6', url: 'https://stmichael.ru/news/bolee-12-sobytij-za-mesyac-v-zorge-9-zapustili-pro', imageUrl: '', title: 'Более 12 событий за месяц: в «Зорге 9» запустили программу для взрослых и детей', publishedAt: '2026-07-22', source: null },
+];
+
 const MONTHS_RU = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 function formatEventDate(iso: string): { day: string; mon: string } {
   const d = new Date(iso);
@@ -1233,7 +1234,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [analyticsDocs, setAnalyticsDocs] = useState<any[]>(() => Array.isArray(initialData?.analyticsDocs) ? initialData!.analyticsDocs! : []);
   const [marketingDocs, setMarketingDocs] = useState<any[]>(() => Array.isArray(initialData?.marketingDocs) ? initialData!.marketingDocs! : []);
   const [materialsDocs, setMaterialsDocs] = useState<any[]>(() => Array.isArray(initialData?.materialsDocs) ? initialData!.materialsDocs! : []);
-  const [news, setNews] = useState<any[]>(() => Array.isArray(initialData?.news) ? initialData!.news! : []);
+  const [news, setNews] = useState<any[]>(() => Array.isArray(initialData?.news) && initialData!.news!.length > 0 ? initialData!.news! : DEFAULT_NEWS);
   const { broker } = useAuth();
   const router = useRouter();
 
@@ -1281,7 +1282,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
         safeFetch('/api/public/cms/commission-policies/active'),
       ]);
       if (Array.isArray(policies) && policies.length > 0) setActivePolicies(policies);
-      if (Array.isArray(nws)) setNews(nws);
+      if (Array.isArray(nws) && nws.length > 0) setNews(nws);
       if (content) {
         if (content.hero) setHero({ ...DEFAULT_HERO, ...content.hero });
         if (content.advantages) setAdvantages({ ...DEFAULT_ADVANTAGES, ...content.advantages });
@@ -1586,6 +1587,12 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 return true;
               })
               .map((p: any, i: number) => {
+              // Ссылка «подробнее»: берём из CMS-поля detailHref, иначе slug-маппинг.
+              const DETAIL_URLS: Record<string, string> = {
+                'zorge9': 'https://stmichael.ru/zorge9',
+                'silver-bor': 'https://stmichael.ru/kvartaly-serebryanyj-bor',
+              };
+              const detailUrl: string | null = p.detailHref || DETAIL_URLS[(p.slug || '').toLowerCase()] || null;
               const projectKey = landingProjectKey(p);
               const projectPolicy = projectKey
                 ? findActiveCommissionPolicy(activePolicies, projectKey)
@@ -1642,9 +1649,9 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 
                 <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:'auto',gap:8}}>
                   <div className="proj-link">{p.ctaText || 'Смотреть каталог'} &rarr;</div>
-                  {p.detailHref && (
+                  {detailUrl && (
                     <a
-                      href={p.detailHref}
+                      href={detailUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
@@ -1924,7 +1931,10 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           <div className="coop-grid">
             <div className="coop-left">
               <p>{cooperation.description}</p>
-              <button className="btn-gold" onClick={handleRegister}>{cooperation.ctaText || 'Стать партнёром'}</button>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                <button className="btn-gold" onClick={handleRegister}>{cooperation.ctaText || 'Стать партнёром'}</button>
+                <a href="#commission" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>
+              </div>
             </div>
             <div className="doc-list">
               {cooperationDocs.length === 0 ? (
@@ -2013,36 +2023,34 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         </section>
 
         {/* NEWS — новости с stmichael.ru, позиция: после FAQ */}
-        {news.length > 0 && (
-          <>
-            <hr className="sep" />
-            <section id="news" style={{background:'var(--bg)'}}>
-              <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
-                <div>
-                  <div className="sh-tag">Новости</div>
-                  <h2>Новости</h2>
-                </div>
-                <a href="https://stmichael.ru/news" target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'10px 24px',fontSize:10,marginBottom:4,whiteSpace:'nowrap'}}>
-                  Все новости &rarr;
-                </a>
+        <>
+          <hr className="sep" />
+          <section id="news" style={{background:'var(--bg)'}}>
+            <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
+              <div>
+                <div className="sh-tag">Новости</div>
+                <h2>Новости</h2>
               </div>
-              <div className="news-grid">
-                {news.slice(0, 6).map((n: any) => (
-                  <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card">
-                    {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
-                    <div className="news-body">
-                      {n.source && <div className="news-source">{n.source}</div>}
-                      <div className="news-title">{n.title}</div>
-                      <div className="news-meta">
-                        {n.publishedAt && new Date(n.publishedAt).toLocaleDateString('ru-RU', {day:'numeric',month:'long',year:'numeric'})}
-                      </div>
+              <a href="https://stmichael.ru/news" target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'10px 24px',fontSize:10,marginBottom:4,whiteSpace:'nowrap'}}>
+                Все новости &rarr;
+              </a>
+            </div>
+            <div className="news-grid">
+              {news.slice(0, 6).map((n: any) => (
+                <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card">
+                  {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
+                  <div className="news-body">
+                    {n.source && <div className="news-source">{n.source}</div>}
+                    <div className="news-title">{n.title}</div>
+                    <div className="news-meta">
+                      {n.publishedAt && new Date(n.publishedAt).toLocaleDateString('ru-RU', {day:'numeric',month:'long',year:'numeric'})}
                     </div>
-                  </a>
-                ))}
-              </div>
-            </section>
-          </>
-        )}
+                  </div>
+                </a>
+              ))}
+            </div>
+          </section>
+        </>
 
         {/* COMMUNITY — Партнёрская программа */}
         <section className="s-comm">
