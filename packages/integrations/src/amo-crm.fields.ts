@@ -755,21 +755,9 @@ export function brokerToAmoContactFields(
   if (broker.region) {
     fields.push({ field_id: AMO_CONTACT_FIELDS.REGION, values: [{ value: broker.region }] });
   }
-  if (broker.brokerTourVisited) {
-    fields.push({
-      field_id: AMO_CONTACT_FIELDS.BROKER_TOUR_VISITED,
-      values: [{ value: true }],
-    });
-  }
-  if (broker.brokerTourDate) {
-    const d = new Date(broker.brokerTourDate);
-    if (!isNaN(d.getTime())) {
-      fields.push({
-        field_id: AMO_CONTACT_FIELDS.BROKER_TOUR_DATE,
-        values: [{ value: Math.floor(d.getTime() / 1000) }],
-      });
-    }
-  }
+  // BROKER_TOUR_VISITED / BROKER_TOUR_DATE are intentionally not emitted:
+  // the amoCRM contact is their source of truth, synced inbound by webhook/cron.
+  // Sending the local snapshot back could restore a mark removed in amoCRM.
   if (broker.presentationSent) {
     fields.push({
       field_id: AMO_CONTACT_FIELDS.PRESENTATION_SENT,
