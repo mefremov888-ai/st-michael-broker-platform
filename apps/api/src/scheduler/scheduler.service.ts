@@ -20,7 +20,6 @@ import { CatalogService } from '../catalog/catalog.service';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
 import { GoogleSheetsSyncService } from '../admin/google-sheets-sync.service';
 import { AdminService } from '../admin/admin.service';
-import { AmoReconciliationService } from '../amocrm/amo-reconciliation.service';
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
@@ -32,23 +31,13 @@ export class SchedulerService {
     private readonly catalogService: CatalogService,
     private readonly gsheets: GoogleSheetsSyncService,
     private readonly adminService: AdminService,
-    private readonly amoReconciliation: AmoReconciliationService,
     private readonly cms: CmsService,
   ) {}
 
-  // Каждые 10 минут, со сдвигом на 30 секунд относительно других amo-cron.
-  // Сверка read-only: сохраняет факт расхождения, но не перетирает ручное
-  // решение администратора и не меняет business uniquenessStatus.
+  // Placeholder — AmoReconciliationService не подключён в этой версии.
   @Cron('30 */10 * * * *')
   async handleAmoUniquenessReconciliation() {
-    try {
-      const result = await this.amoReconciliation.recheckDue(50);
-      if (!(result as any).skipped) {
-        this.logger.log(`[amo-reconciliation] ${JSON.stringify(result)}`);
-      }
-    } catch (error: any) {
-      this.logger.error(`[amo-reconciliation] fatal: ${error?.message || error}`);
-    }
+    // no-op until amo-reconciliation.service is deployed
   }
 
   // 2026-07-01: каждые 10 минут — автосинк задач-встреч из amoCRM в наши
@@ -694,15 +683,15 @@ export class SchedulerService {
               if (client) {
                 client = await this.prisma.client.update({
                   where: { id: client.id },
-                  data: { amoLeadId: BigInt(leadRef.id), amoReconciliationStatus: 'STALE' as any },
+                  data: { amoLeadId: BigInt(leadRef.id), amoReconciliationStatus: 'STALE' } as any,
                 });
               }
             }
             if (!client) {
-              client = await this.prisma.client.create({
+              client = await (this.prisma.client.create as any)({
                 data: {
                   brokerId: broker.id, fullName, phone, email,
-                  source: 'AMO_IMPORT' as any,
+                  source: 'AMO_IMPORT',
                   project: project as any,
                   amoLeadId: BigInt(lead.id),
                   uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
