@@ -4,7 +4,6 @@ import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { AmocrmService } from '../amocrm/amocrm.service';
-import { AmoReconciliationService } from '../amocrm/amo-reconciliation.service';
 import { AmoCrmAdapter, MangoAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig, isSalesPipeline } from '@st-michael/integrations';
 import {
   VALID_CATEGORIES,
@@ -39,17 +38,16 @@ export class AdminService {
   constructor(
     @Inject('PrismaClient') private prisma: PrismaClient,
     private amocrmService: AmocrmService,
-    private amoReconciliation: AmoReconciliationService,
     @InjectQueue('notifications') private notificationQueue: Queue,
     private importJobs: BrokerImportJobsService,
   ) {}
 
-  getUniquenessControl(query: any) {
-    return this.amoReconciliation.list(query);
+  getUniquenessControl(_query: any) {
+    return { items: [], total: 0 };
   }
 
-  recheckUniquenessControl(clientId: string, actorId: string) {
-    return this.amoReconciliation.recheckClient(clientId, 'MANUAL', actorId);
+  recheckUniquenessControl(_clientId: string, _actorId: string) {
+    return { ok: false, message: 'Not available' };
   }
 
   // ─── Mailings (broadcasts) ─────────────────────────────────
@@ -942,8 +940,6 @@ export class AdminService {
     const data: any = {
       uniquenessStatus: newStatus,
       uniquenessReason: `[Ручная правка админом] ${reason.trim()} (было: ${oldStatus})`,
-      amoReconciliationStatus: 'STALE',
-      amoReconciliationReason: 'Статус изменён вручную; требуется повторная сверка с amoCRM',
     };
     if (newStatus === 'CONDITIONALLY_UNIQUE') {
       data.uniquenessExpiresAt = new Date(Date.now() + UNIQUENESS_DAYS * 86400 * 1000);
@@ -1784,7 +1780,6 @@ export class AdminService {
           amoSyncAttempts: { increment: 1 },
           amoSyncLastAttemptAt: new Date(),
           amoLeadId: BigInt(amoLeadId),
-          amoReconciliationStatus: 'STALE' as any,
         },
       });
       return { ok: true, message: 'Заявка передана в amoCRM' };

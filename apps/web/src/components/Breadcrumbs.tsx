@@ -22,6 +22,7 @@ const labels: Record<string, string> = {
   events: 'События',
   projects: 'Проекты',
   content: 'Контент',
+  'commission-policies': 'Комиссия и рассрочка',
   mailings: 'Рассылки',
   'meeting-slots': 'Расписание встреч',
 };

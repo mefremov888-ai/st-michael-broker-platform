@@ -913,6 +913,15 @@ model CommissionPolicy {
   id        String         @id @default(uuid())
   project   Project
   mode      CommissionMode
+  // Условия оплаты являются частью той же политики, что и базовая ставка.
+  // Nullable оставлены только для бесшовной миграции старых записей: пока
+  // политика не пересохранена, API подхватит legacy-значения из CMS.
+  installmentEnabled        Boolean? @map("installment_enabled")
+  installmentDiscount       Decimal? @map("installment_discount") @db.Decimal(5, 2)
+  subsidizedMortgageEnabled Boolean? @map("subsidized_mortgage_enabled")
+  subsidizedMortgageRate    Decimal? @map("subsidized_mortgage_rate") @db.Decimal(5, 2)
+  // Публичное пояснение рядом со ставкой на лендинге/в кабинете.
+  displayNote String? @map("display_note")
   // Для FLAT — единая ставка (например 4.00).
   flatRate  Decimal?       @map("flat_rate") @db.Decimal(5, 2)
   // Для PROGRESSIVE — JSON со шкалой: [{level: 'START', minSqm: 0, rate: 5.0}, ...]

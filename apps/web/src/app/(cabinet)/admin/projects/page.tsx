@@ -21,8 +21,6 @@ type ProjectItem = {
   floorsTotal: number | null;
   readyQuarter: number | null;
   readyYear: number | null;
-  commissionFrom: number | string | null;
-  commissionTo: number | string | null;
   sortOrder: number;
   isActive: boolean;
 };
@@ -76,8 +74,6 @@ export default function AdminProjectsPage() {
           floorsTotal: p.floorsTotal === null || p.floorsTotal === ('' as any) ? null : Number(p.floorsTotal),
           readyQuarter: p.readyQuarter === null || p.readyQuarter === ('' as any) ? null : Number(p.readyQuarter),
           readyYear: p.readyYear === null || p.readyYear === ('' as any) ? null : Number(p.readyYear),
-          commissionFrom: p.commissionFrom === null || p.commissionFrom === '' ? null : Number(p.commissionFrom),
-          commissionTo: p.commissionTo === null || p.commissionTo === '' ? null : Number(p.commissionTo),
           sortOrder: p.sortOrder, isActive: p.isActive,
         }),
       });
@@ -201,14 +197,6 @@ export default function AdminProjectsPage() {
                     <input className="input" type="number" min={2025} max={2099} value={p.readyYear ?? ''} onChange={(e) => updateLocal(idx, { readyYear: e.target.value === '' ? null : Number(e.target.value) })} disabled={!isAdmin} />
                   </div>
                   <div>
-                    <label className="label">Комиссия от (%)</label>
-                    <input className="input" type="number" min={0} max={20} step={0.01} value={p.commissionFrom ?? ''} onChange={(e) => updateLocal(idx, { commissionFrom: e.target.value === '' ? null : e.target.value })} disabled={!isAdmin} />
-                  </div>
-                  <div>
-                    <label className="label">Комиссия до (%)</label>
-                    <input className="input" type="number" min={0} max={20} step={0.01} value={p.commissionTo ?? ''} onChange={(e) => updateLocal(idx, { commissionTo: e.target.value === '' ? null : e.target.value })} disabled={!isAdmin} />
-                  </div>
-                  <div>
                     <label className="label">Порядок</label>
                     <input className="input" type="number" value={p.sortOrder} onChange={(e) => updateLocal(idx, { sortOrder: Number(e.target.value) })} disabled={!isAdmin} />
                   </div>
@@ -219,7 +207,8 @@ export default function AdminProjectsPage() {
                 </div>
                 <p className="text-[10px] text-text-muted mt-2">
                   Эти поля показываются в карточке проекта на лендинге (под названием).
-                  Если поле пусто — строка не выводится. «Комиссия от/до» рендерится как «5–8%».
+                  Комиссия подставляется автоматически из раздела{' '}
+                  <a className="text-accent hover:underline" href="/admin/commission-policies">«Комиссия и рассрочка»</a>.
                 </p>
               </div>
               {isAdmin && (

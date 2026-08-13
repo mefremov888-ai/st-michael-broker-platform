@@ -20,7 +20,10 @@ import { CatalogService } from '../catalog/catalog.service';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
 import { GoogleSheetsSyncService } from '../admin/google-sheets-sync.service';
 import { AdminService } from '../admin/admin.service';
-import { AmoReconciliationService } from '../amocrm/amo-reconciliation.service';
+import {
+  brokerTourSnapshotFromAmoContact,
+  buildBrokerTourUpdate,
+} from '../amocrm/broker-tour-sync';
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
@@ -32,25 +35,77 @@ export class SchedulerService {
     private readonly catalogService: CatalogService,
     private readonly gsheets: GoogleSheetsSyncService,
     private readonly adminService: AdminService,
-    private readonly amoReconciliation: AmoReconciliationService,
     private readonly cms: CmsService,
   ) {}
 
-  // Каждые 10 минут, со сдвигом на 30 секунд относительно других amo-cron.
-  // Сверка read-only: сохраняет факт расхождения, но не перетирает ручное
-  // решение администратора и не меняет business uniquenessStatus.
+  // Placeholder — AmoReconciliationService не подключён в этой версии.
   @Cron('30 */10 * * * *')
   async handleAmoUniquenessReconciliation() {
-    try {
-      const result = await this.amoReconciliation.recheckDue(50);
-      if (!(result as any).skipped) {
-        this.logger.log(`[amo-reconciliation] ${JSON.stringify(result)}`);
-      }
-    } catch (error: any) {
-      this.logger.error(`[amo-reconciliation] fatal: ${error?.message || error}`);
-    }
+    // no-op until amo-reconciliation.service is deployed
   }
 
+  // amoCRM contact fields are the source of truth for broker-tour attendance.
+  // Fetch only contacts linked to canonical brokers (not the whole amo base)
+  // through the adapter's 250-ID batches. There is deliberately no env-token
+  // guard: AmoCrmAdapter can restore tokens from SystemSetting at bootstrap.
+  @Cron('15 15,45 * * * *')
+  async handleBrokerTourContactSync() {
+    try {
+      const brokers = await this.prisma.broker.findMany({
+        where: {
+          role: 'BROKER',
+          mergedIntoId: null,
+          amoContactId: { not: null },
+        },
+        select: {
+          id: true,
+          amoContactId: true,
+          brokerTourVisited: true,
+          brokerTourDate: true,
+        },
+      });
+      if (brokers.length === 0) return;
+
+      const amoIds = brokers
+        .map((broker) => Number(broker.amoContactId))
+        .filter((id) => Number.isSafeInteger(id) && id > 0);
+      const contacts = await this.amo.getContactsByIds(amoIds);
+
+      let updated = 0;
+      let missing = 0;
+      let errors = 0;
+      for (const broker of brokers) {
+        const amoContactId = Number(broker.amoContactId);
+        const contact = contacts.get(amoContactId);
+        if (!contact) {
+          missing++;
+          continue;
+        }
+
+        const update = buildBrokerTourUpdate(
+          broker,
+          brokerTourSnapshotFromAmoContact(contact),
+        );
+        if (!update) continue;
+
+        try {
+          await this.prisma.broker.update({
+            where: { id: broker.id },
+            data: update,
+          });
+          updated++;
+        } catch {
+          errors++;
+        }
+      }
+
+      this.logger.log(
+        `[broker-tour-sync] linked=${brokers.length} fetched=${contacts.size} updated=${updated} missing=${missing} errors=${errors}`,
+      );
+    } catch (error: any) {
+      this.logger.error(`[broker-tour-sync] fatal error=${error?.name || 'unknown'}`);
+    }
+  }
   // 2026-07-01: каждые 10 минут — автосинк задач-встреч из amoCRM в наши
   // Meeting. Менеджер ставит в amoCRM задачу типа «Встреча» (task_type_id=2)
   // с датой на лиде клиента брокера — в кабинете брокера сразу появляется
@@ -694,15 +749,15 @@ export class SchedulerService {
               if (client) {
                 client = await this.prisma.client.update({
                   where: { id: client.id },
-                  data: { amoLeadId: BigInt(leadRef.id), amoReconciliationStatus: 'STALE' as any },
+                  data: { amoLeadId: BigInt(leadRef.id), amoReconciliationStatus: 'STALE' } as any,
                 });
               }
             }
             if (!client) {
-              client = await this.prisma.client.create({
+              client = await (this.prisma.client.create as any)({
                 data: {
                   brokerId: broker.id, fullName, phone, email,
-                  source: 'AMO_IMPORT' as any,
+                  source: 'AMO_IMPORT',
                   project: project as any,
                   amoLeadId: BigInt(lead.id),
                   uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
@@ -900,7 +955,7 @@ export class SchedulerService {
         amoSyncStatus: { in: ['FAILED', 'PENDING'] } as any,
         amoSyncAttempts: { lt: 10 },
       },
-      include: { broker: true, responsibleBroker: true },
+      include: { broker: true },
       orderBy: { amoSyncLastAttemptAt: 'asc' },
       take: 20,
     });
@@ -909,36 +964,17 @@ export class SchedulerService {
 
     let ok = 0;
     let failed = 0;
-    let deferred = 0;
     for (const client of candidates) {
       if (!client.fixationAgencyId) continue;
       const agency = await this.prisma.agency.findUnique({ where: { id: client.fixationAgencyId } });
       if (!agency) continue;
-      // Для делегированной фиксации client.broker — владелец кабинета,
-      // а в amoCRM должен уходить фактический ответственный брокер.
-      const responsibleBroker = client.responsibleBroker || client.broker;
-      if (!responsibleBroker.amoContactId) {
-        const error = 'Responsible broker is not linked to an amoCRM contact; retry deferred';
-        await this.prisma.client.update({
-          where: { id: client.id },
-          data: {
-            amoSyncError: error,
-            amoSyncLastAttemptAt: new Date(),
-          },
-        });
-        // Это не попытка обращения к amoCRM: не сжигаем лимит retry.
-        // После синхронизации amoContactId клиент автоматически снова попадёт сюда.
-        deferred++;
-        this.logger.warn(`[amo-retry] client=${client.id}: ${error}`);
-        continue;
-      }
       try {
         const resultLead = await this.amo.createFixationRequest({
           clientPhone: client.phone,
           clientEmail: client.email || undefined,
           clientName: client.fullName,
-          brokerPhone: responsibleBroker.phone,
-          brokerAmoContactId: Number(responsibleBroker.amoContactId),
+          brokerPhone: client.broker.phone,
+          brokerAmoContactId: client.broker.amoContactId ? Number(client.broker.amoContactId) : undefined,
           agencyName: agency.name,
           agencyInn: agency.inn,
           comment: client.comment || '',
@@ -977,10 +1013,10 @@ export class SchedulerService {
             this.morekit.notifyFixation({
               id: String(createdAmoLeadId),
               agency: agency.name,
-              broker_id: responsibleBroker.amoContactId ? String(responsibleBroker.amoContactId) : '',
-              agent_name: responsibleBroker.fullName,
-              agent_phone: morekitPhone(responsibleBroker.phone),
-              agent_mail: responsibleBroker.email || '',
+              broker_id: client.broker.amoContactId ? String(client.broker.amoContactId) : '',
+              agent_name: client.broker.fullName,
+              agent_phone: morekitPhone(client.broker.phone),
+              agent_mail: client.broker.email || '',
               budget: amount ? String(amount) : '0',
               clients: [{ name: client.fullName, phone: morekitPhone(client.phone) }],
               type: client.propertyType || 'Квартира',
@@ -1015,7 +1051,7 @@ export class SchedulerService {
         }
       }
     }
-    this.logger.log(`amo auto-retry: ${ok} success, ${failed} failed, ${deferred} deferred`);
+    this.logger.log(`amo auto-retry: ${ok} success, ${failed} failed`);
   }
 
   // 2026-06-16: отключён. Раньше каждые 3 мин синкали responsible_user_id

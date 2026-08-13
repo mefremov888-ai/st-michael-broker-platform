@@ -2,6 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
+import {
+  ActiveCommissionPolicy,
+  buildPaymentTermsText,
+  resolveCommissionText,
+} from '@/lib/commission-display';
 import { TrendingUp, Wallet, Award, CreditCard, Building2 } from 'lucide-react';
 
 const levelNames: Record<string, string> = {
@@ -27,28 +32,13 @@ const statusLabels: Record<string, { label: string; cls: string }> = {
   CANCELLED: { label: 'Отменена', cls: 'bg-error/20 text-error' },
 };
 
-// Commission rate tables по новому ТЗ (с 1 января по 30 июня 2026)
-// Серебряный Бор не имеет уровня LEGEND — максимум CHAMPION 6.25%
-const RATE_TABLE: Record<string, Record<string, number>> = {
-  ZORGE9: { START: 5.0, BASIC: 5.5, STRONG: 6.0, PREMIUM: 6.5, ELITE: 7.0, CHAMPION: 7.5, LEGEND: 8.0 },
-  SILVER_BOR: { START: 5.0, BASIC: 5.25, STRONG: 5.5, PREMIUM: 5.75, ELITE: 6.0, CHAMPION: 6.25 },
-};
-
-const LEVEL_ORDER_BY_PROJECT: Record<string, string[]> = {
-  ZORGE9: ['START', 'BASIC', 'STRONG', 'PREMIUM', 'ELITE', 'CHAMPION', 'LEGEND'],
-  SILVER_BOR: ['START', 'BASIC', 'STRONG', 'PREMIUM', 'ELITE', 'CHAMPION'],
-};
-
-const LEVEL_ORDER = LEVEL_ORDER_BY_PROJECT.ZORGE9;
-
 // 2026-07-01: карточки условий комиссии теперь тянутся из CMS
 // (commission.cards в /admin/content → «Комиссия»). Если админ не наполнил CMS
 // или запрос упал — используется этот fallback. Иконки/цвета выбираются по
 // индексу карточки из палитры ниже.
 const FALLBACK_COMMISSION_CARDS = [
-  { title: 'Условия выплаты', text: 'Выплата в течение 5 рабочих дней с момента оплаты клиентом не менее 50% (Зорге 9) или 30% (Серебряный Бор) от суммы договора.' },
+  { title: 'Условия выплаты', text: 'Вознаграждение выплачивается после оплаты клиентом в срок, установленный агентским договором.' },
   { title: 'Квартальный бонус', text: 'При уровне Strong и выше несколько кварталов подряд: +0,1% — +0,15% — +0,2% — +0,25% (максимум). Обнуляется при отсутствии продаж в квартале.' },
-  { title: 'Рассрочка и ипотека', text: 'При рассрочке ставка уменьшается на 0,5%. При субсидированной ипотеке — фиксированные 4%.' },
   { title: 'Коммерческие помещения', text: 'Продажа — 3%. Фитнес — 3%. Отдельные здания — 2%. Аренда ритейл — 100% месячного платежа. Аренда фитнес — 50%.' },
 ];
 
@@ -85,30 +75,49 @@ export default function CommissionPage() {
       .catch(() => {});
   }, []);
 
-  // 2026-07-03: карточки условий теперь по проекту.
-  // Приоритет: cardsByProject[selectedProject] → общий cards (совместимость) → FALLBACK.
+  const selectedPaymentTerms = commission?.paymentTerms?.[selectedProject];
+  const calculatorPaymentTerms = commission?.paymentTerms?.[calcForm.project];
+  const activeDisplayPolicies = useMemo<ActiveCommissionPolicy[]>(() => {
+    if (!commission) return [];
+    return (['ZORGE9', 'SILVER_BOR'] as const).map((project) => ({
+      project,
+      mode: commission?.modes?.[project] === 'FLAT' ? 'FLAT' : 'PROGRESSIVE',
+      flatRate: commission?.flatRates?.[project],
+      levels: commission?.scales?.[project],
+      displayNote: commission?.displayNotes?.[project],
+      ...commission?.paymentTerms?.[project],
+    }));
+  }, [commission]);
+
+  // Редакционные карточки остаются в CMS, но числовая карточка условий оплаты
+  // всегда генерируется ниже из активной CommissionPolicy.
   const termsCards = useMemo<Array<{ title: string; text: string }>>(() => {
     const byProject = cmsCommission?.cardsByProject?.[selectedProject];
-    const source = Array.isArray(byProject) && byProject.length > 0
+    const source = Array.isArray(byProject)
       ? byProject
       : (Array.isArray(cmsCommission?.cards) && cmsCommission.cards.length > 0
           ? cmsCommission.cards
           : FALLBACK_COMMISSION_CARDS);
-    return source.filter((c: any) => c && (c.title || c.text));
-  }, [cmsCommission, selectedProject]);
+    const editorial = source
+      .filter((c: any) =>
+        c
+        && (c.title || c.text)
+        && !/рассроч|ипотек/i.test(String(c.title || '')),
+      )
+      .map((c: any) => ({
+        title: resolveCommissionText(String(c.title || ''), activeDisplayPolicies, selectedProject),
+        text: resolveCommissionText(String(c.text || ''), activeDisplayPolicies, selectedProject),
+      }));
+    if (!selectedPaymentTerms) return editorial;
+    const paymentText = buildPaymentTermsText(selectedPaymentTerms);
+    if (paymentText) {
+      editorial.push({ title: 'Рассрочка и ипотека', text: paymentText });
+    }
+    return editorial;
+  }, [activeDisplayPolicies, cmsCommission, selectedProject, selectedPaymentTerms]);
 
-  // Явно false → выключено. undefined/true → включено. Читаем сначала по
-  // проекту, затем fallback на старое общее поле.
-  const installmentEnabled = (() => {
-    const byProject = cmsCommission?.installmentEnabledByProject?.[selectedProject];
-    if (byProject !== undefined) return byProject !== false;
-    return cmsCommission?.installmentEnabled !== false;
-  })();
-  const subsidizedMortgageEnabled = (() => {
-    const byProject = cmsCommission?.subsidizedMortgageEnabledByProject?.[selectedProject];
-    if (byProject !== undefined) return byProject !== false;
-    return cmsCommission?.subsidizedMortgageEnabled !== false;
-  })();
+  const installmentEnabled = calculatorPaymentTerms?.installmentEnabled !== false;
+  const subsidizedMortgageEnabled = calculatorPaymentTerms?.subsidizedMortgageEnabled !== false;
 
   const projectDeals = useMemo(
     () => deals.filter((d) => d.project === selectedProject),
@@ -123,24 +132,28 @@ export default function CommissionPage() {
     [projectDeals],
   );
 
-  // currentRate теперь берётся из API (commission.rates[project]) — это учитывает
-  // активную политику (PROGRESSIVE или FLAT). Fallback на старую логику если API
-  // не вернул rates. Правка 2026-05-13.
-  const currentRate = commission?.rates?.[selectedProject]
-    ?? RATE_TABLE[selectedProject][commission?.level || 'START'];
+  // Ставка и шкала приходят только из API, который читает активную политику.
+  const currentProjectState = commission?.byProject?.[selectedProject] || {
+    level: commission?.level,
+    progress: commission?.progress,
+    nextLevel: commission?.nextLevel,
+    nextLevelSqm: commission?.nextLevelSqm,
+    totalSqmSold: commission?.totalSqmSold,
+  };
+  const currentRate = commission?.rates?.[selectedProject] ?? null;
+  const currentRateLabel = currentRate == null ? '—' : `${String(currentRate).replace('.', ',')}%`;
   const currentMode = commission?.modes?.[selectedProject];
   const isFlat = currentMode === 'FLAT';
+  const currentDisplayNote = commission?.displayNotes?.[selectedProject]
+    ? resolveCommissionText(
+        commission.displayNotes[selectedProject],
+        activeDisplayPolicies,
+        selectedProject,
+      )
+    : null;
 
-  // 2026-07-01: шкала уровней теперь идёт из API (commission.scales[project])
-  // — это то что админ настроил в /admin/commission-policies. Хардкод RATE_TABLE
-  // остаётся только как fallback (если API не вернул scales — старый клиент /
-  // ошибка запроса). Так UI кабинета всегда синхронен с админкой.
-  const currentScale: Array<{ level: string; minSqm: number; rate: number }> = commission?.scales?.[selectedProject]
-    ?? LEVEL_ORDER_BY_PROJECT[selectedProject].map((lvl) => ({
-      level: lvl,
-      minSqm: 0,
-      rate: RATE_TABLE[selectedProject][lvl] ?? 0,
-    }));
+  const currentScale: Array<{ level: string; minSqm: number; rate: number }> =
+    commission?.scales?.[selectedProject] ?? [];
 
   const handleCalculate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -170,7 +183,11 @@ export default function CommissionPage() {
           {(Object.keys(projectLabels) as Array<'ZORGE9' | 'SILVER_BOR'>).map((p) => (
             <button
               key={p}
-              onClick={() => setSelectedProject(p)}
+              onClick={() => {
+                setSelectedProject(p);
+                setCalcForm((current) => ({ ...current, project: p, paymentMode: 'FULL' }));
+                setCalcResult(null);
+              }}
               className={`px-4 py-2 rounded-md text-sm font-medium transition ${
                 selectedProject === p ? 'bg-accent text-white' : 'text-text-muted hover:text-text'
               }`}
@@ -186,6 +203,12 @@ export default function CommissionPage() {
         <h2 className="text-lg font-semibold mb-3 text-text-muted">Прогрессивная комиссия</h2>
       )}
 
+      {commission && currentDisplayNote && (
+        <div className="mb-4 rounded-lg border border-accent/20 bg-accent/10 px-4 py-3 text-sm text-text-muted">
+          {currentDisplayNote}
+        </div>
+      )}
+
       {commission && (
         <div className={`grid grid-cols-1 gap-6 mb-8 ${isFlat ? 'md:grid-cols-2' : 'md:grid-cols-3'}`}>
           <div className="card">
@@ -197,7 +220,7 @@ export default function CommissionPage() {
             </div>
             {isFlat ? (
               <>
-                <p className="text-4xl font-bold text-accent">{currentRate}%</p>
+                <p className="text-4xl font-bold text-accent">{currentRateLabel}</p>
                 <p className="text-sm text-text-muted mt-1">
                   Фиксированная ставка по {projectLabels[selectedProject]}
                 </p>
@@ -205,25 +228,25 @@ export default function CommissionPage() {
             ) : (
               <>
                 <p className="text-2xl font-bold text-accent">
-                  {levelNames[commission.level] || commission.level}
+                  {levelNames[currentProjectState.level] || currentProjectState.level}
                 </p>
                 <p className="text-sm text-text-muted mt-1">
-                  Ставка {projectLabels[selectedProject]}: <span className="text-accent font-bold">{currentRate}%</span>
+                  Ставка {projectLabels[selectedProject]}: <span className="text-accent font-bold">{currentRateLabel}</span>
                 </p>
-                {commission.nextLevel && (
+                {currentProjectState.nextLevel && (
                   <div className="mt-3">
                     <div className="flex justify-between text-xs text-text-muted mb-1">
-                      <span>Прогресс до {levelNames[commission.nextLevel]}</span>
-                      <span>{commission.progress}%</span>
+                      <span>Прогресс до {levelNames[currentProjectState.nextLevel]}</span>
+                      <span>{currentProjectState.progress}%</span>
                     </div>
                     <div className="w-full bg-surface-secondary rounded-full h-2">
                       <div
                         className="bg-accent rounded-full h-2 transition-all"
-                        style={{ width: `${commission.progress}%` }}
+                        style={{ width: `${currentProjectState.progress}%` }}
                       />
                     </div>
                     <p className="text-xs text-text-muted mt-1">
-                      {commission.totalSqmSold} / {commission.nextLevelSqm} м²
+                      {currentProjectState.totalSqmSold} / {currentProjectState.nextLevelSqm} м²
                     </p>
                   </div>
                 )}
@@ -248,11 +271,9 @@ export default function CommissionPage() {
             <div className="card">
               <h3 className="text-sm text-text-muted mb-2">Шкала ставок — {projectLabels[selectedProject]}</h3>
               <div className="space-y-1">
-                {/* 2026-07-01: шкала теперь из commission.scales[project] — тянется
-                    из активной политики в /admin/commission-policies. Хардкод
-                    остался только как fallback (см. currentScale выше). */}
+                {/* Шкала приходит из активной политики в /admin/commission-policies. */}
                 {currentScale.map((s) => {
-                  const active = s.level === commission.level;
+                  const active = s.level === currentProjectState.level;
                   return (
                     <div
                       key={s.level}
@@ -326,7 +347,10 @@ export default function CommissionPage() {
               <select
                 className="input"
                 value={calcForm.project}
-                onChange={(e) => setCalcForm({ ...calcForm, project: e.target.value })}
+                onChange={(e) => {
+                  setCalcForm({ ...calcForm, project: e.target.value, paymentMode: 'FULL' });
+                  setCalcResult(null);
+                }}
               >
                 <option value="ZORGE9">Зорге 9</option>
                 <option value="SILVER_BOR">Серебряный бор</option>

@@ -2,6 +2,11 @@ import { Injectable, Inject, BadRequestException, Logger } from '@nestjs/common'
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { AmoCrmAdapter, isSalesPipeline, isSalesExceptionStatus, isSalesDealStatus } from '@st-michael/integrations';
 import * as crypto from 'crypto';
+import {
+  brokerTourSnapshotFromAmoContact,
+  buildBrokerTourUpdate,
+  extractAmoContactIds,
+} from '../amocrm/broker-tour-sync';
 
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
@@ -181,41 +186,85 @@ export class WebhooksService {
       }
     }
 
-    this.logger.log(`amoCRM contact update: contact_id=${data.id}`);
-
-    const broker = await this.prisma.broker.findFirst({
-      where: { amoContactId: BigInt(data.id) },
-    });
-
-    if (!broker) {
-      this.logger.warn(`No broker found for amo contact ${data.id}`);
-      return { status: 'processed', matched: false };
+    const contactIds = extractAmoContactIds(data);
+    if (contactIds.length === 0) {
+      this.logger.warn('amoCRM contact webhook: no contact events extracted');
+      return { status: 'processed', matched: false, reason: 'no_events' };
     }
 
-    // 2026-05-26: webhook больше НЕ перетирает поля которые админ
-    // мог отредактировать в кабинете. Только заполняет пустые.
-    // Иначе: админ исправил ФИО / телефон / email в /admin/brokers,
-    // а через минуту приходит webhook с старым значением из amo —
-    // правка стиралась.
-    const updateData: any = {};
-    if (data.name && !broker.fullName) updateData.fullName = data.name;
+    let matched = 0;
+    let updated = 0;
+    let unavailable = 0;
+    for (const contactId of contactIds) {
+      // Webhook payloads may omit unchanged custom fields, so always fetch the
+      // current full contact. This also lets checkbox/date removals become
+      // false/null in our local snapshot instead of leaving stale values.
+      const contact = await this.amo.getContact(contactId);
+      if (!contact) {
+        unavailable++;
+        continue;
+      }
 
-    if (data.custom_fields_values) {
-      const phoneField = data.custom_fields_values.find((f: any) => f.field_code === 'PHONE');
+      const broker = await this.prisma.broker.findFirst({
+        where: {
+          amoContactId: BigInt(contactId),
+          role: 'BROKER',
+          mergedIntoId: null,
+        },
+        select: {
+          id: true,
+          fullName: true,
+          phone: true,
+          email: true,
+          brokerTourVisited: true,
+          brokerTourDate: true,
+        },
+      });
+      if (!broker) continue;
+      matched++;
+
+      // Preserve the existing fill-only behaviour for identity fields. The
+      // tour fields differ: amoCRM is their source of truth and may clear them.
+      const updateData: any = {};
+      if (contact.name && !broker.fullName) updateData.fullName = contact.name;
+      const phoneField = contact.custom_fields_values?.find(
+        (f: any) => f.field_code === 'PHONE',
+      );
       if (phoneField?.values?.[0]?.value && !broker.phone) {
         updateData.phone = phoneField.values[0].value;
       }
-      const emailField = data.custom_fields_values.find((f: any) => f.field_code === 'EMAIL');
+      const emailField = contact.custom_fields_values?.find(
+        (f: any) => f.field_code === 'EMAIL',
+      );
       if (emailField?.values?.[0]?.value && !broker.email) {
         updateData.email = emailField.values[0].value;
       }
+
+      const tourUpdate = buildBrokerTourUpdate(
+        broker,
+        brokerTourSnapshotFromAmoContact(contact),
+      );
+      if (tourUpdate) Object.assign(updateData, tourUpdate);
+
+      if (Object.keys(updateData).length > 0) {
+        await this.prisma.broker.update({
+          where: { id: broker.id },
+          data: updateData,
+        });
+        updated++;
+      }
     }
 
-    if (Object.keys(updateData).length > 0) {
-      await this.prisma.broker.update({ where: { id: broker.id }, data: updateData });
-    }
-
-    return { status: 'processed', brokerId: broker.id };
+    this.logger.log(
+      `amoCRM contact sync: events=${contactIds.length} matched=${matched} updated=${updated} unavailable=${unavailable}`,
+    );
+    return {
+      status: 'processed',
+      events: contactIds.length,
+      matched,
+      updated,
+      unavailable,
+    };
   }
 
   // ─── Mango Call Result ──────────────────────────────

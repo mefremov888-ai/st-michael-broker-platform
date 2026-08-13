@@ -35,6 +35,12 @@ interface Policy {
   mode: 'PROGRESSIVE' | 'FLAT';
   flatRate: string | null;
   levels: any[] | null;
+  installmentEnabled: boolean | null;
+  installmentDiscount: number | string | null;
+  subsidizedMortgageEnabled: boolean | null;
+  subsidizedMortgageRate: number | string | null;
+  displayNote: string | null;
+  paymentSettingsSource?: 'POLICY' | 'LEGACY_CMS';
   startDate: string;
   endDate: string;
   isActive: boolean;
@@ -60,6 +66,17 @@ function PolicyForm({
   const [levels, setLevels] = useState<any[]>(
     initial?.levels || (project === 'ZORGE9' ? DEFAULT_LEVELS_ZORGE9 : DEFAULT_LEVELS_SILVER_BOR),
   );
+  const [installmentEnabled, setInstallmentEnabled] = useState(initial?.installmentEnabled ?? true);
+  const [installmentDiscount, setInstallmentDiscount] = useState(
+    initial?.installmentDiscount != null ? String(initial.installmentDiscount) : '0.5',
+  );
+  const [subsidizedMortgageEnabled, setSubsidizedMortgageEnabled] = useState(
+    initial?.subsidizedMortgageEnabled ?? true,
+  );
+  const [subsidizedMortgageRate, setSubsidizedMortgageRate] = useState(
+    initial?.subsidizedMortgageRate != null ? String(initial.subsidizedMortgageRate) : '4',
+  );
+  const [displayNote, setDisplayNote] = useState(initial?.displayNote || '');
   // Дефолтная дата начала — сегодня, окончание — через год.
   // 2099 в дефолте раньше ломал UX: date picker открывался на 2099 году и
   // приходилось мотать назад. Если нужна «бессрочная» политика — кнопка ниже.
@@ -107,6 +124,11 @@ function PolicyForm({
         endDate: new Date(endDate + 'T23:59:59Z').toISOString(),
         isActive,
         notes: notes || null,
+        installmentEnabled,
+        installmentDiscount: Number(installmentDiscount),
+        subsidizedMortgageEnabled,
+        subsidizedMortgageRate: Number(subsidizedMortgageRate),
+        displayNote: displayNote || null,
       };
       if (mode === 'FLAT') {
         payload.flatRate = Number(flatRate);
@@ -241,6 +263,68 @@ function PolicyForm({
           </div>
         )}
 
+        <div className="mb-4 border-t border-border pt-4">
+          <h3 className="font-semibold mb-1">Условия оплаты</h3>
+          <p className="text-xs text-text-muted mb-3">
+            Эти значения одновременно используются калькулятором, кабинетом брокера и лендингом.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="border border-border rounded-lg p-3">
+              <label className="flex items-center gap-2 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={installmentEnabled}
+                  onChange={(e) => setInstallmentEnabled(e.target.checked)}
+                />
+                <span className="text-sm font-medium">Рассрочка доступна</span>
+              </label>
+              <label className="text-sm text-text-muted block mb-1">Снижение комиссии, п. п.</label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="0.05"
+                className="input w-full"
+                value={installmentDiscount}
+                disabled={!installmentEnabled}
+                onChange={(e) => setInstallmentDiscount(e.target.value)}
+              />
+            </div>
+            <div className="border border-border rounded-lg p-3">
+              <label className="flex items-center gap-2 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={subsidizedMortgageEnabled}
+                  onChange={(e) => setSubsidizedMortgageEnabled(e.target.checked)}
+                />
+                <span className="text-sm font-medium">Субсидированная ипотека доступна</span>
+              </label>
+              <label className="text-sm text-text-muted block mb-1">Фиксированная комиссия, %</label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                step="0.05"
+                className="input w-full"
+                value={subsidizedMortgageRate}
+                disabled={!subsidizedMortgageEnabled}
+                onChange={(e) => setSubsidizedMortgageRate(e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <label className="text-sm text-text-muted block mb-1">Публичное пояснение (необязательно)</label>
+          <textarea
+            className="input w-full"
+            rows={2}
+            value={displayNote}
+            onChange={(e) => setDisplayNote(e.target.value)}
+            placeholder="Например: единая ставка при 100% оплате или ипотеке"
+          />
+        </div>
+
         <div className="mb-4">
           <label className="text-sm text-text-muted block mb-1">Комментарий (необязательно)</label>
           <textarea
@@ -312,7 +396,7 @@ export default function CommissionPoliciesPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl md:text-3xl font-bold">Политики комиссии</h1>
+        <h1 className="text-2xl md:text-3xl font-bold">Комиссия и рассрочка</h1>
         <button className="btn btn-primary" onClick={() => setCreating(true)}>
           <Plus className="w-4 h-4 mr-1" />
           Создать политику
@@ -320,7 +404,7 @@ export default function CommissionPoliciesPage() {
       </div>
 
       <p className="text-sm text-text-muted mb-4">
-        Каждая политика действует для одного проекта в указанный период. Перекрытие активных политик одного проекта запрещено.
+        Единое место для ставки, шкалы и условий оплаты. Сохранённая активная политика сразу используется в расчёте, кабинете и на лендинге. Перекрытие активных периодов одного проекта запрещено.
       </p>
 
       {loading ? (
@@ -330,12 +414,13 @@ export default function CommissionPoliciesPage() {
       ) : (
         <div className="card">
           <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[600px]">
+          <table className="w-full text-sm min-w-[820px]">
             <thead>
               <tr className="text-text-muted text-left border-b border-border">
                 <th className="pb-3 font-medium">Проект</th>
                 <th className="pb-3 font-medium">Режим</th>
                 <th className="pb-3 font-medium">Ставка</th>
+                <th className="pb-3 font-medium">Условия оплаты</th>
                 <th className="pb-3 font-medium">Период</th>
                 <th className="pb-3 font-medium">Статус</th>
                 <th className="pb-3 font-medium text-right">Действия</th>
@@ -352,6 +437,13 @@ export default function CommissionPoliciesPage() {
                       : p.levels
                       ? `${p.levels[0]?.rate}% — ${p.levels[p.levels.length - 1]?.rate}%`
                       : '—'}
+                  </td>
+                  <td className="py-3 text-xs text-text-muted">
+                    <div>{p.installmentEnabled ? `Рассрочка: −${String(p.installmentDiscount).replace('.', ',')} п. п.` : 'Рассрочка выключена'}</div>
+                    <div>{p.subsidizedMortgageEnabled ? `Субс. ипотека: ${String(p.subsidizedMortgageRate).replace('.', ',')}%` : 'Субс. ипотека выключена'}</div>
+                    {p.paymentSettingsSource === 'LEGACY_CMS' && (
+                      <div className="text-warning mt-1">Будут перенесены в политику при сохранении</div>
+                    )}
                   </td>
                   <td className="py-3 text-text-muted">
                     {toDateInput(p.startDate)} — {toDateInput(p.endDate)}

@@ -228,19 +228,29 @@ function HeroEditor({ content, updateField, updateArrayItem, addArrayItem, remov
     <div className="space-y-4">
       <FieldText label="Тег (надзаголовок)" value={content.tag || ''} onChange={(v) => updateField('hero', 'tag', v)} />
       <FieldText label="Заголовок" value={content.title || ''} onChange={(v) => updateField('hero', 'title', v)} />
-      <FieldText label="Акцент в заголовке (часть выделится золотым)" value={content.titleAccent || ''} onChange={(v) => updateField('hero', 'titleAccent', v)} hint="Подстрока из заголовка, например: 8% комиссии" />
+      <FieldText label="Акцент в заголовке (часть выделится золотым)" value={content.titleAccent || ''} onChange={(v) => updateField('hero', 'titleAccent', v)} hint="Подстрока из заголовка, например: продаж агентства" />
       <FieldTextarea label="Описание" value={content.description || ''} onChange={(v) => updateField('hero', 'description', v)} />
 
       <div>
         <label className="label">Цифры внизу (4 блока)</label>
         <div className="space-y-2">
-          {stats.map((s: any, i: number) => (
+          {stats.map((s: any, i: number) => {
+            const isCommissionStat = /комисси|ставк|вознаграждени/i.test(String(s.label || ''));
+            return (
             <div key={i} className="flex gap-2 items-start">
-              <input className="input" placeholder="Число (напр. 5–8%)" value={s.number || ''} onChange={(e) => updateArrayItem('hero', 'stats', i, { number: e.target.value })} />
+              <input
+                className="input"
+                placeholder="Число"
+                value={isCommissionStat ? 'Из активной политики' : (s.number || '')}
+                disabled={isCommissionStat}
+                title={isCommissionStat ? 'Ставка меняется в разделе «Комиссия и рассрочка»' : undefined}
+                onChange={(e) => updateArrayItem('hero', 'stats', i, { number: e.target.value })}
+              />
               <input className="input flex-2" placeholder="Подпись" value={s.label || ''} onChange={(e) => updateArrayItem('hero', 'stats', i, { label: e.target.value })} />
               <button className="btn btn-secondary text-error" onClick={() => removeArrayItem('hero', 'stats', i)}><Trash2 className="w-4 h-4" /></button>
             </div>
-          ))}
+            );
+          })}
         </div>
         <button className="btn btn-secondary mt-2 flex items-center gap-2 text-sm" onClick={() => addArrayItem('hero', 'stats', { number: '', label: '' })}>
           <Plus className="w-4 h-4" /> Добавить цифру
@@ -374,51 +384,9 @@ function CooperationEditor({ content, updateField }: any) {
 }
 
 // ── COMMISSION ────────────────────────────────────────
-function CommissionEditor({ content, updateField, updateArrayItem, addArrayItem, removeArrayItem }: any) {
+function CommissionEditor({ content, updateField }: any) {
   const cards = content.cards || [];
-  const levelsByProject = content.levelsByProject || {};
   const [activeProject, setActiveProject] = useState<'ZORGE9' | 'SILVER_BOR'>('ZORGE9');
-  const projectLevels = levelsByProject[activeProject] || [];
-
-  const updateProjectLevel = (idx: number, patch: any) => {
-    const next = { ...content };
-    const lp = { ...(next.levelsByProject || {}) };
-    const arr = [...(lp[activeProject] || [])];
-    arr[idx] = { ...arr[idx], ...patch };
-    lp[activeProject] = arr;
-    updateField('commission', 'levelsByProject', lp);
-  };
-  const addProjectLevel = () => {
-    const next = { ...content };
-    const lp = { ...(next.levelsByProject || {}) };
-    const arr = [...(lp[activeProject] || []), { name: '', range: '', rate: '', active: false }];
-    lp[activeProject] = arr;
-    updateField('commission', 'levelsByProject', lp);
-  };
-  const removeProjectLevel = (idx: number) => {
-    const next = { ...content };
-    const lp = { ...(next.levelsByProject || {}) };
-    const arr = [...(lp[activeProject] || [])];
-    arr.splice(idx, 1);
-    lp[activeProject] = arr;
-    updateField('commission', 'levelsByProject', lp);
-  };
-
-  // 2026-06-16: переключатель FLAT/PROGRESSIVE по проекту + поля для FLAT.
-  const modeByProject = content.modeByProject || {};
-  const flatRateByProject = content.flatRateByProject || {};
-  const flatNoteByProject = content.flatNoteByProject || {};
-  const currentMode: 'FLAT' | 'PROGRESSIVE' = modeByProject[activeProject] || 'PROGRESSIVE';
-  const setProjectMode = (mode: 'FLAT' | 'PROGRESSIVE') => {
-    updateField('commission', 'modeByProject', { ...modeByProject, [activeProject]: mode });
-  };
-  const setProjectFlatRate = (rate: string) => {
-    const n = parseFloat(rate.replace(',', '.'));
-    updateField('commission', 'flatRateByProject', { ...flatRateByProject, [activeProject]: isNaN(n) ? 0 : n });
-  };
-  const setProjectFlatNote = (note: string) => {
-    updateField('commission', 'flatNoteByProject', { ...flatNoteByProject, [activeProject]: note });
-  };
 
   return (
     <div className="space-y-4">
@@ -427,10 +395,20 @@ function CommissionEditor({ content, updateField, updateArrayItem, addArrayItem,
       <FieldText label="Акцент в заголовке" value={content.titleAccent || ''} onChange={(v) => updateField('commission', 'titleAccent', v)} />
       <FieldTextarea label="Подзаголовок" value={content.subtitle || ''} onChange={(v) => updateField('commission', 'subtitle', v)} />
 
+      <div className="rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm">
+        <div className="font-semibold mb-1">Проценты редактируются в одном месте</div>
+        <p className="text-text-muted mb-2">
+          Ставка, шкала, рассрочка и субсидированная ипотека берутся из активной политики и автоматически попадают в кабинет и на лендинг.
+        </p>
+        <a className="text-accent font-medium hover:underline" href="/admin/commission-policies">
+          Открыть «Комиссия и рассрочка» →
+        </a>
+      </div>
+
       <div className="border-t border-border pt-4 mt-2">
         <label className="label flex items-center justify-between">
-          <span>Шкалы по проектам</span>
-          <span className="text-xs text-text-muted font-normal">переключатель Зорге 9 / Серебряный Бор на лендинге</span>
+          <span>Проект для текстовых карточек</span>
+          <span className="text-xs text-text-muted font-normal">числовые условия сюда больше не дублируются</span>
         </label>
         <div className="flex gap-2 mb-3">
           {(['ZORGE9', 'SILVER_BOR'] as const).map((p) => (
@@ -442,164 +420,10 @@ function CommissionEditor({ content, updateField, updateArrayItem, addArrayItem,
               }`}
             >
               {p === 'ZORGE9' ? 'Зорге 9' : 'Серебряный Бор'}
-              <span className="ml-2 text-xs opacity-70">
-                ({(modeByProject[p] || 'PROGRESSIVE') === 'FLAT' ? `FLAT ${flatRateByProject[p] ?? '—'}%` : `${(levelsByProject[p] || []).length} уровней`})
-              </span>
             </button>
           ))}
         </div>
 
-        {/* 2026-06-16: режим комиссии для выбранного проекта */}
-        <div className="flex gap-3 mb-4 p-3 bg-surface-secondary rounded">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="radio"
-              name={`mode-${activeProject}`}
-              checked={currentMode === 'PROGRESSIVE'}
-              onChange={() => setProjectMode('PROGRESSIVE')}
-              className="accent-accent"
-            />
-            <span className="text-sm">Прогрессивная шкала</span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="radio"
-              name={`mode-${activeProject}`}
-              checked={currentMode === 'FLAT'}
-              onChange={() => setProjectMode('FLAT')}
-              className="accent-accent"
-            />
-            <span className="text-sm">Фиксированная ставка</span>
-          </label>
-        </div>
-
-        {currentMode === 'FLAT' ? (
-          <div className="space-y-2">
-            <div className="flex gap-2 items-center">
-              <label className="text-sm w-32">Ставка %</label>
-              <input
-                className="input w-32"
-                placeholder="4.0"
-                value={flatRateByProject[activeProject] ?? ''}
-                onChange={(e) => setProjectFlatRate(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="text-sm">Пояснение (опционально)</label>
-              <textarea
-                className="input"
-                rows={2}
-                placeholder="Единая ставка по проекту..."
-                value={flatNoteByProject[activeProject] || ''}
-                onChange={(e) => setProjectFlatNote(e.target.value)}
-              />
-            </div>
-          </div>
-        ) : (
-          <>
-            <div className="space-y-2">
-              {projectLevels.map((lv: any, i: number) => (
-                <div key={i} className="flex gap-2 items-center">
-                  <input className="input flex-1" placeholder="Название (Start)" value={lv.name || ''} onChange={(e) => updateProjectLevel(i, { name: e.target.value })} />
-                  <input className="input flex-1" placeholder="Объём (0–59 м²)" value={lv.range || ''} onChange={(e) => updateProjectLevel(i, { range: e.target.value })} />
-                  <input className="input w-24" placeholder="Ставка (5,0%)" value={lv.rate || ''} onChange={(e) => updateProjectLevel(i, { rate: e.target.value })} />
-                  <label className="flex items-center gap-1 text-xs whitespace-nowrap">
-                    <input type="checkbox" checked={!!lv.active} onChange={(e) => updateProjectLevel(i, { active: e.target.checked })} /> active
-                  </label>
-                  <button className="btn btn-secondary text-error" onClick={() => removeProjectLevel(i)}><Trash2 className="w-4 h-4" /></button>
-                </div>
-              ))}
-            </div>
-            <button className="btn btn-secondary mt-2 flex items-center gap-2 text-sm" onClick={addProjectLevel}>
-              <Plus className="w-4 h-4" /> Добавить уровень в {activeProject === 'ZORGE9' ? 'Зорге 9' : 'Серебряный Бор'}
-            </button>
-            <p className="text-xs text-text-muted mt-2">
-              Серебряный Бор по новому ТЗ имеет только 6 уровней (без Legend), максимум — Champion 6,25%.
-            </p>
-          </>
-        )}
-      </div>
-
-      {/* 2026-07-02: параметры калькулятора теперь свои для каждого проекта.
-          Общие поля installmentEnabled / installmentDiscount /
-          subsidizedMortgageEnabled / subsidizedMortgageRate остаются как
-          fallback для старых значений — при первой правке переезжают в
-          *ByProject[activeProject]. */}
-      <div className="border-t border-border pt-4 mt-2">
-        <label className="label flex items-center justify-between">
-          <span>Параметры калькулятора — {activeProject === 'ZORGE9' ? 'Зорге 9' : 'Серебряный Бор'}</span>
-          <span className="text-xs text-text-muted font-normal">используется калькулятором в кабинете брокера · переключается кнопками выше</span>
-        </label>
-        {(() => {
-          const iep = content.installmentEnabledByProject || {};
-          const idp = content.installmentDiscountByProject || {};
-          const sep = content.subsidizedMortgageEnabledByProject || {};
-          const srp = content.subsidizedMortgageRateByProject || {};
-          const legacyIe = content.installmentEnabled;
-          const legacyId = content.installmentDiscount;
-          const legacySe = content.subsidizedMortgageEnabled;
-          const legacySr = content.subsidizedMortgageRate;
-          const instEnabled = iep[activeProject] !== undefined ? iep[activeProject] !== false : legacyIe !== false;
-          const instDiscount = idp[activeProject] ?? legacyId ?? '';
-          const subEnabled = sep[activeProject] !== undefined ? sep[activeProject] !== false : legacySe !== false;
-          const subRate = srp[activeProject] ?? legacySr ?? '';
-          const setInstEnabled = (v: boolean) => updateField('commission', 'installmentEnabledByProject', { ...iep, [activeProject]: v });
-          const setInstDiscount = (v: any) => updateField('commission', 'installmentDiscountByProject', { ...idp, [activeProject]: v });
-          const setSubEnabled = (v: boolean) => updateField('commission', 'subsidizedMortgageEnabledByProject', { ...sep, [activeProject]: v });
-          const setSubRate = (v: any) => updateField('commission', 'subsidizedMortgageRateByProject', { ...srp, [activeProject]: v });
-          return (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="border border-border rounded-lg p-3">
-                <label className="flex items-center gap-2 cursor-pointer mb-2">
-                  <input
-                    type="checkbox"
-                    checked={instEnabled}
-                    onChange={(e) => setInstEnabled(e.target.checked)}
-                  />
-                  <span className="text-sm font-medium">«Рассрочка» активна</span>
-                </label>
-                <label className="text-sm text-text-muted block mb-1">Скидка при рассрочке, %</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.05"
-                  placeholder="0.5"
-                  disabled={!instEnabled}
-                  value={instDiscount}
-                  onChange={(e) => setInstDiscount(e.target.value === '' ? null : Number(e.target.value))}
-                />
-                <p className="text-xs text-text-muted mt-1">
-                  На сколько % уменьшается ставка при выборе «Рассрочка» для этого проекта.
-                  {!instEnabled && ' Вариант скрыт на калькуляторе.'}
-                </p>
-              </div>
-              <div className="border border-border rounded-lg p-3">
-                <label className="flex items-center gap-2 cursor-pointer mb-2">
-                  <input
-                    type="checkbox"
-                    checked={subEnabled}
-                    onChange={(e) => setSubEnabled(e.target.checked)}
-                  />
-                  <span className="text-sm font-medium">«Субсидированная ипотека» активна</span>
-                </label>
-                <label className="text-sm text-text-muted block mb-1">Ставка при субс. ипотеке, %</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.05"
-                  placeholder="4"
-                  disabled={!subEnabled}
-                  value={subRate}
-                  onChange={(e) => setSubRate(e.target.value === '' ? null : Number(e.target.value))}
-                />
-                <p className="text-xs text-text-muted mt-1">
-                  Фиксированная ставка при выборе «Субсидированная ипотека» для этого проекта.
-                  {!subEnabled && ' Вариант скрыт на калькуляторе.'}
-                </p>
-              </div>
-            </div>
-          );
-        })()}
       </div>
 
       {/* 2026-07-03: карточки условий тоже по проекту. Раньше был общий
@@ -634,6 +458,11 @@ function CommissionEditor({ content, updateField, updateArrayItem, addArrayItem,
             <>
               <div className="space-y-3">
                 {projectCards.map((c: any, i: number) => (
+                  /рассроч|ипотек/i.test(String(c?.title || '')) ? (
+                    <div key={i} className="border border-accent/30 bg-accent/10 rounded p-3 text-sm text-text-muted">
+                      Карточка «{c.title}» теперь формируется автоматически из активной политики и этот старый текст не показывается пользователям.
+                    </div>
+                  ) : (
                   <div key={i} className="border border-border rounded p-3">
                     <div className="flex justify-between items-start mb-2">
                       <span className="text-xs text-text-muted">Карточка #{i + 1}</span>
@@ -642,6 +471,7 @@ function CommissionEditor({ content, updateField, updateArrayItem, addArrayItem,
                     <input className="input mb-2" placeholder="Заголовок" value={c.title || ''} onChange={(e) => updateCard(i, { title: e.target.value })} />
                     <textarea className="input" placeholder="Текст" rows={2} value={c.text || ''} onChange={(e) => updateCard(i, { text: e.target.value })} />
                   </div>
+                  )
                 ))}
               </div>
               <button className="btn btn-secondary mt-2 flex items-center gap-2 text-sm" onClick={addCard}>
