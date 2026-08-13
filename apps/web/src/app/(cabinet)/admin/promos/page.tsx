@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { api, apiGet } from '@/lib/api';
+import { useEffect, useRef, useState } from 'react';
+import { api, apiGet, apiUpload } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Megaphone, Plus, Trash2, Save, Eye, EyeOff, Pencil, X } from 'lucide-react';
+import { Megaphone, Plus, Trash2, Save, Eye, EyeOff, Pencil, X, Upload } from 'lucide-react';
 
 interface Promo {
   id: string;
@@ -34,6 +34,9 @@ export default function AdminPromosPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<Partial<Promo>>({});
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadTarget, setUploadTarget] = useState<'draft' | 'edit'>('draft');
 
   if (broker && broker.role !== 'ADMIN' && broker.role !== 'MANAGER') {
     return <div className="card">Доступ запрещён</div>;
@@ -105,6 +108,22 @@ export default function AdminPromosPage() {
     setEditDraft({});
   };
 
+  const handleFileUpload = async (file: File, onChange: (patch: Partial<Promo>) => void) => {
+    setUploading(true); setMessage('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('category', 'marketing');
+      fd.append('name', file.name.replace(/\.[^.]+$/, ''));
+      const doc: any = await apiUpload('/admin/documents/upload', fd);
+      onChange({ imageUrl: doc.fileUrl });
+      setMessage('Фото загружено');
+      setTimeout(() => setMessage(''), 2000);
+    } catch (e: any) { setMessage(e.message || 'Ошибка загрузки'); }
+    setUploading(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const renderFields = (value: Partial<Promo>, onChange: (patch: Partial<Promo>) => void) => (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <div className="md:col-span-2">
@@ -132,8 +151,32 @@ export default function AdminPromosPage() {
         <input className="input" placeholder="#projects или https://..." value={value.ctaHref || ''} onChange={(e) => onChange({ ctaHref: e.target.value })} />
       </div>
       <div>
-        <label className="label">Картинка (URL, необязательно)</label>
-        <input className="input" placeholder="/files/promos/xxx.jpg или https://..." value={value.imageUrl || ''} onChange={(e) => onChange({ imageUrl: e.target.value })} />
+        <label className="label">Картинка (URL)</label>
+        <div className="flex gap-2 items-center">
+          <input className="input flex-1" placeholder="/files/marketing/xxx.jpg или https://..." value={value.imageUrl || ''} onChange={(e) => onChange({ imageUrl: e.target.value })} />
+          <button
+            type="button"
+            className="btn btn-secondary flex items-center gap-1 whitespace-nowrap"
+            disabled={uploading}
+            onClick={() => { fileInputRef.current?.click(); }}
+          >
+            <Upload className="w-3 h-3" /> {uploading ? 'Загрузка...' : 'Загрузить'}
+          </button>
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) handleFileUpload(f, onChange);
+          }}
+        />
+        {value.imageUrl && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={value.imageUrl} alt="preview" className="mt-2 rounded-lg" style={{ maxHeight: 120, objectFit: 'cover', width: '100%' }} />
+        )}
       </div>
       <div>
         <label className="label">Проект (необязательно)</label>
