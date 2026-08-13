@@ -38,7 +38,6 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       {} as any,
       {} as any,
       { recheckDue: jest.fn() } as any,
-      { syncNewsFromStm: jest.fn().mockResolvedValue({ created: 0, updated: 0, total: 0 }) } as any,
     );
     (service as any).amo = { createFixationRequest };
     (service as any).morekit = { notifyFixation };
