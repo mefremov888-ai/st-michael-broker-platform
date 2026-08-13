@@ -18,6 +18,14 @@ interface DocItem {
 }
 
 const IMAGE_RE = /\.(jpe?g|png|webp|gif|svg|heic|avif|bmp|tiff?)(\?|#|$)/i;
+
+function thumbUrl(url: string): string {
+  // Yandex Cloud resize proxy for smaller thumbnails
+  if (url.includes('storage.yandexcloud.net') || url.includes('yandexcloud')) {
+    return `https://stmichael.ru/proxy/insecure/w:400/q:60/plain/${url}@webp`;
+  }
+  return url;
+}
 const VIDEO_RE = /\.(mp4|mov|webm|m4v|avi|mkv)(\?|#|$)/i;
 const PDF_RE = /\.pdf(\?|#|$)/i;
 
@@ -88,6 +96,14 @@ function Viewer({
   );
 }
 
+const SUBCATEGORY_ALIASES: Record<string, string[]> = {
+  'Reels': ['Reels', 'Для роликов сторис reels'],
+  'Презентации': ['Презентации', 'Презентация Квартал Серебряный Бор'],
+  'Фотографии': ['Фотографии', 'Зорге9 (фото)', 'Зорге 9 (фото)'],
+  'Рендеры': ['Рендеры'],
+  'Тексты': ['Тексты', 'Условия вознаграждения', 'Актуальные условия рассрочки'],
+};
+
 export default function MaterialsSubcategoryPage() {
   const params = useParams<{ subcategory: string }>();
   const router = useRouter();
@@ -98,13 +114,24 @@ export default function MaterialsSubcategoryPage() {
   const [viewer, setViewer] = useState<{ items: DocItem[]; index: number } | null>(null);
 
   useEffect(() => {
-    const url = `${API_BASE}/api/public/documents?category=materials&subcategory=${encodeURIComponent(subcategory)}&limit=200`;
-    fetch(url)
-      .then((r) => r.json())
-      .then((data) => {
-        setDocs(Array.isArray(data) ? data : []);
+    const aliases = SUBCATEGORY_ALIASES[subcategory] || [subcategory];
+    Promise.all(
+      aliases.map((alias) =>
+        fetch(`${API_BASE}/api/public/documents?category=materials&subcategory=${encodeURIComponent(alias)}&limit=200`)
+          .then((r) => r.json())
+          .then((data) => (Array.isArray(data) ? data : []))
+          .catch(() => [] as DocItem[])
+      )
+    )
+      .then((results) => {
+        const seen = new Set<string>();
+        const merged = results.flat().filter((d: DocItem) => {
+          if (seen.has(d.id)) return false;
+          seen.add(d.id);
+          return true;
+        });
+        setDocs(merged);
       })
-      .catch(() => setDocs([]))
       .finally(() => setLoading(false));
   }, [subcategory]);
 
@@ -162,7 +189,7 @@ export default function MaterialsSubcategoryPage() {
                       title={img.name}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={img.fileUrl} alt={img.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
+                      <img src={thumbUrl(img.fileUrl)} alt={img.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" decoding="async" />
                     </button>
                   ))}
                 </div>

@@ -8,6 +8,7 @@ import {
   Headphones, PhoneCall, Wallet, TrendingUp, Users2, GraduationCap,
   Shield, Sparkles,
   FileText, Download as DownloadIcon, ChevronLeft, ChevronRight,
+  Film, Camera, Box, BarChart2,
 } from 'lucide-react';
 import { HintIcon } from '@/components/HintIcon';
 import {
@@ -708,60 +709,51 @@ function BrokerToursCalendarModal({ events, onClose }: { events: any[]; onClose:
   );
 }
 
-// Раздел "Материалы для продвижения" — карточки-категории, клик → внутренняя страница.
-function MaterialsSection({ materials }: { materials: any[] }) {
-  const groups = materials.reduce((acc: Record<string, any[]>, d: any) => {
-    const key = d.subcategory?.trim() || 'Материалы';
-    (acc[key] = acc[key] || []).push(d);
-    return acc;
-  }, {});
-  const groupNames = Object.keys(groups).sort();
+const CANONICAL_MAT_CATS = ['Reels', 'Презентации', 'Фотографии', 'Рендеры', 'Тексты'];
 
-  const MATERIAL_ICONS: Record<string, string> = {
-    'Reels': '🎬',
-    'Презентации': '📊',
-    'Фотографии': '🖼️',
-    'Рендеры': '🏗️',
-    'Тексты': '📝',
+function normalizeMaterialCat(sub: string): string {
+  const s = (sub || '').toLowerCase().trim();
+  if (/^reels?$|ролик|сторис/.test(s)) return 'Reels';
+  if (/презентаци/.test(s)) return 'Презентации';
+  if (/фото/.test(s)) return 'Фотографии';
+  if (/рендер/.test(s)) return 'Рендеры';
+  if (/текст|условия|рассрочк/.test(s)) return 'Тексты';
+  return CANONICAL_MAT_CATS.includes(sub) ? sub : 'Тексты';
+}
+
+function MaterialsSection({ materials }: { materials: any[] }) {
+  const counts: Record<string, number> = {};
+  for (const d of materials) {
+    const cat = normalizeMaterialCat(d.subcategory?.trim() || '');
+    counts[cat] = (counts[cat] || 0) + 1;
+  }
+
+  const icons: Record<string, React.ReactNode> = {
+    'Reels': <Film size={36} strokeWidth={1.4} />,
+    'Презентации': <BarChart2 size={36} strokeWidth={1.4} />,
+    'Фотографии': <Camera size={36} strokeWidth={1.4} />,
+    'Рендеры': <Box size={36} strokeWidth={1.4} />,
+    'Тексты': <FileText size={36} strokeWidth={1.4} />,
   };
 
   return (
     <section id="materials" style={{background:'var(--bg)'}}>
       <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Изображения, рендеры, видео и презентации для брокеров ST Michael.</p></div>
-      {materials.length === 0 ? (
-        <div className="mat-groups">
-          {['Reels', 'Презентации', 'Фотографии', 'Рендеры', 'Тексты'].map((group) => (
-            <a key={group} href={`/materials/${encodeURIComponent(group)}`} className="mat-group" style={{textDecoration:'none',display:'block'}}>
-              <div className="mat-group-header" style={{pointerEvents:'none'}}>
-                <div className="mat-group-icon" style={{fontSize:20}}>{MATERIAL_ICONS[group] || '📁'}</div>
-                <div className="mat-group-info">
-                  <div className="mat-group-name">{group}</div>
-                  <div className="mat-group-meta">Скоро появятся материалы</div>
-                </div>
-                <ChevronRight className="mat-group-chev" size={20} />
-              </div>
-            </a>
-          ))}
-        </div>
-      ) : (
-        <div className="mat-groups">
-          {groupNames.map((group) => {
-            const docs = groups[group];
-            return (
-              <a key={group} href={`/materials/${encodeURIComponent(group)}`} className="mat-group" style={{textDecoration:'none',display:'block'}}>
-                <div className="mat-group-header" style={{pointerEvents:'none'}}>
-                  <div className="mat-group-icon" style={{fontSize:20}}>{MATERIAL_ICONS[group] || '📁'}</div>
-                  <div className="mat-group-info">
-                    <div className="mat-group-name">{group}</div>
-                    <div className="mat-group-meta">{docs.length} {docs.length === 1 ? 'файл' : docs.length < 5 ? 'файла' : 'файлов'}</div>
-                  </div>
-                  <ChevronRight className="mat-group-chev" size={20} />
-                </div>
-              </a>
-            );
-          })}
-        </div>
-      )}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(255,255,255,0.07)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(255,255,255,0.07)'}}>
+        {CANONICAL_MAT_CATS.map((cat) => (
+          <a
+            key={cat}
+            href={`/materials/${encodeURIComponent(cat)}`}
+            style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'36px 12px 28px',textDecoration:'none',color:'var(--gold)',background:'#141414',gap:10,transition:'background 0.15s'}}
+            onMouseEnter={(e) => (e.currentTarget.style.background = '#1c1c1c')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = '#141414')}
+          >
+            <div style={{opacity:0.85}}>{icons[cat]}</div>
+            <div style={{fontSize:12,fontWeight:500,textAlign:'center',letterSpacing:0.3,marginTop:2}}>{cat}</div>
+            {counts[cat] ? <div style={{fontSize:10,color:'rgba(255,255,255,0.3)'}}>{counts[cat]} файлов</div> : <div style={{fontSize:10,color:'rgba(255,255,255,0.2)'}}>Скоро</div>}
+          </a>
+        ))}
+      </div>
     </section>
   );
 }
@@ -1230,6 +1222,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [events, setEvents] = useState<any[]>(() => Array.isArray(initialData?.events) ? initialData!.events! : []);
   const [promos, setPromos] = useState<any[]>(() => Array.isArray(initialData?.promos) ? initialData!.promos! : []);
   const [promoIdx, setPromoIdx] = useState(0);
+  const [evView, setEvView] = useState<'week' | 'month'>('week');
   const [cooperationDocs, setCooperationDocs] = useState<any[]>(() => Array.isArray(initialData?.cooperationDocs) ? initialData!.cooperationDocs! : []);
   const [analyticsDocs, setAnalyticsDocs] = useState<any[]>(() => Array.isArray(initialData?.analyticsDocs) ? initialData!.analyticsDocs! : []);
   const [marketingDocs, setMarketingDocs] = useState<any[]>(() => Array.isArray(initialData?.marketingDocs) ? initialData!.marketingDocs! : []);
@@ -1520,22 +1513,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             </div>
             <div style={{display:'flex',flexDirection:'column',gap:16}}>
               <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
-              <div style={{padding:'20px 24px',background:'var(--bg)',borderRadius:12,border:'1px solid var(--bw)'}}>
-                <div style={{fontSize:10,fontWeight:700,letterSpacing:2,textTransform:'uppercase',color:'var(--gold)',marginBottom:14}}>Условия вознаграждения</div>
-                <div style={{display:'flex',flexDirection:'column',gap:10}}>
-                  {[
-                    {n:'до 5%', l:'Комиссия за сделку'},
-                    {n:'7 дней', l:'Срок выплаты вознаграждения'},
-                    {n:'30 дней', l:'Срок уникальности клиента'},
-                    {n:'1%', l:'Брокерская скидка вашему клиенту'},
-                  ].map((item) => (
-                    <div key={item.n} style={{display:'flex',alignItems:'center',gap:12}}>
-                      <div style={{fontSize:16,fontWeight:700,color:'var(--gold)',minWidth:52}}>{item.n}</div>
-                      <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.3}}>{item.l}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <a href="#cooperation" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center',alignSelf:'flex-start',borderRadius:10}}>Условия вознаграждения</a>
             </div>
           </div>
         </div>
@@ -1874,7 +1852,13 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               : DEFAULT_SCHEDULE
                   .filter(e => new Date(e.date) >= now)
                   .map((e, i) => ({id: `default-${i}`, ...e}));
-            const upcomingEvents = eventsToShow.filter(e => new Date(e.date) >= now).slice(0, 4);
+            const cutoff = evView === 'week'
+              ? new Date(now.getTime() + 7 * 24 * 3600 * 1000)
+              : new Date(now.getTime() + 30 * 24 * 3600 * 1000);
+            const upcomingEvents = eventsToShow.filter(e => {
+              const d = new Date(e.date);
+              return d >= now && d <= cutoff;
+            });
             return (
           <>
           <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
@@ -1882,14 +1866,28 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               <div className="sh-tag">Календарь событий</div>
               <h2>Ближайшие <em>мероприятия</em></h2>
             </div>
-            <button
-              type="button"
-              onClick={() => setCalendarOpen(true)}
-              className="btn-outline"
-              style={{padding:'10px 24px',fontSize:10,marginBottom:4,whiteSpace:'nowrap'}}
-            >
-              Все события &rarr;
-            </button>
+            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4}}>
+              <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--bw)'}}>
+                <button
+                  type="button"
+                  onClick={() => setEvView('week')}
+                  style={{padding:'8px 16px',fontSize:11,background:evView==='week'?'var(--gold)':'transparent',color:evView==='week'?'#000':'var(--fg)',border:'none',cursor:'pointer',fontWeight:evView==='week'?600:400,transition:'background 0.15s'}}
+                >Неделя</button>
+                <button
+                  type="button"
+                  onClick={() => setEvView('month')}
+                  style={{padding:'8px 16px',fontSize:11,background:evView==='month'?'var(--gold)':'transparent',color:evView==='month'?'#000':'var(--fg)',border:'none',cursor:'pointer',fontWeight:evView==='month'?600:400,borderLeft:'1px solid var(--bw)',transition:'background 0.15s'}}
+                >Месяц</button>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCalendarOpen(true)}
+                className="btn-outline"
+                style={{padding:'10px 24px',fontSize:10,whiteSpace:'nowrap'}}
+              >
+                Все события &rarr;
+              </button>
+            </div>
           </div>
           {upcomingEvents.length === 0 ? (
             <div style={{textAlign:'center',padding:'24px 0',display:'flex',flexDirection:'column',alignItems:'center',gap:14}}>
@@ -1994,7 +1992,12 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               <p>{cooperation.description}</p>
               <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
                 <button className="btn-gold" onClick={handleRegister}>{cooperation.ctaText || 'Стать партнёром'}</button>
-                <a href="#commission" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>
+                {(() => {
+                  const condDoc = cooperationDocs.find((d: any) => /август 2026/i.test(d.name) || /вознаграждения для брокеров/i.test(d.name));
+                  return condDoc
+                    ? <a href={condDoc.fileUrl} target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>
+                    : <a href="#cooperation" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>;
+                })()}
               </div>
             </div>
             <div className="doc-list">
