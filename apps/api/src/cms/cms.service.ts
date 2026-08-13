@@ -423,6 +423,7 @@ export class CmsService {
         description: data.description || null,
         tag: data.tag || null,
         imageUrl: data.imageUrl || null,
+        imagePosition: data.imagePosition || 'center',
         ctaText: data.ctaText || null,
         ctaHref: data.ctaHref || null,
         project: data.project || null,
@@ -435,7 +436,7 @@ export class CmsService {
 
   async updatePromo(id: string, data: any) {
     const patch: any = {};
-    for (const k of ['title', 'subtitle', 'description', 'tag', 'imageUrl', 'ctaText', 'ctaHref', 'project'] as const) {
+    for (const k of ['title', 'subtitle', 'description', 'tag', 'imageUrl', 'imagePosition', 'ctaText', 'ctaHref', 'project'] as const) {
       if (data[k] !== undefined) patch[k] = data[k] || null;
     }
     if (data.sortOrder !== undefined) patch.sortOrder = Number(data.sortOrder) || 0;

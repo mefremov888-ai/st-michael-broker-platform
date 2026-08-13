@@ -867,8 +867,9 @@ model LandingPromo {
   subtitle    String?
   description String?
   tag         String? // e.g. "Старт продаж"
-  imageUrl    String?   @map("image_url")
-  ctaText     String?   @map("cta_text")
+  imageUrl      String?   @map("image_url")
+  imagePosition String?   @default("center") @map("image_position")
+  ctaText       String?   @map("cta_text")
   ctaHref     String?   @map("cta_href")
   project     Project?
   sortOrder   Int       @default(0) @map("sort_order")

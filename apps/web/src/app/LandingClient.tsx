@@ -783,6 +783,7 @@ function HeroSlides({ slides }: { slides: Array<{ tag?: string; title: string; d
             backgroundImage: s.imageUrl
               ? `linear-gradient(95deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0.1) 100%), url(${s.imageUrl})`
               : 'linear-gradient(135deg, var(--dark) 0%, var(--black) 100%)',
+            backgroundPosition: (s as any).imagePosition || 'center',
           }}
         >
           <div className="hero-slide-content">
@@ -1711,6 +1712,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                   zIndex: i === promoIdx ? 2 : 1,
                   visibility: i === promoIdx ? 'visible' : 'hidden',
                   backgroundImage: `linear-gradient(95deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.45) 55%, rgba(0,0,0,0.1) 100%), url(${img})`,
+                  backgroundPosition: p.imagePosition || 'center',
                 }}>
                   <div className="hero-slide-content">
                     {p.tag && <div className="hero-slide-tag">{resolveLandingCopy(p.tag, activePolicies, context, promoProject)}</div>}
