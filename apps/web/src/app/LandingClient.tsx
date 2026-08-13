@@ -1433,6 +1433,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 @media(max-width:499px){.stats-band{grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}.hst{padding:12px 6px}.hst-n{font-size:16px !important}.hst-l{font-size:9px !important}.foot-grid{grid-template-columns:1fr}.proj-card{min-height:180px;padding:24px 20px}.proj-name{font-size:24px}.adv-card{padding:28px 22px}.comm-grid{gap:24px}.h-phone{font-size:12px}.hero-slide-arrow{width:34px;height:34px}.hero-slide-arrow-prev{left:8px}.hero-slide-arrow-next{right:8px}}
 /* Правка КБ5 (2026-05-25): на моб CTA в столбик, центр, одинаковая ширина */
 @media(max-width:767px){.hero-btns{flex-direction:column;align-items:center;gap:12px;width:100%}.hero-btns > *{width:100%;max-width:360px;justify-content:center;text-align:center}}
+@media(max-width:767px){#how-to-start > div:first-child{flex-direction:column !important;align-items:flex-start !important;gap:20px !important}#how-to-start > div:first-child > div:last-child{flex-shrink:unset !important;width:100%}#how-to-start > div:first-child .btn-gold{width:100%;justify-content:center;text-align:center}}
+.cal-scroll-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:4px}.cal-scroll-wrap::-webkit-scrollbar,.news-scroll::-webkit-scrollbar{display:none}
       `}} />
 
       <div className="lp">
@@ -1951,45 +1953,49 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               </button>
             );
             return evView === 'week' ? (
-              <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:8 }}>
-                {weekDays.map((day, i) => {
-                  const dayEvs = getEvForDay(day);
-                  const isToday = day.toDateString() === calToday.toDateString();
-                  return (
-                    <div key={i} style={{ background: isToday ? 'var(--gold-bg)' : 'var(--bg)', borderRadius:'var(--r-card)', padding:'12px 8px', border: isToday ? '1px solid var(--gold-border)' : '1px solid var(--bw)', minHeight:96 }}>
-                      <div style={{ textAlign:'center', marginBottom:8 }}>
-                        <div style={{ fontSize:9, fontWeight:700, letterSpacing:1, color: isToday ? 'var(--gold)' : 'var(--muted)', textTransform:'uppercase' }}>{dayNames[i]}</div>
-                        <div style={{ fontSize:24, fontWeight: isToday ? 700 : 300, color: isToday ? 'var(--gold)' : 'var(--black)', lineHeight:1.2 }}>{day.getDate()}</div>
-                      </div>
-                      {dayEvs.length === 0
-                        ? <div style={{ fontSize:9, color:'var(--muted)', textAlign:'center', opacity:0.5 }}>—</div>
-                        : dayEvs.map((ev: any, j: number) => <CalEvBtn key={j} ev={ev} />)
-                      }
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:4, marginBottom:6 }}>
-                  {dayNames.map((d) => (
-                    <div key={d} style={{ textAlign:'center', fontSize:9, fontWeight:700, letterSpacing:1, color:'var(--muted)', padding:'4px 0', textTransform:'uppercase' }}>{d}</div>
-                  ))}
-                </div>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:4 }}>
-                  {monthDays.map((day, i) => {
-                    if (!day) return <div key={i} style={{ minHeight:72 }} />;
+              <div className="cal-scroll-wrap">
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:8, minWidth:490 }}>
+                  {weekDays.map((day, i) => {
                     const dayEvs = getEvForDay(day);
                     const isToday = day.toDateString() === calToday.toDateString();
-                    const todayStart = new Date(calToday.getFullYear(), calToday.getMonth(), calToday.getDate());
-                    const isPast = day < todayStart;
                     return (
-                      <div key={i} style={{ background: isToday ? 'var(--gold-bg)' : 'var(--bg)', borderRadius:8, padding:'6px 5px', border: isToday ? '1px solid var(--gold-border)' : '1px solid var(--bw)', minHeight:72, opacity: isPast ? 0.45 : 1 }}>
-                        <div style={{ fontSize:12, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--gold)' : 'var(--black)', textAlign:'center', marginBottom:3 }}>{day.getDate()}</div>
-                        {dayEvs.map((ev: any, j: number) => <CalEvBtn key={j} ev={ev} />)}
+                      <div key={i} style={{ background: isToday ? 'var(--gold-bg)' : 'var(--bg)', borderRadius:'var(--r-card)', padding:'12px 8px', border: isToday ? '1px solid var(--gold-border)' : '1px solid var(--bw)', minHeight:96 }}>
+                        <div style={{ textAlign:'center', marginBottom:8 }}>
+                          <div style={{ fontSize:9, fontWeight:700, letterSpacing:1, color: isToday ? 'var(--gold)' : 'var(--muted)', textTransform:'uppercase' }}>{dayNames[i]}</div>
+                          <div style={{ fontSize:24, fontWeight: isToday ? 700 : 300, color: isToday ? 'var(--gold)' : 'var(--black)', lineHeight:1.2 }}>{day.getDate()}</div>
+                        </div>
+                        {dayEvs.length === 0
+                          ? <div style={{ fontSize:9, color:'var(--muted)', textAlign:'center', opacity:0.5 }}>—</div>
+                          : dayEvs.map((ev: any, j: number) => <CalEvBtn key={j} ev={ev} />)
+                        }
                       </div>
                     );
                   })}
+                </div>
+              </div>
+            ) : (
+              <div className="cal-scroll-wrap">
+                <div style={{ minWidth:490 }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:4, marginBottom:6 }}>
+                    {dayNames.map((d) => (
+                      <div key={d} style={{ textAlign:'center', fontSize:9, fontWeight:700, letterSpacing:1, color:'var(--muted)', padding:'4px 0', textTransform:'uppercase' }}>{d}</div>
+                    ))}
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:4 }}>
+                    {monthDays.map((day, i) => {
+                      if (!day) return <div key={i} style={{ minHeight:72 }} />;
+                      const dayEvs = getEvForDay(day);
+                      const isToday = day.toDateString() === calToday.toDateString();
+                      const todayStart = new Date(calToday.getFullYear(), calToday.getMonth(), calToday.getDate());
+                      const isPast = day < todayStart;
+                      return (
+                        <div key={i} style={{ background: isToday ? 'var(--gold-bg)' : 'var(--bg)', borderRadius:8, padding:'6px 5px', border: isToday ? '1px solid var(--gold-border)' : '1px solid var(--bw)', minHeight:72, opacity: isPast ? 0.45 : 1 }}>
+                          <div style={{ fontSize:12, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--gold)' : 'var(--black)', textAlign:'center', marginBottom:3 }}>{day.getDate()}</div>
+                          {dayEvs.map((ev: any, j: number) => <CalEvBtn key={j} ev={ev} />)}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             );
@@ -2129,7 +2135,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 Все новости &rarr;
               </a>
             </div>
-            <div style={{display:'flex',gap:16,overflowX:'auto',paddingBottom:8,scrollSnapType:'x mandatory',WebkitOverflowScrolling:'touch',msOverflowStyle:'none',scrollbarWidth:'none'} as React.CSSProperties}>
+            <div className="news-scroll" style={{display:'flex',gap:16,overflowX:'auto',paddingBottom:8,scrollSnapType:'x mandatory',WebkitOverflowScrolling:'touch',msOverflowStyle:'none',scrollbarWidth:'none'} as React.CSSProperties}>
               {news.map((n: any) => (
                 <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card" style={{minWidth:300,flex:'0 0 300px',scrollSnapAlign:'start'}}>
                   {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
