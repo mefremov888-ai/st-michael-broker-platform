@@ -12,6 +12,7 @@ type DocItem = {
   type: string;
   category: string;
   subcategory: string | null;
+  project: string | null;
   fileUrl: string;
   fileSize: number | null;
   isPublic: boolean;
@@ -111,7 +112,7 @@ export default function AdminDocumentsPage() {
         method: 'PATCH',
         body: JSON.stringify({
           name: d.name, description: d.description, category: d.category,
-          subcategory: d.subcategory, isPublic: d.isPublic, sortOrder: d.sortOrder,
+          subcategory: d.subcategory, project: d.project || null, isPublic: d.isPublic, sortOrder: d.sortOrder,
         }),
       });
       setMessage('Сохранено'); setTimeout(() => setMessage(''), 1500);
@@ -275,7 +276,12 @@ export default function AdminDocumentsPage() {
                 <select className="input md:col-span-2 text-sm" value={d.category} onChange={(e) => updateLocal(idx, { category: e.target.value })} disabled={!isAdmin}>
                   {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.value}</option>)}
                 </select>
-                <input className="input md:col-span-2 text-sm" placeholder="Подкат." value={d.subcategory || ''} onChange={(e) => updateLocal(idx, { subcategory: e.target.value })} disabled={!isAdmin} />
+                <input className="input md:col-span-1 text-sm" placeholder="Подкат." value={d.subcategory || ''} onChange={(e) => updateLocal(idx, { subcategory: e.target.value })} disabled={!isAdmin} />
+                <select className="input md:col-span-2 text-sm" value={d.project || ''} onChange={(e) => updateLocal(idx, { project: e.target.value || null })} disabled={!isAdmin} title="Проект">
+                  <option value="">— Проект —</option>
+                  <option value="ZORGE9">Зорге 9</option>
+                  <option value="SILVER_BOR">Серебряный Бор</option>
+                </select>
                 <input className="input md:col-span-1 text-sm" type="number" value={d.sortOrder} onChange={(e) => updateLocal(idx, { sortOrder: Number(e.target.value) })} disabled={!isAdmin} title="Порядок" />
                 <label className="flex items-center gap-1 text-xs md:col-span-1">
                   <input type="checkbox" checked={d.isPublic} onChange={(e) => updateLocal(idx, { isPublic: e.target.checked })} disabled={!isAdmin} />

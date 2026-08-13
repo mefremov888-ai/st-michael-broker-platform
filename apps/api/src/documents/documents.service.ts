@@ -130,6 +130,7 @@ export class DocumentsService {
     if (data.name === null) delete data.name;
     if (patch.isPublic !== undefined) data.isPublic = !!patch.isPublic;
     if (patch.sortOrder !== undefined) data.sortOrder = Number(patch.sortOrder) || 0;
+    if (patch.project !== undefined) data.project = patch.project || null;
     if (patch.category && !VALID_CATEGORIES.has(patch.category)) {
       throw new BadRequestException(`Invalid category`);
     }

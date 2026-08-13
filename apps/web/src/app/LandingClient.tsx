@@ -729,11 +729,11 @@ function MaterialsSection({ materials }: { materials: any[] }) {
   }
 
   const icons: Record<string, React.ReactNode> = {
-    'Reels': <Film size={36} strokeWidth={1.4} />,
-    'Презентации': <BarChart2 size={36} strokeWidth={1.4} />,
-    'Фотографии': <Camera size={36} strokeWidth={1.4} />,
-    'Рендеры': <Box size={36} strokeWidth={1.4} />,
-    'Тексты': <FileText size={36} strokeWidth={1.4} />,
+    'Reels': <Film size={54} strokeWidth={1.2} />,
+    'Презентации': <BarChart2 size={54} strokeWidth={1.2} />,
+    'Фотографии': <Camera size={54} strokeWidth={1.2} />,
+    'Рендеры': <Box size={54} strokeWidth={1.2} />,
+    'Тексты': <FileText size={54} strokeWidth={1.2} />,
   };
 
   return (
@@ -744,13 +744,12 @@ function MaterialsSection({ materials }: { materials: any[] }) {
           <a
             key={cat}
             href={`/materials/${encodeURIComponent(cat)}`}
-            style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'36px 12px 28px',textDecoration:'none',color:'var(--gold)',background:'#141414',gap:10,transition:'background 0.15s'}}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#1c1c1c')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = '#141414')}
+            style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 16px 32px',textDecoration:'none',color:'#1a1a1a',background:'var(--gold)',gap:12,transition:'background 0.15s'}}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--gold2)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--gold)')}
           >
-            <div style={{opacity:0.85}}>{icons[cat]}</div>
-            <div style={{fontSize:12,fontWeight:500,textAlign:'center',letterSpacing:0.3,marginTop:2}}>{cat}</div>
-            {counts[cat] ? <div style={{fontSize:10,color:'rgba(255,255,255,0.3)'}}>{counts[cat]} файлов</div> : <div style={{fontSize:10,color:'rgba(255,255,255,0.2)'}}>Скоро</div>}
+            <div style={{opacity:0.9}}>{icons[cat]}</div>
+            <div style={{fontSize:12,fontWeight:600,textAlign:'center',letterSpacing:0.5,marginTop:2}}>{cat}</div>
           </a>
         ))}
       </div>
@@ -1328,7 +1327,7 @@ html{scroll-behavior:smooth}
 .lp-overlay{animation:overlayIn .25s ease both}
 .lp-popup{animation:popupIn .35s cubic-bezier(.2,.7,.3,1) both}
 .lp-spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,0.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:8px}
-:root{--white:#ffffff;--bg:#f8f7f5;--bg2:#f0eeeb;--bg3:#e8e5e0;--black:#1a1a1a;--dark:#2c2c2a;--dark2:#3d3d3a;--gold:#B4936F;--gold2:#a07e5c;--gold3:#8c6b4a;--gold-bg:rgba(180,147,111,0.07);--gold-border:rgba(180,147,111,0.2);--gold-light:#f5efe8;--muted:#8a8680;--muted2:#a09b95;--light:#6b6660;--bw:rgba(0,0,0,0.08);--bw2:rgba(0,0,0,0.12);--green:#3a8a5c;--r:4px;--r-card:16px;--r-card-lg:16px;--r-tag:8px;--r-pill:50px;--fs-h1:clamp(40px,4.6vw,64px);--fs-h2:clamp(28px,3.2vw,40px);--fs-h3:clamp(18px,1.8vw,22px);--t:.2s ease}
+:root{--white:#ffffff;--bg:#f8f7f5;--bg2:#f0eeeb;--bg3:#e8e5e0;--black:#1a1a1a;--dark:#2c2c2a;--dark2:#3d3d3a;--gold:#B4936F;--gold2:#a07e5c;--gold3:#8c6b4a;--gold-bg:rgba(180,147,111,0.07);--gold-border:rgba(180,147,111,0.2);--gold-light:#f5efe8;--muted:#8a8680;--muted2:#a09b95;--light:#6b6660;--bw:rgba(0,0,0,0.08);--bw2:rgba(0,0,0,0.12);--green:#3a8a5c;--r:4px;--r-card:16px;--r-card-lg:16px;--r-tag:8px;--r-pill:8px;--fs-h1:clamp(40px,4.6vw,64px);--fs-h2:clamp(28px,3.2vw,40px);--fs-h3:clamp(18px,1.8vw,22px);--t:.2s ease}
 body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;font-size:15px;line-height:1.7;overflow-x:hidden}
 .lp a{text-decoration:none;color:inherit}
 .lp header{position:sticky;top:0;z-index:200;background:rgba(255,255,255,0.96);backdrop-filter:blur(20px);border-bottom:1px solid var(--bw);display:flex;align-items:center;justify-content:space-between;padding:0 60px;height:64px}
@@ -1390,7 +1389,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 .sh{margin-bottom:48px}.sh-center{text-align:center}.sh-tag{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold);margin-bottom:14px}.sh h2{font-size:var(--fs-h2);font-weight:300;line-height:1.1;letter-spacing:-0.5px}.sh h2 strong{font-weight:700}.sh h2 em{font-style:normal;color:var(--gold);font-weight:700}.sh-sub{color:var(--muted);font-size:15px;max-width:560px;margin-top:14px;line-height:1.7;font-weight:400}.sh-center .sh-sub{margin-left:auto;margin-right:auto}
 /* КБ7 (2026-05-26): grid-auto-rows:1fr выравнивает карточки по высоте
    самой высокой — Зорге и Серебряный Бор стоят одинаковыми. */
-.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;align-items:stretch}.proj-grid>div{height:100%}.proj-card{border-radius:var(--r-card);padding:36px 32px;display:flex;flex-direction:column;justify-content:flex-start;min-height:240px;height:100%;transition:all .3s ease;cursor:pointer;background:var(--bg);overflow:hidden}.proj-card.has-img{padding:0}.proj-card.has-img .proj-card-inner{padding:24px 28px 28px;flex:1;display:flex;flex-direction:column}.proj-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.06)}.proj-img-wrap{position:relative;height:200px;flex-shrink:0}.proj-img-bg{width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg2)}.proj-img-badge{position:absolute;top:14px;left:14px;background:rgba(0,0,0,0.72);color:#fff;font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:5px 12px;border-radius:20px;backdrop-filter:blur(4px)}.proj-card-head{flex:0 0 auto;align-self:stretch}.proj-status-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;min-height:18px;margin:0 0 10px}.proj-tag{font-size:9px;font-weight:700;line-height:1;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);margin:0}.proj-name{font-size:28px;font-weight:300;margin-bottom:8px;letter-spacing:-0.3px}.proj-name strong{font-weight:700}.proj-info{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.7}.proj-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11px;color:var(--muted);margin-top:8px;margin-bottom:12px}.proj-link{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);display:inline-flex;align-items:center;gap:6px;margin-top:auto}.proj-cta-btn{display:flex;align-items:center;justify-content:center;padding:12px 20px;background:var(--gold);color:#fff;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;border-radius:var(--r-tag);text-decoration:none;transition:opacity .2s;margin-top:auto}.proj-cta-btn:hover{opacity:0.88}
+.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;align-items:stretch}.proj-grid>div{height:100%}.proj-card{border-radius:var(--r-card);padding:36px 32px;display:flex;flex-direction:column;justify-content:flex-start;min-height:240px;height:100%;transition:all .3s ease;cursor:pointer;background:var(--bg);overflow:hidden}.proj-card.has-img{padding:0}.proj-card.has-img .proj-card-inner{padding:24px 28px 28px;flex:1;display:flex;flex-direction:column}.proj-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.06)}.proj-img-wrap{position:relative;height:200px;flex-shrink:0}.proj-img-bg{width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg2)}.proj-img-badge{position:absolute;top:14px;left:14px;background:rgba(0,0,0,0.72);color:#fff;font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:5px 12px;border-radius:20px;backdrop-filter:blur(4px)}.proj-card-head{flex:0 0 auto;align-self:stretch}.proj-status-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;min-height:18px;margin:0 0 10px}.proj-tag{font-size:9px;font-weight:700;line-height:1;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);margin:0}.proj-name{font-size:28px;font-weight:300;margin-bottom:8px;letter-spacing:-0.3px}.proj-name strong{font-weight:700}.proj-info{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.7}.proj-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11px;color:var(--muted);margin-top:8px;margin-bottom:12px}.proj-link{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);display:inline-flex;align-items:center;gap:6px;margin-top:auto}.proj-cta-btn{display:inline-flex;align-self:flex-start;align-items:center;justify-content:center;padding:9px 16px;background:var(--gold);color:#fff;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;border-radius:var(--r-tag);text-decoration:none;transition:opacity .2s;margin-top:auto}.proj-cta-btn:hover{opacity:0.88}
 .comm-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}.comm-table{border-radius:var(--r-card);overflow:hidden;background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,0.04)}.ct-head{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;background:var(--bg);gap:8px}.ct-head span{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}.ct-row{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;border-top:1px solid var(--bw);gap:8px;transition:background var(--t)}.ct-row:hover{background:var(--gold-bg)}.ct-level{font-size:14px;font-weight:500}.ct-range{font-size:13px;color:var(--muted)}.ct-rate{font-size:14px;font-weight:600;text-align:right}
 .comm-info{display:flex;flex-direction:column;gap:10px}.comm-card{padding:18px 22px;background:var(--bg);border-radius:var(--r-card);transition:background var(--t)}.comm-card:hover{background:var(--gold-bg)}.comm-card-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);margin-bottom:8px}.comm-card p{font-size:13px;color:var(--light);line-height:1.6;font-weight:400;margin:0}
 .s-adv{background:var(--black);color:var(--white);padding:64px 60px;position:relative;overflow:hidden}.s-adv .sh{margin-bottom:32px}.s-adv .sh-tag{color:var(--gold)}.s-adv h2{color:var(--white)}.s-adv h2 em{color:var(--gold)}.adv-bg-glow{position:absolute;inset:0;background:radial-gradient(circle at 20% 30%,rgba(180,147,111,0.18),transparent 45%),radial-gradient(circle at 85% 80%,rgba(180,147,111,0.12),transparent 50%);pointer-events:none;z-index:0}.s-adv .sh,.s-adv .adv-grid{position:relative;z-index:1}/* 2026-05-28: grid-auto-rows:1fr выравнивает строки по высоте.
@@ -1908,42 +1907,91 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               </button>
             </div>
           </div>
-          {upcomingEvents.length === 0 ? (
-            <div style={{textAlign:'center',padding:'24px 0',display:'flex',flexDirection:'column',alignItems:'center',gap:14}}>
-              <div style={{color:'var(--muted)',fontSize:14}}>В ближайшее время мероприятий не запланировано</div>
+          {(() => {
+            const calToday = new Date();
+            const calDow = (calToday.getDay() + 6) % 7;
+            const calMonday = new Date(calToday);
+            calMonday.setDate(calToday.getDate() - calDow);
+            const weekDays = Array.from({ length: 7 }, (_, i) => {
+              const d = new Date(calMonday);
+              d.setDate(calMonday.getDate() + i);
+              return d;
+            });
+            const calYear = calToday.getFullYear();
+            const calMonth = calToday.getMonth();
+            const firstDay = new Date(calYear, calMonth, 1);
+            const lastDay = new Date(calYear, calMonth + 1, 0);
+            const startDow = (firstDay.getDay() + 6) % 7;
+            const monthDays: (Date | null)[] = [];
+            for (let i = 0; i < startDow; i++) monthDays.push(null);
+            for (let i = 1; i <= lastDay.getDate(); i++) monthDays.push(new Date(calYear, calMonth, i));
+            while (monthDays.length % 7 !== 0) monthDays.push(null);
+            const getEvForDay = (d: Date) => projectFiltered.filter((ev: any) => {
+              const ed = new Date(ev.date);
+              return ed.getFullYear() === d.getFullYear() && ed.getMonth() === d.getMonth() && ed.getDate() === d.getDate();
+            }).sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+            const fmtTime = (dt: string) => new Date(dt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+            const projLabel = (title: string) => {
+              const t = (title || '').toLowerCase();
+              if (t.includes('серебряный') || t.includes('берз')) return 'Сер. Бор';
+              if (t.includes('зорге') || t.includes('zorge')) return 'Зорге 9';
+              return title.replace('Брокер-тур:', '').trim().split('+')[0].trim();
+            };
+            const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+            const CalEvBtn = ({ ev }: { ev: any }) => (
               <button
                 type="button"
-                className="btn-gold"
-                onClick={() => setCalendarOpen(true)}
-              >Расписание брокер-туров</button>
-            </div>
-          ) : (
-            <div className="ev-grid">
-              {upcomingEvents.map((ev: any) => {
-                const d = formatEventDate(ev.date);
-                const eventDate = new Date(ev.date).toLocaleString('ru-RU', { day: '2-digit', month: 'long', hour: '2-digit', minute: '2-digit' });
-                return (
-                  <div
-                    key={ev.id}
-                    className="ev-card"
-                    onClick={() => setContactModal({
-                      open: true,
-                      source: 'event-signup',
-                      eventId: ev.id,
-                      title: `Запись: ${ev.title}`,
-                      defaultMessage: `Хочу записаться на «${ev.title}» — ${eventDate}`,
-                    })}
-                  >
-                    <div className="ev-date"><div className="ev-day">{d.day}</div><div className="ev-mon">{d.mon}</div></div>
-                    <div className="ev-info">
-                      <div className="ev-title">{ev.title}</div>
-                      <div className="ev-meta">{formatEventMeta(ev.date, ev.location, ev.isOnline)}</div>
+                onClick={() => setContactModal({ open:true, source:'event-signup', eventId:ev.id, title:`Запись: ${ev.title}`, defaultMessage:`Хочу записаться на «${ev.title}»` })}
+                style={{ width:'100%', background:'var(--gold)', color:'#fff', border:'none', borderRadius:4, padding:'3px 5px', marginTop:2, fontSize:9, fontWeight:600, cursor:'pointer', textAlign:'left', lineHeight:1.35, display:'block' }}
+              >
+                <span style={{display:'block', opacity:0.85}}>{fmtTime(ev.date)}</span>
+                <span style={{display:'block'}}>{projLabel(ev.title)}</span>
+              </button>
+            );
+            return evView === 'week' ? (
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:8 }}>
+                {weekDays.map((day, i) => {
+                  const dayEvs = getEvForDay(day);
+                  const isToday = day.toDateString() === calToday.toDateString();
+                  return (
+                    <div key={i} style={{ background: isToday ? 'var(--gold-bg)' : 'var(--bg)', borderRadius:'var(--r-card)', padding:'12px 8px', border: isToday ? '1px solid var(--gold-border)' : '1px solid var(--bw)', minHeight:96 }}>
+                      <div style={{ textAlign:'center', marginBottom:8 }}>
+                        <div style={{ fontSize:9, fontWeight:700, letterSpacing:1, color: isToday ? 'var(--gold)' : 'var(--muted)', textTransform:'uppercase' }}>{dayNames[i]}</div>
+                        <div style={{ fontSize:24, fontWeight: isToday ? 700 : 300, color: isToday ? 'var(--gold)' : 'var(--black)', lineHeight:1.2 }}>{day.getDate()}</div>
+                      </div>
+                      {dayEvs.length === 0
+                        ? <div style={{ fontSize:9, color:'var(--muted)', textAlign:'center', opacity:0.5 }}>—</div>
+                        : dayEvs.map((ev: any, j: number) => <CalEvBtn key={j} ev={ev} />)
+                      }
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                  );
+                })}
+              </div>
+            ) : (
+              <div>
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:4, marginBottom:6 }}>
+                  {dayNames.map((d) => (
+                    <div key={d} style={{ textAlign:'center', fontSize:9, fontWeight:700, letterSpacing:1, color:'var(--muted)', padding:'4px 0', textTransform:'uppercase' }}>{d}</div>
+                  ))}
+                </div>
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(7,1fr)', gap:4 }}>
+                  {monthDays.map((day, i) => {
+                    if (!day) return <div key={i} style={{ minHeight:72 }} />;
+                    const dayEvs = getEvForDay(day);
+                    const isToday = day.toDateString() === calToday.toDateString();
+                    const todayStart = new Date(calToday.getFullYear(), calToday.getMonth(), calToday.getDate());
+                    const isPast = day < todayStart;
+                    return (
+                      <div key={i} style={{ background: isToday ? 'var(--gold-bg)' : 'var(--bg)', borderRadius:8, padding:'6px 5px', border: isToday ? '1px solid var(--gold-border)' : '1px solid var(--bw)', minHeight:72, opacity: isPast ? 0.45 : 1 }}>
+                        <div style={{ fontSize:12, fontWeight: isToday ? 700 : 400, color: isToday ? 'var(--gold)' : 'var(--black)', textAlign:'center', marginBottom:3 }}>{day.getDate()}</div>
+                        {dayEvs.map((ev: any, j: number) => <CalEvBtn key={j} ev={ev} />)}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
           </>
             );
           })()}
@@ -1953,17 +2001,14 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 
         {/* HOW TO START — редактируется через /admin/content вкладка "Как начать" */}
         <section id="how-to-start">
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:32,marginBottom:40}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:32,marginBottom:40}}>
             <div className="sh" style={{marginBottom:0,flex:1}}>
               <div className="sh-tag">{howto.tag}</div>
               <h2>{renderAccent(howto.title, howto.titleAccent)}</h2>
               {howto.subtitle && <p className="sh-sub">{howto.subtitle}</p>}
             </div>
-            <div style={{flexShrink:0,textAlign:'center',maxWidth:220,paddingTop:4}}>
+            <div style={{flexShrink:0}}>
               <button className="btn-gold" onClick={handleRegister}>{howto.ctaText || 'Стать партнёром'}</button>
-              {howto.footer && (
-                <div style={{fontSize:12,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>{howto.footer}</div>
-              )}
             </div>
           </div>
           <div className={`howto-steps${(howto.steps || []).length === 2 ? ' howto-steps-2' : ''}`} style={{display:'grid',gridTemplateColumns:`repeat(${Math.min((howto.steps || []).length, 4)}, 1fr)`,gap:16}}>
@@ -2068,42 +2113,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         <MaterialsSection materials={materialsDocs} />
 
 
-        <hr className="sep" />
-
-        {/* FAQ — Часто задаваемые вопросы */}
-        <section id="faq">
-          <div className="sh sh-center"><div className="sh-tag">Вопросы</div><h2>Часто задаваемые <em>вопросы</em></h2></div>
-          <div style={{maxWidth:820,margin:'0 auto'}}>
-            {[
-              {
-                q: 'Как стать партнёром?',
-                a: 'Начать работу можно без заключения общего агентского договора. Достаточно зарегистрироваться в кабинете брокера, проверить клиента на уникальность и записать его на встречу. Агентский договор заключается под конкретную сделку. Для сотрудничества нужно зарегистрированное юр. лицо (ИП, ООО, АО).',
-              },
-              {
-                q: 'Как проверить клиента на уникальность?',
-                a: 'В личном кабинете во вкладке «Зафиксировать клиента» заполните данные и нажмите «Отправить». Получите статус «Условно уникален» (можно работать) или «Отклонён» (клиент уже в базе). Для дополнительных номеров (ЛПР, супруг, родители) используйте функцию «Дополнительные номера».',
-              },
-              {
-                q: 'Что делать, если статус «Отклонён»?',
-                a: 'Это значит клиент уже зарегистрирован другим брокером или обращался самостоятельно. Статус может быть изменён на «Условно уникален» после ручной проверки. Мы можем запросить подтверждение взаимодействия с клиентом (переписка, записи звонков, посещения офиса). Уведомление о решении придёт в WhatsApp / Telegram.',
-              },
-              {
-                q: 'Какой срок действия фиксации?',
-                a: 'Фиксация проходит в два этапа: до встречи с клиентом — 30 календарных дней, после встречи до сделки — ещё 30 дней. В обоих случаях возможна пролонгация по запросу через горячую линию +7 (499) 226-22-49. Брокер сам отслеживает сроки фиксации.',
-              },
-              {
-                q: 'Как записать клиента на встречу?',
-                a: 'Через горячую линию для брокеров: +7 (499) 226-22-49 (ежедневно с 9:00 до 21:00). Менеджер подберёт удобное время и проконсультирует по проектам. Клиент закрепляется за брокером после посещения офиса (или онлайн-встречи) и подписания акта осмотра.',
-              },
-              {
-                q: 'Как происходит выплата комиссии?',
-                a: 'Выплата производится после завершения сделки и полной оплаты со стороны клиента — в течение 7 рабочих дней. После сделки направьте информацию менеджеру — отправим инструкцию по получению выплаты.',
-              },
-            ].map((item, i) => (
-              <FaqItem key={i} q={item.q} a={item.a} />
-            ))}
-          </div>
-        </section>
 
         {/* NEWS — новости с stmichael.ru, позиция: после FAQ */}
         <>
@@ -2118,9 +2127,9 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 Все новости &rarr;
               </a>
             </div>
-            <div className="news-grid">
-              {news.slice(0, 6).map((n: any) => (
-                <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card">
+            <div style={{display:'flex',gap:16,overflowX:'auto',paddingBottom:8,scrollSnapType:'x mandatory',WebkitOverflowScrolling:'touch',msOverflowStyle:'none',scrollbarWidth:'none'} as React.CSSProperties}>
+              {news.map((n: any) => (
+                <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card" style={{minWidth:300,flex:'0 0 300px',scrollSnapAlign:'start'}}>
                   {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
                   <div className="news-body">
                     {n.source && <div className="news-source">{n.source}</div>}
@@ -2135,23 +2144,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </section>
         </>
 
-        {/* COMMUNITY — Партнёрская программа */}
-        <section className="s-comm">
-          <div><div className="sh-tag">Партнёрская программа</div><h2><strong>ST MICHAEL</strong> Партнёры</h2></div>
-          <div className="comm-content">
-            <div>
-              <p className="comm-desc">Сообщество, объединяющее активных профессионалов рынка недвижимости. Приоритетные условия и доступ к закрытым мероприятиям.</p>
-              <button className="btn-white" onClick={handleRegister}>Стать частью сообщества</button>
-            </div>
-            <div className="comm-list">
-              <div className="comm-list-item"><div className="comm-list-dot" />Специальные гибкие условия для участников</div>
-              <div className="comm-list-item"><div className="comm-list-dot" />Приоритетное информирование о стартах продаж</div>
-              <div className="comm-list-item"><div className="comm-list-dot" />Образовательные встречи и мастер-классы</div>
-              <div className="comm-list-item"><div className="comm-list-dot" />Тематические мероприятия и нетворкинг</div>
-              <div className="comm-list-item"><div className="comm-list-dot" />Самые свежие новости и события компании</div>
-            </div>
-          </div>
-        </section>
 
         <hr className="sep" />
 

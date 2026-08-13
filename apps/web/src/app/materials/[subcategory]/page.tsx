@@ -13,6 +13,7 @@ interface DocItem {
   type: string;
   category: string;
   subcategory: string | null;
+  project: string | null;
   fileUrl: string;
   fileSize: number | null;
 }
@@ -22,7 +23,7 @@ const IMAGE_RE = /\.(jpe?g|png|webp|gif|svg|heic|avif|bmp|tiff?)(\?|#|$)/i;
 function thumbUrl(url: string): string {
   // Yandex Cloud resize proxy for smaller thumbnails
   if (url.includes('storage.yandexcloud.net') || url.includes('yandexcloud')) {
-    return `https://stmichael.ru/proxy/insecure/w:400/q:60/plain/${url}@webp`;
+    return `https://stmichael.ru/proxy/insecure/w:600/q:65/plain/${url}@webp`;
   }
   return url;
 }
@@ -113,6 +114,7 @@ export default function MaterialsSubcategoryPage() {
   const [loading, setLoading] = useState(true);
   const [viewer, setViewer] = useState<{ items: DocItem[]; index: number } | null>(null);
   const [photoLimit, setPhotoLimit] = useState(30);
+  const [projFilter, setProjFilter] = useState<'all' | 'ZORGE9' | 'SILVER_BOR'>('all');
 
   useEffect(() => {
     const aliases = SUBCATEGORY_ALIASES[subcategory] || [subcategory];
@@ -136,10 +138,12 @@ export default function MaterialsSubcategoryPage() {
       .finally(() => setLoading(false));
   }, [subcategory]);
 
-  const images = docs.filter(isImage);
-  const videos = docs.filter(isVideo);
-  const pdfs = docs.filter(isPdf);
-  const other = docs.filter((d) => !isImage(d) && !isVideo(d) && !isPdf(d));
+  const filteredDocs = projFilter === 'all' ? docs : docs.filter((d) => d.project === projFilter);
+  const images = filteredDocs.filter(isImage);
+  const videos = filteredDocs.filter(isVideo);
+  const pdfs = filteredDocs.filter(isPdf);
+  const other = filteredDocs.filter((d) => !isImage(d) && !isVideo(d) && !isPdf(d));
+  const hasProjectDocs = docs.some((d) => d.project === 'ZORGE9' || d.project === 'SILVER_BOR');
 
   const ICON: Record<string, string> = {
     'Reels': '🎬',
@@ -166,6 +170,23 @@ export default function MaterialsSubcategoryPage() {
       </div>
 
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '40px 32px 0' }}>
+        {!loading && hasProjectDocs && (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 28, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginRight: 4 }}>Проект:</span>
+            {(['all', 'ZORGE9', 'SILVER_BOR'] as const).map((val) => {
+              const labels = { all: 'Все', ZORGE9: 'Зорге 9', SILVER_BOR: 'Серебряный Бор' };
+              return (
+                <button
+                  key={val}
+                  onClick={() => { setProjFilter(val); setPhotoLimit(30); }}
+                  style={{ padding: '7px 16px', fontSize: 12, fontWeight: 600, borderRadius: 8, border: 'none', cursor: 'pointer', background: projFilter === val ? 'var(--gold, #B4936F)' : 'rgba(255,255,255,0.08)', color: projFilter === val ? '#fff' : 'rgba(255,255,255,0.6)', transition: 'background 0.15s' }}
+                >
+                  {labels[val]}
+                </button>
+              );
+            })}
+          </div>
+        )}
         {loading ? (
           <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.4)', padding: '80px 0', fontSize: 15 }}>Загрузка...</div>
         ) : docs.length === 0 ? (
@@ -181,7 +202,7 @@ export default function MaterialsSubcategoryPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: 'rgba(255,255,255,0.5)', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
                   <ImageIcon size={14} /> Фотографии ({images.length})
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
                   {images.slice(0, photoLimit).map((img, i) => (
                     <button
                       key={img.id}
