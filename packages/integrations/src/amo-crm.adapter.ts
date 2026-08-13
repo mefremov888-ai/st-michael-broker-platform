@@ -107,19 +107,23 @@ export function setAmoTokenRefreshHook(hook: AmoTokenRefreshHook | null): void {
 }
 
 export class AmoCrmAdapter {
-  private baseUrl: string;
-
-  constructor() {
-    // 2026-05-27: amoCRM имеет 2 endpoint'а:
-    //   1) subdomain.amocrm.ru — веб-интерфейс, защищён WAF
-    //   2) api-b.amocrm.ru или другой шард — для API (читается из JWT.api_domain)
-    // Раньше били в (1), nginx-WAF возвращал 403 для node-fetch-запросов.
-    // Теперь по умолчанию используем (2) если AMO_API_DOMAIN не задан явно.
+  // baseUrl is a getter so it always reflects the current token's api_domain.
+  // amoCRM access tokens contain api_domain (e.g. "api-b.amocrm.ru") which
+  // is the correct shard for API calls — different from the WAF-protected
+  // subdomain.amocrm.ru web endpoint that returns 403 for server requests.
+  private get baseUrl(): string {
+    try {
+      const payload = JSON.parse(
+        Buffer.from(amoTokens.access.split('.')[1], 'base64').toString('utf8'),
+      );
+      if (payload.api_domain) return `https://${payload.api_domain}/api/v4`;
+    } catch {}
     const subdomain = process.env.AMO_SUBDOMAIN || 'stmichael';
     const domain = process.env.AMO_BASE_DOMAIN || 'amocrm.ru';
-    const apiDomain = process.env.AMO_API_DOMAIN || `${subdomain}.${domain}`;
-    this.baseUrl = `https://${apiDomain}/api/v4`;
+    return `https://${process.env.AMO_API_DOMAIN || `${subdomain}.${domain}`}/api/v4`;
   }
+
+  constructor() {}
 
   private get token(): string {
     return amoTokens.access;
