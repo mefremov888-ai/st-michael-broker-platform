@@ -1223,6 +1223,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [promos, setPromos] = useState<any[]>(() => Array.isArray(initialData?.promos) ? initialData!.promos! : []);
   const [promoIdx, setPromoIdx] = useState(0);
   const [evView, setEvView] = useState<'week' | 'month'>('week');
+  const [evProject, setEvProject] = useState<'all' | 'zorge' | 'silver'>('all');
   const [cooperationDocs, setCooperationDocs] = useState<any[]>(() => Array.isArray(initialData?.cooperationDocs) ? initialData!.cooperationDocs! : []);
   const [analyticsDocs, setAnalyticsDocs] = useState<any[]>(() => Array.isArray(initialData?.analyticsDocs) ? initialData!.analyticsDocs! : []);
   const [marketingDocs, setMarketingDocs] = useState<any[]>(() => Array.isArray(initialData?.marketingDocs) ? initialData!.marketingDocs! : []);
@@ -1511,9 +1512,14 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 >Записаться на встречу</button>
               </div>
             </div>
-            <div style={{display:'flex',flexDirection:'column',gap:16}}>
+            <div style={{display:'flex',flexDirection:'column',justifyContent:'center',gap:16,textAlign:'right',alignItems:'flex-end'}}>
               <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
-              <a href="#cooperation" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center',alignSelf:'flex-start',borderRadius:10}}>Условия вознаграждения</a>
+              {(() => {
+                const condDoc = cooperationDocs.find((d: any) => /август 2026/i.test(d.name) || /вознаграждения для брокеров/i.test(d.name));
+                return condDoc
+                  ? <a href={condDoc.fileUrl} target="_blank" rel="noopener noreferrer" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>
+                  : <a href="#cooperation" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>;
+              })()}
             </div>
           </div>
         </div>
@@ -1852,21 +1858,34 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               : DEFAULT_SCHEDULE
                   .filter(e => new Date(e.date) >= now)
                   .map((e, i) => ({id: `default-${i}`, ...e}));
+            const projectFiltered = evProject === 'all' ? eventsToShow : eventsToShow.filter((e: any) => {
+              const t = (e.title || '').toLowerCase();
+              if (evProject === 'zorge') return t.includes('зорге') || t.includes('zorge');
+              if (evProject === 'silver') return t.includes('серебряный') || t.includes('silver') || t.includes('берз');
+              return true;
+            });
             const cutoff = evView === 'week'
               ? new Date(now.getTime() + 7 * 24 * 3600 * 1000)
               : new Date(now.getTime() + 30 * 24 * 3600 * 1000);
-            const upcomingEvents = eventsToShow.filter(e => {
+            const upcomingEvents = projectFiltered.filter((e: any) => {
               const d = new Date(e.date);
               return d >= now && d <= cutoff;
             });
             return (
           <>
-          <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
+          <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24,flexWrap:'wrap'}}>
             <div>
               <div className="sh-tag">Календарь событий</div>
               <h2>Ближайшие <em>мероприятия</em></h2>
             </div>
-            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4}}>
+            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4,flexWrap:'wrap'}}>
+              <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--bw)'}}>
+                {([['all','Все'],['zorge','Зорге 9'],['silver','Серебряный Бор']] as const).map(([val,label]) => (
+                  <button key={val} type="button" onClick={() => setEvProject(val)}
+                    style={{padding:'8px 14px',fontSize:11,background:evProject===val?'var(--gold)':'transparent',color:evProject===val?'#000':'var(--fg)',border:'none',borderLeft:val!=='all'?'1px solid var(--bw)':'none',cursor:'pointer',fontWeight:evProject===val?600:400,transition:'background 0.15s',whiteSpace:'nowrap'}}
+                  >{label}</button>
+                ))}
+              </div>
               <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--bw)'}}>
                 <button
                   type="button"
@@ -2046,7 +2065,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             с hover-выделением, как в advantages. Источник — Яндекс.Диск
             (sync-yandex-disk.js, category=materials), плюс fallback на
             старые marketing-документы (если есть). Группируется по подкатегории. */}
-        <MaterialsSection materials={[...materialsDocs, ...marketingDocs]} />
+        <MaterialsSection materials={materialsDocs} />
 
 
         <hr className="sep" />

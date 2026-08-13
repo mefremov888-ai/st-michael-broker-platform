@@ -97,6 +97,29 @@ export default function AdminEventsPage() {
     } catch (e: any) { setMessage(e.message || 'Ошибка удаления'); }
   };
 
+  const handleDuplicate = async (ev: EventItem) => {
+    const d = new Date(ev.date);
+    d.setDate(d.getDate() + 7);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const nextDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    try {
+      await api('/admin/cms/events', { method: 'POST', body: JSON.stringify({ date: nextDate, title: ev.title, location: ev.location, isOnline: ev.isOnline, description: ev.description }) });
+      load();
+      setMessage('Дублировано на след. неделю');
+      setTimeout(() => setMessage(''), 2000);
+    } catch (e: any) { setMessage(e.message || 'Ошибка'); }
+  };
+
+  const handleDeletePast = async () => {
+    const past = events.filter(ev => new Date(ev.date) < new Date());
+    if (past.length === 0) return setMessage('Прошедших событий нет');
+    if (!confirm(`Удалить ${past.length} прошедших событий?`)) return;
+    await Promise.all(past.map(ev => api(`/admin/cms/events/${ev.id}`, { method: 'DELETE' }).catch(() => {})));
+    load();
+    setMessage(`Удалено ${past.length} событий`);
+    setTimeout(() => setMessage(''), 2000);
+  };
+
   const updateLocal = (idx: number, patch: Partial<EventItem>) => {
     const next = [...events];
     next[idx] = { ...next[idx], ...patch };
@@ -150,7 +173,14 @@ export default function AdminEventsPage() {
       )}
 
       <div className="card">
-        <h2 className="text-lg font-semibold mb-3">Все события ({events.length})</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold">Все события ({events.length})</h2>
+          {isAdmin && (
+            <button className="btn btn-secondary text-error text-sm flex items-center gap-1" onClick={handleDeletePast}>
+              <Trash2 className="w-4 h-4" /> Удалить прошедшие
+            </button>
+          )}
+        </div>
         {loading ? (
           <div className="text-center py-8 text-text-muted">Загрузка...</div>
         ) : events.length === 0 ? (
@@ -169,11 +199,12 @@ export default function AdminEventsPage() {
                   <label className="flex items-center gap-1 text-xs md:col-span-1">
                     <input type="checkbox" checked={ev.isActive} onChange={(e) => updateLocal(idx, { isActive: e.target.checked })} disabled={!isAdmin} /> Активно
                   </label>
-                  <div className="md:col-span-2 flex gap-1 justify-end">
+                  <div className="md:col-span-2 flex gap-1 justify-end flex-wrap">
                     {isAdmin && (
                       <>
-                        <button className="btn btn-primary text-sm" onClick={() => handleSave(ev)}><Save className="w-4 h-4" /></button>
-                        <button className="btn btn-secondary text-error text-sm" onClick={() => handleDelete(ev.id)}><Trash2 className="w-4 h-4" /></button>
+                        <button className="btn btn-primary text-sm" onClick={() => handleSave(ev)} title="Сохранить"><Save className="w-4 h-4" /></button>
+                        <button className="btn btn-secondary text-sm" onClick={() => handleDuplicate(ev)} title="Дублировать на след. неделю"><Plus className="w-4 h-4" /></button>
+                        <button className="btn btn-secondary text-error text-sm" onClick={() => handleDelete(ev.id)} title="Удалить"><Trash2 className="w-4 h-4" /></button>
                       </>
                     )}
                   </div>

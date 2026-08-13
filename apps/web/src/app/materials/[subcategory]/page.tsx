@@ -112,6 +112,7 @@ export default function MaterialsSubcategoryPage() {
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewer, setViewer] = useState<{ items: DocItem[]; index: number } | null>(null);
+  const [photoLimit, setPhotoLimit] = useState(30);
 
   useEffect(() => {
     const aliases = SUBCATEGORY_ALIASES[subcategory] || [subcategory];
@@ -181,7 +182,7 @@ export default function MaterialsSubcategoryPage() {
                   <ImageIcon size={14} /> Фотографии ({images.length})
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
-                  {images.map((img, i) => (
+                  {images.slice(0, photoLimit).map((img, i) => (
                     <button
                       key={img.id}
                       onClick={() => setViewer({ items: images, index: i })}
@@ -193,6 +194,14 @@ export default function MaterialsSubcategoryPage() {
                     </button>
                   ))}
                 </div>
+                {images.length > photoLimit && (
+                  <button
+                    onClick={() => setPhotoLimit(prev => prev + 30)}
+                    style={{ marginTop: 16, width: '100%', padding: '12px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'rgba(255,255,255,0.7)', fontSize: 13, cursor: 'pointer' }}
+                  >
+                    Загрузить ещё ({images.length - photoLimit} фото)
+                  </button>
+                )}
               </div>
             )}
 
