@@ -739,16 +739,16 @@ function MaterialsSection({ materials }: { materials: any[] }) {
   return (
     <section id="materials" style={{background:'var(--bg)'}}>
       <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Изображения, рендеры, видео и презентации для брокеров ST Michael.</p></div>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(255,255,255,0.07)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(255,255,255,0.07)'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(180,147,111,0.2)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(180,147,111,0.25)'}}>
         {CANONICAL_MAT_CATS.map((cat) => (
           <a
             key={cat}
             href={`/materials/${encodeURIComponent(cat)}`}
-            style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 16px 32px',textDecoration:'none',color:'#1a1a1a',background:'var(--gold)',gap:12,transition:'background 0.15s'}}
-            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--gold2)')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--gold)')}
+            style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 16px 32px',textDecoration:'none',color:'var(--black)',background:'#f5efe8',gap:12,transition:'background 0.15s'}}
+            onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
           >
-            <div style={{opacity:0.9}}>{icons[cat]}</div>
+            <div style={{color:'var(--gold)',opacity:0.9}}>{icons[cat]}</div>
             <div style={{fontSize:12,fontWeight:600,textAlign:'center',letterSpacing:0.5,marginTop:2}}>{cat}</div>
           </a>
         ))}
@@ -1223,7 +1223,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [promos, setPromos] = useState<any[]>(() => Array.isArray(initialData?.promos) ? initialData!.promos! : []);
   const [promoIdx, setPromoIdx] = useState(0);
   const [evView, setEvView] = useState<'week' | 'month'>('week');
-  const [evProject, setEvProject] = useState<'all' | 'zorge' | 'silver'>('all');
+  const newsScrollRef = useRef<HTMLDivElement>(null);
   const [cooperationDocs, setCooperationDocs] = useState<any[]>(() => Array.isArray(initialData?.cooperationDocs) ? initialData!.cooperationDocs! : []);
   const [analyticsDocs, setAnalyticsDocs] = useState<any[]>(() => Array.isArray(initialData?.analyticsDocs) ? initialData!.analyticsDocs! : []);
   const [marketingDocs, setMarketingDocs] = useState<any[]>(() => Array.isArray(initialData?.marketingDocs) ? initialData!.marketingDocs! : []);
@@ -1684,7 +1684,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                       rel="noopener noreferrer"
                       className="proj-cta-btn"
                       onClick={(e) => e.stopPropagation()}
-                      style={{marginTop:14}}
+                      style={{marginTop:14,color:'#fff'}}
                     >
                       {ctaLabel}
                     </a>
@@ -1861,12 +1861,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               : DEFAULT_SCHEDULE
                   .filter(e => new Date(e.date) >= now)
                   .map((e, i) => ({id: `default-${i}`, ...e}));
-            const projectFiltered = evProject === 'all' ? eventsToShow : eventsToShow.filter((e: any) => {
-              const t = (e.title || '').toLowerCase();
-              if (evProject === 'zorge') return t.includes('зорге') || t.includes('zorge');
-              if (evProject === 'silver') return t.includes('серебряный') || t.includes('silver') || t.includes('берз');
-              return true;
-            });
+            const projectFiltered = eventsToShow;
             const cutoff = evView === 'week'
               ? new Date(now.getTime() + 7 * 24 * 3600 * 1000)
               : new Date(now.getTime() + 30 * 24 * 3600 * 1000);
@@ -1881,34 +1876,19 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               <div className="sh-tag">Календарь событий</div>
               <h2>Ближайшие <em>мероприятия</em></h2>
             </div>
-            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4,flexWrap:'wrap'}}>
-              <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--bw)'}}>
-                {([['all','Все'],['zorge','Зорге 9'],['silver','Серебряный Бор']] as const).map(([val,label]) => (
-                  <button key={val} type="button" onClick={() => setEvProject(val)}
-                    style={{padding:'8px 14px',fontSize:11,background:evProject===val?'var(--gold)':'transparent',color:evProject===val?'#000':'var(--fg)',border:'none',borderLeft:val!=='all'?'1px solid var(--bw)':'none',cursor:'pointer',fontWeight:evProject===val?600:400,transition:'background 0.15s',whiteSpace:'nowrap'}}
-                  >{label}</button>
-                ))}
-              </div>
+            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4}}>
               <div style={{display:'flex',borderRadius:8,overflow:'hidden',border:'1px solid var(--bw)'}}>
                 <button
                   type="button"
                   onClick={() => setEvView('week')}
-                  style={{padding:'8px 16px',fontSize:11,background:evView==='week'?'var(--gold)':'transparent',color:evView==='week'?'#000':'var(--fg)',border:'none',cursor:'pointer',fontWeight:evView==='week'?600:400,transition:'background 0.15s'}}
+                  style={{padding:'8px 16px',fontSize:11,background:evView==='week'?'var(--gold)':'transparent',color:evView==='week'?'#fff':'var(--fg)',border:'none',cursor:'pointer',fontWeight:evView==='week'?600:400,transition:'background 0.15s'}}
                 >Неделя</button>
                 <button
                   type="button"
                   onClick={() => setEvView('month')}
-                  style={{padding:'8px 16px',fontSize:11,background:evView==='month'?'var(--gold)':'transparent',color:evView==='month'?'#000':'var(--fg)',border:'none',cursor:'pointer',fontWeight:evView==='month'?600:400,borderLeft:'1px solid var(--bw)',transition:'background 0.15s'}}
+                  style={{padding:'8px 16px',fontSize:11,background:evView==='month'?'var(--gold)':'transparent',color:evView==='month'?'#fff':'var(--fg)',border:'none',cursor:'pointer',fontWeight:evView==='month'?600:400,borderLeft:'1px solid var(--bw)',transition:'background 0.15s'}}
                 >Месяц</button>
               </div>
-              <button
-                type="button"
-                onClick={() => setCalendarOpen(true)}
-                className="btn-outline"
-                style={{padding:'10px 24px',fontSize:10,whiteSpace:'nowrap'}}
-              >
-                Все события &rarr;
-              </button>
             </div>
           </div>
           {(() => {
@@ -1937,8 +1917,11 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             const fmtTime = (dt: string) => new Date(dt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
             const projLabel = (title: string) => {
               const t = (title || '').toLowerCase();
-              if (t.includes('серебряный') || t.includes('берз')) return 'Сер. Бор';
-              if (t.includes('зорге') || t.includes('zorge')) return 'Зорге 9';
+              const hasZorge = t.includes('зорге') || t.includes('zorge');
+              const hasSilver = t.includes('серебряный') || t.includes('берз');
+              if (hasZorge && hasSilver) return 'Зорге 9 + Сер. Бор';
+              if (hasSilver) return 'Сер. Бор';
+              if (hasZorge) return 'Зорге 9';
               return title.replace('Брокер-тур:', '').trim().split('+')[0].trim();
             };
             const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -2131,11 +2114,15 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 <div className="sh-tag">Новости</div>
                 <h2>Новости</h2>
               </div>
-              <a href="https://stmichael.ru/news" target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'10px 24px',fontSize:10,marginBottom:4,whiteSpace:'nowrap'}}>
-                Все новости &rarr;
-              </a>
+              <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4}}>
+                <button type="button" aria-label="Назад" onClick={() => newsScrollRef.current?.scrollBy({left:-316,behavior:'smooth'})} style={{width:36,height:36,borderRadius:'50%',border:'1px solid var(--bw2)',background:'var(--bg)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:'var(--fg)',transition:'all .2s',flexShrink:0}} onMouseEnter={(e)=>(e.currentTarget.style.background='var(--gold-bg)')} onMouseLeave={(e)=>(e.currentTarget.style.background='var(--bg)')}>‹</button>
+                <button type="button" aria-label="Вперёд" onClick={() => newsScrollRef.current?.scrollBy({left:316,behavior:'smooth'})} style={{width:36,height:36,borderRadius:'50%',border:'1px solid var(--bw2)',background:'var(--bg)',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,color:'var(--fg)',transition:'all .2s',flexShrink:0}} onMouseEnter={(e)=>(e.currentTarget.style.background='var(--gold-bg)')} onMouseLeave={(e)=>(e.currentTarget.style.background='var(--bg)')}>›</button>
+                <a href="https://stmichael.ru/news" target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'10px 24px',fontSize:10,whiteSpace:'nowrap'}}>
+                  Все новости &rarr;
+                </a>
+              </div>
             </div>
-            <div className="news-scroll" style={{display:'flex',gap:16,overflowX:'auto',paddingBottom:8,scrollSnapType:'x mandatory',WebkitOverflowScrolling:'touch',msOverflowStyle:'none',scrollbarWidth:'none'} as React.CSSProperties}>
+            <div ref={newsScrollRef} className="news-scroll" style={{display:'flex',gap:16,overflowX:'auto',paddingBottom:8,scrollSnapType:'x mandatory',WebkitOverflowScrolling:'touch',msOverflowStyle:'none',scrollbarWidth:'none'} as React.CSSProperties}>
               {news.map((n: any) => (
                 <a key={n.id} href={n.url} target="_blank" rel="noopener noreferrer" className="news-card" style={{minWidth:300,flex:'0 0 300px',scrollSnapAlign:'start'}}>
                   {n.imageUrl && <div className="news-img" style={{backgroundImage:`url(${n.imageUrl})`}} />}
@@ -2178,19 +2165,18 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 return (
                   <div style={{display:'grid',gridTemplateColumns: list.length > 1 ? '1fr 1fr' : '1fr',gap:10}}>
                     {list.map((m: any, i: number) => (
-                      <div key={i} style={{padding:'14px 16px',background:'var(--white)',borderRadius:'var(--r-card)',border:'1px solid var(--gold-border)'}}>
-                        {/* Фото: m.photo из CMS; если нет — серый круг с инициалами */}
-                        <div style={{marginBottom:10}}>
+                      <div key={i} style={{padding:'12px 14px',background:'var(--white)',borderRadius:'var(--r-card)',border:'1px solid var(--gold-border)'}}>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:6}}>
+                          <div style={{fontSize:9,fontWeight:700,letterSpacing:2,textTransform:'uppercase',color:'var(--muted)'}}>Персональный контакт</div>
                           {m.photo ? (
                             // eslint-disable-next-line @next/next/no-img-element
-                            <img src={m.photo} alt={m.name} style={{width:52,height:52,borderRadius:'50%',objectFit:'cover',border:'2px solid var(--gold-border)'}} />
+                            <img src={m.photo} alt={m.name} style={{width:44,height:44,borderRadius:'50%',objectFit:'cover',border:'2px solid var(--gold-border)',flexShrink:0}} />
                           ) : (
-                            <div style={{width:52,height:52,borderRadius:'50%',background:'var(--bg)',border:'2px solid var(--bw)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,fontWeight:700,color:'var(--muted)',letterSpacing:0.5}}>
+                            <div style={{width:44,height:44,borderRadius:'50%',background:'var(--bg)',border:'2px solid var(--bw)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14,fontWeight:700,color:'var(--muted)',letterSpacing:0.5,flexShrink:0}}>
                               {m.name ? m.name.split(' ').slice(0,2).map((n: string) => n[0]).join('') : '?'}
                             </div>
                           )}
                         </div>
-                        <div style={{fontSize:9,fontWeight:700,letterSpacing:2,textTransform:'uppercase',color:'var(--muted)',marginBottom:6}}>Персональный контакт</div>
                         <div style={{fontSize:15,fontWeight:600,color:'var(--black)',marginBottom:2}}>{m.name}</div>
                         {m.role && <div style={{fontSize:11,color:'var(--muted)',marginBottom:6,lineHeight:1.5}}>{m.role}</div>}
                         {m.phone && <div style={{fontSize:13}}><a href={`tel:${m.phone.replace(/\D/g,'')}`} style={{color:'var(--black)',fontWeight:600}}>{m.phone}</a></div>}
