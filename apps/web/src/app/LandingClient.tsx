@@ -1472,7 +1472,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           {burgerOpen && (
             <div className="h-burger-menu" onClick={() => setBurgerOpen(false)}>
               <a href="#projects">Проекты</a>
-              <a href="#commission">Комиссия</a>
               <a href="#events">Мероприятия</a>
               <a href="#cooperation">Документы</a>
               <a href="#materials">Материалы</a>
@@ -1486,27 +1485,58 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             2) Двухколонный Hero: слева тег+H1+кнопки, справа описание
             3) ПОД ним — слайдер с картинками
             4) ПОТОМ — stats band со скруглёнными углами */}
-        <div className="hero hero-compact">
-          <div className="hero-tag"><span>{resolveLandingCopy(hero.tag, activePolicies)}</span></div>
+        <div className="hero hero-compact" style={{paddingTop:24}}>
           <div className="hero-2col">
-            <h1><strong>{renderAccent(
-              resolveLandingCopy(hero.title, activePolicies),
-              resolveLandingCopy(hero.titleAccent, activePolicies),
-            )}</strong></h1>
-            <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
-          </div>
-          <div className="hero-btns">
-            <button className="btn-gold btn-lg" onClick={handleRegister}>Стать партнёром</button>
-            <button
-              type="button"
-              className="btn-outline btn-lg"
-              onClick={() => setContactModal({
-                open: true,
-                source: 'broker-tour',
-                title: 'Запись на брокер-тур',
-                defaultMessage: 'Хочу записаться на ближайший брокер-тур',
-              })}
-            >Записаться на брокер-тур</button>
+            <div>
+              <h1><strong>{renderAccent(
+                resolveLandingCopy(hero.title, activePolicies),
+                resolveLandingCopy(hero.titleAccent, activePolicies),
+              )}</strong></h1>
+              <div className="hero-btns" style={{marginTop:24}}>
+                <button className="btn-gold btn-lg" style={{borderRadius:10}} onClick={handleRegister}>Стать партнёром</button>
+                <button
+                  type="button"
+                  className="btn-outline btn-lg"
+                  style={{borderRadius:10}}
+                  onClick={() => setContactModal({
+                    open: true,
+                    source: 'broker-tour',
+                    title: 'Запись на брокер-тур',
+                    defaultMessage: 'Хочу записаться на ближайший брокер-тур',
+                  })}
+                >Записаться на брокер-тур</button>
+                <button
+                  type="button"
+                  className="btn-outline btn-lg"
+                  style={{borderRadius:10}}
+                  onClick={() => setContactModal({
+                    open: true,
+                    source: 'meeting',
+                    title: 'Записаться на встречу',
+                    defaultMessage: 'Хочу записаться на встречу',
+                  })}
+                >Записаться на встречу</button>
+              </div>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:16}}>
+              <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
+              <div style={{padding:'20px 24px',background:'var(--bg)',borderRadius:12,border:'1px solid var(--bw)'}}>
+                <div style={{fontSize:10,fontWeight:700,letterSpacing:2,textTransform:'uppercase',color:'var(--gold)',marginBottom:14}}>Условия вознаграждения</div>
+                <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                  {[
+                    {n:'до 5%', l:'Комиссия за сделку'},
+                    {n:'7 дней', l:'Срок выплаты вознаграждения'},
+                    {n:'30 дней', l:'Срок уникальности клиента'},
+                    {n:'1%', l:'Брокерская скидка вашему клиенту'},
+                  ].map((item) => (
+                    <div key={item.n} style={{display:'flex',alignItems:'center',gap:12}}>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--gold)',minWidth:52}}>{item.n}</div>
+                      <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.3}}>{item.l}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1553,29 +1583,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             <h2>{renderAccent(projectsSection.title, projectsSection.titleAccent)}</h2>
             {projectsSection.subtitle && <p className="sh-sub">{projectsSection.subtitle}</p>}
           </div>
-          {/* Табы "Выбрать квартиру / апартамент" */}
-          <div style={{display:'flex',gap:8,marginBottom:24,flexWrap:'wrap'}}>
-            {[
-              { key: 'all', label: 'Все проекты' },
-              { key: 'flat', label: 'Выбрать квартиру' },
-              { key: 'apartments', label: 'Выбрать апартамент' },
-            ].map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => setProjectTab(tab.key as 'all' | 'flat' | 'apartments')}
-                style={{
-                  padding:'9px 20px',fontSize:11,fontWeight:700,letterSpacing:1,textTransform:'uppercase',
-                  borderRadius:999,border:'1.5px solid',cursor:'pointer',transition:'all .18s',
-                  background: projectTab === tab.key ? 'var(--gold)' : 'transparent',
-                  borderColor: projectTab === tab.key ? 'var(--gold)' : 'var(--bw)',
-                  color: projectTab === tab.key ? '#fff' : 'var(--black)',
-                }}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
           <div className="proj-grid">
             {projects
               .filter((p: any) => {
@@ -1601,8 +1608,11 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 progressive: 'range',
                 fallback: '',
               });
-              // Статус-бейдж: «Дом сдан» если readyYear в прошлом, иначе «Сдача: X кв. Y г.»
+              // Статус-бейдж: фиксированные значения по slug
               const statusBadge = (() => {
+                const slug = (p.slug || '').toLowerCase();
+                if (slug.includes('zorge')) return 'Дом сдан';
+                if (slug.includes('silver') || slug.includes('бор') || slug.includes('serebr')) return 'Сдача: 2 кв. 2027';
                 if (!p.readyYear) return null;
                 const curY = new Date().getFullYear();
                 const curQ = Math.floor(new Date().getMonth() / 3) + 1;
@@ -1610,6 +1620,20 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 const lq = p.readyQuarter ? Number(p.readyQuarter) : 4;
                 const done = ly < curY || (ly === curY && lq < curQ);
                 return done ? 'Дом сдан' : `Сдача: ${p.readyQuarter ? `${p.readyQuarter} кв. ` : ''}${p.readyYear} г.`;
+              })();
+              // Этажи по slug
+              const floorsDisplay = (() => {
+                const slug = (p.slug || '').toLowerCase();
+                if (slug.includes('zorge')) return '23';
+                if (slug.includes('silver') || slug.includes('serebr')) return '16–25';
+                return p.floors ? String(p.floors) : null;
+              })();
+              // CTA текст по slug
+              const ctaLabel = (() => {
+                const slug = (p.slug || '').toLowerCase();
+                if (slug.includes('zorge')) return 'Выбрать апартамент';
+                if (slug.includes('silver') || slug.includes('serebr')) return 'Выбрать квартиру';
+                return p.ctaText || 'Смотреть каталог';
               })();
 
               return (
@@ -1623,10 +1647,9 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 )}
                 <div className={p.imageUrl ? 'proj-card-inner' : undefined}>
                   <div className="proj-card-head">
-                    {!p.imageUrl && (
+                    {!p.imageUrl && statusBadge && (
                       <div className="proj-status-row">
-                        {p.tag && <div className="proj-tag">{p.tag}</div>}
-                        {statusBadge && <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',color:'var(--gold)'}}>{statusBadge}</span>}
+                        <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',color:'var(--gold)'}}>{statusBadge}</span>
                       </div>
                     )}
                     <div className="proj-name"><strong>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</strong></div>
@@ -1651,9 +1674,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                         return <div><span style={{color:'var(--muted2)'}}>Сдача:</span> <strong style={{color:'var(--black)'}}>{display}</strong></div>;
                       })()}
                       {p.totalUnits && <div><span style={{color:'var(--muted2)'}}>Лотов:</span> <strong style={{color:'var(--black)'}}>{p.totalUnits}</strong></div>}
-                      {commissionLabel && (
-                        <div><span style={{color:'var(--muted2)'}}>Комиссия:</span> <strong style={{color:'var(--gold)'}}>{commissionLabel}</strong></div>
-                      )}
+                      {floorsDisplay && <div><span style={{color:'var(--muted2)'}}>Этажи:</span> <strong style={{color:'var(--black)'}}>{floorsDisplay}</strong></div>}
                     </div>
                   )}
 
@@ -1670,7 +1691,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                       </a>
                     )}
                   </div>
-                  {p.ctaHref && (
+                  {p.ctaHref ? (
                     <a
                       href={p.ctaHref}
                       target="_blank"
@@ -1679,11 +1700,10 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                       onClick={(e) => e.stopPropagation()}
                       style={{marginTop:14}}
                     >
-                      {p.ctaText || 'Смотреть каталог'}
+                      {ctaLabel}
                     </a>
-                  )}
-                  {!p.ctaHref && (
-                    <div className="proj-link" style={{marginTop:14}}>{p.ctaText || 'Смотреть каталог'} &rarr;</div>
+                  ) : (
+                    <div className="proj-link" style={{marginTop:14}}>{ctaLabel} &rarr;</div>
                   )}
                 </div>
               </div>
@@ -1693,10 +1713,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </div>
         </section>
 
-        {/* PROMO SLIDER — full-width стиль с картинкой во весь блок.
-            Если у промо нет imageUrl — fallback на дефолтное здание Зорге 9
-            (правка 2026-05-07: каждый слайд должен быть с картинкой). */}
-        {promos.length > 0 && (
+        {false && promos.length > 0 && (
           <section id="promos" style={{padding:'40px 60px'}}>
             <div className="hero-slides" style={{height:340}}>
               {promos.map((p, i) => {
@@ -1765,12 +1782,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </section>
         )}
 
-        <hr className="sep" />
-
-        {/* COMMISSION
-            Числовые условия, шкала и рассрочка берутся только из активной
-            commission-policy. CMS хранит лишь редакционные тексты без ставок. */}
-        <section id="commission">
+        {false && (<section id="commission" style={{display:'none'}}>
           <div className="sh">
             <div className="sh-tag">{resolveLandingCopy(commission.tag, activePolicies)}</div>
             <h2>{renderAccent(
@@ -1834,11 +1846,37 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             </div>
           </div>
         </section>
-
-        <hr className="sep" />
+        )}
 
         {/* EVENTS */}
         <section id="events" style={{background:'var(--bg)'}}>
+          {(() => {
+            // Актуальное расписание брокер-туров (из расписания 2026-08-13)
+            const DEFAULT_SCHEDULE: Array<{date: string; title: string; location: string}> = [
+              {date:'2026-08-13T11:00:00',title:'Брокер-тур: Квартал Серебряный Бор',location:'Москва, ул. Берзарина, 37'},
+              {date:'2026-08-13T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-14T11:00:00',title:'Брокер-тур: Квартал Серебряный Бор',location:'Москва, ул. Берзарина, 37'},
+              {date:'2026-08-14T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-17T11:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-17T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-18T11:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-18T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-19T11:00:00',title:'Брокер-тур: Квартал Серебряный Бор',location:'Москва, ул. Берзарина, 37'},
+              {date:'2026-08-19T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-20T11:00:00',title:'Брокер-тур: Квартал Серебряный Бор',location:'Москва, ул. Берзарина, 37'},
+              {date:'2026-08-20T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+              {date:'2026-08-21T11:00:00',title:'Брокер-тур: Квартал Серебряный Бор',location:'Москва, ул. Берзарина, 37'},
+              {date:'2026-08-21T15:00:00',title:'Брокер-тур: Зорге 9 + Серебряный Бор',location:'Москва'},
+            ];
+            const now = new Date();
+            const eventsToShow = events.length > 0
+              ? events
+              : DEFAULT_SCHEDULE
+                  .filter(e => new Date(e.date) >= now)
+                  .map((e, i) => ({id: `default-${i}`, ...e}));
+            const upcomingEvents = eventsToShow.filter(e => new Date(e.date) >= now).slice(0, 4);
+            return (
+          <>
           <div className="sh ev-head-row" style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',gap:24}}>
             <div>
               <div className="sh-tag">Календарь событий</div>
@@ -1853,7 +1891,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               Все события &rarr;
             </button>
           </div>
-          {events.length === 0 ? (
+          {upcomingEvents.length === 0 ? (
             <div style={{textAlign:'center',padding:'24px 0',display:'flex',flexDirection:'column',alignItems:'center',gap:14}}>
               <div style={{color:'var(--muted)',fontSize:14}}>В ближайшее время мероприятий не запланировано</div>
               <button
@@ -1864,7 +1902,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             </div>
           ) : (
             <div className="ev-grid">
-              {events.map((ev: any) => {
+              {upcomingEvents.map((ev: any) => {
                 const d = formatEventDate(ev.date);
                 const eventDate = new Date(ev.date).toLocaleString('ru-RU', { day: '2-digit', month: 'long', hour: '2-digit', minute: '2-digit' });
                 return (
@@ -1883,17 +1921,15 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                     <div className="ev-info">
                       <div className="ev-title">{ev.title}</div>
                       <div className="ev-meta">{formatEventMeta(ev.date, ev.location, ev.isOnline)}</div>
-                      {ev.description && (
-                        <div className="ev-desc" style={{marginTop:6,fontSize:12,color:'var(--muted)',lineHeight:1.5,whiteSpace:'pre-wrap'}}>
-                          {ev.description}
-                        </div>
-                      )}
                     </div>
                   </div>
                 );
               })}
             </div>
           )}
+          </>
+            );
+          })()}
         </section>
 
         <hr className="sep" />
