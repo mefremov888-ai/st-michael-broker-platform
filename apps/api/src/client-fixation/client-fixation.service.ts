@@ -1193,12 +1193,9 @@ export class ClientFixationService {
       select: { id: true, fullName: true, phone: true, email: true, isCoordinator: true },
     });
     if (existingByPhone) {
-      try {
-        await this.ensureBrokerAmoContact(existingByPhone.id);
-      } catch (e: any) {
+      this.ensureBrokerAmoContact(existingByPhone.id).catch((e: any) => {
         console.error('[createBrokerByCreator] existing broker amo sync failed:', e?.message || e);
-        throw new ServiceUnavailableException('Не удалось связать брокера с amoCRM');
-      }
+      });
       return { broker: existingByPhone, created: false };
     }
     if (data.email) {
@@ -1207,12 +1204,9 @@ export class ClientFixationService {
         select: { id: true, fullName: true, phone: true, email: true, isCoordinator: true },
       });
       if (existingByEmail) {
-        try {
-          await this.ensureBrokerAmoContact(existingByEmail.id);
-        } catch (e: any) {
+        this.ensureBrokerAmoContact(existingByEmail.id).catch((e: any) => {
           console.error('[createBrokerByCreator] existing broker amo sync failed:', e?.message || e);
-          throw new ServiceUnavailableException('Не удалось связать брокера с amoCRM');
-        }
+        });
         return { broker: existingByEmail, created: false };
       }
     }
