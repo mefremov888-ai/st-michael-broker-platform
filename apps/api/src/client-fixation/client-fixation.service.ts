@@ -81,11 +81,9 @@ export class ClientFixationService {
     try {
       responsibleBroker = await this.ensureBrokerAmoContact(responsibleBroker.id);
     } catch (e: any) {
-      console.error('[fixClient] responsible broker amo sync failed:', e?.message || e);
-      throw new ServiceUnavailableException({
-        message: 'Не удалось связать брокера с amoCRM. Повторите фиксацию через несколько минут.',
-        code: 'BROKER_AMO_CONTACT_UNAVAILABLE',
-      });
+      console.error('[fixClient] responsible broker amo sync failed (non-blocking):', e?.message || e);
+      // AMO sync failure is non-blocking: the fixation is saved to DB and the
+      // scheduler retries failed leads via handleAmoFailedRetry.
     }
 
     // 2026-06-09: блок полей формы фиксации, общий для всех 4 веток create.
