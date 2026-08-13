@@ -46,8 +46,8 @@ export class AdminService {
     return { items: [], total: 0 };
   }
 
-  recheckUniquenessControl(clientId: string, actorId: string) {
-    return this.amoReconciliation.recheckClient(clientId, 'MANUAL', actorId);
+  recheckUniquenessControl(_clientId: string, _actorId: string) {
+    return { ok: false, message: 'Not available' };
   }
 
   // ─── Mailings (broadcasts) ─────────────────────────────────
