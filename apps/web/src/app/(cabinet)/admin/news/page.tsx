@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { api, apiGet } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Newspaper, Plus, Trash2, Save, X, ExternalLink } from 'lucide-react';
+import { Newspaper, Plus, Trash2, Save, X, ExternalLink, RefreshCw } from 'lucide-react';
 
 type NewsItem = {
   id: string;
@@ -38,7 +38,24 @@ export default function AdminNewsPage() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<Partial<NewsItem> | null>(null);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [msg, setMsg] = useState('');
+
+  const syncFromStm = async () => {
+    setSyncing(true);
+    setMsg('');
+    try {
+      const res = await api('/admin/cms/news/sync-stm', { method: 'POST' });
+      const data = res as any;
+      setMsg(`Синхронизировано: добавлено ${data?.created ?? 0}, обновлено ${data?.updated ?? 0}`);
+      load();
+      setTimeout(() => setMsg(''), 4000);
+    } catch (e: any) {
+      setMsg(e.message || 'Ошибка синхронизации');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   if (broker && broker.role !== 'ADMIN' && broker.role !== 'MANAGER') {
     return <div className="card">Доступ запрещён</div>;
@@ -102,18 +119,28 @@ export default function AdminNewsPage() {
         <Newspaper className="w-7 h-7 text-accent" /> Лендинг — Новости
       </h1>
       <p className="text-sm text-text-muted mb-4">
-        Карточки публикаций (РБК / Forbes / Ведомости и т.п.) внизу лендинга.
+        Новости внизу лендинга. Синхронизируются с stmichael.ru/news (ежедневно в 08:00) или вручную кнопкой ниже.
       </p>
 
       {msg && <div className="mb-4 p-3 bg-info/20 text-info rounded text-sm">{msg}</div>}
 
       {canEdit && !editing && (
-        <button
-          className="btn btn-primary mb-4 inline-flex items-center gap-2"
-          onClick={() => setEditing({ ...empty })}
-        >
-          <Plus className="w-4 h-4" /> Добавить новость
-        </button>
+        <div className="flex gap-3 mb-4 flex-wrap">
+          <button
+            className="btn btn-primary inline-flex items-center gap-2"
+            onClick={() => setEditing({ ...empty })}
+          >
+            <Plus className="w-4 h-4" /> Добавить новость
+          </button>
+          <button
+            className="btn btn-secondary inline-flex items-center gap-2"
+            onClick={syncFromStm}
+            disabled={syncing}
+          >
+            <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+            {syncing ? 'Синхронизация...' : 'Синхронизировать с stmichael.ru'}
+          </button>
+        </div>
       )}
 
       {editing && (
