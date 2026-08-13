@@ -1396,8 +1396,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 .sh{margin-bottom:48px}.sh-center{text-align:center}.sh-tag{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold);margin-bottom:14px}.sh h2{font-size:var(--fs-h2);font-weight:300;line-height:1.1;letter-spacing:-0.5px}.sh h2 strong{font-weight:700}.sh h2 em{font-style:normal;color:var(--gold);font-weight:700}.sh-sub{color:var(--muted);font-size:15px;max-width:560px;margin-top:14px;line-height:1.7;font-weight:400}.sh-center .sh-sub{margin-left:auto;margin-right:auto}
 /* КБ7 (2026-05-26): grid-auto-rows:1fr выравнивает карточки по высоте
    самой высокой — Зорге и Серебряный Бор стоят одинаковыми. */
-.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;align-items:stretch}.proj-grid>div{height:100%}.proj-card{border-radius:var(--r-card);padding:36px 32px;display:flex;flex-direction:column;justify-content:flex-start;min-height:240px;height:100%;transition:all .3s ease;cursor:pointer;background:var(--bg)}.proj-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.06)}.proj-card-head{flex:0 0 auto;align-self:stretch}.proj-status-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;min-height:18px;margin:0 0 10px}.proj-tag{font-size:9px;font-weight:700;line-height:1;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);margin:0}.proj-name{font-size:28px;font-weight:300;margin-bottom:8px;letter-spacing:-0.3px}.proj-name strong{font-weight:700}.proj-info{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.7}.proj-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11px;color:var(--muted);margin-top:8px;margin-bottom:12px}.proj-link{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);display:inline-flex;align-items:center;gap:6px;margin-top:auto}
-.comm-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:28px;align-items:start}.comm-table{border-radius:var(--r-card);overflow:hidden;background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,0.04)}.ct-head{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;background:var(--bg);gap:8px}.ct-head span{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}.ct-row{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;border-top:1px solid var(--bw);gap:8px;transition:background var(--t)}.ct-row:hover{background:var(--gold-bg)}.ct-level{font-size:14px;font-weight:500}.ct-range{font-size:13px;color:var(--muted)}.ct-rate{font-size:14px;font-weight:600;text-align:right}
+.proj-grid{display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:20px;align-items:stretch}.proj-grid>div{height:100%}.proj-card{border-radius:var(--r-card);padding:36px 32px;display:flex;flex-direction:column;justify-content:flex-start;min-height:240px;height:100%;transition:all .3s ease;cursor:pointer;background:var(--bg);overflow:hidden}.proj-card.has-img{padding:0}.proj-card.has-img .proj-card-inner{padding:24px 28px 28px;flex:1;display:flex;flex-direction:column}.proj-card:hover{transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,0.06)}.proj-img-wrap{position:relative;height:200px;flex-shrink:0}.proj-img-bg{width:100%;height:100%;background-size:cover;background-position:center;background-color:var(--bg2)}.proj-img-badge{position:absolute;top:14px;left:14px;background:rgba(0,0,0,0.72);color:#fff;font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:5px 12px;border-radius:20px;backdrop-filter:blur(4px)}.proj-card-head{flex:0 0 auto;align-self:stretch}.proj-status-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;min-height:18px;margin:0 0 10px}.proj-tag{font-size:9px;font-weight:700;line-height:1;letter-spacing:2.5px;text-transform:uppercase;color:var(--gold);margin:0}.proj-name{font-size:28px;font-weight:300;margin-bottom:8px;letter-spacing:-0.3px}.proj-name strong{font-weight:700}.proj-info{font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.7}.proj-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:11px;color:var(--muted);margin-top:8px;margin-bottom:12px}.proj-link{font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);display:inline-flex;align-items:center;gap:6px;margin-top:auto}.proj-cta-btn{display:flex;align-items:center;justify-content:center;padding:12px 20px;background:var(--gold);color:#fff;font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;border-radius:var(--r-tag);text-decoration:none;transition:opacity .2s;margin-top:auto}.proj-cta-btn:hover{opacity:0.88}
+.comm-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}.comm-table{border-radius:var(--r-card);overflow:hidden;background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,0.04)}.ct-head{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;background:var(--bg);gap:8px}.ct-head span{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}.ct-row{display:grid;grid-template-columns:1fr 1.2fr 0.8fr;padding:14px 22px;border-top:1px solid var(--bw);gap:8px;transition:background var(--t)}.ct-row:hover{background:var(--gold-bg)}.ct-level{font-size:14px;font-weight:500}.ct-range{font-size:13px;color:var(--muted)}.ct-rate{font-size:14px;font-weight:600;text-align:right}
 .comm-info{display:flex;flex-direction:column;gap:10px}.comm-card{padding:18px 22px;background:var(--bg);border-radius:var(--r-card);transition:background var(--t)}.comm-card:hover{background:var(--gold-bg)}.comm-card-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);margin-bottom:8px}.comm-card p{font-size:13px;color:var(--light);line-height:1.6;font-weight:400;margin:0}
 .s-adv{background:var(--black);color:var(--white);padding:64px 60px;position:relative;overflow:hidden}.s-adv .sh{margin-bottom:32px}.s-adv .sh-tag{color:var(--gold)}.s-adv h2{color:var(--white)}.s-adv h2 em{color:var(--gold)}.adv-bg-glow{position:absolute;inset:0;background:radial-gradient(circle at 20% 30%,rgba(180,147,111,0.18),transparent 45%),radial-gradient(circle at 85% 80%,rgba(180,147,111,0.12),transparent 50%);pointer-events:none;z-index:0}.s-adv .sh,.s-adv .adv-grid{position:relative;z-index:1}/* 2026-05-28: grid-auto-rows:1fr выравнивает строки по высоте.
    .adv-card как flex column + height:100% растягивает карточку на
@@ -1405,7 +1405,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 .adv-grid{display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:1fr;gap:1px;background:rgba(255,255,255,0.08);border-radius:var(--r-card);overflow:hidden}.adv-card{padding:24px 24px;background:var(--black);display:flex;flex-direction:column;height:100%}.adv-icon{width:36px;height:36px;border-radius:50%;border:1px solid rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center;margin-bottom:12px}.adv-title{font-size:15px;font-weight:600;color:var(--white);margin-bottom:6px}.adv-desc{font-size:12px;color:rgba(255,255,255,0.5);line-height:1.55;font-weight:300}
 .s-comm{background:var(--gold);padding:80px 60px;position:relative;overflow:hidden}.s-comm .sh-tag{color:rgba(255,255,255,0.6)}.s-comm h2{color:var(--white)}.comm-content{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:28px}.comm-desc{font-size:15px;color:rgba(255,255,255,0.8);line-height:1.8;font-weight:300;margin-bottom:24px}.comm-list{display:flex;flex-direction:column;gap:10px}.comm-list-item{display:flex;align-items:flex-start;gap:10px;font-size:14px;color:rgba(255,255,255,0.9)}.comm-list-dot{width:6px;height:6px;border-radius:50%;background:var(--white);flex-shrink:0;margin-top:7px}
 .s-cta{text-align:center;padding:100px 60px}
-.news-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.news-card{display:flex;flex-direction:column;border-radius:var(--r-card);overflow:hidden;background:var(--bg);transition:all var(--t);text-decoration:none;color:inherit;box-shadow:0 1px 2px rgba(0,0,0,0.04)}.news-card:hover{transform:translateY(-3px);box-shadow:0 12px 28px rgba(0,0,0,0.08)}.news-img{height:160px;background-size:cover;background-position:center;background-color:var(--bg2)}.news-body{padding:18px 20px;display:flex;flex-direction:column;gap:6px;flex:1}.news-source{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold)}.news-title{font-size:14px;font-weight:500;line-height:1.45}.news-meta{font-size:11px;color:var(--muted);margin-top:auto;padding-top:8px}
+.news-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.news-card{display:flex;flex-direction:column;border-radius:var(--r-card);overflow:hidden;background:var(--bg);transition:all var(--t);text-decoration:none;color:inherit;box-shadow:0 1px 2px rgba(0,0,0,0.04)}.news-card:hover{transform:translateY(-3px);box-shadow:0 12px 28px rgba(0,0,0,0.08)}.news-img{height:200px;background-size:cover;background-position:center;background-color:var(--bg2)}.news-body{padding:14px 18px;display:flex;flex-direction:column;gap:5px;flex:1}.news-source{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold)}.news-title{font-size:13px;font-weight:500;line-height:1.45}.news-meta{font-size:11px;color:var(--muted);margin-top:auto;padding-top:6px}
 .lp footer{padding:40px 60px;border-top:1px solid var(--bw);background:var(--bg)}.foot-grid{display:grid;grid-template-columns:1.5fr 1fr 1fr 1fr;gap:40px;margin-bottom:28px}.foot-logo{font-size:14px;font-weight:700;letter-spacing:2.5px;margin-bottom:2px}.foot-logo-sub{font-size:10px;color:var(--muted);letter-spacing:1px}.foot-col-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--gold);margin-bottom:12px}.foot-link{display:block;font-size:13px;color:var(--muted);margin-bottom:7px;transition:color .2s}.foot-link:hover{color:var(--black)}.foot-bottom{display:flex;justify-content:space-between;align-items:center;padding-top:18px;border-top:1px solid var(--bw);font-size:12px;color:var(--muted2)}
 .float-btn{position:fixed;bottom:28px;right:28px;z-index:100;padding:14px 28px;background:var(--black);color:var(--white);font-size:12px;font-weight:700;letter-spacing:1px;border-radius:50px;cursor:pointer;border:none;box-shadow:0 4px 20px rgba(0,0,0,0.2);transition:all .25s}.float-btn:hover{transform:translateY(-2px);box-shadow:0 8px 32px rgba(0,0,0,0.3)}
 .ev-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.ev-card{padding:24px 26px;border-radius:var(--r-card);display:flex;align-items:center;gap:20px;cursor:pointer;transition:all var(--t);background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,0.04)}.ev-card:hover{background:var(--gold-bg);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.06)}.ev-date{width:54px;height:54px;border-radius:var(--r-tag);background:var(--white);display:flex;flex-direction:column;align-items:center;justify-content:center;flex-shrink:0}.ev-day{font-size:22px;font-weight:700;line-height:1}.ev-mon{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}.ev-info{flex:1}.ev-title{font-size:15px;font-weight:500;margin-bottom:3px}.ev-meta{font-size:12px;color:var(--muted)}
@@ -1601,64 +1601,89 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 progressive: 'range',
                 fallback: '',
               });
+              // Статус-бейдж: «Дом сдан» если readyYear в прошлом, иначе «Сдача: X кв. Y г.»
+              const statusBadge = (() => {
+                if (!p.readyYear) return null;
+                const curY = new Date().getFullYear();
+                const curQ = Math.floor(new Date().getMonth() / 3) + 1;
+                const ly = Number(p.readyYear);
+                const lq = p.readyQuarter ? Number(p.readyQuarter) : 4;
+                const done = ly < curY || (ly === curY && lq < curQ);
+                return done ? 'Дом сдан' : `Сдача: ${p.readyQuarter ? `${p.readyQuarter} кв. ` : ''}${p.readyYear} г.`;
+              })();
+
               return (
               <Reveal key={p.id} delay={i * 120}>
-              <div className="proj-card" onClick={() => handleProjectClick(p)}>
-                {/* Статус и название собраны в отдельную верхнюю секцию:
-                    обе карточки начинаются строго на одной горизонтали,
-                    независимо от количества характеристик ниже. */}
-                <div className="proj-card-head">
-                  {/* Правка КБ5 (2026-05-25): бейдж «Готовый» для проектов, сдача
-                      которых уже наступила (readyYear ≤ текущий год). */}
-                  <div className="proj-status-row">
-                    {p.tag && <div className="proj-tag">{p.tag}</div>}
-                    {p.readyYear && Number(p.readyYear) <= new Date().getFullYear() && (
-                      <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',color:'#fff',background:'var(--gold)',padding:'4px 10px',borderRadius:999}}>Готовый</span>
-                    )}
-                  </div>
-                  {/* Bug fix 2026-06-02: subtitle тоже жирным — иначе «Квартал»
-                      был жирный, а «Серебряный Бор» — нет, визуально некрасиво. */}
-                  <div className="proj-name"><strong>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</strong></div>
-                </div>
-                {p.description && (
-                  <div className="proj-info">
-                    {resolveLandingCopy(p.description, activePolicies, p.description, projectKey || undefined)}
+              <div className={`proj-card${p.imageUrl ? ' has-img' : ''}`} onClick={() => handleProjectClick(p)}>
+                {p.imageUrl && (
+                  <div className="proj-img-wrap">
+                    <div className="proj-img-bg" style={{backgroundImage:`url(${p.imageUrl})`}} />
+                    {statusBadge && <div className="proj-img-badge">{statusBadge}</div>}
                   </div>
                 )}
+                <div className={p.imageUrl ? 'proj-card-inner' : undefined}>
+                  <div className="proj-card-head">
+                    {!p.imageUrl && (
+                      <div className="proj-status-row">
+                        {p.tag && <div className="proj-tag">{p.tag}</div>}
+                        {statusBadge && <span style={{fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:'uppercase',color:'var(--gold)'}}>{statusBadge}</span>}
+                      </div>
+                    )}
+                    <div className="proj-name"><strong>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</strong></div>
+                  </div>
+                  {p.description && (
+                    <div className="proj-info">
+                      {resolveLandingCopy(p.description, activePolicies, p.description, projectKey || undefined)}
+                    </div>
+                  )}
 
-                {(p.classType || p.address || p.readyYear || p.totalUnits || projectPolicy) && (
-                  <div className="proj-meta">
-                    {p.classType && <div><span style={{color:'var(--muted2)'}}>Класс:</span> <strong style={{color:'var(--black)'}}>{p.classType}</strong></div>}
-                    {p.address && <div><span style={{color:'var(--muted2)'}}>Адрес:</span> <strong style={{color:'var(--black)'}}>{p.address}</strong></div>}
-                    {p.readyYear && (() => {
-                      // КБ6: «Сдан» если дата сдачи в прошлом
-                      const curY = new Date().getFullYear();
-                      const curQ = Math.floor(new Date().getMonth() / 3) + 1;
-                      const ly = Number(p.readyYear);
-                      const lq = p.readyQuarter ? Number(p.readyQuarter) : 4;
-                      const done = ly < curY || (ly === curY && lq < curQ);
-                      const display = done ? 'Сдан' : `${p.readyQuarter ? `${p.readyQuarter} кв. ` : ''}${p.readyYear}`;
-                      return <div><span style={{color:'var(--muted2)'}}>Сдача:</span> <strong style={{color:'var(--black)'}}>{display}</strong></div>;
-                    })()}
-                    {p.totalUnits && <div><span style={{color:'var(--muted2)'}}>Лотов:</span> <strong style={{color:'var(--black)'}}>{p.totalUnits}</strong></div>}
-                    {commissionLabel && (
-                      <div><span style={{color:'var(--muted2)'}}>Комиссия:</span> <strong style={{color:'var(--gold)'}}>{commissionLabel}</strong></div>
+                  {(p.classType || p.address || p.readyYear || p.totalUnits || projectPolicy) && (
+                    <div className="proj-meta">
+                      {p.classType && <div><span style={{color:'var(--muted2)'}}>Класс:</span> <strong style={{color:'var(--black)'}}>{p.classType}</strong></div>}
+                      {p.address && <div><span style={{color:'var(--muted2)'}}>Адрес:</span> <strong style={{color:'var(--black)'}}>{p.address}</strong></div>}
+                      {!p.imageUrl && p.readyYear && (() => {
+                        const curY = new Date().getFullYear();
+                        const curQ = Math.floor(new Date().getMonth() / 3) + 1;
+                        const ly = Number(p.readyYear);
+                        const lq = p.readyQuarter ? Number(p.readyQuarter) : 4;
+                        const done = ly < curY || (ly === curY && lq < curQ);
+                        const display = done ? 'Сдан' : `${p.readyQuarter ? `${p.readyQuarter} кв. ` : ''}${p.readyYear}`;
+                        return <div><span style={{color:'var(--muted2)'}}>Сдача:</span> <strong style={{color:'var(--black)'}}>{display}</strong></div>;
+                      })()}
+                      {p.totalUnits && <div><span style={{color:'var(--muted2)'}}>Лотов:</span> <strong style={{color:'var(--black)'}}>{p.totalUnits}</strong></div>}
+                      {commissionLabel && (
+                        <div><span style={{color:'var(--muted2)'}}>Комиссия:</span> <strong style={{color:'var(--gold)'}}>{commissionLabel}</strong></div>
+                      )}
+                    </div>
+                  )}
+
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:'auto',gap:8,paddingTop:8}}>
+                    {detailUrl && (
+                      <a
+                        href={detailUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{fontSize:11,color:'var(--muted)',textDecoration:'underline',whiteSpace:'nowrap'}}
+                      >
+                        Подробнее →
+                      </a>
                     )}
                   </div>
-                )}
-
-                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:'auto',gap:8}}>
-                  <div className="proj-link">{p.ctaText || 'Смотреть каталог'} &rarr;</div>
-                  {detailUrl && (
+                  {p.ctaHref && (
                     <a
-                      href={detailUrl}
+                      href={p.ctaHref}
                       target="_blank"
                       rel="noopener noreferrer"
+                      className="proj-cta-btn"
                       onClick={(e) => e.stopPropagation()}
-                      style={{fontSize:11,color:'var(--muted)',textDecoration:'underline',whiteSpace:'nowrap'}}
+                      style={{marginTop:14}}
                     >
-                      Подробнее →
+                      {p.ctaText || 'Смотреть каталог'}
                     </a>
+                  )}
+                  {!p.ctaHref && (
+                    <div className="proj-link" style={{marginTop:14}}>{p.ctaText || 'Смотреть каталог'} &rarr;</div>
                   )}
                 </div>
               </div>
@@ -1875,12 +1900,20 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
 
         {/* HOW TO START — редактируется через /admin/content вкладка "Как начать" */}
         <section id="how-to-start">
-          <div className="sh sh-center">
-            <div className="sh-tag">{howto.tag}</div>
-            <h2>{renderAccent(howto.title, howto.titleAccent)}</h2>
-            {howto.subtitle && <p className="sh-sub">{howto.subtitle}</p>}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:32,marginBottom:40}}>
+            <div className="sh" style={{marginBottom:0,flex:1}}>
+              <div className="sh-tag">{howto.tag}</div>
+              <h2>{renderAccent(howto.title, howto.titleAccent)}</h2>
+              {howto.subtitle && <p className="sh-sub">{howto.subtitle}</p>}
+            </div>
+            <div style={{flexShrink:0,textAlign:'center',maxWidth:220,paddingTop:4}}>
+              <button className="btn-gold" onClick={handleRegister}>{howto.ctaText || 'Стать партнёром'}</button>
+              {howto.footer && (
+                <div style={{fontSize:12,color:'var(--muted)',marginTop:10,lineHeight:1.5}}>{howto.footer}</div>
+              )}
+            </div>
           </div>
-          <div className={`howto-steps${(howto.steps || []).length === 2 ? ' howto-steps-2' : ''}`} style={{display:'grid',gridTemplateColumns:`repeat(${Math.min((howto.steps || []).length, 4)}, 1fr)`,gap:16,maxWidth:1100,margin:'0 auto'}}>
+          <div className={`howto-steps${(howto.steps || []).length === 2 ? ' howto-steps-2' : ''}`} style={{display:'grid',gridTemplateColumns:`repeat(${Math.min((howto.steps || []).length, 4)}, 1fr)`,gap:16}}>
             {(howto.steps || []).map((s: any, i: number) => (
               <div key={i} style={{padding:'24px 22px',background:'var(--bg)',borderRadius:'var(--r-card)',boxShadow:'0 1px 2px rgba(0,0,0,0.04)'}}>
                 <div style={{fontSize:32,fontWeight:200,color:'var(--gold)',marginBottom:12,lineHeight:1}}>{s.num}</div>
@@ -1888,14 +1921,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 <div style={{fontSize:13,color:'var(--muted)',lineHeight:1.6}}>{s.description}</div>
               </div>
             ))}
-          </div>
-          {howto.footer && (
-            <p style={{textAlign:'center',fontSize:13,color:'var(--muted)',marginTop:20,maxWidth:700,marginLeft:'auto',marginRight:'auto',lineHeight:1.7}}>
-              {howto.footer}
-            </p>
-          )}
-          <div style={{textAlign:'center',marginTop:24}}>
-            <button className="btn-gold" onClick={handleRegister}>{howto.ctaText || 'Стать партнёром'}</button>
           </div>
         </section>
 
