@@ -2037,42 +2037,6 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
           </div>
         </section>
 
-        <hr className="sep" />
-
-        {/* DOCUMENTS — Все прозрачно */}
-        <section id="cooperation" style={{background:'var(--bg)'}}>
-          <div className="sh"><div className="sh-tag">{cooperation.tag}</div><h2>{renderAccent(cooperation.title, cooperation.titleAccent)}</h2><p className="sh-sub">{cooperation.subtitle}</p></div>
-          <div className="coop-grid">
-            <div className="coop-left">
-              <p>{cooperation.description}</p>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-                <button className="btn-gold" onClick={handleRegister}>{cooperation.ctaText || 'Стать партнёром'}</button>
-                {(() => {
-                  const condDoc = cooperationDocs.find((d: any) => /август 2026/i.test(d.name) || /вознаграждения для брокеров/i.test(d.name));
-                  return condDoc
-                    ? <a href={condDoc.fileUrl} target="_blank" rel="noopener noreferrer" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>
-                    : <a href="#cooperation" className="btn-outline" style={{padding:'12px 24px',fontSize:11,display:'inline-flex',alignItems:'center'}}>Условия вознаграждения</a>;
-                })()}
-              </div>
-            </div>
-            <div className="doc-list">
-              {cooperationDocs.length === 0 ? (
-                <div className="doc-item" style={{cursor:'default'}}>
-                  <div className="doc-icon"><FileText style={{width:18,height:18,color:'var(--gold)'}} /></div>
-                  <div className="doc-name" style={{color:'var(--muted)'}}>Скоро здесь появятся документы</div>
-                </div>
-              ) : (
-                cooperationDocs.map((d: any) => (
-                  <a key={d.id} href={d.fileUrl} target="_blank" rel="noopener noreferrer" className="doc-item">
-                    <div className="doc-icon"><FileText style={{width:18,height:18,color:'var(--gold)'}} /></div>
-                    <div className="doc-name">{d.name}</div>
-                    <div className="doc-dl"><DownloadIcon style={{width:16,height:16}} /></div>
-                  </a>
-                ))
-              )}
-            </div>
-          </div>
-        </section>
 
         {/* ANALYTICS — скрыт с лендинга по правке заказчика 2026-05-06.
             Блок появляется только если в /admin/documents (category=analytics)

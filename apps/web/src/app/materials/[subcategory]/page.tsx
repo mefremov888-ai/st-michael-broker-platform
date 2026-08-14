@@ -21,9 +21,8 @@ interface DocItem {
 const IMAGE_RE = /\.(jpe?g|png|webp|gif|svg|heic|avif|bmp|tiff?)(\?|#|$)/i;
 
 function thumbUrl(url: string): string {
-  // Yandex Cloud resize proxy for smaller thumbnails
   if (url.includes('storage.yandexcloud.net') || url.includes('yandexcloud')) {
-    return `https://stmichael.ru/proxy/insecure/w:600/q:65/plain/${url}@webp`;
+    return `https://stmichael.ru/proxy/insecure/w:150/q:35/plain/${url}@webp`;
   }
   return url;
 }
@@ -170,7 +169,7 @@ export default function MaterialsSubcategoryPage() {
       </div>
 
       <div style={{ maxWidth: 1200, margin: '0 auto', padding: '40px 32px 0' }}>
-        {!loading && hasProjectDocs && (
+        {!loading && (
           <div style={{ display: 'flex', gap: 8, marginBottom: 28, alignItems: 'center' }}>
             <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginRight: 4 }}>Проект:</span>
             {(['all', 'ZORGE9', 'SILVER_BOR'] as const).map((val) => {
@@ -202,7 +201,7 @@ export default function MaterialsSubcategoryPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: 'rgba(255,255,255,0.5)', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
                   <ImageIcon size={14} /> Фотографии ({images.length})
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 8 }}>
                   {images.slice(0, photoLimit).map((img, i) => (
                     <button
                       key={img.id}
