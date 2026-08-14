@@ -44,14 +44,14 @@ export default function AdminDocumentsPage() {
   // upload form
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadDraft, setUploadDraft] = useState({
-    name: '', description: '', category: 'cooperation', subcategory: '', isPublic: true, sortOrder: 0,
+    name: '', description: '', category: 'cooperation', subcategory: '', project: '', isPublic: true, sortOrder: 0,
   });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
 
   // external url form
   const [extDraft, setExtDraft] = useState({
-    name: '', description: '', url: '', category: 'cooperation', subcategory: '', isPublic: true, sortOrder: 0,
+    name: '', description: '', url: '', category: 'cooperation', subcategory: '', project: '', isPublic: true, sortOrder: 0,
   });
   const [extSaving, setExtSaving] = useState(false);
 
@@ -80,12 +80,13 @@ export default function AdminDocumentsPage() {
       if (uploadDraft.name) fd.append('name', uploadDraft.name);
       if (uploadDraft.description) fd.append('description', uploadDraft.description);
       if (uploadDraft.subcategory) fd.append('subcategory', uploadDraft.subcategory);
+      if (uploadDraft.project) fd.append('project', uploadDraft.project);
       fd.append('isPublic', String(uploadDraft.isPublic));
       fd.append('sortOrder', String(uploadDraft.sortOrder));
       await apiUpload('/admin/documents/upload', fd);
       setUploadFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
-      setUploadDraft({ ...uploadDraft, name: '', description: '', subcategory: '' });
+      setUploadDraft({ ...uploadDraft, name: '', description: '', subcategory: '', project: '' });
       load();
       setMessage('Файл загружен');
       setTimeout(() => setMessage(''), 2000);
@@ -184,6 +185,14 @@ export default function AdminDocumentsPage() {
                   <input className="input" placeholder="Напр. Презентации" value={uploadDraft.subcategory} onChange={(e) => setUploadDraft({ ...uploadDraft, subcategory: e.target.value })} />
                 </div>
               </div>
+              <div>
+                <label className="label">Проект (объект)</label>
+                <select className="input" value={uploadDraft.project} onChange={(e) => setUploadDraft({ ...uploadDraft, project: e.target.value })}>
+                  <option value="">— Все проекты —</option>
+                  <option value="ZORGE9">Зорге 9</option>
+                  <option value="SILVER_BOR">Серебряный Бор</option>
+                </select>
+              </div>
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input type="checkbox" checked={uploadDraft.isPublic} onChange={(e) => setUploadDraft({ ...uploadDraft, isPublic: e.target.checked })} />
@@ -229,6 +238,14 @@ export default function AdminDocumentsPage() {
                   <label className="label">Подкатегория</label>
                   <input className="input" value={extDraft.subcategory} onChange={(e) => setExtDraft({ ...extDraft, subcategory: e.target.value })} />
                 </div>
+              </div>
+              <div>
+                <label className="label">Проект (объект)</label>
+                <select className="input" value={extDraft.project} onChange={(e) => setExtDraft({ ...extDraft, project: e.target.value })}>
+                  <option value="">— Все проекты —</option>
+                  <option value="ZORGE9">Зорге 9</option>
+                  <option value="SILVER_BOR">Серебряный Бор</option>
+                </select>
               </div>
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 cursor-pointer">
