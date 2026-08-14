@@ -21,8 +21,13 @@ interface DocItem {
 const IMAGE_RE = /\.(jpe?g|png|webp|gif|svg|heic|avif|bmp|tiff?)(\?|#|$)/i;
 
 function thumbUrl(url: string): string {
-  if (url.includes('storage.yandexcloud.net') || url.includes('yandexcloud')) {
-    return `https://stmichael.ru/proxy/insecure/w:150/q:35/plain/${url}@webp`;
+  if (
+    url.includes('storage.yandexcloud.net') ||
+    url.includes('yandexcloud') ||
+    url.includes('s3.ru-central1') ||
+    url.includes('stmichael.ru/storage')
+  ) {
+    return `https://stmichael.ru/proxy/insecure/w:280/q:40/plain/${url}@webp`;
   }
   return url;
 }
@@ -206,11 +211,18 @@ export default function MaterialsSubcategoryPage() {
                     <button
                       key={img.id}
                       onClick={() => setViewer({ items: images, index: i })}
-                      style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, overflow: 'hidden', aspectRatio: '1', cursor: 'pointer', padding: 0, position: 'relative' }}
+                      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, overflow: 'hidden', aspectRatio: '1', cursor: 'pointer', padding: 0, position: 'relative' }}
                       title={img.name}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={thumbUrl(img.fileUrl)} alt={img.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" decoding="async" />
+                      <img
+                        src={thumbUrl(img.fileUrl)}
+                        alt={img.name}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0, transition: 'opacity 0.2s' }}
+                        loading="lazy"
+                        decoding="async"
+                        onLoad={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '1'; }}
+                      />
                     </button>
                   ))}
                 </div>

@@ -1820,9 +1820,9 @@ export class AdminService {
   }
 
   async checkAmoHealth() {
-    const tokenConfigured = !!process.env.AMO_ACCESS_TOKEN;
+    const tokenConfigured = !!(getAmoTokens().access || process.env.AMO_ACCESS_TOKEN);
     if (!tokenConfigured) {
-      return { ok: false, tokenConfigured: false, error: 'AMO_ACCESS_TOKEN не настроен в env' };
+      return { ok: false, tokenConfigured: false, error: 'AMO_ACCESS_TOKEN не настроен' };
     }
     const started = Date.now();
     try {
