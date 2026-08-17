@@ -25,6 +25,12 @@ export class PublicCmsController {
       return { ok: false, tokenConfigured: false, error: 'AMO_ACCESS_TOKEN не настроен в .env' };
     }
     const started = Date.now();
+    // 2026-08-17: диагностика блокировки WAF amoCRM по IP — сверяем egress IP
+    // сервера с IP домена сайта, чтобы понять какой адрес слать в поддержку.
+    const egressIp = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) })
+      .then((r) => r.json())
+      .then((j: any) => j.ip)
+      .catch(() => null);
     try {
       const acc = await this.amo.getAccount();
       return {
@@ -33,6 +39,7 @@ export class PublicCmsController {
         accountName: acc?.name || acc?.subdomain || null,
         accountId: acc?.id || null,
         latencyMs: Date.now() - started,
+        egressIp,
       };
     } catch (e: any) {
       return {
@@ -40,6 +47,7 @@ export class PublicCmsController {
         tokenConfigured: true,
         error: String(e?.message || e).slice(0, 500),
         latencyMs: Date.now() - started,
+        egressIp,
       };
     }
   }
