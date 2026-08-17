@@ -107,17 +107,10 @@ export function setAmoTokenRefreshHook(hook: AmoTokenRefreshHook | null): void {
 }
 
 export class AmoCrmAdapter {
-  // baseUrl is a getter so it always reflects the current token's api_domain.
-  // amoCRM access tokens contain api_domain (e.g. "api-b.amocrm.ru") which
-  // is the correct shard for API calls — different from the WAF-protected
-  // subdomain.amocrm.ru web endpoint that returns 403 for server requests.
+  // 2026-05-27: api-b.amocrm.ru (JWT payload.api_domain) отдаёт 401 даже на
+  // валидный токен — используем AMO_API_DOMAIN/дефолт stmichael.amocrm.ru.
+  // Не читать домен из JWT (см. 7750ec2), даже если он там есть.
   private get baseUrl(): string {
-    try {
-      const payload = JSON.parse(
-        Buffer.from(amoTokens.access.split('.')[1], 'base64').toString('utf8'),
-      );
-      if (payload.api_domain) return `https://${payload.api_domain}/api/v4`;
-    } catch {}
     const subdomain = process.env.AMO_SUBDOMAIN || 'stmichael';
     const domain = process.env.AMO_BASE_DOMAIN || 'amocrm.ru';
     return `https://${process.env.AMO_API_DOMAIN || `${subdomain}.${domain}`}/api/v4`;

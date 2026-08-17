@@ -1113,7 +1113,7 @@ export class SchedulerService {
           brokerId: m.id,
           channel: 'TELEGRAM',
           subject: '🔑 amoCRM: токен умер',
-          body: `Токен AMO_ACCESS_TOKEN истёк или невалиден (${error}). Обнови через gh secret set AMO_ACCESS_TOKEN < newtoken.txt --repo mefremov888-ai/st-michael-broker-platform и сделай пуш.`,
+          body: `Токен AMO_ACCESS_TOKEN истёк или невалиден (${error}). Обнови через gh secret set AMO_ACCESS_TOKEN < newtoken.txt --repo sereganikitin/st-michael-broker-platform и сделай пуш.`,
         }).catch(() => {});
       }
     } catch (e: any) {
