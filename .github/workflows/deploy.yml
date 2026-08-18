@@ -51,6 +51,9 @@ jobs:
           # scripts/import-brokers-from-gsheet.js). До этого секрет
           # руками клался на сервер и терялся при перезапусках.
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # 2026-08-18: бот для технических алертов (amoCRM/SMTP/диск и т.д.),
+          # см. scheduler.service.ts alertAmoDown/alertAmoTokenDead/alertSmtpDown.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -63,7 +66,7 @@ jobs:
           # ВАЖНО: refresh_token ротируется на каждом использовании.
           # На сервере приоритет у БД (SystemSetting) — деплой пишет в .env
           # как fallback. См. apps/api/src/common/amo-token-bootstrap.service.ts.
-          envs: AMO_ACCESS_TOKEN,AMO_CLIENT_ID,AMO_CLIENT_SECRET,AMO_REFRESH_TOKEN,MANGO_API_KEY,MANGO_API_SALT,MANGO_API_URL,SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,SMTP_FROM,SMTP_SECURE,DADATA_API_KEY,ANTHROPIC_API_KEY,GOOGLE_SERVICE_ACCOUNT_JSON
+          envs: AMO_ACCESS_TOKEN,AMO_CLIENT_ID,AMO_CLIENT_SECRET,AMO_REFRESH_TOKEN,MANGO_API_KEY,MANGO_API_SALT,MANGO_API_URL,SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,SMTP_FROM,SMTP_SECURE,DADATA_API_KEY,ANTHROPIC_API_KEY,GOOGLE_SERVICE_ACCOUNT_JSON,TELEGRAM_BOT_TOKEN
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
@@ -89,7 +92,7 @@ jobs:
             # Всё запихнуто в одну строку с ; разделителями.
             # 2026-06-05: тот же подход применён к 4 переменным сразу.
             touch .env
-            for VAR_NAME in AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN MANGO_API_KEY MANGO_API_SALT MANGO_API_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON; do VAR_VALUE=$(printenv "$VAR_NAME" || true); if [ -n "$VAR_VALUE" ]; then echo "=== Update .env: $VAR_NAME ==="; awk -v var="$VAR_NAME" 'BEGIN{skip=0} $0 ~ "^"var"="{skip=1; next} skip && /^[A-Z_][A-Z0-9_]*=/{skip=0} !skip{print}' .env > .env.tmp; mv .env.tmp .env; CLEAN_VAR=$(printf "%s" "$VAR_VALUE" | tr -d '\r\n\t '); echo "${VAR_NAME}=${CLEAN_VAR}" >> .env; echo "    длина из env: ${#VAR_VALUE}, длина clean: ${#CLEAN_VAR}"; fi; done
+            for VAR_NAME in AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN MANGO_API_KEY MANGO_API_SALT MANGO_API_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON TELEGRAM_BOT_TOKEN; do VAR_VALUE=$(printenv "$VAR_NAME" || true); if [ -n "$VAR_VALUE" ]; then echo "=== Update .env: $VAR_NAME ==="; awk -v var="$VAR_NAME" 'BEGIN{skip=0} $0 ~ "^"var"="{skip=1; next} skip && /^[A-Z_][A-Z0-9_]*=/{skip=0} !skip{print}' .env > .env.tmp; mv .env.tmp .env; CLEAN_VAR=$(printf "%s" "$VAR_VALUE" | tr -d '\r\n\t '); echo "${VAR_NAME}=${CLEAN_VAR}" >> .env; echo "    длина из env: ${#VAR_VALUE}, длина clean: ${#CLEAN_VAR}"; fi; done
             echo "    .env строк после обновления: $(wc -l < .env)"
             echo "=== Запуск deploy-update.sh ==="
             bash deploy-update.sh

@@ -1,0 +1,66 @@
+name: Monitor server health (disk + amoCRM queue)
+
+# 2026-08-18: 22.07.2026 диск на проде заполнился на 100%, упал postgres
+# (см. server-disk-cleanup.yml — было чем чистить, но никто не узнал заранее).
+# Этот workflow раз в 30 минут проверяет место на диске и размер очереди
+# фиксаций, зависших с ошибкой amoCRM, и шлёт алерт в Telegram при
+# превышении порога. Отдельно от app-level проверок (amoCRM/SMTP —
+# см. scheduler.service.ts), т.к. диск — уровень хоста, а не приложения.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: monitor-server-health
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    name: Check disk + failed-sync queue on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and check
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPS_ALERT_CHAT_ID: ${{ secrets.OPS_ALERT_CHAT_ID }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 5m
+          envs: TELEGRAM_BOT_TOKEN,OPS_ALERT_CHAT_ID
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            alert() {
+              if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$OPS_ALERT_CHAT_ID" ]; then
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d chat_id="$OPS_ALERT_CHAT_ID" \
+                  -d parse_mode=HTML \
+                  --data-urlencode text="$1" > /dev/null
+              fi
+              echo "ALERT: $1"
+            }
+
+            DISK_PCT=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
+            echo "Диск: ${DISK_PCT}% занято"
+            if [ "$DISK_PCT" -ge 85 ]; then
+              alert "⚠️ Диск сервера заполнен на ${DISK_PCT}%. Запусти workflow «Server disk cleanup (safe)», чтобы почистить."
+            fi
+
+            FAILED_COUNT=$(docker compose exec -T api node -e "
+              const { PrismaClient } = require('@st-michael/database');
+              const p = new PrismaClient();
+              p.client.count({ where: { amoSyncStatus: { in: ['FAILED','PENDING'] } } })
+                .then((n) => { console.log(n); return p.\$disconnect(); });
+            " 2>/dev/null | tail -1)
+            echo "Очередь ошибок amoCRM: ${FAILED_COUNT}"
+            if [ -n "$FAILED_COUNT" ] && [ "$FAILED_COUNT" -ge 10 ]; then
+              alert "⚠️ ${FAILED_COUNT} фиксаций не могут отправиться в amoCRM (очередь ошибок). Проверь /admin/broker-applications."
+            fi
