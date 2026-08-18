@@ -18,6 +18,7 @@
 
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
+const DIAGNOSE = args.includes('--diagnose');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -40,11 +41,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   try {
     const candidates = await prisma.client.findMany({
       where: { amoSyncStatus: { in: ['FAILED', 'PENDING'] } },
-      select: { id: true, fullName: true, phone: true, amoSyncAttempts: true, amoSyncError: true },
+      select: {
+        id: true, fullName: true, phone: true, amoSyncAttempts: true, amoSyncError: true,
+        broker: { select: { fullName: true, phone: true, amoContactId: true } },
+        responsibleBroker: { select: { fullName: true, phone: true, amoContactId: true } },
+      },
       orderBy: { amoSyncLastAttemptAt: 'asc' },
     });
 
     console.log(`Найдено ${candidates.length} записей в очереди ошибок.`);
+
+    if (DIAGNOSE) {
+      for (const c of candidates) {
+        const rb = c.responsibleBroker || c.broker;
+        console.log(`  ${c.fullName} (${c.phone}) <- брокер: ${rb?.fullName} (${rb?.phone}), amoContactId=${rb?.amoContactId || 'НЕТ'}`);
+      }
+      return;
+    }
+
     if (!APPLY) {
       for (const c of candidates) {
         console.log(`  [dry-run] ${c.fullName} (${c.phone}) — попыток: ${c.amoSyncAttempts}, ошибка: ${String(c.amoSyncError || '').slice(0, 80)}`);

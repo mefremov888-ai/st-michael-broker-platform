@@ -14,6 +14,11 @@ on:
         required: true
         type: boolean
         default: true
+      diagnose:
+        description: 'Diagnose (показать брокера и amoContactId для каждой записи, без отправки)'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: retry-failed-amo-sync
@@ -39,6 +44,9 @@ jobs:
             ARGS=""
             if [ "${{ inputs.dry_run }}" != "true" ]; then
               ARGS="$ARGS --apply"
+            fi
+            if [ "${{ inputs.diagnose }}" == "true" ]; then
+              ARGS="$ARGS --diagnose"
             fi
             echo "=== Args: $ARGS ==="
             cd ${{ secrets.DEPLOY_PATH }}
