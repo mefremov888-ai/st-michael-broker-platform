@@ -2,10 +2,10 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Bell, User, LogOut, Menu, Settings } from 'lucide-react';
+import { Bell, User, LogOut, Menu, Settings, HelpCircle } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 
-export function TopBar({ onMenuToggle }: { onMenuToggle?: () => void }) {
+export function TopBar({ onMenuToggle, onHelp }: { onMenuToggle?: () => void; onHelp?: () => void }) {
   const { broker, logout } = useAuth();
   const pathname = usePathname();
   const settingsActive = pathname === '/profile';
@@ -26,6 +26,17 @@ export function TopBar({ onMenuToggle }: { onMenuToggle?: () => void }) {
         </div>
 
         <div className="flex items-center space-x-2 sm:space-x-4">
+          {onHelp && (
+            <button
+              onClick={onHelp}
+              className="p-2 hover:bg-surface-secondary rounded-lg text-text-muted"
+              aria-label="Как пользоваться кабинетом"
+              title="Как пользоваться кабинетом"
+            >
+              <HelpCircle className="w-5 h-5" />
+            </button>
+          )}
+
           <button className="p-2 hover:bg-surface-secondary rounded-lg" aria-label="Уведомления">
             <Bell className="w-5 h-5" />
           </button>
