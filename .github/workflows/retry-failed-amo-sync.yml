@@ -1,0 +1,50 @@
+name: Retry failed amoCRM sync
+
+# 2026-08-18: массовый ретрай фиксаций, зависших с amoSyncStatus=FAILED/PENDING
+# из-за WAF-блокировки IP сервера в amoCRM (13-18.08.2026, снята поддержкой
+# amoCRM). По умолчанию dry-run — только показывает список.
+#
+# Запуск: Actions → "Retry failed amoCRM sync" → Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только показать, без реальной отправки)'
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: retry-failed-amo-sync
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    name: Run retry script on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run retry script
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          script: |
+            set -e
+            ARGS=""
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              ARGS="$ARGS --apply"
+            fi
+            echo "=== Args: $ARGS ==="
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/retry-failed-amo-sync.js > /tmp/retry-failed-amo-sync.js
+            docker cp /tmp/retry-failed-amo-sync.js st-michael-api:/app/scripts/retry-failed-amo-sync.js
+            eval "docker compose exec -T api node /app/scripts/retry-failed-amo-sync.js $ARGS"
+            echo "=== Готово ==="
