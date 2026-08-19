@@ -3343,6 +3343,158 @@ export class LoyaltyBaseService {
     );
   }
 
+  // "Есть только у Анны" — записи активного снимка без единого кандидата
+  // сверки (см. findCandidates). Схема reconciliation_cases требует цель по
+  // ту сторону, поэтому "нет пары" не хранится строкой, а вычисляется как
+  // разница: у записи ноль связанных дел сверки в активном снимке.
+  async unmatchedAnnaRecords(query: LoyaltyReconciliationQueryDto) {
+    const active = await this.activeAnnaSnapshot();
+    const page = query.page || 1;
+    const pageSize = query.pageSize || 30;
+    if (!active) return { items: [], page, pageSize, total: 0, totalPages: 0 };
+    const snapshotId = active.snapshot.id;
+    const entityWhere = (entityType: EntityType): any => ({
+      entityType,
+      snapshotId,
+      sourceArchivedAt: null,
+      ...(entityType === "BROKER"
+        ? {
+            person: {
+              is: {
+                archivedAt: null,
+                reconciliationCases: { none: { snapshotId } },
+              },
+            },
+          }
+        : {
+            organization: {
+              is: {
+                archivedAt: null,
+                reconciliationCases: { none: { snapshotId } },
+              },
+            },
+          }),
+    });
+    const where: any = query.entityType
+      ? entityWhere(query.entityType)
+      : { OR: [entityWhere("BROKER"), entityWhere("AGENCY")] };
+    const [records, total] = await Promise.all([
+      this.prisma.loyaltySourceRecord.findMany({
+        where,
+        include: { contactPoints: true },
+        orderBy: { displayName: "asc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.loyaltySourceRecord.count({ where }),
+    ]);
+    return {
+      items: (records as any[]).map((record) => ({
+        id: record.personId || record.organizationId,
+        entityType: record.entityType,
+        displayName: record.displayName,
+        city: record.city,
+        hasValidPhone: (record.contactPoints || []).some(
+          (point: any) => point.type === "PHONE",
+        ),
+        contacts: (record.contactPoints || []).map((point: any) => ({
+          type: point.type,
+          maskedValue: maskContact(point.type, point.value),
+        })),
+      })),
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    };
+  }
+
+  // "Есть только в кабинете" — канонические Broker/Agency, на которых не
+  // сослалось ни одно дело сверки активного снимка (т.е. Анна их не знает).
+  async unmatchedCabinetEntities(query: LoyaltyReconciliationQueryDto) {
+    const active = await this.activeAnnaSnapshot();
+    const page = query.page || 1;
+    const pageSize = query.pageSize || 30;
+    if (!active) return { items: [], page, pageSize, total: 0, totalPages: 0 };
+    const snapshotId = active.snapshot.id;
+    const matchedIdsFor = async (targetType: EntityType) => {
+      const rows = await this.prisma.loyaltyReconciliationCase.findMany({
+        where: { snapshotId, targetType },
+        select: { targetId: true },
+        distinct: ["targetId"],
+      });
+      return (rows as any[]).map((row) => row.targetId);
+    };
+    const wantBrokers = !query.entityType || query.entityType === "BROKER";
+    const wantAgencies = !query.entityType || query.entityType === "AGENCY";
+    const [matchedBrokerIds, matchedAgencyIds] = await Promise.all([
+      wantBrokers ? matchedIdsFor("BROKER") : Promise.resolve([]),
+      wantAgencies ? matchedIdsFor("AGENCY") : Promise.resolve([]),
+    ]);
+    const brokerWhere: any = {
+      role: "BROKER",
+      mergedIntoId: null,
+      id: { notIn: matchedBrokerIds.length ? matchedBrokerIds : undefined },
+    };
+    const agencyWhere: any = {
+      id: { notIn: matchedAgencyIds.length ? matchedAgencyIds : undefined },
+    };
+    const [brokerTotal, agencyTotal] = await Promise.all([
+      wantBrokers ? this.prisma.broker.count({ where: brokerWhere }) : 0,
+      wantAgencies ? this.prisma.agency.count({ where: agencyWhere }) : 0,
+    ]);
+    const total = brokerTotal + agencyTotal;
+    const offset = (page - 1) * pageSize;
+    const items: any[] = [];
+    if (wantBrokers && offset < brokerTotal) {
+      const brokers = await this.prisma.broker.findMany({
+        where: brokerWhere,
+        select: { id: true, fullName: true, phone: true, amoContactId: true },
+        orderBy: { fullName: "asc" },
+        skip: offset,
+        take: pageSize,
+      });
+      items.push(
+        ...(brokers as any[]).map((broker) => ({
+          id: broker.id,
+          entityType: "BROKER" as const,
+          displayName: broker.fullName,
+          contact: broker.phone ? maskContact("PHONE", broker.phone) : null,
+          amoContactId: broker.amoContactId
+            ? String(broker.amoContactId)
+            : null,
+        })),
+      );
+    }
+    const remaining = pageSize - items.length;
+    if (wantAgencies && remaining > 0) {
+      const agencyOffset = Math.max(0, offset - brokerTotal);
+      const agencies = await this.prisma.agency.findMany({
+        where: agencyWhere,
+        select: { id: true, name: true, inn: true, phone: true },
+        orderBy: { name: "asc" },
+        skip: agencyOffset,
+        take: remaining,
+      });
+      items.push(
+        ...(agencies as any[]).map((agency) => ({
+          id: agency.id,
+          entityType: "AGENCY" as const,
+          displayName: agency.name,
+          taxId: agency.inn,
+          contact: agency.phone ? maskContact("PHONE", agency.phone) : null,
+        })),
+      );
+    }
+    return {
+      items,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    };
+  }
+
   async decideReconciliation(
     dto: LoyaltyReconciliationDecisionDto,
     actorId?: string,

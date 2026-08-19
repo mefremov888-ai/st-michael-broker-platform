@@ -1199,6 +1199,132 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
+  it("finds Anna records with zero reconciliation cases in the active snapshot", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+      },
+    });
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([
+      {
+        personId: "person-1",
+        organizationId: null,
+        entityType: "BROKER",
+        displayName: "Только у Анны",
+        city: null,
+        contactPoints: [{ type: "PHONE", value: "+79990000001" }],
+      },
+    ]);
+    prisma.loyaltySourceRecord.count.mockResolvedValue(1);
+
+    const result = await service.unmatchedAnnaRecords({
+      page: 1,
+      pageSize: 30,
+    });
+
+    const where = prisma.loyaltySourceRecord.findMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({
+      OR: [
+        {
+          entityType: "BROKER",
+          snapshotId: "snapshot-1",
+          sourceArchivedAt: null,
+          person: {
+            is: {
+              archivedAt: null,
+              reconciliationCases: { none: { snapshotId: "snapshot-1" } },
+            },
+          },
+        },
+        {
+          entityType: "AGENCY",
+          snapshotId: "snapshot-1",
+          sourceArchivedAt: null,
+          organization: {
+            is: {
+              archivedAt: null,
+              reconciliationCases: { none: { snapshotId: "snapshot-1" } },
+            },
+          },
+        },
+      ],
+    });
+    expect(result.total).toBe(1);
+    expect(result.items[0].hasValidPhone).toBe(true);
+    // Contact values must never leave the service unmasked.
+    expect(result.items[0].contacts[0].maskedValue).not.toBe("+79990000001");
+  });
+
+  it("returns empty unmatched-Anna results when there is no published snapshot", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue(null);
+
+    const result = await service.unmatchedAnnaRecords({
+      page: 1,
+      pageSize: 30,
+    });
+
+    expect(result).toEqual({
+      items: [],
+      page: 1,
+      pageSize: 30,
+      total: 0,
+      totalPages: 0,
+    });
+    expect(prisma.loyaltySourceRecord.findMany).not.toHaveBeenCalled();
+  });
+
+  it("excludes matched brokers/agencies and paginates across the two lists", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+      },
+    });
+    prisma.loyaltyReconciliationCase.findMany
+      .mockResolvedValueOnce([{ targetId: "broker-matched" }])
+      .mockResolvedValueOnce([{ targetId: "agency-matched" }]);
+    prisma.broker.count.mockResolvedValue(1);
+    prisma.agency.count.mockResolvedValue(1);
+    prisma.broker.findMany.mockResolvedValue([
+      {
+        id: "broker-unmatched",
+        fullName: "Только в кабинете",
+        phone: "+79990000002",
+        amoContactId: null,
+      },
+    ]);
+    prisma.agency.findMany.mockResolvedValue([]);
+
+    const result = await service.unmatchedCabinetEntities({
+      page: 1,
+      pageSize: 30,
+    });
+
+    expect(prisma.broker.findMany.mock.calls[0][0].where).toMatchObject({
+      role: "BROKER",
+      mergedIntoId: null,
+      id: { notIn: ["broker-matched"] },
+    });
+    expect(result.total).toBe(2);
+    expect(result.items[0]).toMatchObject({
+      id: "broker-unmatched",
+      entityType: "BROKER",
+    });
+  });
+
   it("updates an Anna entity with an optimistic timestamp and audits before/after", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);

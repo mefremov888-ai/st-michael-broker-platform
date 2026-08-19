@@ -114,6 +114,40 @@ export interface ReconciliationResponse {
   totalPages: number;
 }
 
+export interface UnmatchedAnnaRecord {
+  id: string;
+  entityType: string;
+  name: string;
+  city: string;
+  hasValidPhone: boolean;
+  phone: string;
+}
+
+export interface UnmatchedAnnaResponse {
+  items: UnmatchedAnnaRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface UnmatchedCabinetEntity {
+  id: string;
+  entityType: string;
+  name: string;
+  phone: string;
+  taxId: string;
+  amoContactId: string;
+}
+
+export interface UnmatchedCabinetResponse {
+  items: UnmatchedCabinetEntity[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
 export interface LoyaltyActiveLink {
   id: string;
   version: number;
@@ -556,6 +590,62 @@ export function normalizeActiveLinks(value: unknown, fallbackPage: number, fallb
   };
 }
 
+function normalizeUnmatchedAnna(value: unknown): UnmatchedAnnaRecord {
+  const item = asRecord(value);
+  const contacts = arrayValue(item.contacts).map(asRecord);
+  const phone = contacts.find((entry) => stringValue(entry.type).toUpperCase() === 'PHONE') || contacts[0] || {};
+  return {
+    id: stringValue(pick(item, 'id')),
+    entityType: stringValue(pick(item, 'entityType', 'type')),
+    name: stringValue(pick(item, 'displayName', 'name'), '—'),
+    city: stringValue(pick(item, 'city')),
+    hasValidPhone: booleanValue(pick(item, 'hasValidPhone')) === true,
+    phone: stringValue(pick(phone, 'maskedValue', 'value')),
+  };
+}
+
+export function normalizeUnmatchedAnnaResponse(value: unknown, fallbackPage: number, fallbackPageSize: number): UnmatchedAnnaResponse {
+  const root = responseRoot(value);
+  const items = arrayValue(pick(root, 'items', 'results') ?? (Array.isArray(root.data) ? root.data : []));
+  const page = numberValue(pick(root, 'page'), fallbackPage);
+  const pageSize = numberValue(pick(root, 'pageSize', 'limit'), fallbackPageSize);
+  const total = numberValue(pick(root, 'total'), items.length);
+  return {
+    items: items.map(normalizeUnmatchedAnna),
+    page,
+    pageSize,
+    total,
+    totalPages: numberValue(pick(root, 'totalPages'), total === 0 ? 0 : Math.ceil(total / Math.max(1, pageSize))),
+  };
+}
+
+function normalizeUnmatchedCabinet(value: unknown): UnmatchedCabinetEntity {
+  const item = asRecord(value);
+  return {
+    id: stringValue(pick(item, 'id')),
+    entityType: stringValue(pick(item, 'entityType', 'type')),
+    name: stringValue(pick(item, 'displayName', 'name'), '—'),
+    phone: stringValue(pick(item, 'contact', 'phone')),
+    taxId: stringValue(pick(item, 'taxId', 'inn')),
+    amoContactId: stringValue(pick(item, 'amoContactId')),
+  };
+}
+
+export function normalizeUnmatchedCabinetResponse(value: unknown, fallbackPage: number, fallbackPageSize: number): UnmatchedCabinetResponse {
+  const root = responseRoot(value);
+  const items = arrayValue(pick(root, 'items', 'results') ?? (Array.isArray(root.data) ? root.data : []));
+  const page = numberValue(pick(root, 'page'), fallbackPage);
+  const pageSize = numberValue(pick(root, 'pageSize', 'limit'), fallbackPageSize);
+  const total = numberValue(pick(root, 'total'), items.length);
+  return {
+    items: items.map(normalizeUnmatchedCabinet),
+    page,
+    pageSize,
+    total,
+    totalPages: numberValue(pick(root, 'totalPages'), total === 0 ? 0 : Math.ceil(total / Math.max(1, pageSize))),
+  };
+}
+
 function normalizeImportSummary(value: unknown): ImportSummary {
   const summary = asRecord(value);
   const nullableCount = (key: string) => Object.prototype.hasOwnProperty.call(summary, key)
@@ -697,6 +787,16 @@ export async function getActiveLoyaltyLinks(filters: { page: number; pageSize: n
 
 export async function unlinkActiveLoyaltyLink(linkId: string, expectedVersion: number) {
   return apiPost<unknown>('/loyalty-base/reconciliation/links/unlink', { linkId, expectedVersion });
+}
+
+export async function getUnmatchedAnnaRecords(filters: { page: number; pageSize: number; entityType?: 'BROKER' | 'AGENCY' | '' }) {
+  const value = await apiGet<unknown>(`/loyalty-base/reconciliation/anna-only${queryString(filters)}`);
+  return normalizeUnmatchedAnnaResponse(value, filters.page, filters.pageSize);
+}
+
+export async function getUnmatchedCabinetEntities(filters: { page: number; pageSize: number; entityType?: 'BROKER' | 'AGENCY' | '' }) {
+  const value = await apiGet<unknown>(`/loyalty-base/reconciliation/cabinet-only${queryString(filters)}`);
+  return normalizeUnmatchedCabinetResponse(value, filters.page, filters.pageSize);
 }
 
 export async function dryRunAnnaImport(file: File) {

@@ -217,6 +217,18 @@ export class LoyaltyBaseController {
     return this.loyalty.reconciliation(normalized, body.search.trim());
   }
 
+  @Get("reconciliation/anna-only")
+  @Roles(UserRole.ADMIN)
+  unmatchedAnna(@Query() query: LoyaltyReconciliationQueryDto) {
+    return this.loyalty.unmatchedAnnaRecords(query);
+  }
+
+  @Get("reconciliation/cabinet-only")
+  @Roles(UserRole.ADMIN)
+  unmatchedCabinet(@Query() query: LoyaltyReconciliationQueryDto) {
+    return this.loyalty.unmatchedCabinetEntities(query);
+  }
+
   @Get("reconciliation/links")
   @Roles(UserRole.ADMIN)
   activeLinks(@Query() query: LoyaltyReconciliationQueryDto) {

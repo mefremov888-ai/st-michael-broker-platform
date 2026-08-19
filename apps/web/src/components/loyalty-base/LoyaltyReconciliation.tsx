@@ -11,6 +11,8 @@ import {
   type ReconciliationSide,
 } from '@/lib/loyalty-base-api';
 import { LoyaltyActiveLinks } from './LoyaltyActiveLinks';
+import { LoyaltyUnmatchedAnna } from './LoyaltyUnmatchedAnna';
+import { LoyaltyUnmatchedCabinet } from './LoyaltyUnmatchedCabinet';
 
 const decisionLabels: Record<string, string> = {
   LINK: 'Связаны',
@@ -86,7 +88,7 @@ function ReconciliationCard({ item, busy, onDecision }: {
 }
 
 export function LoyaltyReconciliation() {
-  const [view, setView] = useState<'candidates' | 'links'>('candidates');
+  const [view, setView] = useState<'candidates' | 'links' | 'anna-only' | 'cabinet-only'>('candidates');
   const [data, setData] = useState<ReconciliationResponse | null>(null);
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState('');
@@ -141,9 +143,16 @@ export function LoyaltyReconciliation() {
       <nav className="inline-flex rounded-xl bg-surface-secondary p-1" aria-label="Раздел сверки">
         <button type="button" aria-pressed={view === 'candidates'} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'candidates' ? 'bg-surface text-accent shadow-sm' : 'text-text-muted'}`} onClick={() => setView('candidates')}>Кандидаты</button>
         <button type="button" aria-pressed={view === 'links'} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'links' ? 'bg-surface text-accent shadow-sm' : 'text-text-muted'}`} onClick={() => setView('links')}>Активные связи</button>
+        <button type="button" aria-pressed={view === 'anna-only'} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'anna-only' ? 'bg-surface text-accent shadow-sm' : 'text-text-muted'}`} onClick={() => setView('anna-only')}>Только у Анны</button>
+        <button type="button" aria-pressed={view === 'cabinet-only'} className={`px-4 py-2 rounded-lg text-sm font-medium ${view === 'cabinet-only' ? 'bg-surface text-accent shadow-sm' : 'text-text-muted'}`} onClick={() => setView('cabinet-only')}>Только у нас</button>
       </nav>
 
-      {view === 'links' ? <LoyaltyActiveLinks /> : <>
+      {view === 'links' ? <LoyaltyActiveLinks />
+        : view === 'anna-only' ? <LoyaltyUnmatchedAnna />
+          : view === 'cabinet-only' ? <LoyaltyUnmatchedCabinet />
+            : <></>}
+      {view === 'candidates' && <>
+
 
       <div className="card p-4 flex flex-col md:flex-row gap-3">
         <form className="relative flex-1" onSubmit={(event) => { event.preventDefault(); setPage(1); setSearch(searchInput.trim()); }}>
