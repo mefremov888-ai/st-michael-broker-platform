@@ -283,7 +283,7 @@ export default function MeetingsPage() {
         {/* 2026-06-18: форма временно скрыта — показываем брокеру телефон
             менеджера по работе с брокерами для записи. Форма вернётся когда
             доработаем (см. project_pending_tasks). */}
-        <div className="card">
+        <div className="card" data-tour="meetings-section">
           <h2 className="text-lg font-semibold mb-3">Записаться на встречу</h2>
           {/* 2026-07-02: подпись «раздел дорабатывается» убрана + блок «Календарь из amoCRM» убран. */}
           <div className="rounded-lg border border-accent/30 bg-accent/5 p-4">

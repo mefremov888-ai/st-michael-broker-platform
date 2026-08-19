@@ -79,7 +79,7 @@ export default function DocumentsPage() {
 
       {error && <div className="mb-4 p-4 rounded-lg bg-error/20 text-error text-sm">{error}</div>}
 
-      <div className="card">
+      <div className="card" data-tour="documents-list">
         {loading ? (
           <div className="text-center py-8 text-text-muted">Загрузка...</div>
         ) : documents.length === 0 ? (

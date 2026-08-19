@@ -602,7 +602,7 @@ export default function ClientsPage() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" data-tour="clients-table">
         {loading ? (
           <div className="text-center py-8 text-text-muted">Загрузка...</div>
         ) : clients.length === 0 ? (

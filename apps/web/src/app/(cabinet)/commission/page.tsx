@@ -211,7 +211,7 @@ export default function CommissionPage() {
 
       {commission && (
         <div className={`grid grid-cols-1 gap-6 mb-8 ${isFlat ? 'md:grid-cols-2' : 'md:grid-cols-3'}`}>
-          <div className="card">
+          <div className="card" data-tour="commission-card">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm text-text-muted">
                 {isFlat ? 'Текущая ставка' : 'Текущий уровень'}

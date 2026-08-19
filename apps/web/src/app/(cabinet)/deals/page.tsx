@@ -84,7 +84,7 @@ export default function DealsPage() {
       </div>
 
       {/* Summary KPIs (ТЗ §5 — сводные показатели) */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" data-tour="deals-summary">
         <div className="card">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm text-text-muted">Всего сделок</span>

@@ -332,7 +332,7 @@ export default function FixationPage() {
     <div className="max-w-3xl">
       <h1 className="text-2xl md:text-3xl font-bold mb-6">Фиксация клиента</h1>
 
-      <div className="card">
+      <div className="card" data-tour="fixation-form">
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
             <div className="flex items-center justify-between mb-1">

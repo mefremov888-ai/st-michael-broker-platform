@@ -423,7 +423,7 @@ export default function CatalogPage() {
       )}
 
       {/* Filters */}
-      <div className="card mb-6">
+      <div className="card mb-6" data-tour="catalog-filters">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2 font-medium"><SlidersHorizontal className="w-4 h-4" />Фильтры{activeFiltersCount > 0 && <span className="text-xs bg-accent text-white px-2 py-0.5 rounded-full">{activeFiltersCount}</span>}</div>
           <div className="flex gap-2">

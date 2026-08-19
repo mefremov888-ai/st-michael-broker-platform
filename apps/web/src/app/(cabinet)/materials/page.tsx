@@ -72,7 +72,7 @@ export default function MaterialsPage() {
       {loading ? (
         <div className="card text-center py-8 text-text-muted">Загрузка...</div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
+        <div data-tour="materials-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
           {CANONICAL_CATS.map((cat) => (
             <button
               key={cat}
