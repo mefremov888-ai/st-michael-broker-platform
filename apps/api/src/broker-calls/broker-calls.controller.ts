@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser, CurrentUserPayload } from '../auth/current-user.decorator';
 import { BrokerCallsService } from './broker-calls.service';
+import { InitiateBrokerCallDto } from './broker-calls.dto';
 
 @ApiTags('broker-calls')
 @Controller('broker-calls')
@@ -16,9 +17,9 @@ export class BrokerCallsController {
   @ApiResponse({ status: 201, description: 'Звонок поставлен в очередь Mango' })
   async initiate(
     @CurrentUser() user: CurrentUserPayload,
-    @Body() body: { clientId: string },
+    @Body() body: InitiateBrokerCallDto,
   ) {
-    return this.svc.initiate(user.id, body.clientId);
+    return this.svc.initiate(user.id, body.clientId, body.idempotencyKey);
   }
 
   @Get()

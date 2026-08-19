@@ -1,6 +1,6 @@
-import { Context } from 'grammy'
+import type { MyContext } from '../types/context'
 
-export async function loggingMiddleware(ctx: Context, next: () => Promise<void>) {
+export async function loggingMiddleware(ctx: MyContext, next: () => Promise<void>) {
   const start = Date.now()
   const user = ctx.from?.username || ctx.from?.first_name || 'unknown'
   const command = ctx.message?.text || ctx.callbackQuery?.data || 'unknown'

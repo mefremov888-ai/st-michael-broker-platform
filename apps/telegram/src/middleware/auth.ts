@@ -1,7 +1,7 @@
-import { Context } from 'grammy'
 import { apiService } from '../services/api'
+import type { MyContext } from '../types/context'
 
-export async function authMiddleware(ctx: Context, next: () => Promise<void>) {
+export async function authMiddleware(ctx: MyContext, next: () => Promise<void>) {
   // Пропускаем команды start и help для неавторизованных пользователей
   if (ctx.message?.text === '/start' || ctx.message?.text === '/help') {
     return next()

@@ -45,7 +45,7 @@ describe('AmoCrmAdapter broker contact safety', () => {
 
     await expect(
       new AmoCrmAdapter().createContact({ name: 'Новый брокер' }),
-    ).rejects.toThrow('socket reset');
+    ).rejects.toThrow('amoCRM network error /contacts');
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -68,8 +68,60 @@ describe('AmoCrmAdapter broker contact safety', () => {
 
     await expect(
       new AmoCrmAdapter().createLead({ name: 'Фиксация клиента' }),
-    ).rejects.toThrow('socket reset');
+    ).rejects.toThrow('amoCRM network error /leads');
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not expose a contact phone or raw WAF HTML in an error', async () => {
+    const rawBody = '<html><body>blocked secret diagnostic</body></html>';
+    const phone = '+79990000009';
+    global.fetch = jest.fn().mockResolvedValue({
+      status: 403,
+      ok: false,
+      headers: { get: () => null },
+      text: async () => rawBody,
+    } as any);
+
+    const error = (await new AmoCrmAdapter()
+      .findContactByPhone(phone)
+      .catch((caught) => caught as Error)) as Error;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('amoCRM 403 /contacts');
+    expect(error.message).not.toContain(phone);
+    expect(error.message).not.toContain(rawBody);
+  });
+
+  it('propagates a failed lead lookup during uniqueness checking', async () => {
+    const phone = '+79990000010';
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        json: async () => ({
+          _embedded: {
+            contacts: [
+              {
+                id: 123,
+                custom_fields_values: [
+                  { field_code: 'PHONE', values: [{ value: phone }] },
+                ],
+              },
+            ],
+          },
+        }),
+      } as any)
+      .mockResolvedValueOnce({
+        status: 403,
+        ok: false,
+        headers: { get: () => null },
+        text: async () => '<html>blocked</html>',
+      } as any);
+
+    await expect(
+      new AmoCrmAdapter().checkUniqueness(phone),
+    ).rejects.toThrow('amoCRM 403 /contacts/123');
   });
 
   it('does not retry createLead after a 5xx response', async () => {

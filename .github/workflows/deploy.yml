@@ -1,12 +1,19 @@
 name: Deploy to production
 
 # Триггеры:
-# 1) Любой push в master (например после мерджа PR) — авто-деплой
-# 2) Ручной запуск с GitHub UI (Actions → Run workflow) — на случай отката или повторного деплоя
+# Push в master запускает обязательную сборку/тесты, но production deployment
+# выполняется только вручную с явным подтверждением. Это особенно важно для
+# первого migration-aware релиза и legacy Prisma baseline.
 on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: I completed backup, clone rehearsal and production DB identity checks
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   # Гарантирует, что одновременно идёт не более одного деплоя.
@@ -14,14 +21,57 @@ concurrency:
   group: production-deploy
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
+  verify:
+    name: Build and test release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Prisma generate only needs a syntactically valid URL in CI; this address
+      # is deliberately non-routable and is never used for a database connection.
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/ci?connect_timeout=1
+    steps:
+      - name: Checkout exact workflow commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Run test suites
+        run: npm test --workspace=@st-michael/api -- --runInBand
+
+      - name: Run web contract tests
+        run: npm test --workspace=@st-michael/web
+
   deploy:
     name: SSH deploy to production
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm_production
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Configure required reviewers and prevent self-approval for this
+    # environment in GitHub Settings before the first migration-aware release.
+    environment: production
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
         # 2026-05-27 fix: env-секция обязательна, иначе envs: передаёт пустоту.
         # 2026-06-05: добавлены AMO_CLIENT_ID / AMO_CLIENT_SECRET / AMO_REFRESH_TOKEN —
         # нужны для авто-refresh access_token (см. PR #82).
@@ -33,6 +83,8 @@ jobs:
           MANGO_API_KEY: ${{ secrets.MANGO_API_KEY }}
           MANGO_API_SALT: ${{ secrets.MANGO_API_SALT }}
           MANGO_API_URL: ${{ secrets.MANGO_API_URL }}
+          MANGO_CALLBACK_URL: ${{ secrets.MANGO_CALLBACK_URL }}
+          MANGO_OUTBOUND_LINE: ${{ secrets.MANGO_OUTBOUND_LINE }}
           # 2026-06-09: SMTP для welcome-email при регистрации брокера +
           # forgotPassword. mail.stmichael.ru:587 (STARTTLS).
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -54,6 +106,13 @@ jobs:
           # 2026-08-18: бот для технических алертов (amoCRM/SMTP/диск и т.д.),
           # см. scheduler.service.ts alertAmoDown/alertAmoTokenDead/alertSmtpDown.
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPS_TELEGRAM_BOT_TOKEN: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          OPS_ALERT_CHAT_ID: ${{ secrets.OPS_ALERT_CHAT_ID }}
+          OPS_ALERT_CHAT_IDS: ${{ secrets.OPS_ALERT_CHAT_IDS }}
+          EXPECTED_DEPLOY_SHA: ${{ github.sha }}
+          PRODUCTION_PG_SYSTEM_IDENTIFIER: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -66,34 +125,29 @@ jobs:
           # ВАЖНО: refresh_token ротируется на каждом использовании.
           # На сервере приоритет у БД (SystemSetting) — деплой пишет в .env
           # как fallback. См. apps/api/src/common/amo-token-bootstrap.service.ts.
-          envs: AMO_ACCESS_TOKEN,AMO_CLIENT_ID,AMO_CLIENT_SECRET,AMO_REFRESH_TOKEN,MANGO_API_KEY,MANGO_API_SALT,MANGO_API_URL,SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,SMTP_FROM,SMTP_SECURE,DADATA_API_KEY,ANTHROPIC_API_KEY,GOOGLE_SERVICE_ACCOUNT_JSON,TELEGRAM_BOT_TOKEN
+          envs: AMO_ACCESS_TOKEN,AMO_CLIENT_ID,AMO_CLIENT_SECRET,AMO_REFRESH_TOKEN,MANGO_API_KEY,MANGO_API_SALT,MANGO_API_URL,MANGO_CALLBACK_URL,MANGO_OUTBOUND_LINE,SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,SMTP_FROM,SMTP_SECURE,DADATA_API_KEY,ANTHROPIC_API_KEY,GOOGLE_SERVICE_ACCOUNT_JSON,TELEGRAM_BOT_TOKEN,OPS_TELEGRAM_BOT_TOKEN,OPS_ALERT_CHAT_ID,OPS_ALERT_CHAT_IDS,EXPECTED_DEPLOY_SHA,PRODUCTION_PG_SYSTEM_IDENTIFIER,PRODUCTION_MIN_BROKER_ROWS,DEPLOY_PATH
           script: |
-            set -e
-            cd ${{ secrets.DEPLOY_PATH }}
-            echo "=== Bootstrap: подтягиваем свежий master ==="
-            # 2026-06-10: фиксируем origin на продакшн-репо sereganikitin.
-            # Раньше origin случайно остался на форке mefremov888-ai —
-            # из-за этого мерджи в sereganikitin/master НЕ приезжали
-            # на сервер (форк не синхронизировался). Workflow упорно
-            # показывал success, но код оставался старым.
-            CURRENT_URL=$(git remote get-url origin)
-            EXPECTED_URL="https://github.com/sereganikitin/st-michael-broker-platform.git"
-            if [ "$CURRENT_URL" != "$EXPECTED_URL" ]; then
-              echo "    origin был: $CURRENT_URL"
-              echo "    меняем на:  $EXPECTED_URL"
-              git remote set-url origin "$EXPECTED_URL"
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            command -v git >/dev/null
+            command -v flock >/dev/null
+            command -v mktemp >/dev/null
+            command -v grep >/dev/null
+            printf '%s' "$EXPECTED_DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "Invalid EXPECTED_DEPLOY_SHA"; exit 1; }
+            exec 8>/tmp/st-michael-production-deploy.lock
+            flock -n 8 || { echo "Another production deploy holds the server lock"; exit 1; }
+            TRUSTED_REPOSITORY="https://github.com/sereganikitin/st-michael-broker-platform.git"
+            git fetch "$TRUSTED_REPOSITORY" master
+            TRUSTED_SHA=$(git rev-parse FETCH_HEAD)
+            if [ "$TRUSTED_SHA" != "$EXPECTED_DEPLOY_SHA" ]; then
+              echo "Production master changed after this workflow started; rerun for the current SHA."
+              exit 1
             fi
-            git fetch origin master
-            git reset --hard origin/master
-            echo "    HEAD после reset: $(git log --oneline -1)"
-            # Обновляем AMO_* в .env из GH secrets.
-            # ВАЖНО: appleboy/ssh-action вставляет exit-code-check между
-            # строками — поэтому многострочные awk/script ЛОМАЮТСЯ.
-            # Всё запихнуто в одну строку с ; разделителями.
-            # 2026-06-05: тот же подход применён к 4 переменным сразу.
-            touch .env
-            for VAR_NAME in AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN MANGO_API_KEY MANGO_API_SALT MANGO_API_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON TELEGRAM_BOT_TOKEN; do VAR_VALUE=$(printenv "$VAR_NAME" || true); if [ -n "$VAR_VALUE" ]; then echo "=== Update .env: $VAR_NAME ==="; awk -v var="$VAR_NAME" 'BEGIN{skip=0} $0 ~ "^"var"="{skip=1; next} skip && /^[A-Z_][A-Z0-9_]*=/{skip=0} !skip{print}' .env > .env.tmp; mv .env.tmp .env; CLEAN_VAR=$(printf "%s" "$VAR_VALUE" | tr -d '\r\n\t '); echo "${VAR_NAME}=${CLEAN_VAR}" >> .env; echo "    длина из env: ${#VAR_VALUE}, длина clean: ${#CLEAN_VAR}"; fi; done
-            echo "    .env строк после обновления: $(wc -l < .env)"
-            echo "=== Запуск deploy-update.sh ==="
-            bash deploy-update.sh
+            TRUSTED_DEPLOY_SCRIPT=$(mktemp /tmp/st-michael-deploy-script.XXXXXX)
+            cleanup_bootstrap() { rm -f -- "$TRUSTED_DEPLOY_SCRIPT"; }
+            trap cleanup_bootstrap EXIT
+            git show "$EXPECTED_DEPLOY_SHA:deploy-update.sh" > "$TRUSTED_DEPLOY_SCRIPT"
+            chmod 700 "$TRUSTED_DEPLOY_SCRIPT"
+            echo "=== Запуск reviewed deploy-update.sh exact SHA ==="
+            DEPLOY_REPO_DIR="$PWD" DEPLOY_LOCK_HELD=1 bash "$TRUSTED_DEPLOY_SCRIPT"
             echo "=== Деплой завершён успешно ==="

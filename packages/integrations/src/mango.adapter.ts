@@ -37,25 +37,145 @@ export interface IMangoAdapter {
 //   https://integration-webhook.mango-office.ru/webhookapp/common?
 //     code=<ID>&Source=Other&API_key=<API_KEY>&Action=Callback&
 //     EmployeeNUM={{Ответственный}}&TelNumbr={{Телефон}}
-type MangoConfig = { apiKey: string; apiSalt: string; apiUrl: string; callbackUrl: string };
+export interface MangoConfig {
+  apiKey: string;
+  apiSalt: string;
+  apiUrl: string;
+  callbackUrl: string;
+  outboundLine: string;
+}
 
 const DEFAULT_MANGO_URL = 'https://app.mango-office.ru/vpbx';
+const MANGO_API_HOST = 'app.mango-office.ru';
+const MANGO_API_PATH = '/vpbx';
+const MANGO_CALLBACK_HOST = 'integration-webhook.mango-office.ru';
+const MANGO_CALLBACK_PATH = '/webhookapp/common';
+const MANGO_EMPLOYEE_PLACEHOLDER = '{{Ответственный}}';
+const MANGO_PHONE_PLACEHOLDER = '{{Телефон}}';
+
+function parseHttpsUrl(value: string, label: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label}: указан некорректный URL`);
+  }
+  if (
+    parsed.protocol !== 'https:'
+    || parsed.username
+    || parsed.password
+    || parsed.port
+    || parsed.hash
+  ) {
+    throw new Error(`${label}: разрешён только HTTPS URL без credentials, порта и fragment`);
+  }
+  return parsed;
+}
+
+/**
+ * Mango publishes one fixed VPBX base URL. Keeping this allowlist exact is
+ * important because the value is editable through the admin settings page.
+ */
+export function normalizeMangoApiUrl(value: string): string {
+  const candidate = String(value || '').trim() || DEFAULT_MANGO_URL;
+  const parsed = parseHttpsUrl(candidate, 'MANGO_API_URL');
+  const path = parsed.pathname.replace(/\/+$/, '') || '/';
+  if (
+    parsed.hostname.toLowerCase() !== MANGO_API_HOST
+    || path !== MANGO_API_PATH
+    || parsed.search
+  ) {
+    throw new Error(
+      `MANGO_API_URL: разрешён только https://${MANGO_API_HOST}${MANGO_API_PATH}`,
+    );
+  }
+  return DEFAULT_MANGO_URL;
+}
+
+/**
+ * Validate the official integration-webhook template without ever exposing
+ * its credential-like query values in an exception or log message.
+ */
+export function normalizeMangoCallbackUrl(value: string): string {
+  const candidate = String(value || '').trim();
+  if (!candidate) return '';
+  const parsed = parseHttpsUrl(candidate, 'MANGO_CALLBACK_URL');
+  if (
+    parsed.hostname.toLowerCase() !== MANGO_CALLBACK_HOST
+    || parsed.pathname !== MANGO_CALLBACK_PATH
+  ) {
+    throw new Error(
+      `MANGO_CALLBACK_URL: разрешён только https://${MANGO_CALLBACK_HOST}${MANGO_CALLBACK_PATH}`,
+    );
+  }
+
+  const employeeValues = parsed.searchParams.getAll('EmployeeNUM');
+  const phoneValues = parsed.searchParams.getAll('TelNumbr');
+  if (
+    employeeValues.length !== 1
+    || employeeValues[0] !== MANGO_EMPLOYEE_PLACEHOLDER
+    || phoneValues.length !== 1
+    || phoneValues[0] !== MANGO_PHONE_PLACEHOLDER
+  ) {
+    throw new Error(
+      'MANGO_CALLBACK_URL: требуются безопасные query-плейсхолдеры EmployeeNUM и TelNumbr',
+    );
+  }
+  for (const [key, queryValue] of parsed.searchParams.entries()) {
+    if (
+      (queryValue.includes('{{') || queryValue.includes('}}'))
+      && !(
+        (key === 'EmployeeNUM' && queryValue === MANGO_EMPLOYEE_PLACEHOLDER)
+        || (key === 'TelNumbr' && queryValue === MANGO_PHONE_PLACEHOLDER)
+      )
+    ) {
+      throw new Error('MANGO_CALLBACK_URL: неизвестный query-плейсхолдер');
+    }
+  }
+  // Preserve the original placeholders: URL#toString percent-encodes braces,
+  // while initiateCallbackViaWebhook replaces the literal template tokens.
+  return candidate;
+}
+
+function safeInitialApiUrl(value: string | undefined): string {
+  try {
+    return normalizeMangoApiUrl(value || DEFAULT_MANGO_URL);
+  } catch {
+    return '';
+  }
+}
+
+function safeInitialCallbackUrl(value: string | undefined): string {
+  try {
+    return normalizeMangoCallbackUrl(value || '');
+  } catch {
+    return '';
+  }
+}
 
 let mangoConfig: MangoConfig = {
   apiKey: process.env.MANGO_API_KEY || '',
   apiSalt: process.env.MANGO_API_SALT || '',
-  apiUrl: process.env.MANGO_API_URL || DEFAULT_MANGO_URL,
-  callbackUrl: process.env.MANGO_CALLBACK_URL || '',
+  apiUrl: safeInitialApiUrl(process.env.MANGO_API_URL),
+  callbackUrl: safeInitialCallbackUrl(process.env.MANGO_CALLBACK_URL),
+  outboundLine: process.env.MANGO_OUTBOUND_LINE || '',
 };
 
 export function setMangoConfig(cfg: Partial<MangoConfig>): void {
+  // Validate every changed URL before mutating shared state, so a rejected
+  // hot update cannot leave the adapter partially reconfigured.
+  const apiUrl = cfg.apiUrl === undefined
+    ? mangoConfig.apiUrl
+    : normalizeMangoApiUrl(cfg.apiUrl);
+  const callbackUrl = cfg.callbackUrl === undefined
+    ? mangoConfig.callbackUrl
+    : normalizeMangoCallbackUrl(cfg.callbackUrl);
   mangoConfig = {
     apiKey: cfg.apiKey ?? mangoConfig.apiKey,
     apiSalt: cfg.apiSalt ?? mangoConfig.apiSalt,
-    // Нормализуем URL: убираем trailing slash, чтобы `${url}/commands/callback`
-    // не получался с двойным слешем.
-    apiUrl: (cfg.apiUrl ?? mangoConfig.apiUrl).replace(/\/+$/, '') || DEFAULT_MANGO_URL,
-    callbackUrl: cfg.callbackUrl ?? mangoConfig.callbackUrl,
+    apiUrl,
+    callbackUrl,
+    outboundLine: cfg.outboundLine ?? mangoConfig.outboundLine,
   };
 }
 
@@ -67,13 +187,40 @@ export function getMangoConfig(): MangoConfig {
 // timestamps в мс, чистим до 60 секунд назад при каждом запросе.
 const callTimestamps: number[] = [];
 const MANGO_RATE_LIMIT_PER_MIN = 20;
+const MANGO_REQUEST_TIMEOUT_MS = 10_000;
+
+async function mangoFetch(
+  input: string,
+  init: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MANGO_REQUEST_TIMEOUT_MS);
+  try {
+    // A redirect could leave an otherwise valid allowlisted host. Mango's
+    // documented endpoints are final, so fail closed instead of following it.
+    return await fetch(input, {
+      ...init,
+      redirect: 'error',
+      signal: controller.signal,
+    });
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      // Do not include the requested URL: the legacy callback URL may contain
+      // credential-like query parameters.
+      throw new Error(`Mango request timed out after ${MANGO_REQUEST_TIMEOUT_MS / 1000}s`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Mango VPBX integration — outbound callback.
  *
  * Doc: https://www.mango-office.ru/upload/api/vpbx_api.pdf
  * Endpoint: POST {apiUrl}/commands/callback
- * Auth: HMAC-SHA256 от (vpbx_api_key + json_body + vpbx_api_salt).
+ * Signature: SHA-256 от (vpbx_api_key + exact json string + vpbx_api_salt).
  *
  * Источники конфигурации (приоритет ↓):
  *   1. SystemSetting в БД (управляется из /admin/integrations)
@@ -93,8 +240,20 @@ export class MangoAdapter implements IMangoAdapter {
     return mangoConfig.apiUrl;
   }
 
+  private get outboundLine(): string {
+    return mangoConfig.outboundLine;
+  }
+
   private digits(phone: string): string {
     return String(phone || '').replace(/\D/g, '');
+  }
+
+  private outboundLineDigits(value?: string): string {
+    const digits = this.digits(value ?? this.outboundLine);
+    if (digits && (digits.length < 10 || digits.length > 15)) {
+      throw new Error('Mango callback: исходящая линия должна содержать от 10 до 15 цифр');
+    }
+    return digits;
   }
 
   /**
@@ -109,6 +268,7 @@ export class MangoAdapter implements IMangoAdapter {
     const commandId = crypto.randomUUID();
     const fromDigits = this.digits(req.from);
     const toDigits = this.digits(req.to);
+    const lineNumber = this.outboundLineDigits(req.lineNumber);
     if (fromDigits.length < 10 || toDigits.length < 10) {
       throw new Error(`Mango callback: некорректные номера (from=${req.from}, to=${req.to})`);
     }
@@ -117,7 +277,7 @@ export class MangoAdapter implements IMangoAdapter {
       command_id: commandId,
       from: { number: fromDigits },
       to_number: toDigits,
-      ...(req.lineNumber ? { line_number: this.digits(req.lineNumber) } : {}),
+      ...(lineNumber ? { line_number: lineNumber } : {}),
     });
     const sign = crypto
       .createHash('sha256')
@@ -130,7 +290,8 @@ export class MangoAdapter implements IMangoAdapter {
       json,
     });
 
-    const res = await fetch(`${this.apiUrl}/commands/callback`, {
+    const apiUrl = normalizeMangoApiUrl(this.apiUrl);
+    const res = await mangoFetch(`${apiUrl}/commands/callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
@@ -147,7 +308,7 @@ export class MangoAdapter implements IMangoAdapter {
    * 2026-07 (issue #2): callback от ВНУТРЕННЕГО НОМЕРА сотрудника.
    * Mango звонит на extension менеджера (его SIP/МангоМобайл), после ответа
    * дозванивается до `to` и соединяет. Штатный VPBX commands/callback с
-   * HMAC-подписью — нужны только api_key + api_salt (MANGO_CALLBACK_URL НЕ
+   * SHA-256-подписью — нужны только api_key + api_salt (MANGO_CALLBACK_URL НЕ
    * требуется). extension — короткий внутренний номер сотрудника (напр. "33").
    */
   async initiateCallbackFromExtension(req: {
@@ -159,10 +320,11 @@ export class MangoAdapter implements IMangoAdapter {
       throw new Error('Mango: API key / salt не настроены (см. /admin/integrations)');
     }
     const extension = String(req.extension || '').trim();
-    if (!extension) {
-      throw new Error('Mango callback: не указан внутренний номер сотрудника (extension)');
+    if (!/^\d{1,20}$/.test(extension)) {
+      throw new Error('Mango callback: внутренний номер сотрудника должен содержать от 1 до 20 цифр');
     }
     const toDigits = this.digits(req.to);
+    const lineNumber = this.outboundLineDigits(req.lineNumber);
     if (toDigits.length < 10) {
       throw new Error(`Mango callback: некорректный номер брокера (${req.to})`);
     }
@@ -172,7 +334,7 @@ export class MangoAdapter implements IMangoAdapter {
       command_id: commandId,
       from: { extension },
       to_number: toDigits,
-      ...(req.lineNumber ? { line_number: this.digits(req.lineNumber) } : {}),
+      ...(lineNumber ? { line_number: lineNumber } : {}),
     });
     const sign = crypto
       .createHash('sha256')
@@ -180,7 +342,8 @@ export class MangoAdapter implements IMangoAdapter {
       .digest('hex');
 
     const params = new URLSearchParams({ vpbx_api_key: this.apiKey, sign, json });
-    const res = await fetch(`${this.apiUrl}/commands/callback`, {
+    const apiUrl = normalizeMangoApiUrl(this.apiUrl);
+    const res = await mangoFetch(`${apiUrl}/commands/callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params.toString(),
@@ -198,7 +361,7 @@ export class MangoAdapter implements IMangoAdapter {
 
   /**
    * 2026-06-09: альтернативный путь через готовый integration-webhook URL
-   * от Mango. Не требует HMAC-подписи — просто GET на готовый URL шаблона
+   * от Mango. Не требует VPBX-подписи — просто GET на готовый URL шаблона
    * с подстановкой EmployeeNUM (внутренний номер оператора) и TelNumbr
    * (телефон того кого набираем).
    *
@@ -211,8 +374,9 @@ export class MangoAdapter implements IMangoAdapter {
     if (!mangoConfig.callbackUrl) {
       throw new Error('Mango: MANGO_CALLBACK_URL не настроен (см. /admin/integrations)');
     }
-    if (!req.employeeNum) {
-      throw new Error('Mango: не указан EmployeeNUM (внутренний номер оператора)');
+    const employeeNum = String(req.employeeNum || '').trim();
+    if (!/^\d{1,20}$/.test(employeeNum)) {
+      throw new Error('Mango: EmployeeNUM должен содержать от 1 до 20 цифр');
     }
     const phone = this.digits(req.phone);
     if (phone.length < 10) {
@@ -228,16 +392,18 @@ export class MangoAdapter implements IMangoAdapter {
       throw new Error(`Mango: превышен лимит ${MANGO_RATE_LIMIT_PER_MIN} звонков в минуту`);
     }
 
-    // Подставляем плейсхолдеры. Шаблон от Mango:
-    //   EmployeeNUM={{Ответственный}}&TelNumbr={{Телефон}}
-    const url = mangoConfig.callbackUrl
-      .replace(/\{\{Ответственный\}\}/g, encodeURIComponent(req.employeeNum))
-      .replace(/\{\{Телефон\}\}/g, encodeURIComponent(phone));
+    // Parse and set query values instead of string replacement. This handles
+    // both literal and percent-encoded official placeholders and cannot move
+    // user-controlled digits into the host/path portion of the URL.
+    const callbackUrl = new URL(normalizeMangoCallbackUrl(mangoConfig.callbackUrl));
+    callbackUrl.searchParams.set('EmployeeNUM', employeeNum);
+    callbackUrl.searchParams.set('TelNumbr', phone);
+    const url = callbackUrl.toString();
 
     const commandId = crypto.randomUUID();
     callTimestamps.push(now);
 
-    const res = await fetch(url, { method: 'GET' });
+    const res = await mangoFetch(url, { method: 'GET' });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Mango webhook ${res.status}: ${text.slice(0, 300)}`);
@@ -248,7 +414,7 @@ export class MangoAdapter implements IMangoAdapter {
   async getCallRecording(callId: string): Promise<string> {
     // VPBX API не отдаёт прямую ссылку — запись приходит в webhook
     // call-result (recording_url). Тут — для обратной совместимости.
-    return `${this.apiUrl}/queries/recording/${callId}`;
+    return `${normalizeMangoApiUrl(this.apiUrl)}/queries/recording/${callId}`;
   }
 
   async getCallStatus(callId: string): Promise<CallStatus> {

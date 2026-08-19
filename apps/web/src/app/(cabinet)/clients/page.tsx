@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Search, ChevronLeft, ChevronRight, X, AlertTriangle, Mail, Building, User, Phone as PhoneIcon, Calendar, FileText, CheckCircle2, AlertCircle, PhoneCall } from 'lucide-react';
@@ -54,18 +54,24 @@ function daysUntilExpiry(expiresAt: string | null): number | null {
 function CallButton({ clientId, variant = 'icon' }: { clientId: string; variant?: 'icon' | 'full' }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const callInFlight = useRef(false);
 
   const handle = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (busy) return;
+    if (callInFlight.current) return;
+    callInFlight.current = true;
     setBusy(true);
     setMsg(null);
     try {
-      const res: any = await apiPost('/broker-calls/initiate', { clientId });
+      const res: any = await apiPost('/broker-calls/initiate', {
+        clientId,
+        idempotencyKey: crypto.randomUUID(),
+      });
       setMsg({ ok: true, text: res?.message || 'Mango сейчас наберёт вас.' });
     } catch (err: any) {
       setMsg({ ok: false, text: err?.message || 'Не удалось инициировать звонок' });
     } finally {
+      callInFlight.current = false;
       setBusy(false);
       setTimeout(() => setMsg(null), 6000);
     }

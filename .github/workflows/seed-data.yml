@@ -39,6 +39,7 @@ on:
           - force-sync-lead
           - api-logs
           - find-test-leads
+          - production-db-preflight
           - full-backup
       admin_phone:
         description: 'Телефон админа (для task=create-admin), формат +7XXXXXXXXXX'
@@ -98,7 +99,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: SSH and run requested task
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -114,6 +115,37 @@ jobs:
             if ! docker compose version &>/dev/null; then COMPOSE_CMD="docker-compose"; fi
 
             TASK="${{ inputs.task }}"
+
+            if [ "$TASK" = "production-db-preflight" ]; then
+              echo "=== production-db-preflight (read-only, no secret values) ==="
+              test -f .env || { echo "env_file=missing"; exit 1; }
+              ENV_MODE=$(stat -c '%a' .env)
+              POSTGRES_VALUE=$(awk -F= '$1=="POSTGRES_PASSWORD" {sub(/^[^=]*=/, ""); print; exit}' .env)
+              JWT_VALUE=$(awk -F= '$1=="JWT_SECRET" {sub(/^[^=]*=/, ""); print; exit}' .env)
+              echo "env_mode=$ENV_MODE"
+              if [ -n "$POSTGRES_VALUE" ] && [ "$POSTGRES_VALUE" != "postgres" ] && [ ${#POSTGRES_VALUE} -ge 16 ]; then echo "postgres_password=strong_enough"; else echo "postgres_password=missing_default_or_short"; fi
+              if [ -n "$JWT_VALUE" ] && [ "$JWT_VALUE" != "change-me-in-production" ] && [ ${#JWT_VALUE} -ge 32 ]; then echo "jwt_secret=strong_enough"; else echo "jwt_secret=missing_default_or_short"; fi
+              unset POSTGRES_VALUE JWT_VALUE
+
+              DB_NAME=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT current_database()')
+              SYSTEM_ID=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT system_identifier FROM pg_control_system()')
+              BROKERS_EXISTS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT to_regclass('public.brokers') IS NOT NULL")
+              MIGRATIONS_EXISTS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT to_regclass('public._prisma_migrations') IS NOT NULL")
+              echo "database=$DB_NAME"
+              echo "system_identifier=$SYSTEM_ID"
+              echo "brokers_table=$BROKERS_EXISTS"
+              echo "migration_history=$MIGRATIONS_EXISTS"
+              if [ "$BROKERS_EXISTS" = "t" ]; then
+                BROKER_ROWS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT COUNT(*) FROM public.brokers')
+                echo "broker_rows=$BROKER_ROWS"
+              fi
+              if [ "$MIGRATIONS_EXISTS" = "t" ]; then
+                UNFINISHED=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT COUNT(*) FROM public."_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL')
+                BASELINE=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT EXISTS (SELECT 1 FROM public.\"_prisma_migrations\" WHERE migration_name='0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL)")
+                echo "unfinished_migrations=$UNFINISHED"
+                echo "baseline_applied=$BASELINE"
+              fi
+            fi
 
             if [ "$TASK" = "all" ] || [ "$TASK" = "seed-stmichael" ]; then
               echo "=== seed-from-stmichael (проекты + акции с stmichael.ru) ==="
@@ -298,43 +330,54 @@ jobs:
             fi
 
             if [ "$TASK" = "full-backup" ]; then
-              # 2026-06-18: `set -e` + script_stop:true валят весь скрипт когда
-              # `tar uploads` возвращает 2 (даже внутри if). Бэкап делает best-effort
-              # — лучше пропустить отсутствующий uploads чем потерять весь dump.
-              set +e
-              echo "=== full-backup (БД + uploads + .env → /var/backups/stmichael) ==="
+              # Fail closed: a zero-byte/truncated dump must never be reported
+              # as a valid pre-deploy backup. Secrets from .env are deliberately
+              # excluded; they belong in the approved secret manager.
+              set -euo pipefail
+              umask 077
+              echo "=== full-backup (verified DB dump + optional uploads; no .env) ==="
               BACKUP_DIR=/var/backups/stmichael
               sudo mkdir -p "$BACKUP_DIR"
+              test -d "$BACKUP_DIR" && test -w "$BACKUP_DIR"
               TS=$(date -u +%Y%m%d-%H%M%S)
               TMP=$(mktemp -d)
+              trap 'rm -rf "$TMP"' EXIT
+              DUMP_FILE="$TMP/db-$TS.dump"
 
-              echo "→ pg_dump (через postgres-контейнер — env \$POSTGRES_USER/DB доступны внутри)"
-              $COMPOSE_CMD exec -T postgres bash -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' \
-                | gzip > "$TMP/db-$TS.sql.gz"
-              echo "  размер dump: $(du -h "$TMP/db-$TS.sql.gz" | cut -f1)"
+              echo "→ pg_dump custom format"
+              $COMPOSE_CMD exec -T postgres bash -c \
+                'exec pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$DUMP_FILE"
+              test -s "$DUMP_FILE"
+              $COMPOSE_CMD exec -T postgres pg_restore --list < "$DUMP_FILE" > /dev/null
+              echo "  dump verified; size: $(du -h "$DUMP_FILE" | cut -f1)"
 
-              echo "→ tar uploads (если есть)"
-              tar -czf "$TMP/uploads-$TS.tar.gz" uploads 2>/dev/null || rm -f "$TMP/uploads-$TS.tar.gz"
-              test ! -f "$TMP/uploads-$TS.tar.gz" || echo "  размер uploads: $(du -h "$TMP/uploads-$TS.tar.gz" | cut -f1)"
-              test -f "$TMP/uploads-$TS.tar.gz" || echo "  uploads/ не найден или пустой — пропускаю"
-              echo "→ копирую .env"
-              if cp .env "$TMP/.env.$TS" 2>/dev/null; then
-                echo "  .env скопирован"
-              else
-                echo "  .env не найден — пропускаю"
-              fi
+              echo "→ tar named uploads volume through the running API container"
+              UPLOADS_FILE="$TMP/uploads-$TS.tar.gz"
+              $COMPOSE_CMD exec -T api sh -c \
+                'test -d /app/uploads && exec tar -C /app/uploads -czf - .' \
+                > "$UPLOADS_FILE"
+              test -s "$UPLOADS_FILE"
+              tar -tzf "$UPLOADS_FILE" > /dev/null
+              echo "  uploads volume verified; size: $(du -h "$UPLOADS_FILE" | cut -f1)"
 
-              echo "→ собираю tarball"
-              tar -czf "$BACKUP_DIR/backup-$TS.tar.gz" -C "$TMP" .
-              rm -rf "$TMP"
+              printf 'created_at_utc=%s\ncommit=%s\n' "$TS" "$(git rev-parse HEAD)" > "$TMP/MANIFEST.txt"
+              (cd "$TMP" && sha256sum -- * > SHA256SUMS)
+
+              echo "→ собираю и проверяю tarball"
+              FINAL_BACKUP="$BACKUP_DIR/backup-$TS.tar.gz"
+              TEMP_BACKUP="$BACKUP_DIR/.backup-$TS.tar.gz.tmp"
+              tar -czf "$TEMP_BACKUP" -C "$TMP" .
+              test -s "$TEMP_BACKUP"
+              tar -tzf "$TEMP_BACKUP" > /dev/null
+              mv "$TEMP_BACKUP" "$FINAL_BACKUP"
 
               # Чистим бэкапы старше 14 дней
               find "$BACKUP_DIR" -name "backup-*.tar.gz" -mtime +14 -delete 2>/dev/null || true
 
-              ls -lh "$BACKUP_DIR/backup-$TS.tar.gz"
-              sha256sum "$BACKUP_DIR/backup-$TS.tar.gz"
-              echo "✓ Бэкап готов: $BACKUP_DIR/backup-$TS.tar.gz"
-              set -e
+              ls -lh "$FINAL_BACKUP"
+              sha256sum "$FINAL_BACKUP"
+              echo "✓ Локальный backup verified: $FINAL_BACKUP"
+              echo "ВАЖНО: скопируйте его в утверждённое off-host encrypted storage и проверьте restore на clone."
             fi
 
             if [ "$TASK" = "find-test-leads" ]; then

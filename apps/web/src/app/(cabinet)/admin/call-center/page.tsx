@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiGet, apiPost } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import {
@@ -167,6 +167,12 @@ export default function AdminCallCenterPage() {
   useEffect(() => { loadQueue(); }, [loadQueue]);
   useEffect(() => { loadStats(); }, [loadStats]);
   useEffect(() => { loadManagers(); }, [loadManagers]);
+  useEffect(() => {
+    if (me?.role === 'MANAGER' && assignmentFilter !== 'mine') {
+      setAssignmentFilter('mine');
+      setPage(1);
+    }
+  }, [me?.role, assignmentFilter]);
 
   // При смене страницы или фильтра — сбрасываем выбор (не путаем менеджера).
   useEffect(() => { setSelected(new Set()); }, [page, search, categoryFilter, specializationFilter, includeAll, coordinatorsFilter, assignmentFilter]);
@@ -234,9 +240,9 @@ export default function AdminCallCenterPage() {
   // issue #2: клик-ту-колл — менеджер КЦ звонит брокеру через Mango.
   // Дёргает POST /admin/mango-call; Mango звонит менеджеру, тот берёт трубку —
   // соединяют с брокером. Итог показываем в общей плашке message.
-  const handleMangoCall = async (brokerId: string) => {
+  const handleMangoCall = async (brokerId: string, idempotencyKey: string) => {
     try {
-      const res: any = await apiPost('/admin/mango-call', { brokerId });
+      const res: any = await apiPost('/admin/mango-call', { brokerId, idempotencyKey });
       setMessage(res?.message || 'Mango звонит вам — возьмите трубку, соединим с брокером');
     } catch (e: any) {
       setMessage(`Ошибка звонка: ${e?.message || 'не удалось'}`);
@@ -318,8 +324,8 @@ export default function AdminCallCenterPage() {
             title="Фильтр распределения по менеджерам КЦ"
           >
             <option value="mine">{me?.role === 'MANAGER' ? 'Только мои' : 'Назначенные на меня'}</option>
-            <option value="unassigned">Без назначения</option>
-            <option value="all">Все</option>
+            {me?.role === 'ADMIN' && <option value="unassigned">Без назначения</option>}
+            {me?.role === 'ADMIN' && <option value="all">Все</option>}
           </select>
           <label className="flex items-center gap-2 text-sm cursor-pointer">
             <input type="checkbox" checked={includeAll} onChange={(e) => { setIncludeAll(e.target.checked); setPage(1); }} />
@@ -463,17 +469,20 @@ function BrokerRow({
   showCheckbox?: boolean;
   selected?: boolean;
   onSelectToggle?: () => void;
-  onCall: (brokerId: string) => Promise<void>;
+  onCall: (brokerId: string, idempotencyKey: string) => Promise<void>;
 }) {
   const cat = categoryLabels[broker.category];
   const lastResult = broker.callLogs[0];
   const [calling, setCalling] = useState(false);
+  const callInFlight = useRef(false);
   const doCall = async () => {
-    if (broker.doNotCall || calling) return;
+    if (broker.doNotCall || callInFlight.current) return;
+    callInFlight.current = true;
     setCalling(true);
     try {
-      await onCall(broker.id);
+      await onCall(broker.id, crypto.randomUUID());
     } finally {
+      callInFlight.current = false;
       setCalling(false);
     }
   };
@@ -517,6 +526,7 @@ function BrokerRow({
               role="button"
               tabIndex={0}
               onClick={(e) => { e.stopPropagation(); doCall(); }}
+              aria-disabled={broker.doNotCall || calling}
               title={broker.doNotCall ? 'Брокер в списке «не звонить»' : 'Позвонить брокеру через Mango'}
               className={`inline-flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0 ${broker.doNotCall ? 'opacity-30 cursor-not-allowed' : 'bg-accent/15 text-accent hover:bg-accent/30 cursor-pointer'}`}
             >

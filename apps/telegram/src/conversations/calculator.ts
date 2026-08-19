@@ -1,8 +1,4 @@
-import { Conversation, ConversationFlavor } from '@grammyjs/conversations'
-import { Context } from 'grammy'
-
-type MyContext = Context & ConversationFlavor
-type MyConversation = Conversation<MyContext>
+import type { MyContext, MyConversation } from '../types/context'
 
 export async function calculatorConversation(conversation: MyConversation, ctx: MyContext) {
   await ctx.reply('🏦 *Ипотечный калькулятор*\n\nВведите стоимость квартиры (рублей):', { parse_mode: 'Markdown' })

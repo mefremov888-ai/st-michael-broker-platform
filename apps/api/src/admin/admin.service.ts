@@ -1,10 +1,28 @@
-import { Injectable, Inject, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { AmocrmService } from '../amocrm/amocrm.service';
-import { AmoCrmAdapter, MangoAdapter, AMO_CONTACT_FIELDS, BROKER_PIPELINE_ID, setAmoTokens, getAmoTokens, setMangoConfig, isSalesPipeline } from '@st-michael/integrations';
+import {
+  AmoCrmAdapter,
+  MangoAdapter,
+  AMO_CONTACT_FIELDS,
+  BROKER_PIPELINE_ID,
+  setAmoTokens,
+  getAmoTokens,
+  setMangoConfig,
+  isSalesPipeline,
+  normalizeMangoApiUrl,
+  normalizeMangoCallbackUrl,
+} from '@st-michael/integrations';
 import {
   VALID_CATEGORIES,
   VALID_CALL_FLAGS,
@@ -20,6 +38,25 @@ import {
   DEFAULT_PAYMENT_TERMS,
   paymentTermsForPolicy,
 } from '../commission/commission.service';
+import { normalizeMangoEmployeeNum } from './mango-employee-num';
+import { PUBLIC_CALL_SELECT } from '../common/public-call';
+import { MangoCallSafetyService } from '../common/mango-call-safety.service';
+import type { BrokerCallResultCode } from './admin-mango.dto';
+import {
+  AMO_UNIQUENESS_RECHECK_MARKER,
+  publicAmoSyncError,
+  requeueAmoAuthDeadLetters,
+} from '../common/amo-sync-retry';
+
+const SAFE_BROKER_MUTATION_SELECT = {
+  id: true,
+  fullName: true,
+  phone: true,
+  email: true,
+  role: true,
+  status: true,
+  updatedAt: true,
+} as const;
 
 interface MailingFilters {
   project?: string;        // ZORGE9 / SILVER_BOR
@@ -40,6 +77,7 @@ export class AdminService {
     private amocrmService: AmocrmService,
     @InjectQueue('notifications') private notificationQueue: Queue,
     private importJobs: BrokerImportJobsService,
+    private mangoCallSafety: MangoCallSafetyService,
   ) {}
 
   getUniquenessControl(_query: any) {
@@ -302,28 +340,60 @@ export class AdminService {
     return { brokers, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
-  async getBroker(id: string) {
-    const broker = await this.prisma.broker.findUnique({
-      where: { id },
-      include: {
-        brokerAgencies: { include: { agency: true } },
-        _count: { select: { clients: true, deals: true, meetings: true, callLogs: true } },
-        callLogs: {
-          orderBy: { createdAt: 'desc' },
-          take: 50,
-          select: {
-            id: true, result: true, comment: true, campaign: true,
-            duration: true, createdAt: true, nextCallAt: true, operatorId: true,
-          },
-        },
-        // КБ6 (2026-05-25): акцепты оферты — для статуса «договор подписан».
-        offerAcceptances: {
-          orderBy: { acceptedAt: 'desc' },
-          select: {
-            id: true, offerVersion: true, acceptedAt: true, ip: true, signedPdfUrl: true,
-          },
+  async getBroker(id: string, includeMangoEmployeeNum = false) {
+    const select: any = {
+      id: true,
+      amoContactId: true,
+      fullName: true,
+      phone: true,
+      email: true,
+      avatarUrl: true,
+      role: true,
+      status: true,
+      funnelStage: true,
+      source: true,
+      closureReason: true,
+      brokerTourVisited: true,
+      brokerTourDate: true,
+      doNotCall: true,
+      bestCallTime: true,
+      category: true,
+      specialization: true,
+      region: true,
+      isRegional: true,
+      isCoordinator: true,
+      coordinatorAgency: true,
+      lastCallAt: true,
+      nextCallAt: true,
+      isInBase: true,
+      baseSource: true,
+      assignedManagerId: true,
+      assignedAt: true,
+      createdAt: true,
+      updatedAt: true,
+      reactivatedAt: true,
+      mergedIntoId: true,
+      brokerAgencies: { include: { agency: true } },
+      _count: { select: { clients: true, deals: true, meetings: true, callLogs: true } },
+      callLogs: {
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+        select: {
+          id: true, result: true, comment: true, campaign: true,
+          duration: true, createdAt: true, nextCallAt: true, operatorId: true,
         },
       },
+      offerAcceptances: {
+        orderBy: { acceptedAt: 'desc' },
+        select: {
+          id: true, offerVersion: true, acceptedAt: true, ip: true, signedPdfUrl: true,
+        },
+      },
+    };
+    if (includeMangoEmployeeNum) select.mangoEmployeeNum = true;
+    const broker = await this.prisma.broker.findUnique({
+      where: { id },
+      select,
     });
     if (!broker) throw new NotFoundException('Broker not found');
     return broker;
@@ -338,12 +408,115 @@ export class AdminService {
     if (data.doNotCall !== undefined) allowed.doNotCall = data.doNotCall;
     if (data.bestCallTime !== undefined) allowed.bestCallTime = data.bestCallTime;
 
-    const updated = await this.prisma.broker.update({ where: { id }, data: allowed });
+    const updated = await this.prisma.broker.update({
+      where: { id },
+      data: allowed,
+      select: SAFE_BROKER_MUTATION_SELECT,
+    });
     return updated;
   }
 
+  async updateBrokerMangoEmployeeNum(
+    id: string,
+    value: unknown,
+    actorId: string,
+  ) {
+    const mangoEmployeeNum = normalizeMangoEmployeeNum(value);
+    const broker = await this.prisma.broker.findUnique({
+      where: { id },
+      select: { id: true, fullName: true, role: true, mangoEmployeeNum: true },
+    });
+    if (!broker) throw new NotFoundException('Broker not found');
+
+    if (mangoEmployeeNum && !['MANAGER', 'ADMIN'].includes(String(broker.role))) {
+      throw new BadRequestException(
+        'Внутренний номер Mango можно назначить только сотруднику с ролью MANAGER или ADMIN',
+      );
+    }
+
+    if (mangoEmployeeNum) {
+      const conflict = await this.prisma.broker.findFirst({
+        where: {
+          mangoEmployeeNum,
+          id: { not: id },
+        },
+        select: { id: true, fullName: true },
+      });
+      if (conflict) {
+        throw new ConflictException(
+          'Внутренний номер Mango уже назначен другому сотруднику',
+        );
+      }
+    }
+
+    if (broker.mangoEmployeeNum === mangoEmployeeNum) {
+      return {
+        id: broker.id,
+        fullName: broker.fullName,
+        mangoEmployeeNum: broker.mangoEmployeeNum,
+      };
+    }
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.broker.update({
+          where: { id },
+          data: { mangoEmployeeNum },
+          select: { id: true, fullName: true, mangoEmployeeNum: true },
+        });
+        await tx.auditLog.create({
+          data: {
+            userId: actorId,
+            action: 'BROKER_MANGO_EMPLOYEE_NUM_UPDATED',
+            entity: 'Broker',
+            entityId: id,
+            // Internal extensions are operational identifiers. The audit only
+            // records the state transition, not the value itself.
+            payload: { cleared: mangoEmployeeNum === null },
+          },
+        });
+        return updated;
+      });
+    } catch (error: any) {
+      const target = error?.meta?.target;
+      const targets = Array.isArray(target) ? target.map(String) : [String(target || '')];
+      if (
+        error?.code === 'P2002'
+        && targets.some((item) =>
+          item === 'mangoEmployeeNum'
+          || item === 'mango_employee_num'
+          || item.includes('brokers_mango_employee_num_key'),
+        )
+      ) {
+        // The database constraint is authoritative. The pre-check above only
+        // improves UX and cannot prevent two concurrent assignments.
+        throw new ConflictException(
+          'Внутренний номер Mango уже назначен другому сотруднику',
+        );
+      }
+      throw error;
+    }
+  }
+
   async changeRole(id: string, role: 'BROKER' | 'MANAGER' | 'ADMIN') {
-    return this.prisma.broker.update({ where: { id }, data: { role: role as any } });
+    const broker = await this.prisma.broker.findUnique({
+      where: { id },
+      select: { status: true, passwordHash: true },
+    });
+    if (!broker) throw new NotFoundException('Broker not found');
+    if (
+      role !== 'BROKER'
+      && (broker.status !== 'ACTIVE' || !broker.passwordHash)
+    ) {
+      throw new BadRequestException(
+        'Сначала пользователь должен активировать аккаунт и установить пароль',
+      );
+    }
+    return this.prisma.broker.update({
+      where: { id },
+      data: { role: role as any },
+      select: SAFE_BROKER_MUTATION_SELECT,
+    });
   }
 
   async changeStatus(id: string, status: 'ACTIVE' | 'BLOCKED' | 'PENDING') {
@@ -357,7 +530,11 @@ export class AdminService {
     const wasClosed = current && current.status !== 'ACTIVE';
     const data: any = { status };
     if (status === 'ACTIVE' && wasClosed) data.reactivatedAt = new Date();
-    return this.prisma.broker.update({ where: { id }, data });
+    return this.prisma.broker.update({
+      where: { id },
+      data,
+      select: SAFE_BROKER_MUTATION_SELECT,
+    });
   }
 
   async brokerDeals(brokerId: string, query: any) {
@@ -1087,6 +1264,7 @@ export class AdminService {
     // currentUserId (передаётся через параметр).
     assignment?: 'mine' | 'unassigned' | 'all' | string;
     currentUserId?: string;
+    currentUserRole?: string;
     // 2026-07-06: фильтр по специализации — чтобы КЦ мог собрать очередь
     // только коммерческих брокеров (или наоборот только жилой сегмент).
     specialization?: 'COMM' | 'RESIDENTIAL' | 'BOTH' | 'REGIONAL' | 'UNSET' | string;
@@ -1115,7 +1293,11 @@ export class AdminService {
       where.isCoordinator = false;
     }
     // 2026-06-03: фильтр распределения по менеджерам КЦ.
-    if (query.assignment === 'mine' && query.currentUserId) {
+    if (query.currentUserRole === 'MANAGER' && query.currentUserId) {
+      // Server-side ownership is authoritative. A manager cannot widen the
+      // queue with assignment=all/unassigned or by calling the API directly.
+      where.assignedManagerId = query.currentUserId;
+    } else if (query.assignment === 'mine' && query.currentUserId) {
       where.assignedManagerId = query.currentUserId;
     } else if (query.assignment === 'unassigned') {
       where.assignedManagerId = null;
@@ -1218,52 +1400,59 @@ export class AdminService {
   // (mangoEmployeeNum), тот берёт трубку → Mango дозванивается до брокера и
   // соединяет. Запись Call создаётся сразу (status INITIATED, clientId=null —
   // клиента в этой паре нет). Итог допишет webhook /webhooks/mango/call-result.
-  async mangoCallBroker(managerId: string, brokerId: string) {
-    const manager = await this.prisma.broker.findUnique({ where: { id: managerId } });
-    if (!manager) throw new NotFoundException('Менеджер не найден');
-    if (!manager.mangoEmployeeNum) {
-      throw new BadRequestException(
-        'У вас не заполнен внутренний номер Mango (mangoEmployeeNum) — обратитесь к администратору',
-      );
-    }
+  async mangoCallBroker(
+    managerId: string,
+    brokerId: string,
+    actorRole: string,
+    idempotencyKey?: string,
+  ) {
+    return this.mangoCallSafety.execute(
+      { actorId: managerId, scope: 'broker', targetId: brokerId, idempotencyKey },
+      async () => {
+        const manager = await this.prisma.broker.findUnique({ where: { id: managerId } });
+        if (!manager) throw new NotFoundException('Менеджер не найден');
+        if (!manager.mangoEmployeeNum) {
+          throw new BadRequestException(
+            'У вас не заполнен внутренний номер Mango (mangoEmployeeNum) — обратитесь к администратору',
+          );
+        }
 
-    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
-    if (!broker) throw new NotFoundException('Брокер не найден');
-    if (broker.doNotCall) {
-      throw new BadRequestException('Брокер в списке «не звонить» (doNotCall)');
-    }
-    if (!broker.phone) {
-      throw new BadRequestException('У брокера не указан телефон');
-    }
+        const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+        if (!broker) throw new NotFoundException('Брокер не найден');
+        if (actorRole !== 'ADMIN' && broker.assignedManagerId !== managerId) {
+          throw new ForbiddenException('Брокер не назначен текущему оператору');
+        }
+        if (broker.doNotCall) {
+          throw new BadRequestException('Брокер в списке «не звонить» (doNotCall)');
+        }
+        if (!broker.phone) {
+          throw new BadRequestException('У брокера не указан телефон');
+        }
 
-    // Mango звонит менеджеру на его внутренний номер, после ответа — брокеру.
-    // Штатный VPBX callback по api_key/salt (MANGO_CALLBACK_URL не нужен).
-    // Caller ID для брокера — общий офисный номер (MANGO_OUTBOUND_LINE),
-    // иначе Mango подставит дефолтную линию аккаунта.
-    const lineNumber = process.env.MANGO_OUTBOUND_LINE || undefined;
-    const r = await this.mango.initiateCallbackFromExtension({
-      extension: manager.mangoEmployeeNum,
-      to: broker.phone,
-      lineNumber,
-    });
+        const r = await this.mango.initiateCallbackFromExtension({
+          extension: manager.mangoEmployeeNum,
+          to: broker.phone,
+        });
 
-    const call = await this.prisma.call.create({
-      data: {
-        brokerId: broker.id,
-        clientId: null,
-        mangoCallId: r.callId,
-        direction: 'OUTBOUND',
-        status: 'INITIATED' as any,
-        attemptNumber: 1,
-        cycleDay: 0,
+        const call = await this.prisma.call.create({
+          data: {
+            brokerId: broker.id,
+            clientId: null,
+            mangoCallId: r.callId,
+            direction: 'OUTBOUND',
+            status: 'INITIATED' as any,
+            attemptNumber: 1,
+            cycleDay: 0,
+          },
+        });
+
+        return {
+          callId: call.id,
+          mangoCallId: r.callId,
+          message: 'Mango сейчас позвонит вам на рабочий телефон — возьмите трубку, соединим с брокером.',
+        };
       },
-    });
-
-    return {
-      callId: call.id,
-      mangoCallId: r.callId,
-      message: 'Mango сейчас позвонит вам на рабочий телефон — возьмите трубку, соединим с брокером.',
-    };
+    );
   }
   async assignBrokersToManager(brokerIds: string[], managerId: string) {
     if (!brokerIds.length) throw new BadRequestException('Не выбрано ни одного брокера');
@@ -1327,7 +1516,7 @@ export class AdminService {
     operatorId: string,
     data: {
       brokerId: string;
-      result: string;
+      result: BrokerCallResultCode;
       comment?: string | null;
       campaign?: string | null;
       duration?: number | null;
@@ -1336,9 +1525,13 @@ export class AdminService {
       // A4 fix 2026-05-24: дата брокер-тура когда result=SCHEDULED_TOUR
       brokerTourDate?: string | null;
     },
+    operatorRole: string,
   ) {
     const broker = await this.prisma.broker.findUnique({ where: { id: data.brokerId } });
     if (!broker) throw new NotFoundException('Брокер не найден');
+    if (operatorRole !== 'ADMIN' && broker.assignedManagerId !== operatorId) {
+      throw new ForbiddenException('Брокер не назначен текущему оператору');
+    }
 
     const effects = this.callResultEffects(data.result);
 
@@ -1571,7 +1764,8 @@ export class AdminService {
       showCall
         ? this.prisma.call.findMany({
             where: callWhere,
-            include: {
+            select: {
+              ...PUBLIC_CALL_SELECT,
               client: { select: { fullName: true, phone: true } },
               broker: { select: { id: true, fullName: true, phone: true } },
             },
@@ -1643,7 +1837,9 @@ export class AdminService {
         broker: c.broker,
         amoStatus: c.amoSyncStatus || null,
         amoLeadId: c.amoLeadId ? String(c.amoLeadId) : null,
-        amoSyncError: c.amoSyncError || null,
+        // Never return a raw amo/WAF response. Legacy rows can contain HTML
+        // and the original request URL may include the client's phone number.
+        amoSyncError: publicAmoSyncError(c.amoSyncError),
         extra: { project: c.project, uniquenessStatus: c.uniquenessStatus, fromAmoSync },
       });
     }
@@ -1737,64 +1933,59 @@ export class AdminService {
     };
   }
 
-  // 2026-05-25: ручной retry — менеджер видит FAILED-заявку и нажимает «повторить».
-  // Вызывает amo createFixationRequest снова. При успехе — статус SYNCED.
-  // 2026-06-19: если клиент был зафиксирован координатором (responsibleBrokerId !=
-  // brokerId), используем для amo реального брокера, а не координатора.
+  // Manual action only requeues the row. The scheduler owns the actual amo
+  // state machine (uniqueness recheck, responsible broker, max attempts and
+  // MoreKIT delivery). The old implementation duplicated only half of that
+  // logic and returned HTTP 200 {ok:false}; the UI ignored the body and falsely
+  // reported success.
   async retryAmoSync(clientId: string) {
     const client = await this.prisma.client.findUnique({
       where: { id: clientId },
-      include: { broker: true, responsibleBroker: true },
+      select: {
+        id: true,
+        amoLeadId: true,
+        amoSyncStatus: true,
+        amoSyncError: true,
+      },
     });
-    if (!client) throw new BadRequestException('Client not found');
-    if (client.amoSyncStatus === 'SYNCED') return { ok: true, message: 'Уже синхронизирован' };
-    if (!client.fixationAgencyId) throw new BadRequestException('У клиента нет fixationAgency');
-    const agency = await this.prisma.agency.findUnique({ where: { id: client.fixationAgencyId } });
-    if (!agency) throw new BadRequestException('Агентство не найдено');
+    if (!client) throw new NotFoundException('Заявка не найдена');
+    if (client.amoSyncStatus === 'SYNCED') {
+      return { ok: true, queued: false, message: 'Заявка уже синхронизирована' };
+    }
+    if (client.amoSyncStatus === 'PENDING') {
+      return { ok: true, queued: false, message: 'Заявка уже находится в очереди' };
+    }
+    if (client.amoLeadId) {
+      throw new ConflictException(
+        'У заявки уже записан идентификатор amoCRM; вместо повтора нужна сверка',
+      );
+    }
 
-    // 2026-06-19: для координаторских фиксаций берём реального брокера.
-    const responsibleBroker = (client as any).responsibleBroker || client.broker;
-    if (!responsibleBroker.amoContactId) {
-      throw new BadRequestException('Ответственный брокер не связан с контактом amoCRM');
+    const preserveUniquenessMarker = String(client.amoSyncError || '').startsWith(
+      AMO_UNIQUENESS_RECHECK_MARKER,
+    );
+    const updated = await this.prisma.client.updateMany({
+      where: {
+        id: clientId,
+        amoLeadId: null,
+        amoSyncStatus: 'FAILED',
+      },
+      data: {
+        amoSyncStatus: 'PENDING',
+        amoSyncAttempts: 0,
+        // Epoch is deterministic and sorts ahead of ordinary retry rows.
+        amoSyncLastAttemptAt: new Date(0),
+        amoSyncError: preserveUniquenessMarker ? client.amoSyncError : null,
+      },
+    });
+    if (!updated.count) {
+      return { ok: true, queued: false, message: 'Статус заявки уже изменился' };
     }
-    try {
-      const resultLead = await this.amo.createFixationRequest({
-        clientPhone: client.phone,
-        clientEmail: client.email || undefined,
-        clientName: client.fullName,
-        brokerPhone: responsibleBroker.phone,
-        brokerAmoContactId: responsibleBroker.amoContactId ? Number(responsibleBroker.amoContactId) : undefined,
-        agencyName: agency.name,
-        agencyInn: agency.inn,
-        comment: client.comment || '',
-        project: client.project as any,
-        fromBroker: true,
-      });
-      const amoLeadId = resultLead?.id ? Number(resultLead.id) : null;
-      if (!amoLeadId) throw new Error('amoCRM не вернула id созданной сделки');
-      await this.prisma.client.update({
-        where: { id: clientId },
-        data: {
-          amoSyncStatus: 'SYNCED',
-          amoSyncError: null,
-          amoSyncAttempts: { increment: 1 },
-          amoSyncLastAttemptAt: new Date(),
-          amoLeadId: BigInt(amoLeadId),
-        },
-      });
-      return { ok: true, message: 'Заявка передана в amoCRM' };
-    } catch (e: any) {
-      const error = String(e?.message || e).slice(0, 500);
-      await this.prisma.client.update({
-        where: { id: clientId },
-        data: {
-          amoSyncError: error,
-          amoSyncAttempts: { increment: 1 },
-          amoSyncLastAttemptAt: new Date(),
-        },
-      });
-      return { ok: false, error };
-    }
+    return {
+      ok: true,
+      queued: true,
+      message: 'Заявка возвращена в очередь amoCRM',
+    };
   }
 
   // Bug fix 2026-05-25: диагностика статуса amoCRM.
@@ -2217,6 +2408,7 @@ export class AdminService {
     // 2026-06-09: Mango integration-webhook URL — click-to-call через
     // готовый GET-шаблон без подписи. Альтернатива VPBX API.
     'MANGO_CALLBACK_URL',
+    'MANGO_OUTBOUND_LINE',
     // 2026-06-09: Google Sheets — URL CSV-экспорта таблицы с базой брокеров.
     'GSHEETS_BROKERS_URL',
   ];
@@ -2228,6 +2420,8 @@ export class AdminService {
     'AMO_REFRESH_TOKEN',
     'MANGO_API_KEY',
     'MANGO_API_SALT',
+    // The integration-webhook URL may embed code/API_key query parameters.
+    'MANGO_CALLBACK_URL',
   ]);
 
   async getIntegrationSettings() {
@@ -2266,7 +2460,39 @@ export class AdminService {
     if (!AdminService.INTEGRATION_KEYS.includes(key)) {
       throw new BadRequestException(`Ключ ${key} не разрешён к редактированию`);
     }
-    const trimmed = value.trim();
+    let trimmed = value.trim();
+    if (key === 'MANGO_OUTBOUND_LINE' && trimmed) {
+      const digits = trimmed.replace(/\D/g, '');
+      if (digits.length < 10 || digits.length > 15) {
+        throw new BadRequestException(
+          'MANGO_OUTBOUND_LINE должен содержать от 10 до 15 цифр',
+        );
+      }
+      trimmed = digits;
+    }
+    if (key === 'MANGO_API_URL') {
+      const effectiveValue = trimmed || process.env.MANGO_API_URL || '';
+      try {
+        // Keep an empty DB value as the env-fallback sentinel, but validate the
+        // effective runtime value before persisting anything.
+        const normalized = normalizeMangoApiUrl(effectiveValue);
+        if (trimmed) trimmed = normalized;
+      } catch {
+        throw new BadRequestException(
+          'MANGO_API_URL должен быть официальным HTTPS URL Mango VPBX',
+        );
+      }
+    }
+    if (key === 'MANGO_CALLBACK_URL') {
+      const effectiveValue = trimmed || process.env.MANGO_CALLBACK_URL || '';
+      try {
+        normalizeMangoCallbackUrl(effectiveValue);
+      } catch {
+        throw new BadRequestException(
+          'MANGO_CALLBACK_URL должен быть официальным HTTPS webhook-шаблоном Mango',
+        );
+      }
+    }
     await this.prisma.systemSetting.upsert({
       where: { key },
       update: { value: trimmed, updatedBy },
@@ -2284,18 +2510,49 @@ export class AdminService {
     // 2026-06-05: если обновили amoCRM-токены — обновляем in-memory state
     // адаптера, чтобы следующий же request пошёл с новым значением,
     // без рестарта контейнера.
+    let requeuedAmoApplications = 0;
     if (key === 'AMO_ACCESS_TOKEN' || key === 'AMO_REFRESH_TOKEN') {
       const current = getAmoTokens();
       const access = key === 'AMO_ACCESS_TOKEN' ? trimmed : current.access;
       const refresh = key === 'AMO_REFRESH_TOKEN' ? trimmed : current.refresh;
       setAmoTokens(access, refresh);
+      // Re-open exhausted 401/403 rows only after the new credentials pass a
+      // real account request. Ambiguous network/5xx failures are intentionally
+      // excluded to avoid duplicate leads.
+      if (access || refresh) {
+        try {
+          await this.amo.getAccount();
+          requeuedAmoApplications = await requeueAmoAuthDeadLetters(
+            this.prisma,
+            'integration-setting-update',
+            updatedBy,
+          );
+        } catch {
+          // Saving the setting remains successful; amo-health reports whether
+          // the pair is valid without exposing the raw upstream response.
+        }
+      }
     }
     // 2026-06-08: то же для Mango — конфиг подхватывается без рестарта.
-    if (key === 'MANGO_API_KEY') setMangoConfig({ apiKey: trimmed });
-    if (key === 'MANGO_API_SALT') setMangoConfig({ apiSalt: trimmed });
-    if (key === 'MANGO_API_URL') setMangoConfig({ apiUrl: trimmed });
-    if (key === 'MANGO_CALLBACK_URL') setMangoConfig({ callbackUrl: trimmed });
-    return { ok: true, key };
+    // An empty DB value means "use env fallback", both at bootstrap and
+    // immediately after this hot update. Keeping these paths identical avoids
+    // a temporary unconfigured state that would otherwise last until restart.
+    if (key === 'MANGO_API_KEY') {
+      setMangoConfig({ apiKey: trimmed || process.env.MANGO_API_KEY || '' });
+    }
+    if (key === 'MANGO_API_SALT') {
+      setMangoConfig({ apiSalt: trimmed || process.env.MANGO_API_SALT || '' });
+    }
+    if (key === 'MANGO_API_URL') {
+      setMangoConfig({ apiUrl: trimmed || process.env.MANGO_API_URL || '' });
+    }
+    if (key === 'MANGO_CALLBACK_URL') {
+      setMangoConfig({ callbackUrl: trimmed || process.env.MANGO_CALLBACK_URL || '' });
+    }
+    if (key === 'MANGO_OUTBOUND_LINE') {
+      setMangoConfig({ outboundLine: trimmed || process.env.MANGO_OUTBOUND_LINE || '' });
+    }
+    return { ok: true, key, requeuedAmoApplications };
   }
 
   // ─── Дубли брокеров: ручное слияние (/admin/broker-dedup) ─────────────

@@ -14,9 +14,9 @@ services:
     environment:
       POSTGRES_DB: broker_platform
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in server .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -33,7 +33,7 @@ services:
     container_name: st-michael-redis
     logging: *default-logging
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     networks:
@@ -56,10 +56,10 @@ services:
       # (database.module.ts: verbose при NODE_ENV!=production) — так лог api
       # дорос до 12 ГБ и уронил диск с postgres. Dockerfile.api его не ставит.
       NODE_ENV: production
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/broker_platform
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in server .env}@postgres:5432/broker_platform
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in server .env}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
       API_PORT: 4000
@@ -76,6 +76,12 @@ services:
       # Mozilla User-Agent (обходит WAF).
       AMO_API_DOMAIN: ${AMO_API_DOMAIN:-stmichael.amocrm.ru}
       AMO_ACCESS_TOKEN: ${AMO_ACCESS_TOKEN:-}
+      # Mango VPBX: non-empty SystemSetting values override these env fallbacks.
+      MANGO_API_KEY: ${MANGO_API_KEY:-}
+      MANGO_API_SALT: ${MANGO_API_SALT:-}
+      MANGO_API_URL: ${MANGO_API_URL:-}
+      MANGO_CALLBACK_URL: ${MANGO_CALLBACK_URL:-}
+      MANGO_OUTBOUND_LINE: ${MANGO_OUTBOUND_LINE:-}
       # 2026-05-29: публичная папка Я.Диска с материалами для брокеров.
       YANDEX_DISK_PUBLIC_KEY: ${YANDEX_DISK_PUBLIC_KEY:-https://disk.yandex.ru/d/8_w-xQ8PR3uz3w}
       SMTP_HOST: ${SMTP_HOST:-}
@@ -84,12 +90,20 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      # Technical alerts use a dedicated Telegram chat. Keep the broker bot
+      # token as a fallback so existing installations continue to work.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      OPS_TELEGRAM_BOT_TOKEN: ${OPS_TELEGRAM_BOT_TOKEN:-}
+      OPS_ALERT_CHAT_ID: ${OPS_ALERT_CHAT_ID:-}
+      OPS_ALERT_CHAT_IDS: ${OPS_ALERT_CHAT_IDS:-}
+      OPS_TELEGRAM_TIMEOUT_MS: ${OPS_TELEGRAM_TIMEOUT_MS:-10000}
+      OPS_ALERT_DEDUP_COOLDOWN_MS: ${OPS_ALERT_DEDUP_COOLDOWN_MS:-300000}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
       BROKER_SHEET_ID: ${BROKER_SHEET_ID:-}
       # 2026-06-26: Dadata Suggestions API — автодополнение ИНН в форме регистрации.
       DADATA_API_KEY: ${DADATA_API_KEY:-}
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     volumes:
       - uploads:/app/uploads
     depends_on:
@@ -111,7 +125,7 @@ services:
       API_URL: http://api:4000
       NEXT_PUBLIC_API_URL: /api
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     # 2026-06-24: shared volume для disk-snapshot CMS-данных.
     # page.tsx пишет /app/data/cms-snapshot.json после каждого
     # успешного fetch к API. При падении API лендинг отдаёт его

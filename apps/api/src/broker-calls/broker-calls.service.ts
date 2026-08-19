@@ -1,13 +1,22 @@
 import { Injectable, Inject, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
-import { MangoAdapter, AmoCrmAdapter } from '@st-michael/integrations';
+import {
+  MangoAdapter,
+  AmoCrmAdapter,
+  getMangoConfig,
+} from '@st-michael/integrations';
+import { PUBLIC_CALL_SELECT, toPublicCall } from '../common/public-call';
+import { MangoCallSafetyService } from '../common/mango-call-safety.service';
 
 @Injectable()
 export class BrokerCallsService {
   private mango = new MangoAdapter();
   private amo = new AmoCrmAdapter();
 
-  constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
+  constructor(
+    @Inject('PrismaClient') private prisma: PrismaClient,
+    private readonly mangoCallSafety: MangoCallSafetyService,
+  ) {}
 
   /**
    * Брокер инициирует callback клиенту через Mango.
@@ -20,77 +29,84 @@ export class BrokerCallsService {
    * чтобы у пользователя в журнале появилась строка «звоню сейчас…»,
    * даже если Mango/webhook задержатся.
    */
-  async initiate(brokerId: string, clientId: string) {
-    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
-    if (!broker) throw new NotFoundException('Broker not found');
-    if (broker.doNotCall) {
-      throw new BadRequestException('Брокер в чёрном списке (doNotCall)');
-    }
-    if (!broker.phone) {
-      throw new BadRequestException('У вас не указан телефон в профиле');
-    }
+  async initiate(brokerId: string, clientId: string, idempotencyKey?: string) {
+    return this.mangoCallSafety.execute(
+      { actorId: brokerId, scope: 'client', targetId: clientId, idempotencyKey },
+      async () => {
+        const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+        if (!broker) throw new NotFoundException('Broker not found');
+        if (broker.doNotCall) {
+          throw new BadRequestException('Брокер в чёрном списке (doNotCall)');
+        }
+        if (!broker.phone) {
+          throw new BadRequestException('У вас не указан телефон в профиле');
+        }
 
-    const client = await this.prisma.client.findUnique({ where: { id: clientId } });
-    if (!client) throw new NotFoundException('Client not found');
-    if (client.brokerId !== brokerId) {
-      throw new BadRequestException('Этот клиент привязан к другому брокеру');
-    }
-    if (!client.phone) {
-      throw new BadRequestException('У клиента не указан телефон');
-    }
+        const client = await this.prisma.client.findUnique({ where: { id: clientId } });
+        if (!client) throw new NotFoundException('Client not found');
+        if (client.brokerId !== brokerId) {
+          throw new BadRequestException('Этот клиент привязан к другому брокеру');
+        }
+        if (!client.phone) {
+          throw new BadRequestException('У клиента не указан телефон');
+        }
 
-    // 2026-06-09: если у брокера задан mangoEmployeeNum — используем новый
-    // integration-webhook URL (GET без подписи). Иначе fallback на VPBX
-    // POST /commands/callback (HMAC-подпись по api_key/salt). Mango
-    // присылает callback-уведомления о статусе звонка на
-    // /api/webhooks/mango/call-result.
-    let callId: string;
-    if (broker.mangoEmployeeNum) {
-      const r = await this.mango.initiateCallbackViaWebhook({
-        employeeNum: broker.mangoEmployeeNum,
-        phone: client.phone,
-      });
-      callId = r.callId;
-    } else {
-      // Caller ID для клиента — общий офисный номер St Michael.
-      // Берём из ENV (MANGO_OUTBOUND_LINE), если нет — Mango возьмёт дефолт аккаунта.
-      const lineNumber = process.env.MANGO_OUTBOUND_LINE || undefined;
-      const r = await this.mango.initiateCallback({
-        from: broker.phone,
-        to: client.phone,
-        lineNumber,
-      });
-      callId = r.callId;
-    }
+    // При настроенных VPBX credentials используем подписанный callback и
+    // передаём command_id в Mango: так status webhook надёжно коррелируется
+    // с локальной записью. Старый integration-webhook остаётся fallback для
+    // инсталляций, где задан только его URL.
+        let callId: string;
+        const mangoConfig = getMangoConfig();
+        if (broker.mangoEmployeeNum && mangoConfig.apiKey && mangoConfig.apiSalt) {
+          const r = await this.mango.initiateCallbackFromExtension({
+            extension: broker.mangoEmployeeNum,
+            to: client.phone,
+          });
+          callId = r.callId;
+        } else if (broker.mangoEmployeeNum && mangoConfig.callbackUrl) {
+          const r = await this.mango.initiateCallbackViaWebhook({
+            employeeNum: broker.mangoEmployeeNum,
+            phone: client.phone,
+          });
+          callId = r.callId;
+        } else {
+          const r = await this.mango.initiateCallback({
+            from: broker.phone,
+            to: client.phone,
+          });
+          callId = r.callId;
+        }
 
     // Создаём запись Call со статусом «инициирован» — пользователь увидит её
     // в журнале сразу. Webhook позже допишет duration/recording/result.
-    const call = await this.prisma.call.create({
-      data: {
-        brokerId,
-        clientId,
-        mangoCallId: callId,
-        direction: 'OUTBOUND',
-        status: 'INITIATED' as any,
-        attemptNumber: 1,
-        cycleDay: 0,
-      },
-    });
+        const call = await this.prisma.call.create({
+          data: {
+            brokerId,
+            clientId,
+            mangoCallId: callId,
+            direction: 'OUTBOUND',
+            status: 'INITIATED' as any,
+            attemptNumber: 1,
+            cycleDay: 0,
+          },
+        });
 
     // amo-sync: оставляем note в лиде клиента — менеджеру видно сразу,
     // что брокер пошёл звонить. Не критично если упало — звонок уже состоялся.
-    if (client.amoLeadId) {
-      const note = `📞 Брокер ${broker.fullName} инициировал звонок клиенту ${client.fullName} (${client.phone})`;
-      this.amo.addNoteToLead(Number(client.amoLeadId), note).catch((e: any) => {
-        console.error('[broker-calls] amo addNoteToLead failed:', e?.message || e);
-      });
-    }
+        if (client.amoLeadId) {
+          const note = `📞 Брокер ${broker.fullName} инициировал звонок клиенту ${client.fullName} (${client.phone})`;
+          this.amo.addNoteToLead(Number(client.amoLeadId), note).catch((e: any) => {
+            console.error('[broker-calls] amo addNoteToLead failed:', e?.message || e);
+          });
+        }
 
-    return {
-      callId: call.id,
-      mangoCallId: callId,
-      message: 'Mango сейчас наберёт ваш мобильный, возьмите трубку — мы соединим с клиентом.',
-    };
+        return {
+          callId: call.id,
+          mangoCallId: callId,
+          message: 'Mango сейчас наберёт ваш мобильный, возьмите трубку — мы соединим с клиентом.',
+        };
+      },
+    );
   }
 
   /**
@@ -110,7 +126,8 @@ export class BrokerCallsService {
         orderBy: { initiatedAt: 'desc' },
         skip,
         take: limit,
-        include: {
+        select: {
+          ...PUBLIC_CALL_SELECT,
           client: { select: { id: true, fullName: true, phone: true } },
         },
       }),
@@ -118,7 +135,7 @@ export class BrokerCallsService {
     ]);
 
     return {
-      calls,
+      calls: calls.map((call) => toPublicCall(call as any)),
       total,
       page,
       limit,

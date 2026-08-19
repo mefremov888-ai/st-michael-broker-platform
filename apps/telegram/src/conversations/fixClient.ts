@@ -1,9 +1,5 @@
-import { Conversation, ConversationFlavor } from '@grammyjs/conversations'
-import { Context } from 'grammy'
 import { apiService } from '../services/api'
-
-type MyContext = Context & ConversationFlavor
-type MyConversation = Conversation<MyContext>
+import type { MyContext, MyConversation } from '../types/context'
 
 export async function fixClientConversation(conversation: MyConversation, ctx: MyContext) {
   const broker = ctx.session?.broker

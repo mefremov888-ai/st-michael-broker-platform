@@ -1,4 +1,4 @@
-import { Injectable, Inject, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Inject, Optional, BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { Project } from '@st-michael/shared';
 import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, AMO_CONTACT_FIELDS, brokerToAmoContactFields } from '@st-michael/integrations';
@@ -7,6 +7,12 @@ import type { Queue } from 'bull';
 import * as XLSX from 'xlsx';
 import { getSystemSetting } from '../common/system-setting';
 import { buildPhoneSearchConditions } from '../admin/brokers-import.helper';
+import { OpsAlertService } from '../ops-alert/ops-alert.service';
+import {
+  AMO_UNIQUENESS_RECHECK_MARKER,
+  publicAmoSyncError,
+  sanitizeAmoSyncError,
+} from '../common/amo-sync-retry';
 
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
@@ -24,6 +30,7 @@ export class ClientFixationService {
     @Inject('PrismaClient') private prisma: PrismaClient,
     private amoCrmAdapter: AmoCrmAdapter,
     @InjectQueue('notifications') private notificationQueue: Queue,
+    @Optional() private readonly opsAlerts?: OpsAlertService,
   ) {}
 
   async fixClient(
@@ -120,8 +127,8 @@ export class ClientFixationService {
           });
           if (newAmoCompany?.name) agencyName = newAmoCompany.name;
         }
-      } catch (e: any) {
-        console.error('[fixClient] amo agency lookup failed, продолжаем без amo:', e?.message || e);
+      } catch {
+        console.error('[fixClient] amo agency lookup failed, продолжаем без amo');
       }
       agency = await this.prisma.agency.create({
         data: { name: agencyName, inn: data.agencyInn },
@@ -145,11 +152,15 @@ export class ClientFixationService {
       triggerType?: 'DEFERRED_DEMAND' | 'NEW_REQUEST_NO_BROKER' | 'ACTIVE_SALES';
       triggerLeadId?: number;
     } | null = null;
+    let amoCheckError: string | null = null;
     try {
       amoVerdict = await this.amoCrmAdapter.checkUniqueness(data.phone);
       console.log(`[fixClient] amo uniqueness rule=${amoVerdict.rule} — ${amoVerdict.reason}${amoVerdict.triggerLeadId ? ` — triggerLeadId=${amoVerdict.triggerLeadId}` : ''}`);
     } catch (e: any) {
-      console.error('[fixClient] amo checkUniqueness failed, fallback to local DB only:', e?.message || e);
+      amoCheckError = sanitizeAmoSyncError(e);
+      console.error(
+        `[fixClient] amo checkUniqueness failed, fallback to local DB only: ${amoCheckError}`,
+      );
     }
 
     // Проверяем сначала запись ЭТОГО брокера — если он уже фиксировал, обновляем её.
@@ -380,7 +391,7 @@ export class ClientFixationService {
         }
       } catch (e: any) {
         amoSyncOk = false;
-        amoSyncError = String(e?.message || e).slice(0, 500);
+        amoSyncError = sanitizeAmoSyncError(e);
         console.error('[fixClient] amo createFixationRequest failed:', amoSyncError);
       }
 
@@ -402,7 +413,13 @@ export class ClientFixationService {
             type: data.propertyType || 'Квартира',
             lead_date: morekitLeadDate(),
             project: morekitProjectName(String(data.project)),
-          }, morekitUrl).catch((e) => console.error('[fixClient] morekit notify error:', e?.message || e));
+          }, morekitUrl)
+            .then((result) => {
+              if (result?.ok === false) {
+                return this.notifyMorekitFailed(client.id, brokerId, createdAmoLeadId);
+              }
+            })
+            .catch((e) => console.error('[fixClient] morekit notify error:', e?.message || e));
 
           // 2026-06-16: первичная фиксация (новый лид) — синкаем
           // responsible_user_id с Морикит-задачи на сам лид. Это
@@ -447,7 +464,7 @@ export class ClientFixationService {
           console.error('[fixClient] audit log failed:', e?.message || e);
         }
         try {
-          await this.notifyAmoSyncFailed(client.id, broker, data.phone, amoSyncError || '');
+          await this.notifyAmoSyncFailed(client.id, brokerId, amoSyncError || '', 'NEW_CLIENT');
         } catch (e: any) {
           console.error('[fixClient] notifyAmoSyncFailed failed:', e?.message || e);
         }
@@ -501,17 +518,12 @@ export class ClientFixationService {
     //   • Если старая закрыта (любая причина: 142/143/CANCELLED/EXPIRED) —
     //     создаём НОВЫЙ Client + НОВЫЙ amo лид со ссылкой на старую карточку.
     //
-    // amoVerdict = null → не можем проверить, fallback на локальный статус:
-    //   CONDITIONALLY_UNIQUE + uniquenessExpiresAt > now → считаем активной.
-    const localActive =
-      existingClient.uniquenessStatus === UniquenessStatus.CONDITIONALLY_UNIQUE &&
-      !!existingClient.uniquenessExpiresAt &&
-      new Date(existingClient.uniquenessExpiresAt) > new Date();
-    const amoSaysOldClosed =
-      !!amoVerdict && (amoVerdict.rule === 'RULE_3' || amoVerdict.rule === 'NO_CONFLICT');
-
-    if (!amoSaysOldClosed && localActive) {
-      // amo упал, но локально фиксация активна. Создаём отдельный Client
+    // A real check failure must never be mistaken for a successful amo rule.
+    // Persist the repeat request, but defer every create decision until the
+    // scheduler can repeat checkUniqueness. This applies even when the local
+    // record looks expired: local state cannot prove that the amo lead closed.
+    if (!amoVerdict && amoCheckError) {
+      // amo упал. Создаём отдельный Client
       // на повторную фиксацию (без amoLeadId — amo сам не доступен), чтобы
       // брокер видел свою заявку в кабинете. Никаких диалогов «всё равно
       // создать?». 2026-06-14: раньше тут был тихий merge (return existingClient),
@@ -528,7 +540,15 @@ export class ClientFixationService {
           fixationAgencyId: agency.id,
           uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
           uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
-          uniquenessReason: 'Повторная фиксация (amoCRM недоступен, синхронизируется позже)',
+          uniquenessReason: 'Повторная фиксация: проверка amoCRM будет повторена автоматически.',
+          // The retry scheduler selects PENDING and FAILED rows. Without an
+          // explicit status Prisma would apply the SYNCED schema default and
+          // this fixation would never reach the retry queue.
+          amoSyncStatus: 'PENDING' as any,
+          // Technical marker: unlike uniquenessReason, amoSyncError is not a
+          // broker-facing business explanation. The scheduler preserves this
+          // marker across failures until the recheck is resolved.
+          amoSyncError: `${AMO_UNIQUENESS_RECHECK_MARKER}${existingClient.id}`,
           ...fixationFormFields,
         },
       });
@@ -541,9 +561,29 @@ export class ClientFixationService {
       } catch (e: any) {
         console.error('[fixClient refix-merge] audit failed:', e?.message || e);
       }
+      try {
+        await this.logAudit(brokerId, 'AMO_SYNC_FAILED', 'Client', refixClient.id, {
+          step: 'checkUniqueness',
+          scenario: 'REFIX_AMO_DOWN',
+          error: amoCheckError,
+        });
+      } catch (e: any) {
+        console.error('[fixClient refix-merge] amo failure audit failed:', e?.message || e);
+      }
+      try {
+        await this.notifyAmoSyncFailed(
+          refixClient.id,
+          brokerId,
+          amoCheckError || 'amoCRM uniqueness check unavailable',
+          'REFIX_AMO_DOWN',
+        );
+      } catch (e: any) {
+        console.error('[fixClient refix-merge] notifyAmoSyncFailed failed:', e?.message || e);
+      }
       return {
         client: refixClient,
         status: 'CONDITIONALLY_UNIQUE',
+        amoSyncStatus: 'PENDING',
         message: 'Клиент зафиксирован повторно. Синхронизация с amoCRM произойдёт автоматически.',
       };
     }
@@ -563,6 +603,8 @@ export class ClientFixationService {
     }
     const previousLeadInfo = previousLeadInfoParts.join(', ') || undefined;
 
+    const isExceptionAfterSalesMeeting =
+      amoVerdict?.rule === 'RULE_EXCEPTION_AFTER_SALES_MEETING';
     const newClient = await this.prisma.client.create({
       data: {
         brokerId,
@@ -573,11 +615,17 @@ export class ClientFixationService {
         comment: data.comment,
         project: data.project as any,
         fixationAgencyId: agency.id,
-        uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
-        uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
-        uniquenessReason: previousLeadId
-          ? `Повторная фиксация. Предыдущий лид #${previousLeadId} (${previousLeadInfo || 'закрыт'})`
-          : 'Повторная фиксация после закрытой',
+        uniquenessStatus: isExceptionAfterSalesMeeting
+          ? UniquenessStatus.UNDER_REVIEW
+          : UniquenessStatus.CONDITIONALLY_UNIQUE,
+        uniquenessExpiresAt: isExceptionAfterSalesMeeting
+          ? null
+          : new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
+        uniquenessReason: isExceptionAfterSalesMeeting
+          ? `EXCEPTION_AFTER_SALES_MEETING:${amoVerdict?.triggerLeadId || ''} ${amoVerdict?.reason || ''}`
+          : previousLeadId
+            ? `Повторная фиксация. Предыдущий лид #${previousLeadId} (${previousLeadInfo || 'закрыт'})`
+            : 'Повторная фиксация после закрытой',
         ...fixationFormFields,
       },
     });
@@ -624,7 +672,7 @@ export class ClientFixationService {
       }
     } catch (e: any) {
       amoSyncOk = false;
-      amoSyncError = String(e?.message || e).slice(0, 500);
+      amoSyncError = sanitizeAmoSyncError(e);
       console.error('[fixClient refix] amo createFixationRequest failed:', amoSyncError);
     }
 
@@ -658,7 +706,13 @@ export class ClientFixationService {
           type: data.propertyType || 'Квартира',
           lead_date: morekitLeadDate(),
           project: morekitProjectName(String(data.project)),
-        }, morekitUrl).catch((e) => console.error('[fixClient refix] morekit notify error:', e?.message || e));
+        }, morekitUrl)
+          .then((result) => {
+            if (result?.ok === false) {
+              return this.notifyMorekitFailed(newClient.id, brokerId, createdAmoLeadId);
+            }
+          })
+          .catch((e) => console.error('[fixClient refix] morekit notify error:', e?.message || e));
         // 2026-06-16: refix-after-closed создаёт НОВЫЙ лид — синкаем
         // responsible как и при первичной фиксации.
         this.amoCrmAdapter
@@ -680,6 +734,27 @@ export class ClientFixationService {
       console.error('[fixClient refix] audit failed:', e?.message || e);
     }
 
+    if (!amoSyncOk) {
+      try {
+        await this.logAudit(brokerId, 'AMO_SYNC_FAILED', 'Client', newClient.id, {
+          step: 'refixAfterClosed.createFixationRequest',
+          error: amoSyncError,
+        });
+      } catch (e: any) {
+        console.error('[fixClient refix] amo failure audit failed:', e?.message || e);
+      }
+      try {
+        await this.notifyAmoSyncFailed(
+          newClient.id,
+          brokerId,
+          amoSyncError || '',
+          'REFIX_AFTER_CLOSED',
+        );
+      } catch (e: any) {
+        console.error('[fixClient refix] notifyAmoSyncFailed failed:', e?.message || e);
+      }
+    }
+
     let managerContacts: any = undefined;
     if (!amoSyncOk) {
       try { managerContacts = await this.getManagerContacts(); }
@@ -688,10 +763,12 @@ export class ClientFixationService {
 
     return {
       client: newClient,
-      status: 'CONDITIONALLY_UNIQUE',
+      status: isExceptionAfterSalesMeeting ? 'UNDER_REVIEW' : 'CONDITIONALLY_UNIQUE',
       amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
       message: amoSyncOk
-        ? `Создана новая фиксация со ссылкой на предыдущую (${previousFixDate || 'закрыта'}). Истекает через 30 дней.`
+        ? isExceptionAfterSalesMeeting
+          ? 'Создана новая фиксация на ручной проверке КЦ.'
+          : `Создана новая фиксация со ссылкой на предыдущую (${previousFixDate || 'закрыта'}). Истекает через 30 дней.`
         : 'Создана новая фиксация, но не передана в amoCRM. Менеджеры уведомлены.',
       managerContacts,
     };
@@ -1015,7 +1092,10 @@ export class ClientFixationService {
     ]);
 
     return {
-      clients,
+      clients: clients.map((client) => ({
+        ...client,
+        amoSyncError: publicAmoSyncError(client.amoSyncError),
+      })),
       total,
       page,
       limit,
@@ -1385,7 +1465,12 @@ export class ClientFixationService {
       // не валим, история — необязательно
     }
 
-    return { ...client, fixationAgency, uniquenessHistory };
+    return {
+      ...client,
+      amoSyncError: publicAmoSyncError(client.amoSyncError),
+      fixationAgency,
+      uniquenessHistory,
+    };
   }
 
   async extendUniqueness(id: string, brokerId: string, data: { reason: string; comment?: string }) {
@@ -1745,9 +1830,52 @@ export class ClientFixationService {
     }));
   }
 
-  // 2026-05-25: рассылка алерта менеджерам и координаторам, что заявка не
-  // передалась в amo. Уведомляем всех активных MANAGER + isCoordinator=true.
-  private async notifyAmoSyncFailed(clientId: string, broker: { fullName: string; phone: string }, clientPhone: string, error: string) {
+  // Manager/coordinator notifications stay in the existing queue. A separate,
+  // best-effort copy goes to the operations chat. Neither message contains
+  // client/broker names, phone numbers or the raw dependency error.
+  private async notifyAmoSyncFailed(
+    clientId: string,
+    brokerId: string,
+    error: string,
+    scenario: 'NEW_CLIENT' | 'REFIX_AFTER_CLOSED' | 'REFIX_AMO_DOWN',
+  ) {
+    const safeClientId = this.safeAlertIdentifier(clientId);
+    const safeBrokerId = this.safeAlertIdentifier(brokerId);
+    const category = this.categorizeAmoSyncError(error);
+    const safeScenario = this.safeAlertIdentifier(scenario);
+    const body = [
+      '⚠ Фиксация не передана в amoCRM.',
+      `clientId: ${safeClientId}`,
+      `brokerId: ${safeBrokerId}`,
+      `category: ${category}`,
+      `scenario: ${safeScenario}`,
+      'Клиент сохранён в кабинете и оставлен для автоматического ретрая.',
+    ].join('\n');
+
+    if (this.opsAlerts) {
+      try {
+        await this.opsAlerts.sendSafely(
+          [
+            '🔴 PROD: amoCRM fixation sync failed',
+            `clientId: ${safeClientId}`,
+            `brokerId: ${safeBrokerId}`,
+            `category: ${category}`,
+            `scenario: ${safeScenario}`,
+            `at: ${new Date().toISOString()}`,
+            'Client remains queued for automatic retry.',
+          ].join('\n'),
+          {
+            dedupKey: `fixation-amo-sync:${safeClientId}:${category}`,
+            cooldownMs: 5 * 60_000,
+          },
+        );
+      } catch (e: any) {
+        // sendSafely already contains its own guard; this also protects tests
+        // and alternate implementations of the optional dependency.
+        console.error('[notifyAmoSyncFailed] ops alert failed:', e?.message || e);
+      }
+    }
+
     const recipients = await this.prisma.broker.findMany({
       where: {
         status: 'ACTIVE',
@@ -1755,7 +1883,6 @@ export class ClientFixationService {
       },
       select: { id: true },
     });
-    const body = `⚠ Фиксация клиента ${clientPhone} НЕ передана в amoCRM. Брокер: ${broker.fullName} (${broker.phone}). Клиент сохранён в кабинете, нужно вручную создать лид или дождаться авто-ретрая. Ошибка: ${error.slice(0, 200)}`;
     for (const r of recipients) {
       try {
         await this.notificationQueue.add('send', {
@@ -1763,11 +1890,86 @@ export class ClientFixationService {
           channel: 'TELEGRAM',
           subject: 'amoCRM: фиксация не передана',
           body,
-          payload: { clientId, kind: 'AMO_SYNC_FAILED' },
+          payload: {
+            clientId: safeClientId,
+            brokerId: safeBrokerId,
+            category,
+            scenario: safeScenario,
+            kind: 'AMO_SYNC_FAILED',
+          },
         });
       } catch (e: any) {
         console.error('[notifyAmoSyncFailed] queue add failed:', e?.message || e);
       }
     }
+  }
+
+  private async notifyMorekitFailed(
+    clientId: string,
+    brokerId: string,
+    amoLeadId: number | null,
+  ): Promise<void> {
+    const safeClientId = this.safeAlertIdentifier(clientId);
+    const safeBrokerId = this.safeAlertIdentifier(brokerId);
+    const safeLeadId = this.safeAlertIdentifier(amoLeadId);
+
+    try {
+      await this.logAudit(brokerId, 'MOREKIT_DELIVERY_FAILED', 'Client', clientId, {
+        amoLeadId: safeLeadId,
+        category: 'MOREKIT_DELIVERY_FAILED',
+      });
+    } catch (e: any) {
+      console.error('[notifyMorekitFailed] audit failed:', e?.message || e);
+    }
+
+    await this.opsAlerts?.sendSafely(
+      [
+        '🔴 PROD: Morekit не принял фиксацию',
+        `clientId: ${safeClientId}`,
+        `brokerId: ${safeBrokerId}`,
+        `amoLeadId: ${safeLeadId}`,
+        'category: MOREKIT_DELIVERY_FAILED',
+        'Лид создан в amoCRM, но распределение менеджера КЦ нужно проверить вручную.',
+      ].join('\n'),
+      {
+        dedupKey: `fixation-morekit:${safeClientId}`,
+        cooldownMs: 15 * 60_000,
+      },
+    );
+  }
+
+  private categorizeAmoSyncError(error: string): string {
+    const normalized = String(error || '').toLowerCase();
+    if (normalized === 'amo_auth_401' || normalized === 'amo_forbidden_403') {
+      return 'AMO_AUTH_ERROR';
+    }
+    if (normalized === 'amo_rate_limit_429') return 'AMO_RATE_LIMIT';
+    if (normalized === 'amo_temporary_unavailable' || normalized === 'amo_network_error') {
+      return 'AMO_UNAVAILABLE';
+    }
+    if (normalized === 'amo_invalid_response') return 'AMO_INVALID_RESPONSE';
+    if (/\b(401|403)\b/.test(normalized) || normalized.includes('unauthoriz') || normalized.includes('token')) {
+      return 'AMO_AUTH_ERROR';
+    }
+    if (/\b429\b/.test(normalized) || normalized.includes('rate limit')) return 'AMO_RATE_LIMIT';
+    if (normalized.includes('timeout') || normalized.includes('timed out') || normalized.includes('abort')) {
+      return 'AMO_TIMEOUT';
+    }
+    if (normalized.includes('did not return a lead id') || normalized.includes('не вернула id')) {
+      return 'AMO_INVALID_RESPONSE';
+    }
+    if (/\b5\d\d\b/.test(normalized)
+      || normalized.includes('network')
+      || normalized.includes('socket')
+      || normalized.includes('econn')) {
+      return 'AMO_UNAVAILABLE';
+    }
+    return 'AMO_SYNC_ERROR';
+  }
+
+  private safeAlertIdentifier(value: unknown): string {
+    return String(value || 'unknown')
+      .replace(/[^a-zA-Z0-9:_-]/g, '')
+      .slice(0, 128) || 'unknown';
   }
 }

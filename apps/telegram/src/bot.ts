@@ -18,11 +18,12 @@ import { calculatorConversation } from './conversations/calculator'
 
 // Импорт клавиатур
 import { mainKeyboard } from './keyboards/main'
+import type { MyContext, SessionData } from './types/context'
 
-const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!)
+const bot = new Bot<MyContext>(process.env.TELEGRAM_BOT_TOKEN!)
 
-bot.use(session({ initial: () => ({}) }))
-bot.use(conversations())
+bot.use(session<SessionData, MyContext>({ initial: () => ({}) }))
+bot.use(conversations<MyContext>())
 
 // Middleware
 bot.use(loggingMiddleware)

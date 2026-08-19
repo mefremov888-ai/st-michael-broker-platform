@@ -1,7 +1,7 @@
-import { CommandContext } from 'grammy'
 import { mainKeyboard } from '../keyboards/main'
+import type { MyContext } from '../types/context'
 
-export async function helpCommand(ctx: CommandContext<any>) {
+export async function helpCommand(ctx: MyContext) {
   const message = `❓ *Помощь по боту*\n\n` +
     `*Команды:*\n` +
     `/start — авторизация по номеру телефона\n` +

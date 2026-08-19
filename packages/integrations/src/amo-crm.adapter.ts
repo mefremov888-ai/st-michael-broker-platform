@@ -7,6 +7,12 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// 2026-08-19: без таймаута зависший amoCRM держит fetch() открытым
+// бесконечно — вместе с overlap-guard'ом в handleAmoFailedRetry это
+// раньше позволяло двум прогонам крона параллельно слать один и тот же
+// лид (см. code-review PR #288).
+const AMO_REQUEST_TIMEOUT_MS = 15_000;
+
 // "+79039606053" / "8 (903) 960-60-53" / "+7-903-960-60-53" → "9039606053".
 // amoCRM ?query=<substring> капризно реагирует на формат: поиск по «+79039606053»
 // не находит контакт сохранённый как «8 (903) 960-60-53», поэтому ищем по
@@ -94,6 +100,15 @@ let amoTokens: AmoTokens = {
 let amoTokenRefreshHook: AmoTokenRefreshHook | null = null;
 let amoRefreshInFlight: Promise<boolean> | null = null; // дедуп параллельных refresh
 
+function safeAmoRequestPath(path: string): string {
+  try {
+    const parsed = new URL(path, 'https://amo.invalid');
+    return parsed.pathname || '/';
+  } catch {
+    return String(path || '/').split('?')[0] || '/';
+  }
+}
+
 export function setAmoTokens(access: string, refresh: string): void {
   amoTokens = { access: access || '', refresh: refresh || '' };
 }
@@ -156,8 +171,9 @@ export class AmoCrmAdapter {
           }),
         });
         if (!res.ok) {
-          const text = await res.text().catch(() => '');
-          console.error(`[amo-refresh] failed: HTTP ${res.status} ${text.slice(0, 300)}`);
+          // OAuth/WAF bodies can contain implementation details. Status is
+          // enough for diagnostics and keeps secrets out of server logs.
+          console.error(`[amo-refresh] failed: HTTP ${res.status}`);
           return false;
         }
         const data: any = await res.json();
@@ -177,8 +193,8 @@ export class AmoCrmAdapter {
         }
         console.log('[amo-refresh] OK, access_token обновлён');
         return true;
-      } catch (e: any) {
-        console.error('[amo-refresh] exception:', e?.message || e);
+      } catch {
+        console.error('[amo-refresh] network exception');
         return false;
       }
     })();
@@ -204,10 +220,14 @@ export class AmoCrmAdapter {
     }
 
     const url = path.startsWith('http') ? path : `${this.baseUrl}${path}`;
+    const safePath = safeAmoRequestPath(path);
     let res: Response;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AMO_REQUEST_TIMEOUT_MS);
     try {
       res = await fetch(url, {
         ...init,
+        signal: controller.signal,
         headers: {
           // 2026-05-27: «человеческий» User-Agent + Accept — без них
           // WAF возвращает 403. С браузерным UA проходит.
@@ -218,13 +238,15 @@ export class AmoCrmAdapter {
           ...(init.headers || {}),
         },
       });
-    } catch (e: any) {
+    } catch {
       // Network-level (timeout, ECONNRESET) — ретраим до 3 раз.
       if (options.retryTransient !== false && attempt < 3) {
         await sleep(500 * attempt);
         return this.request<T>(path, init, options, attempt + 1, didRefresh);
       }
-      throw e;
+      throw new Error(`amoCRM network error ${safePath}`);
+    } finally {
+      clearTimeout(timer);
     }
 
     if (res.status === 204) return null as T;
@@ -232,7 +254,7 @@ export class AmoCrmAdapter {
     // 2026-06-05: 401 → попытка refresh + одиночный retry. Если refresh уже
     // делали в этом цепочке — не повторяем, бросаем.
     if (res.status === 401 && !didRefresh) {
-      console.warn(`[amo] 401 на ${path}, пробуем refresh access_token`);
+      console.warn(`[amo] 401 на ${safePath}, пробуем refresh access_token`);
       const ok = await this.refreshAccessToken();
       if (ok) return this.request<T>(path, init, options, attempt, true);
     }
@@ -246,8 +268,9 @@ export class AmoCrmAdapter {
     }
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`amoCRM ${res.status} ${path}: ${text.slice(0, 200)}`);
+      // Never surface the raw response body or query string: amo WAF replies
+      // with HTML and contact searches include a phone number in the query.
+      throw new Error(`amoCRM ${res.status} ${safePath}`);
     }
     return res.json() as Promise<T>;
   }
@@ -267,26 +290,22 @@ export class AmoCrmAdapter {
     // как КЦ-контакт, новая фиксация создавала второй).
     const target = last10Digits(phone);
     if (target.length < 10) return null;
-    try {
-      const data = await this.request<any>(`/contacts?query=${target}&limit=50`);
-      const contacts: any[] = data?._embedded?.contacts || [];
-      const matches = contacts.filter((c: any) => {
-        const fields = c.custom_fields_values || [];
-        const phoneField = fields.find(
-          (f: any) => f?.field_id === AMO_CONTACT_FIELDS.PHONE || f?.field_code === 'PHONE',
-        );
-        const vals = phoneField?.values || [];
-        return vals.some((v: any) => last10Digits(v?.value) === target);
-      });
-      if (matches.length === 0) return null;
-      if (matches.length === 1) return matches[0];
-      // Несколько контактов с тем же номером (дубли в самой amo) — берём
-      // самого свежего по updated_at, чтобы фиксация привязалась к актуальному.
-      matches.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-      return matches[0];
-    } catch {
-      return null;
-    }
+    const data = await this.request<any>(`/contacts?query=${target}&limit=50`);
+    const contacts: any[] = data?._embedded?.contacts || [];
+    const matches = contacts.filter((c: any) => {
+      const fields = c.custom_fields_values || [];
+      const phoneField = fields.find(
+        (f: any) => f?.field_id === AMO_CONTACT_FIELDS.PHONE || f?.field_code === 'PHONE',
+      );
+      const vals = phoneField?.values || [];
+      return vals.some((v: any) => last10Digits(v?.value) === target);
+    });
+    if (matches.length === 0) return null;
+    if (matches.length === 1) return matches[0];
+    // An upstream failure must propagate. Returning null on 401/403/timeout
+    // means "contact does not exist" and lets callers create duplicates.
+    matches.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    return matches[0];
   }
 
   async findBrokerContactByPhone(
@@ -313,7 +332,7 @@ export class AmoCrmAdapter {
       if (brokerCandidates.length === 1) return brokerCandidates[0];
       if (options.strict) {
         const ids = brokerCandidates.map((c: any) => c.id).join(',');
-        throw new Error(`AMBIGUOUS_BROKER_CONTACT phone=${target} ids=${ids}`);
+        throw new Error(`AMBIGUOUS_BROKER_CONTACT ids=${ids}`);
       }
 
       // Multiple broker candidates — pick the one with the most linked leads
@@ -737,19 +756,15 @@ export class AmoCrmAdapter {
   }
 
   async getLeadsByContact(contactId: number): Promise<AmoLead[]> {
-    try {
-      const contact = await this.request<any>(`/contacts/${contactId}?with=leads`);
-      const leadIds = (contact?._embedded?.leads || []).map((l: any) => l.id);
-      if (leadIds.length === 0) return [];
-      // 2026-06-03: with=contacts чтобы для проверки уникальности можно было
-      // понять, привязан ли к лиду «брокер» (контакт с IS_BROKER=true).
-      const data = await this.request<any>(
-        `/leads?filter[id][]=${leadIds.join('&filter[id][]=')}&with=contacts`,
-      );
-      return data?._embedded?.leads || [];
-    } catch {
-      return [];
-    }
+    const contact = await this.request<any>(`/contacts/${contactId}?with=leads`);
+    const leadIds = (contact?._embedded?.leads || []).map((l: any) => l.id);
+    if (leadIds.length === 0) return [];
+    // A failed lookup must propagate. Treating a 401/403/timeout as "no leads"
+    // makes uniqueness appear successful and can create a duplicate fixation.
+    const data = await this.request<any>(
+      `/leads?filter[id][]=${leadIds.join('&filter[id][]=')}&with=contacts`,
+    );
+    return data?._embedded?.leads || [];
   }
 
   async getLeadsByPipeline(pipelineId: number, limit = 250): Promise<AmoLead[]> {

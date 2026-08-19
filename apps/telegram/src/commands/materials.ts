@@ -1,7 +1,7 @@
-import { CommandContext } from 'grammy'
 import { InlineKeyboard } from 'grammy'
+import type { MyContext } from '../types/context'
 
-export async function materialsCommand(ctx: CommandContext<any>) {
+export async function materialsCommand(ctx: MyContext) {
   const keyboard = new InlineKeyboard()
     .text('📖 Брошюра ЖК', 'material_brochure')
     .row()

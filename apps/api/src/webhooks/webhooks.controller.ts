@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Headers } from '@nestjs/common';
+import { Controller, Post, Body, Headers, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { WebhooksService } from './webhooks.service';
 
@@ -22,6 +22,7 @@ export class WebhooksController {
   }
 
   @Post('mango/call-result')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Mango call result webhook' })
   @ApiResponse({ status: 200, description: 'Webhook processed' })
   async mangoCallResult(@Body() body: any, @Headers() headers: any) {

@@ -18,6 +18,7 @@ const labels: Record<string, string> = {
   profile: 'Профиль',
   analytics: 'Аналитика',
   admin: 'Админка',
+  instructions: 'Инструкции сотрудникам',
   brokers: 'Брокеры',
   events: 'События',
   projects: 'Проекты',
@@ -25,6 +26,10 @@ const labels: Record<string, string> = {
   'commission-policies': 'Комиссия и рассрочка',
   mailings: 'Рассылки',
   'meeting-slots': 'Расписание встреч',
+  'loyalty-base': 'База лояльности',
+  anna: 'База Анны Скибицкой',
+  ours: 'Наша база',
+  agencies: 'Агентства',
 };
 
 export function Breadcrumbs() {
@@ -36,7 +41,8 @@ export function Breadcrumbs() {
 
   const crumbs = parts.map((p, i) => {
     const href = '/' + parts.slice(0, i + 1).join('/');
-    const label = labels[p] || decodeURIComponent(p);
+    const isOpaqueDetailId = i === parts.length - 1 && ['brokers', 'agencies'].includes(parts[i - 1]);
+    const label = isOpaqueDetailId ? 'Карточка' : labels[p] || decodeURIComponent(p);
     return { href, label };
   });
 

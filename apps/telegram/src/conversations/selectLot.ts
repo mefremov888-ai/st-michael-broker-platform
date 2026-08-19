@@ -1,10 +1,6 @@
-import { Conversation, ConversationFlavor } from '@grammyjs/conversations'
-import { Context } from 'grammy'
 import { apiService } from '../services/api'
 import { InlineKeyboard } from 'grammy'
-
-type MyContext = Context & ConversationFlavor
-type MyConversation = Conversation<MyContext>
+import type { MyContext, MyConversation } from '../types/context'
 
 export async function selectLotConversation(conversation: MyConversation, ctx: MyContext) {
   await ctx.reply('🏠 *Подбор квартиры*\n\nВыберите проект:', {

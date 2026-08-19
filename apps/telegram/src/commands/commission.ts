@@ -1,7 +1,7 @@
-import { CommandContext } from 'grammy'
 import { apiService } from '../services/api'
+import type { MyContext } from '../types/context'
 
-export async function commissionCommand(ctx: CommandContext<any>) {
+export async function commissionCommand(ctx: MyContext) {
   const broker = ctx.session?.broker
 
   if (!broker) {

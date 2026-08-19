@@ -205,6 +205,89 @@ enum BrokerCallResult {
   NEGATIVE
 }
 
+// ─── Loyalty base bounded context ─────────────────────────────────────
+// ANNA is stored only in loyalty_* tables. OUR is a read-only projection
+// over the existing Broker/Agency models and never receives imported rows.
+enum LoyaltyBaseKind {
+  ANNA
+  OUR
+}
+
+enum LoyaltyEntityType {
+  BROKER
+  AGENCY
+}
+
+enum LoyaltySnapshotStatus {
+  STAGED
+  PUBLISHED
+  SUPERSEDED
+  REJECTED
+}
+
+enum LoyaltyContactPointType {
+  PHONE
+  EMAIL
+  TELEGRAM
+  WHATSAPP
+  OTHER
+}
+
+enum LoyaltyExternalSystem {
+  AMOCRM
+  BROKER_CABINET
+  GOOGLE_SHEETS
+  ANNA_FILE
+  MANUAL
+}
+
+enum LoyaltyExternalEntityType {
+  CONTACT
+  COMPANY
+  LEAD
+  OTHER
+}
+
+enum LoyaltyActivityType {
+  FIXATION
+  MEETING
+  DEAL
+  BROKER_TOUR
+  CALL
+}
+
+enum LoyaltyActivityVerdict {
+  INCLUDED
+  EXCLUDED
+  UNKNOWN
+}
+
+enum LoyaltyLinkStatus {
+  PROPOSED
+  CONFIRMED
+  REJECTED
+  REVOKED
+}
+
+enum LoyaltyReconciliationStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+enum LoyaltyReconciliationDecision {
+  LINK
+  KEEP_SEPARATE
+  REJECT_MATCH
+  UNLINK
+}
+
+enum LoyaltyChangeAction {
+  UPDATE
+  ARCHIVE
+  RESTORE
+}
+
 // ─── MODELS ──────────────────────────────────────────
 
 model Agency {
@@ -269,7 +352,7 @@ model Broker {
   bestCallTime           String?                  @map("best_call_time")
   // 2026-06-09: внутренний номер сотрудника в Mango (для click-to-call:
   // Mango сначала набирает этот номер, оператор берёт трубку → соединение).
-  mangoEmployeeNum       String?                  @map("mango_employee_num")
+  mangoEmployeeNum       String?                  @unique @map("mango_employee_num")
   // 2026-07-22: Штат (Empire Estate) / Аутсорс — только для role=MANAGER.
   // Backfill: scripts/backfill-kc-team.js (6 штатных по ФИО из
   // docs/call-center-team.md, остальные MANAGER → OUTSOURCE).
@@ -337,54 +420,54 @@ model Broker {
 }
 
 model Client {
-  id                  String           @id @default(uuid())
-  brokerId            String           @map("broker_id") // владелец кабинета (для координатора — координатор)
-  broker              Broker           @relation(fields: [brokerId], references: [id])
+  id                   String           @id @default(uuid())
+  brokerId             String           @map("broker_id") // владелец кабинета (для координатора — координатор)
+  broker               Broker           @relation(fields: [brokerId], references: [id])
   // 2026-06-19: для координаторов — реальный брокер, который ведёт клиента.
   // Nullable для обратной совместимости: если поле пустое, ответственный = brokerId
   // (как было раньше). У координаторов на новых фиксациях ОБЯЗАТЕЛЬНО.
-  responsibleBrokerId String?          @map("responsible_broker_id")
-  responsibleBroker   Broker?          @relation("ClientResponsibleBroker", fields: [responsibleBrokerId], references: [id])
-  amoLeadId           BigInt?          @map("amo_lead_id")
-  fullName            String           @map("full_name")
-  phone               String
-  email               String?
-  comment             String?
-  project             Project          @default(ZORGE9)
-  fixationAgencyId    String?          @map("fixation_agency_id") // Компания, от которой подана заявка
-  uniquenessStatus    UniquenessStatus @default(CONDITIONALLY_UNIQUE) @map("uniqueness_status")
-  uniquenessReason    String?          @map("uniqueness_reason") // Пояснение (напр. «переоткрыта сделка»)
-  uniquenessExpiresAt DateTime?        @map("uniqueness_expires_at")
-  fixationStatus      FixationStatus   @default(NOT_FIXED) @map("fixation_status")
-  fixationExpiresAt   DateTime?        @map("fixation_expires_at")
-  inspectionActSigned Boolean          @default(false) @map("inspection_act_signed")
-  status              ClientStatus     @default(NEW)
-  deals               Deal[]
-  meetings            Meeting[]
-  calls               Call[]
-  createdAt           DateTime         @default(now()) @map("created_at")
-  updatedAt           DateTime         @updatedAt @map("updated_at")
+  responsibleBrokerId  String?          @map("responsible_broker_id")
+  responsibleBroker    Broker?          @relation("ClientResponsibleBroker", fields: [responsibleBrokerId], references: [id])
+  amoLeadId            BigInt?          @map("amo_lead_id")
+  fullName             String           @map("full_name")
+  phone                String
+  email                String?
+  comment              String?
+  project              Project          @default(ZORGE9)
+  fixationAgencyId     String?          @map("fixation_agency_id") // Компания, от которой подана заявка
+  uniquenessStatus     UniquenessStatus @default(CONDITIONALLY_UNIQUE) @map("uniqueness_status")
+  uniquenessReason     String?          @map("uniqueness_reason") // Пояснение (напр. «переоткрыта сделка»)
+  uniquenessExpiresAt  DateTime?        @map("uniqueness_expires_at")
+  fixationStatus       FixationStatus   @default(NOT_FIXED) @map("fixation_status")
+  fixationExpiresAt    DateTime?        @map("fixation_expires_at")
+  inspectionActSigned  Boolean          @default(false) @map("inspection_act_signed")
+  status               ClientStatus     @default(NEW)
+  deals                Deal[]
+  meetings             Meeting[]
+  calls                Call[]
+  createdAt            DateTime         @default(now()) @map("created_at")
+  updatedAt            DateTime         @updatedAt @map("updated_at")
   // amoCRM dates — для показа в кабинете вместо нашей sync-даты.
-  amoCreatedAt        DateTime?        @map("amo_created_at")
-  amoUpdatedAt        DateTime?        @map("amo_updated_at")
+  amoCreatedAt         DateTime?        @map("amo_created_at")
+  amoUpdatedAt         DateTime?        @map("amo_updated_at")
   // 2026-05-25: статус синка с amoCRM. Если amo упал во время фиксации,
   // клиент НЕ теряется (остаётся в БД), а сюда пишем FAILED и amoSyncError.
   // Менеджеры/координаторы видят список FAILED, scheduler ретраит.
-  amoSyncStatus       AmoSyncStatus    @default(SYNCED) @map("amo_sync_status")
-  amoSyncError        String?          @map("amo_sync_error")
-  amoSyncAttempts     Int              @default(0) @map("amo_sync_attempts")
-  amoSyncLastAttemptAt DateTime?       @map("amo_sync_last_attempt_at")
+  amoSyncStatus        AmoSyncStatus    @default(SYNCED) @map("amo_sync_status")
+  amoSyncError         String?          @map("amo_sync_error")
+  amoSyncAttempts      Int              @default(0) @map("amo_sync_attempts")
+  amoSyncLastAttemptAt DateTime?        @map("amo_sync_last_attempt_at")
 
   // 2026-06-09: поля формы фиксации — раньше склеивались в comment строкой,
   // что мешало брокеру видеть структурированно. Теперь храним каждое поле
   // отдельно и показываем в карточке клиента.
-  propertyType        String?          @map("property_type")        // «Квартира» / «Апартаменты» / «Коммерция» и т.п.
-  roomsCount          String?          @map("rooms_count")          // «Студия» / «1» / «2» / ... / «Коммерческое помещение»
-  amount              Decimal?         @db.Decimal(14, 2)            // бюджет покупки, руб.
-  sqm                 Decimal?         @db.Decimal(10, 2)            // метраж, м²
-  clientRegion        String?          @map("client_region")         // «Москва / СПб / другой»
-  purchaseTiming      String?          @map("purchase_timing")       // «1-3 месяца» / «3-6» / «от 5» / «Не выяснил»
-  readinessLevel      String?          @map("readiness_level")       // «Горячий» / «Тёплый» / «Холодный»
+  propertyType   String?  @map("property_type") // «Квартира» / «Апартаменты» / «Коммерция» и т.п.
+  roomsCount     String?  @map("rooms_count") // «Студия» / «1» / «2» / ... / «Коммерческое помещение»
+  amount         Decimal? @db.Decimal(14, 2) // бюджет покупки, руб.
+  sqm            Decimal? @db.Decimal(10, 2) // метраж, м²
+  clientRegion   String?  @map("client_region") // «Москва / СПб / другой»
+  purchaseTiming String?  @map("purchase_timing") // «1-3 месяца» / «3-6» / «от 5» / «Не выяснил»
+  readinessLevel String?  @map("readiness_level") // «Горячий» / «Тёплый» / «Холодный»
 
   @@index([phone])
   @@index([brokerId])
@@ -399,44 +482,44 @@ enum AmoSyncStatus {
 }
 
 model Lot {
-  id               String    @id @default(uuid())
-  externalId       String?   @unique @map("external_id")
+  id               String        @id @default(uuid())
+  externalId       String?       @unique @map("external_id")
   number           String
-  project          Project   @default(ZORGE9)
+  project          Project       @default(ZORGE9)
   building         String
   floor            Int
   rooms            String
-  sqm              Decimal   @db.Decimal(10, 2)
-  price            Decimal   @db.Decimal(14, 2)
-  pricePerSqm      Decimal?  @map("price_per_sqm") @db.Decimal(10, 2)
-  status           LotStatus @default(AVAILABLE)
-  propertyType     String?   @map("property_type")
-  layoutUrl        String?   @map("layout_url")
-  planImageUrl     String?   @map("plan_image_url")
+  sqm              Decimal       @db.Decimal(10, 2)
+  price            Decimal       @db.Decimal(14, 2)
+  pricePerSqm      Decimal?      @map("price_per_sqm") @db.Decimal(10, 2)
+  status           LotStatus     @default(AVAILABLE)
+  propertyType     String?       @map("property_type")
+  layoutUrl        String?       @map("layout_url")
+  planImageUrl     String?       @map("plan_image_url")
   description      String?
-  floorsTotal      Int?      @map("floors_total")
-  buildingSection  String?   @map("building_section")
-  windowView       String?   @map("window_view")
-  builtYear        Int?      @map("built_year")
-  readyQuarter     Int?      @map("ready_quarter")
-  buildingState    String?   @map("building_state")
-  hasBalcony       Boolean   @default(false) @map("has_balcony")
-  hasTerrace       Boolean   @default(false) @map("has_terrace")
-  isPenthouse      Boolean   @default(false) @map("is_penthouse")
-  isCornerLayout   Boolean   @default(false) @map("is_corner_layout")
-  hasStorage       Boolean   @default(false) @map("has_storage")
-  twoBathrooms     Boolean   @default(false) @map("two_bathrooms")
-  hasMasterBedroom Boolean   @default(false) @map("has_master_bedroom")
-  isUrbanVilla     Boolean   @default(false) @map("is_urban_villa")
-  isViewLot        Boolean   @default(false) @map("is_view_lot")
-  isHighFlat       Boolean   @default(false) @map("is_high_flat") // ceilings 4.2+ м
-  discountPrice    Decimal?  @map("discount_price") @db.Decimal(14, 2)
-  discountPercent  Decimal?  @map("discount_percent") @db.Decimal(5, 2)
-  discountName     String?   @map("discount_name")
+  floorsTotal      Int?          @map("floors_total")
+  buildingSection  String?       @map("building_section")
+  windowView       String?       @map("window_view")
+  builtYear        Int?          @map("built_year")
+  readyQuarter     Int?          @map("ready_quarter")
+  buildingState    String?       @map("building_state")
+  hasBalcony       Boolean       @default(false) @map("has_balcony")
+  hasTerrace       Boolean       @default(false) @map("has_terrace")
+  isPenthouse      Boolean       @default(false) @map("is_penthouse")
+  isCornerLayout   Boolean       @default(false) @map("is_corner_layout")
+  hasStorage       Boolean       @default(false) @map("has_storage")
+  twoBathrooms     Boolean       @default(false) @map("two_bathrooms")
+  hasMasterBedroom Boolean       @default(false) @map("has_master_bedroom")
+  isUrbanVilla     Boolean       @default(false) @map("is_urban_villa")
+  isViewLot        Boolean       @default(false) @map("is_view_lot")
+  isHighFlat       Boolean       @default(false) @map("is_high_flat") // ceilings 4.2+ м
+  discountPrice    Decimal?      @map("discount_price") @db.Decimal(14, 2)
+  discountPercent  Decimal?      @map("discount_percent") @db.Decimal(5, 2)
+  discountName     String?       @map("discount_name")
   deals            Deal[]
   favoritedBy      FavoriteLot[]
-  createdAt        DateTime  @default(now()) @map("created_at")
-  updatedAt        DateTime  @updatedAt @map("updated_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
 
   @@index([project, status])
   @@map("lots")
@@ -487,6 +570,9 @@ model Call {
   clientId      String?       @map("client_id")
   client        Client?       @relation(fields: [clientId], references: [id])
   mangoCallId   String?       @map("mango_call_id")
+  // Official Mango /events/call ordering counter. Notifications are ordered
+  // by seq, not by arrival time; nullable for historical and legacy events.
+  mangoEventSeq BigInt?       @map("mango_event_seq")
   direction     CallDirection @default(OUTBOUND)
   status        CallStatus    @default(COMPLETED)
   result        CallResult?
@@ -754,6 +840,377 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+// ─── Loyalty base bounded context ─────────────────────────────────────
+// The published snapshot pointer is the only switch used by ANNA reads.
+// Staging therefore cannot leak partially imported records to the UI.
+model LoyaltyDataset {
+  id                  String                      @id @default(uuid())
+  code                String                      @unique
+  name                String
+  base                LoyaltyBaseKind             @default(ANNA)
+  activeSnapshotId    String?                     @unique @map("active_snapshot_id")
+  activeSnapshot      LoyaltySnapshot?            @relation("LoyaltyActiveSnapshot", fields: [activeSnapshotId], references: [id], onDelete: SetNull)
+  snapshots           LoyaltySnapshot[]           @relation("LoyaltyDatasetSnapshots")
+  persons             LoyaltyPerson[]
+  organizations       LoyaltyOrganization[]
+  reconciliationCases LoyaltyReconciliationCase[]
+  publicationEvents   LoyaltyPublicationEvent[]
+  archivedAt          DateTime?                   @map("archived_at")
+  createdAt           DateTime                    @default(now()) @map("created_at")
+  updatedAt           DateTime                    @updatedAt @map("updated_at")
+
+  @@index([base, archivedAt])
+  @@map("loyalty_datasets")
+}
+
+model LoyaltySnapshot {
+  id                  String                      @id @default(uuid())
+  datasetId           String                      @map("dataset_id")
+  dataset             LoyaltyDataset              @relation("LoyaltyDatasetSnapshots", fields: [datasetId], references: [id], onDelete: Restrict)
+  activeForDataset    LoyaltyDataset?             @relation("LoyaltyActiveSnapshot")
+  status              LoyaltySnapshotStatus       @default(STAGED)
+  sourceName          String                      @map("source_name")
+  contentHash         String                      @map("content_hash")
+  ruleVersion         String                      @map("rule_version")
+  expectedRecords     Int?                        @map("expected_records")
+  recordCount         Int                         @default(0) @map("record_count")
+  brokerCount         Int                         @default(0) @map("broker_count")
+  agencyCount         Int                         @default(0) @map("agency_count")
+  activityCount       Int                         @default(0) @map("activity_count")
+  errorCount          Int                         @default(0) @map("error_count")
+  summary             Json?
+  createdById         String?                     @map("created_by_id")
+  publishedById       String?                     @map("published_by_id")
+  publishedAt         DateTime?                   @map("published_at")
+  createdAt           DateTime                    @default(now()) @map("created_at")
+  sourceRecords       LoyaltySourceRecord[]
+  activities          LoyaltyActivity[]
+  reconciliationCases LoyaltyReconciliationCase[]
+  publicationEvents   LoyaltyPublicationEvent[]   @relation("LoyaltyPublicationTarget")
+  replacedByEvents    LoyaltyPublicationEvent[]   @relation("LoyaltyPublicationPrevious")
+
+  @@unique([datasetId, contentHash])
+  @@unique([datasetId, id])
+  @@index([datasetId, status, createdAt])
+  @@map("loyalty_snapshots")
+}
+
+// Stable ANNA identity. Imported PII lives in snapshot-scoped SourceRecord;
+// explicit manual overrides remain separate and never touch public.brokers.
+model LoyaltyPerson {
+  id                  String                          @id @default(uuid())
+  datasetId           String                          @map("dataset_id")
+  dataset             LoyaltyDataset                  @relation(fields: [datasetId], references: [id], onDelete: Restrict)
+  externalKey         String                          @map("external_key")
+  manualDisplayName   String?                         @map("manual_display_name")
+  manualCity          String?                         @map("manual_city")
+  manualAttributes    Json?                           @map("manual_attributes")
+  archivedAt          DateTime?                       @map("archived_at")
+  createdAt           DateTime                        @default(now()) @map("created_at")
+  updatedAt           DateTime                        @updatedAt @map("updated_at")
+  sourceRecords       LoyaltySourceRecord[]
+  links               LoyaltyEntityLink[]
+  reconciliationCases LoyaltyReconciliationCase[]
+  changes             LoyaltyEntityChange[]
+  organizationRoles   LoyaltyPersonOrganizationRole[]
+
+  @@unique([datasetId, externalKey])
+  @@unique([datasetId, id])
+  @@index([datasetId, archivedAt])
+  @@map("loyalty_persons")
+}
+
+model LoyaltyOrganization {
+  id                  String                          @id @default(uuid())
+  datasetId           String                          @map("dataset_id")
+  dataset             LoyaltyDataset                  @relation(fields: [datasetId], references: [id], onDelete: Restrict)
+  externalKey         String                          @map("external_key")
+  manualDisplayName   String?                         @map("manual_display_name")
+  manualCity          String?                         @map("manual_city")
+  manualAttributes    Json?                           @map("manual_attributes")
+  archivedAt          DateTime?                       @map("archived_at")
+  createdAt           DateTime                        @default(now()) @map("created_at")
+  updatedAt           DateTime                        @updatedAt @map("updated_at")
+  sourceRecords       LoyaltySourceRecord[]
+  links               LoyaltyEntityLink[]
+  reconciliationCases LoyaltyReconciliationCase[]
+  changes             LoyaltyEntityChange[]
+  personRoles         LoyaltyPersonOrganizationRole[]
+
+  @@unique([datasetId, externalKey])
+  @@unique([datasetId, id])
+  @@index([datasetId, archivedAt])
+  @@map("loyalty_organizations")
+}
+
+// Immutable source row/version inside a snapshot. personId/organizationId is
+// guarded by a SQL CHECK in the migration (exactly one must be populated).
+model LoyaltySourceRecord {
+  id                 String                          @id @default(uuid())
+  snapshotId         String                          @map("snapshot_id")
+  snapshot           LoyaltySnapshot                 @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  sourceKey          String                          @map("source_key")
+  sourceRowNumber    Int?                            @map("source_row_number")
+  entityType         LoyaltyEntityType               @map("entity_type")
+  personId           String?                         @map("person_id")
+  person             LoyaltyPerson?                  @relation(fields: [personId], references: [id], onDelete: Restrict)
+  organizationId     String?                         @map("organization_id")
+  organization       LoyaltyOrganization?            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  displayName        String                          @map("display_name")
+  city               String?
+  taxId              String?                         @map("tax_id")
+  sourceSystem       LoyaltyExternalSystem           @default(ANNA_FILE) @map("source_system")
+  sourceExternalId   String?                         @map("source_external_id")
+  rowFingerprint     String                          @map("row_fingerprint")
+  attributes         Json?
+  sourceArchivedAt   DateTime?                       @map("source_archived_at")
+  createdAt          DateTime                        @default(now()) @map("created_at")
+  contactPoints      LoyaltyContactPoint[]
+  externalIdentities LoyaltyExternalIdentity[]
+  activities         LoyaltyActivity[]
+  metrics            LoyaltyMetricSnapshot[]
+  fieldValues        LoyaltySourceFieldValue[]
+  organizationRoles  LoyaltyPersonOrganizationRole[]
+
+  @@unique([snapshotId, sourceKey])
+  @@unique([snapshotId, id])
+  @@index([snapshotId, entityType, sourceArchivedAt])
+  @@index([personId])
+  @@index([organizationId])
+  @@index([taxId])
+  @@map("loyalty_source_records")
+}
+
+// Snapshot-scoped person ↔ organization membership. It is evidence, not a
+// mutation of the existing BrokerAgency relation.
+model LoyaltyPersonOrganizationRole {
+  id             String                @id @default(uuid())
+  personId       String                @map("person_id")
+  person         LoyaltyPerson         @relation(fields: [personId], references: [id], onDelete: Restrict)
+  organizationId String                @map("organization_id")
+  organization   LoyaltyOrganization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  sourceRecordId String                @map("source_record_id")
+  sourceRecord   LoyaltySourceRecord   @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  role           String
+  isPrimary      Boolean               @default(false) @map("is_primary")
+  validFrom      DateTime              @default(now()) @map("valid_from")
+  validTo        DateTime?             @map("valid_to")
+  sourceSystem   LoyaltyExternalSystem @default(ANNA_FILE) @map("source_system")
+  evidence       Json?
+  createdAt      DateTime              @default(now()) @map("created_at")
+
+  @@unique([sourceRecordId, organizationId, role])
+  @@index([personId, isPrimary, validTo])
+  @@index([organizationId, validTo])
+  @@map("loyalty_person_organization_roles")
+}
+
+// First-class per-field provenance. rawValue remains immutable; normalized
+// values support matching, while valueHash makes repeated observations safe.
+model LoyaltySourceFieldValue {
+  id               String                @id @default(uuid())
+  sourceRecordId   String                @map("source_record_id")
+  sourceRecord     LoyaltySourceRecord   @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  fieldName        String                @map("field_name")
+  rawValue         Json                  @map("raw_value")
+  normalizedValue  String?               @map("normalized_value")
+  valueHash        String                @map("value_hash")
+  sourceSystem     LoyaltyExternalSystem @map("source_system")
+  sourceExternalId String?               @map("source_external_id")
+  lockedByUser     Boolean               @default(false) @map("locked_by_user")
+  observedAt       DateTime              @default(now()) @map("observed_at")
+  createdAt        DateTime              @default(now()) @map("created_at")
+
+  @@unique([sourceRecordId, fieldName, valueHash, sourceSystem])
+  @@index([sourceRecordId, fieldName, observedAt])
+  @@index([fieldName, normalizedValue])
+  @@map("loyalty_source_field_values")
+}
+
+model LoyaltyContactPoint {
+  id              String                  @id @default(uuid())
+  sourceRecordId  String                  @map("source_record_id")
+  sourceRecord    LoyaltySourceRecord     @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  type            LoyaltyContactPointType
+  value           String
+  normalizedValue String                  @map("normalized_value")
+  label           String?
+  isPrimary       Boolean                 @default(false) @map("is_primary")
+  createdAt       DateTime                @default(now()) @map("created_at")
+
+  @@unique([sourceRecordId, type, normalizedValue])
+  @@index([type, normalizedValue])
+  @@map("loyalty_contact_points")
+}
+
+// One source row may retain every observed amoCRM ID; there is no scalar
+// amoContactId and therefore no accidental collapse to the first contact.
+model LoyaltyExternalIdentity {
+  id             String                    @id @default(uuid())
+  sourceRecordId String                    @map("source_record_id")
+  sourceRecord   LoyaltySourceRecord       @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  system         LoyaltyExternalSystem
+  entityType     LoyaltyExternalEntityType @map("entity_type")
+  externalId     String                    @map("external_id")
+  url            String?
+  isPrimary      Boolean                   @default(false) @map("is_primary")
+  observedAt     DateTime                  @default(now()) @map("observed_at")
+  activities     LoyaltyActivity[]
+
+  @@unique([sourceRecordId, system, entityType, externalId])
+  @@index([system, entityType, externalId])
+  @@map("loyalty_external_identities")
+}
+
+model LoyaltyActivity {
+  id                 String                   @id @default(uuid())
+  snapshotId         String                   @map("snapshot_id")
+  snapshot           LoyaltySnapshot          @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  sourceRecordId     String                   @map("source_record_id")
+  sourceRecord       LoyaltySourceRecord      @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  externalIdentityId String?                  @map("external_identity_id")
+  externalIdentity   LoyaltyExternalIdentity? @relation(fields: [externalIdentityId], references: [id], onDelete: SetNull)
+  sourceSystem       LoyaltyExternalSystem    @map("source_system")
+  sourceExternalId   String                   @map("source_external_id")
+  type               LoyaltyActivityType
+  occurredAt         DateTime                 @map("occurred_at")
+  amount             Decimal?                 @db.Decimal(18, 2)
+  currency           String                   @default("RUB")
+  contractType       String?                  @map("contract_type")
+  verdict            LoyaltyActivityVerdict   @default(UNKNOWN)
+  reasonCode         String?                  @map("reason_code")
+  ruleVersion        String                   @map("rule_version")
+  sourcePayloadHash  String?                  @map("source_payload_hash")
+  metadata           Json?
+  archivedAt         DateTime?                @map("archived_at")
+  createdAt          DateTime                 @default(now()) @map("created_at")
+
+  @@unique([snapshotId, sourceSystem, type, sourceExternalId, ruleVersion])
+  @@index([sourceRecordId, type, occurredAt])
+  @@index([sourceSystem, sourceExternalId])
+  @@map("loyalty_activities")
+}
+
+model LoyaltyMetricSnapshot {
+  id              String              @id @default(uuid())
+  sourceRecordId  String              @map("source_record_id")
+  sourceRecord    LoyaltySourceRecord @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  ruleVersion     String              @map("rule_version")
+  fixationCount   Int                 @default(0) @map("fixation_count")
+  meetingCount    Int                 @default(0) @map("meeting_count")
+  dealCount       Int                 @default(0) @map("deal_count")
+  brokerTourCount Int                 @default(0) @map("broker_tour_count")
+  callCount       Int                 @default(0) @map("call_count")
+  dealAmount      Decimal             @default(0) @map("deal_amount") @db.Decimal(18, 2)
+  calculatedAt    DateTime            @default(now()) @map("calculated_at")
+
+  @@unique([sourceRecordId, ruleVersion])
+  @@index([ruleVersion, calculatedAt])
+  @@map("loyalty_metric_snapshots")
+}
+
+// Append-only pointer transition history. Snapshot rows are immutable source
+// data, while this relation records every publish/rollback A -> B -> A.
+model LoyaltyPublicationEvent {
+  id                 String           @id @default(uuid())
+  datasetId          String           @map("dataset_id")
+  dataset            LoyaltyDataset   @relation(fields: [datasetId], references: [id], onDelete: Restrict)
+  snapshotId         String           @map("snapshot_id")
+  snapshot           LoyaltySnapshot  @relation("LoyaltyPublicationTarget", fields: [snapshotId], references: [id], onDelete: Restrict)
+  previousSnapshotId String?          @map("previous_snapshot_id")
+  previousSnapshot   LoyaltySnapshot? @relation("LoyaltyPublicationPrevious", fields: [previousSnapshotId], references: [id], onDelete: Restrict)
+  contentHash        String           @map("content_hash")
+  ruleVersion        String           @map("rule_version")
+  isRollback         Boolean          @default(false) @map("is_rollback")
+  actorId            String?          @map("actor_id")
+  createdAt          DateTime         @default(now()) @map("created_at")
+
+  @@index([datasetId, createdAt])
+  @@index([snapshotId, createdAt])
+  @@map("loyalty_publication_events")
+}
+
+// A confirmed link is only a reversible association. It never copies or
+// merges a LoyaltyPerson/Organization into Broker/Agency.
+model LoyaltyEntityLink {
+  id                   String                     @id @default(uuid())
+  personId             String?                    @map("person_id")
+  person               LoyaltyPerson?             @relation(fields: [personId], references: [id], onDelete: Restrict)
+  organizationId       String?                    @map("organization_id")
+  organization         LoyaltyOrganization?       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  targetType           LoyaltyEntityType          @map("target_type")
+  targetId             String                     @map("target_id")
+  status               LoyaltyLinkStatus          @default(PROPOSED)
+  version              Int                        @default(1)
+  reconciliationCaseId String?                    @map("reconciliation_case_id")
+  reconciliationCase   LoyaltyReconciliationCase? @relation(fields: [reconciliationCaseId], references: [id], onDelete: SetNull)
+  evidence             Json?
+  ruleVersion          String                     @map("rule_version")
+  createdById          String?                    @map("created_by_id")
+  decidedById          String?                    @map("decided_by_id")
+  decidedAt            DateTime?                  @map("decided_at")
+  revokedById          String?                    @map("revoked_by_id")
+  revokedAt            DateTime?                  @map("revoked_at")
+  createdAt            DateTime                   @default(now()) @map("created_at")
+
+  @@index([personId, status])
+  @@index([organizationId, status])
+  @@index([targetType, targetId, status])
+  @@map("loyalty_entity_links")
+}
+
+model LoyaltyReconciliationCase {
+  id             String                         @id @default(uuid())
+  datasetId      String                         @map("dataset_id")
+  dataset        LoyaltyDataset                 @relation(fields: [datasetId], references: [id], onDelete: Restrict)
+  snapshotId     String                         @map("snapshot_id")
+  snapshot       LoyaltySnapshot                @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  personId       String?                        @map("person_id")
+  person         LoyaltyPerson?                 @relation(fields: [personId], references: [id], onDelete: Restrict)
+  organizationId String?                        @map("organization_id")
+  organization   LoyaltyOrganization?           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  targetType     LoyaltyEntityType              @map("target_type")
+  targetId       String                         @map("target_id")
+  matchCodes     String[]                       @default([]) @map("match_codes")
+  evidence       Json?
+  score          Decimal                        @default(0) @db.Decimal(5, 4)
+  ruleVersion    String                         @map("rule_version")
+  status         LoyaltyReconciliationStatus    @default(OPEN)
+  decision       LoyaltyReconciliationDecision?
+  version        Int                            @default(1)
+  resolvedById   String?                        @map("resolved_by_id")
+  resolvedAt     DateTime?                      @map("resolved_at")
+  createdAt      DateTime                       @default(now()) @map("created_at")
+  updatedAt      DateTime                       @updatedAt @map("updated_at")
+  links          LoyaltyEntityLink[]
+
+  @@index([snapshotId, status, targetType])
+  @@index([personId, status])
+  @@index([organizationId, status])
+  @@index([targetType, targetId])
+  @@map("loyalty_reconciliation_cases")
+}
+
+// Manual override audit keeps the before/after values needed for review and
+// rollback. Access is restricted to the same ADMIN-only bounded context.
+model LoyaltyEntityChange {
+  id             String               @id @default(uuid())
+  personId       String?              @map("person_id")
+  person         LoyaltyPerson?       @relation(fields: [personId], references: [id], onDelete: Restrict)
+  organizationId String?              @map("organization_id")
+  organization   LoyaltyOrganization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  action         LoyaltyChangeAction
+  changedFields  String[]             @default([]) @map("changed_fields")
+  beforeValues   Json?                @map("before_values")
+  afterValues    Json?                @map("after_values")
+  actorId        String?              @map("actor_id")
+  createdAt      DateTime             @default(now()) @map("created_at")
+
+  @@index([personId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("loyalty_entity_changes")
+}
+
 // ─── CMS / LANDING CONTENT ───────────────────────────
 
 // Generic key-value content for landing blocks (hero, advantages, commission, contact, etc.)
@@ -784,16 +1241,15 @@ model SystemSetting {
 // Позволяет откатиться / посмотреть изменения «как в Google Docs».
 model SiteContentRevision {
   id         String   @id @default(uuid())
-  key        String   // тот же что в SiteContent
-  value      Json     // снимок значения после правки
-  editorId   String?  @map("editor_id")     // brokerId редактора (если есть)
-  editorName String?  @map("editor_name")   // ФИО на момент правки (для истории)
+  key        String // тот же что в SiteContent
+  value      Json // снимок значения после правки
+  editorId   String?  @map("editor_id") // brokerId редактора (если есть)
+  editorName String?  @map("editor_name") // ФИО на момент правки (для истории)
   createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([key, createdAt])
   @@map("site_content_revisions")
 }
-
 
 model LandingEvent {
   id          String   @id @default(uuid())
@@ -862,21 +1318,21 @@ model LandingNews {
 
 // Promotion slider on landing — block 3 of TZ.
 model LandingPromo {
-  id          String    @id @default(uuid())
-  title       String
-  subtitle    String?
-  description String?
-  tag         String? // e.g. "Старт продаж"
+  id            String    @id @default(uuid())
+  title         String
+  subtitle      String?
+  description   String?
+  tag           String? // e.g. "Старт продаж"
   imageUrl      String?   @map("image_url")
   imagePosition String?   @default("center") @map("image_position")
   ctaText       String?   @map("cta_text")
-  ctaHref     String?   @map("cta_href")
-  project     Project?
-  sortOrder   Int       @default(0) @map("sort_order")
-  isActive    Boolean   @default(true) @map("is_active")
-  expiresAt   DateTime? @map("expires_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  ctaHref       String?   @map("cta_href")
+  project       Project?
+  sortOrder     Int       @default(0) @map("sort_order")
+  isActive      Boolean   @default(true) @map("is_active")
+  expiresAt     DateTime? @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 
   @@index([sortOrder, isActive])
   @@map("landing_promos")
@@ -911,28 +1367,28 @@ model ContactRequest {
 //   Зорге 9: PROGRESSIVE 01.01.2026—06.05.2026 (старая шкала)
 //   Зорге 9: FLAT 4% 07.05.2026—31.12.2099 (новая, действует сейчас)
 model CommissionPolicy {
-  id        String         @id @default(uuid())
-  project   Project
-  mode      CommissionMode
+  id                        String         @id @default(uuid())
+  project                   Project
+  mode                      CommissionMode
   // Условия оплаты являются частью той же политики, что и базовая ставка.
   // Nullable оставлены только для бесшовной миграции старых записей: пока
   // политика не пересохранена, API подхватит legacy-значения из CMS.
-  installmentEnabled        Boolean? @map("installment_enabled")
-  installmentDiscount       Decimal? @map("installment_discount") @db.Decimal(5, 2)
-  subsidizedMortgageEnabled Boolean? @map("subsidized_mortgage_enabled")
-  subsidizedMortgageRate    Decimal? @map("subsidized_mortgage_rate") @db.Decimal(5, 2)
+  installmentEnabled        Boolean?       @map("installment_enabled")
+  installmentDiscount       Decimal?       @map("installment_discount") @db.Decimal(5, 2)
+  subsidizedMortgageEnabled Boolean?       @map("subsidized_mortgage_enabled")
+  subsidizedMortgageRate    Decimal?       @map("subsidized_mortgage_rate") @db.Decimal(5, 2)
   // Публичное пояснение рядом со ставкой на лендинге/в кабинете.
-  displayNote String? @map("display_note")
+  displayNote               String?        @map("display_note")
   // Для FLAT — единая ставка (например 4.00).
-  flatRate  Decimal?       @map("flat_rate") @db.Decimal(5, 2)
+  flatRate                  Decimal?       @map("flat_rate") @db.Decimal(5, 2)
   // Для PROGRESSIVE — JSON со шкалой: [{level: 'START', minSqm: 0, rate: 5.0}, ...]
-  levels    Json?
-  startDate DateTime       @map("start_date")
-  endDate   DateTime       @map("end_date")
-  isActive  Boolean        @default(true) @map("is_active")
-  notes     String?
-  createdAt DateTime       @default(now()) @map("created_at")
-  updatedAt DateTime       @updatedAt @map("updated_at")
+  levels                    Json?
+  startDate                 DateTime       @map("start_date")
+  endDate                   DateTime       @map("end_date")
+  isActive                  Boolean        @default(true) @map("is_active")
+  notes                     String?
+  createdAt                 DateTime       @default(now()) @map("created_at")
+  updatedAt                 DateTime       @updatedAt @map("updated_at")
 
   @@index([project, startDate, endDate])
   @@map("commission_policies")

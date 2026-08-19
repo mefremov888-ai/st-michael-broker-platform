@@ -114,8 +114,13 @@ export default function BrokerApplicationsPage() {
     setRetrying(clientId);
     setMsg('');
     try {
-      await apiPost(`/admin/clients/${clientId}/retry-amo-sync`, {});
-      setMsg('Повторная отправка запущена');
+      const result = await apiPost<{
+        ok: boolean;
+        queued?: boolean;
+        message?: string;
+      }>(`/admin/clients/${clientId}/retry-amo-sync`, {});
+      if (!result?.ok) throw new Error('Не удалось вернуть заявку в очередь');
+      setMsg(result.message || 'Заявка возвращена в очередь amoCRM');
       setTimeout(() => setMsg(''), 3000);
       load();
     } catch (e: any) {
@@ -137,6 +142,15 @@ export default function BrokerApplicationsPage() {
             Фиксации клиентов, встречи, звонки, акцепты оферты и заходы брокеров на платформу.
           </div>
         </div>
+        <button
+          type="button"
+          className="btn btn-secondary inline-flex items-center gap-2"
+          onClick={load}
+          disabled={loading}
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          Обновить
+        </button>
       </div>
 
       <AmoHealthBanner />

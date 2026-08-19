@@ -5,30 +5,32 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "test": "tsx --test src/lib/loyalty-base-api.test.ts",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint ."
   },
   "dependencies": {
-    "next": "14.0.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "@st-michael/shared": "*",
-    "tailwindcss": "^3.3.0",
-    "autoprefixer": "^10.4.0",
-    "postcss": "^8.4.0",
-    "lucide-react": "^0.294.0",
-    "react-hook-form": "^7.48.0",
     "@hookform/resolvers": "^3.3.0",
-    "zod": "^3.22.0",
+    "@st-michael/shared": "*",
     "clsx": "^2.0.0",
-    "tailwind-merge": "^2.0.0"
+    "lucide-react": "0.469.0",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-hook-form": "^7.48.0",
+    "tailwind-merge": "^2.0.0",
+    "zod": "^3.22.0"
   },
   "devDependencies": {
-    "typescript": "^5.0.0",
     "@types/node": "^20.0.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "eslint": "^8.0.0",
-    "eslint-config-next": "14.0.0"
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "autoprefixer": "^10.4.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "16.3.1",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0"
   }
 }

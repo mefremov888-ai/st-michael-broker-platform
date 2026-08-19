@@ -23,7 +23,7 @@ export const dynamic = 'force-dynamic';
 // (см. docker-compose.yml → web → volumes: web-data:/app/data).
 // Если папка не существует или нет прав на запись — fallback просто
 // не работает (как раньше), без падений.
-const SNAPSHOT_PATH = process.env.CMS_SNAPSHOT_PATH || '/app/data/cms-snapshot.json';
+const SNAPSHOT_PATH = path.join(process.cwd(), 'data', 'cms-snapshot.json');
 
 // API хост для server-side fetch. В docker-compose web получает
 // API_URL=http://api:4000 (см. docker-compose.yml). NEXT_PUBLIC_API_URL=/api

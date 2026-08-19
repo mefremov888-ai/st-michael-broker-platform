@@ -13,6 +13,7 @@ import {
   paginationQuerySchema,
 } from '@st-michael/shared';
 import { UserRole, UniquenessStatus, Project } from '@st-michael/shared';
+import { FixationFailureInterceptor } from './fixation-failure.interceptor';
 
 @ApiTags('clients')
 @Controller('clients')
@@ -35,6 +36,7 @@ export class ClientFixationController {
   }
 
   @Post('fix')
+  @UseInterceptors(FixationFailureInterceptor)
   @ApiOperation({ summary: 'Fix client uniqueness' })
   @ApiResponse({ status: 201, description: 'Client fixed successfully' })
   async fixClient(@CurrentUser() user: CurrentUserPayload, @Body() body: unknown) {

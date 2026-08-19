@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Post, Delete, Param, Body, Query, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { Controller, Get, Patch, Post, Delete, Param, Body, Query, UseGuards, UseInterceptors, UploadedFile, ParseUUIDPipe } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -8,6 +8,14 @@ import { CurrentUser, CurrentUserPayload } from '../auth/current-user.decorator'
 import { UserRole } from '@st-michael/shared';
 import { AdminService } from './admin.service';
 import { GoogleSheetsSyncService } from './google-sheets-sync.service';
+import {
+  AssignCallCenterBrokersDto,
+  LogCallCenterCallDto,
+  MangoCallDto,
+  UnassignCallCenterBrokersDto,
+  UpdateIntegrationSettingDto,
+  UpdateMangoEmployeeNumDto,
+} from './admin-mango.dto';
 
 @ApiTags('admin')
 @Controller('admin')
@@ -28,8 +36,11 @@ export class AdminController {
 
   @Get('brokers/:id')
   @ApiOperation({ summary: 'Get broker details with stats' })
-  async getBroker(@Param('id') id: string) {
-    return this.adminService.getBroker(id);
+  async getBroker(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.adminService.getBroker(id, user.role === UserRole.ADMIN);
   }
 
   @Patch('brokers/:id')
@@ -37,6 +48,21 @@ export class AdminController {
   @Roles(UserRole.ADMIN)
   async updateBroker(@Param('id') id: string, @Body() body: any) {
     return this.adminService.updateBroker(id, body);
+  }
+
+  @Patch('brokers/:id/mango-employee-num')
+  @ApiOperation({ summary: 'Set or clear a staff Mango EmployeeNUM (admin only)' })
+  @Roles(UserRole.ADMIN)
+  async updateBrokerMangoEmployeeNum(
+    @CurrentUser() user: CurrentUserPayload,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdateMangoEmployeeNumDto,
+  ) {
+    return this.adminService.updateBrokerMangoEmployeeNum(
+      id,
+      body?.mangoEmployeeNum,
+      user.id,
+    );
   }
 
   @Patch('brokers/:id/role')
@@ -128,44 +154,41 @@ export class AdminController {
   @Get('call-center/queue')
   @ApiOperation({ summary: 'Очередь обзвона: брокеры isInBase=true, отсортированные по приоритету' })
   async callCenterQueue(@CurrentUser() user: CurrentUserPayload, @Query() query: any) {
-    // 2026-06-03: пробрасываем currentUserId для фильтра assignment=mine.
-    return this.adminService.getCallCenterQueue({ ...query, currentUserId: user.id });
+    return this.adminService.getCallCenterQueue({
+      ...query,
+      currentUserId: user.id,
+      currentUserRole: user.role,
+    });
   }
 
   @Get('call-center/managers')
   @ApiOperation({ summary: 'Список менеджеров КЦ для дропдауна назначения' })
+  @Roles(UserRole.ADMIN)
   async listKcManagers() {
     return this.adminService.listKcManagers();
   }
 
   @Post('call-center/assign')
   @ApiOperation({ summary: 'Назначить выбранных брокеров на менеджера КЦ' })
-  async assignBrokers(@Body() body: { brokerIds: string[]; managerId: string }) {
-    return this.adminService.assignBrokersToManager(body.brokerIds || [], body.managerId);
+  @Roles(UserRole.ADMIN)
+  async assignBrokers(@Body() body: AssignCallCenterBrokersDto) {
+    return this.adminService.assignBrokersToManager(body.brokerIds, body.managerId);
   }
 
   @Post('call-center/unassign')
   @ApiOperation({ summary: 'Снять назначение менеджера с выбранных брокеров' })
-  async unassignBrokers(@Body() body: { brokerIds: string[] }) {
-    return this.adminService.unassignBrokers(body.brokerIds || []);
+  @Roles(UserRole.ADMIN)
+  async unassignBrokers(@Body() body: UnassignCallCenterBrokersDto) {
+    return this.adminService.unassignBrokers(body.brokerIds);
   }
 
   @Post('call-center/log-call')
   @ApiOperation({ summary: 'Зафиксировать звонок: создаёт CallLog и обновляет category/doNotCall/nextCallAt' })
   async logCall(
     @CurrentUser() user: CurrentUserPayload,
-    @Body() body: {
-      brokerId: string;
-      result: string;
-      comment?: string;
-      campaign?: string;
-      duration?: number;
-      nextCallAtOverride?: string;
-      doNotCallOverride?: boolean;
-      brokerTourDate?: string;
-    },
+    @Body() body: LogCallCenterCallDto,
   ) {
-    return this.adminService.logCall(user.id, body);
+    return this.adminService.logCall(user.id, body, user.role);
   }
 
   // ─── issue #2: звонок менеджера КЦ брокеру через Mango ────
@@ -173,9 +196,14 @@ export class AdminController {
   @ApiOperation({ summary: 'Менеджер КЦ звонит брокеру через Mango (callback)' })
   async mangoCall(
     @CurrentUser() user: CurrentUserPayload,
-    @Body() body: { brokerId: string },
+    @Body() body: MangoCallDto,
   ) {
-    return this.adminService.mangoCallBroker(user.id, body.brokerId);
+    return this.adminService.mangoCallBroker(
+      user.id,
+      body.brokerId,
+      user.role,
+      body.idempotencyKey,
+    );
   }
   @Get('call-center/stats')
   @ApiOperation({ summary: 'KPI оператора и команды на сегодня/неделю/месяц' })
@@ -258,7 +286,7 @@ export class AdminController {
 
   @Post('clients/:id/retry-amo-sync')
   @ApiOperation({ summary: 'Повторить попытку передать заявку в amoCRM' })
-  async retryAmoSync(@Param('id') id: string) {
+  async retryAmoSync(@Param('id', ParseUUIDPipe) id: string) {
     return this.adminService.retryAmoSync(id);
   }
 
@@ -368,9 +396,9 @@ export class AdminController {
   async updateIntegrationSetting(
     @CurrentUser() user: CurrentUserPayload,
     @Param('key') key: string,
-    @Body() body: { value: string },
+    @Body() body: UpdateIntegrationSettingDto,
   ) {
-    return this.adminService.updateIntegrationSetting(key, body.value || '', user.id);
+    return this.adminService.updateIntegrationSetting(key, body.value, user.id);
   }
 
   // ─── Reassign client to another broker (manager/admin) ────

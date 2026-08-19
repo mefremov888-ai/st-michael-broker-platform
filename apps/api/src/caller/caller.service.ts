@@ -2,6 +2,7 @@ import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
+import { PUBLIC_CALL_SELECT, toPublicCall } from '../common/public-call';
 
 @Injectable()
 export class CallerService {
@@ -33,12 +34,13 @@ export class CallerService {
         skip,
         take: limit,
         orderBy: { createdAt: 'desc' },
+        select: PUBLIC_CALL_SELECT,
       }),
       this.prisma.call.count({ where }),
     ]);
 
     return {
-      calls,
+      calls: calls.map((call) => toPublicCall(call as any)),
       total,
       page,
       limit,

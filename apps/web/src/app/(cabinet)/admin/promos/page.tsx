@@ -242,7 +242,7 @@ export default function AdminPromosPage() {
   const renderForm = (
     value: Partial<Promo>,
     onChange: (patch: Partial<Promo>) => void,
-    inputRef: React.RefObject<HTMLInputElement>,
+    inputRef: React.RefObject<HTMLInputElement | null>,
   ) => (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 24, alignItems: 'start' }}>
       {/* LEFT: fields */}

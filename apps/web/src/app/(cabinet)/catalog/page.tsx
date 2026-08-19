@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
 import { Building, RefreshCw, ChevronLeft, ChevronRight, X, SlidersHorizontal, Heart, Printer, CalendarDays, Bookmark } from 'lucide-react';
 import { useFavorites } from '@/lib/favorites';
@@ -513,7 +513,7 @@ export default function CatalogPage() {
                   if (y.year < curY) doneCount += y.count;
                   else future.push(y);
                 }
-                const opts: JSX.Element[] = [];
+                const opts: ReactElement[] = [];
                 if (doneCount > 0) {
                   opts.push(<option key="done" value="done">Сдан ({doneCount})</option>);
                 }

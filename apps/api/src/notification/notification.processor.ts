@@ -7,8 +7,8 @@ import * as sgMail from '@sendgrid/mail';
 
 interface NotificationJob {
   brokerId: string;
-  // 2026-07-02: убран WHATSAPP (не подключён). TELEGRAM оставлен на случай
-  // старых job'ов в очереди — processor молча пропустит без TOKEN.
+  // 2026-07-02: убран WHATSAPP (не подключён). TELEGRAM оставлен для
+  // связанных chatId; отсутствие токена/chatId считается ошибкой доставки.
   channel: 'SMS' | 'TELEGRAM' | 'EMAIL' | 'PUSH';
   subject?: string;
   body: string;
@@ -18,6 +18,12 @@ interface NotificationJob {
   // Optional payload for push — link to open, icon, tag for de-dup
   data?: { url?: string; tag?: string; icon?: string };
 }
+
+interface TelegramApiResponse {
+  ok?: boolean;
+}
+
+const DEFAULT_TELEGRAM_TIMEOUT_MS = 10_000;
 
 let sendgridConfigured = false;
 function configureSendgrid() {
@@ -125,20 +131,54 @@ export class NotificationProcessor {
   }
 
   private async sendTelegram(chatId: bigint | null, body: string) {
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
-    if (!botToken || !chatId) {
-      this.logger.warn(`[Telegram] Not configured or no chatId. Message: ${body}`);
-      return;
+    const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+    if (!botToken) {
+      throw new Error('[Telegram] TELEGRAM_BOT_TOKEN is not configured');
+    }
+    if (chatId === null || chatId === undefined) {
+      throw new Error('[Telegram] Broker has no Telegram chat ID');
     }
 
     this.logger.log(`[Telegram] Sending to chat ${chatId}: ${body.substring(0, 50)}...`);
 
+    const configuredTimeout = Number(process.env.TELEGRAM_REQUEST_TIMEOUT_MS || process.env.TELEGRAM_TIMEOUT_MS);
+    const timeoutMs =
+      Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : DEFAULT_TELEGRAM_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId.toString(), text: body, parse_mode: 'HTML' }),
-    });
+    try {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId.toString(), text: body }),
+          signal: controller.signal,
+        });
+      } catch {
+        if (controller.signal.aborted) {
+          throw new Error(`[Telegram] Request timed out after ${timeoutMs} ms`);
+        }
+        throw new Error('[Telegram] Network request failed');
+      }
+
+      let payload: TelegramApiResponse | undefined;
+      try {
+        payload = (await response.json()) as TelegramApiResponse;
+      } catch {
+        // Check HTTP status first, then report an invalid Telegram response.
+      }
+
+      if (!response.ok) {
+        throw new Error(`[Telegram] Request failed with HTTP ${response.status}`);
+      }
+      if (!payload || payload.ok !== true) {
+        throw new Error('[Telegram] API rejected the request');
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async sendEmail(email: string | null, subject: string, body: string) {

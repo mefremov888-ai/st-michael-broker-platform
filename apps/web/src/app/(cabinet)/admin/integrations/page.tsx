@@ -44,19 +44,19 @@ const SETTINGS_META: Record<string, { label: string; description: string; placeh
   MANGO_API_KEY: {
     label: 'Mango VPBX — уникальный код АТС',
     description:
-      '«Уникальный код вашей АТС» из ЛК Mango (vpbx_api_key). Используется как идентификатор приложения и часть HMAC-подписи каждого запроса.',
-    placeholder: 'y918tc9kgaza...',
+      '«Уникальный код вашей АТС» из ЛК Mango (vpbx_api_key). Используется как идентификатор приложения и часть SHA-256 подписи каждого запроса.',
+    placeholder: 'vpbx_api_key',
   },
   MANGO_API_SALT: {
     label: 'Mango VPBX — ключ для подписи',
     description:
-      '«Ключ для создания подписи» из ЛК Mango (vpbx_api_salt). HMAC-SHA256 от (api_key + json + salt) идёт в параметр sign.',
-    placeholder: 'lor605qgarrx...',
+      '«Ключ для создания подписи» из ЛК Mango (vpbx_api_salt). SHA-256 от точной строки (api_key + json + salt) идёт в параметр sign.',
+    placeholder: '64-символьный ключ подписи',
   },
   MANGO_API_URL: {
     label: 'Mango VPBX — API URL',
     description:
-      'Базовый URL VPBX API. Для обычного аккаунта — https://app.mango-office.ru/vpbx. Если аккаунт Контакт-центр — URL другой.',
+      'Разрешён только официальный базовый URL VPBX API: https://app.mango-office.ru/vpbx. Другие host и path backend отклонит.',
     placeholder: 'https://app.mango-office.ru/vpbx',
   },
   MANGO_CALLBACK_URL: {
@@ -67,6 +67,13 @@ const SETTINGS_META: Record<string, { label: string; description: string; placeh
       'https://integration-webhook.mango-office.ru/webhookapp/common?code=...&Source=Other&API_key=...&Action=Callback&EmployeeNUM={{Ответственный}}&TelNumbr={{Телефон}}. ' +
       'Лимит 20 звонков/мин (проверяется в коде).',
     placeholder: 'https://integration-webhook.mango-office.ru/webhookapp/common?code=...&EmployeeNUM={{Ответственный}}&TelNumbr={{Телефон}}',
+  },
+  MANGO_OUTBOUND_LINE: {
+    label: 'Mango — исходящая линия',
+    description:
+      'Caller ID для исходящих callback-звонков. Укажите 10–15 цифр; форматирование и знак + будут удалены. ' +
+      'Если поле пустое, Mango использует линию аккаунта по умолчанию.',
+    placeholder: '74990000000',
   },
   GSHEETS_BROKERS_URL: {
     label: 'Google Sheets — URL CSV-экспорта базы брокеров',

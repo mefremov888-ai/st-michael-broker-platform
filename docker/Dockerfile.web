@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.6
-FROM mirror.gcr.io/library/node:20-alpine AS builder
+FROM mirror.gcr.io/library/node:20.20.2-alpine AS builder
 WORKDIR /app
 # python3/make/g++ нужны для нативной компиляции bcrypt из workspace apps/api,
 # когда prebuilt-бинарник не качается. Эти пакеты живут только в throwaway-builder-stage.
@@ -37,7 +37,7 @@ RUN rm -rf apps/web/.next apps/web/tsconfig.tsbuildinfo \
  && npm run build --workspace=apps/web
 
 # ─── runtime ───
-FROM mirror.gcr.io/library/node:20-alpine
+FROM mirror.gcr.io/library/node:20.20.2-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1

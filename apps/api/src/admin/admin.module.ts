@@ -7,12 +7,14 @@ import { GoogleSheetsSyncService } from './google-sheets-sync.service';
 import { DatabaseModule } from '../database/database.module';
 import { AmocrmModule } from '../amocrm/amocrm.module';
 import { AuthModule } from '../auth/auth.module';
+import { MangoCallSafetyModule } from '../common/mango-call-safety.module';
 
 @Module({
   imports: [
     DatabaseModule,
     AmocrmModule,
     AuthModule,
+    MangoCallSafetyModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
   controllers: [AdminController],

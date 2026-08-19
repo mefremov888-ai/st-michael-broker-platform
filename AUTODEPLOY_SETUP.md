@@ -1,9 +1,13 @@
-# Настройка автодеплоя на production
+# Настройка защищённого production deploy
 
-**Цель:** после мерджа PR в master GitHub автоматически делает SSH на сервер, подтягивает свежий код, пересобирает Docker и рестартит. Заказчик (mefremov888-ai) может править контент через `/admin/content` и сразу видеть результат на https://72.56.241.199/ — больше не нужно вручную трогать сервер на каждое обновление.
+**Цель:** после merge в `master` GitHub автоматически выполняет build/tests.
+Production SSH deploy запускается отдельно через `Run workflow`, только для
+точного SHA текущего `master`, после подтверждения backup/clone rehearsal и
+approval защищённого Environment `production`.
 
 **Время на разовую настройку:** ~5–10 минут.
-**После настройки:** деплой полностью автономный.
+**После настройки:** проверки автоматические, production rollout намеренно
+требует ручного подтверждения и approval.
 
 ---
 
@@ -41,7 +45,7 @@ ssh -i ~/.ssh/github-deploy <user>@72.56.241.199 "echo OK"
 ```
 Должно вывести `OK`.
 
-## Шаг 3. Добавить 4 секрета в GitHub
+## Шаг 3. Добавить deploy-секреты и production variables
 
 В репо `sereganikitin/st-michael-broker-platform` → **Settings → Secrets and variables → Actions → New repository secret**:
 
@@ -55,6 +59,20 @@ ssh -i ~/.ssh/github-deploy <user>@72.56.241.199 "echo OK"
 Опционально — если SSH-порт не 22:
 | `DEPLOY_PORT` | Порт | `2222` |
 
+В **Settings → Environments → production** включи required reviewers,
+запрети self-approval и разреши deployment только из `master`. В environment
+добавь две переменные (не secrets):
+
+| Имя | Что записать |
+|---|---|
+| `PRODUCTION_PG_SYSTEM_IDENTIFIER` | точный `system_identifier`, полученный read-only preflight workflow |
+| `PRODUCTION_MIN_BROKER_ROWS` | согласованный нижний порог количества брокеров, меньше которого deploy запрещён |
+
+Токены интеграций добавляются как GitHub Secrets по инструкциям
+`docs/telegram-ops-monitoring.md` и `docs/mango-setup.md`. Многострочный Google
+Service Account JSON сначала сохрани как валидный однострочный minified JSON;
+workflow намеренно отклоняет секреты с реальными переводами строк.
+
 ## Шаг 4. Убедиться что на сервере есть `deploy-update.sh`
 
 Зайди на сервер, проверь:
@@ -63,40 +81,58 @@ cd /opt/st-michael-broker-platform   # подставь твой путь
 ls -la deploy-update.sh
 ```
 
-Если файла нет — это значит сервер ещё не подтягивал последний master. Запусти один раз вручную:
-```bash
-git pull origin master
-chmod +x deploy-update.sh
-```
+Для первого migration-aware релиза не запускай старую копию скрипта вручную.
+Сначала merge reviewed PR, затем выполни baseline/clone runbook из
+`packages/database/prisma/migrations/README.md`; deployment запускается только
+защищённым workflow для точного SHA `master`.
 
 ## Шаг 5. Тест workflow
 
-В GitHub: **Actions → Deploy to production → Run workflow → Run** (на ветке master).
+После успешного backup, restore на изолированном clone и baseline rehearsal:
 
-Должен появиться запуск, и через 2–3 минуты статус `✓`. В логах увидишь шаги: pull, build, restart, health check, refresh-cms-content.
+1. GitHub → **Actions → Deploy to production**.
+2. Открой зелёный verify-run для текущего SHA `master`.
+3. Нажми **Run workflow**, выбери `master`.
+4. Поставь `confirm_production = true`.
+5. Нажми **Run workflow** и дождись approval второго reviewer для environment
+   `production`.
+
+Deploy выполняется только после повторной сборки и тестов exact SHA. В логах
+будут: проверка SHA/БД, чистая сборка образов, `prisma migrate deploy`, rollout,
+readiness PostgreSQL+Redis, контейнеры, nginx и внешний HTTPS.
 
 Если что-то падает — лог расскажет что именно. Чаще всего:
 - неверный путь в `DEPLOY_PATH` → проверь
 - нет прав на `~/.ssh/authorized_keys` на сервере → `chmod 600 ~/.ssh/authorized_keys`
-- `docker compose` команда не работает → скрипт сам fallback-нет на `docker-compose`
+- нет Docker Compose v2 или host tools → установить их до повторного запуска;
+  fallback на legacy `docker-compose` намеренно отсутствует
+- не совпадает DB identity/count → остановиться и проверить volume/project, а
+  не снижать проверку вслепую
 
 ---
 
-## Что происходит при автодеплое
+## Что происходит в workflow
 
-Workflow `.github/workflows/deploy.yml` срабатывает на:
-- `push` в `master` (после мерджа PR)
-- ручной запуск из GitHub Actions UI
+`push` в `master` запускает только build/tests. Production SSH deployment
+запускается исключительно вручную через `workflow_dispatch` с подтверждением и
+approval защищённого environment.
 
 GitHub Actions подключается к серверу по SSH и выполняет `bash deploy-update.sh`, который:
 
-1. `git fetch + reset --hard origin/master` — подтягивает свежий код (без слияний)
-2. `docker compose up -d --build` — пересобирает образы и перезапускает контейнеры
-3. Ждёт пока API ответит на `/api/health`
-4. `prisma db push` — применяет изменения схемы БД (если есть)
-5. `refresh-cms-content.js` — обновляет блоки лендинга в БД из дефолтов
+1. Проверяет обязательный SHA, server lock и identity существующей production БД.
+2. Собирает API/web из чистого `git archive` exact SHA, пока старый сервис жив.
+3. До замены контейнеров выполняет только `prisma migrate deploy`; `db push` и
+   `--accept-data-loss` в production запрещены.
+4. Заменяет только `api` и `web`, выполняет graceful reload уже работающего
+   `nginx`, чтобы он разрешил новые Docker-адреса, затем проверяет
+   `/api/health/ready`, web и внешний HTTPS. PostgreSQL, Redis и nginx этот
+   application workflow не пересоздаёт; изменение их портов/образов выполняется в отдельное
+   согласованное maintenance window.
+5. Сохраняет SHA и прежние image IDs для расследования/отката. Business seeds,
+   amo inspection и принудительное обновление CMS не запускаются.
 
-Время от мерджа до видимого обновления: ~2-3 минуты (большинство — Docker rebuild).
+Время зависит от чистой Docker-сборки и миграций; рассчитывай до 75 минут,
+особенно при холодном cache.
 
 ---
 
@@ -109,8 +145,10 @@ GitHub Actions подключается к серверу по SSH и выпол
 4. Сергей запускает `refresh-cms-content.js` если нужно
 
 **Стало:**
-1. mefremov888-ai создаёт PR
-2. Сергей ревьювит, мержит — **на этом всё**, остальное автоматически
+1. mefremov888-ai создаёт PR.
+2. Сергей ревьювит и мержит; автоматический verify обязан стать зелёным.
+3. Ответственный оператор подтверждает backup/clone/baseline, запускает manual
+   workflow и второй reviewer разрешает production environment.
 
 Заказчик правит контент через админку (`/admin/content`, `/admin/promos`) — это вообще не требует мержей или деплоя, всё в БД.
 
@@ -120,20 +158,33 @@ GitHub Actions подключается к серверу по SSH и выпол
 
 - Приватный ключ хранится **только** в GitHub Secrets — он зашифрован, виден только в момент запуска workflow, в логах не печатается.
 - При угрозе компрометации — удали публичный ключ с сервера (`~/.ssh/authorized_keys`) и сгенерируй новый.
-- Если хочешь ограничить ключ только этим действием, добавь в `authorized_keys` префикс `command="cd /opt/st-michael-broker-platform && bash deploy-update.sh"` — тогда ключом нельзя будет ничего другого выполнить.
+- Ограничивай deploy key отдельным системным пользователем и минимальными sudo
+  permissions. Не задавай forced command только `bash deploy-update.sh`: workflow
+  передаёт обязательные SHA/DB identity variables и выполняет безопасный bootstrap.
 
 ---
 
 ## Откат при проблеме
 
-Если деплой что-то сломал, на сервере:
-```bash
-cd /opt/st-michael-broker-platform
-git reset --hard <предыдущий-хеш-коммита>
-docker compose up -d --build
-```
+Перед rollout скрипт фиксирует старые image IDs и создаёт локальные rollback
+tags/override в `/var/backups/stmichael/releases`. Если новый `api`/`web` не
+проходит readiness, container или внешний HTTPS smoke, скрипт автоматически
+возвращает предыдущие образы и запускает старый API напрямую, не вызывая его
+legacy migration-entrypoint. Additive DB migrations при этом остаются
+применёнными; автоматического отката данных нет. Workflow завершится красным,
+даже если старое приложение успешно восстановлено — назначенный production
+operator обязан проверить сайт и открыть incident.
 
-Или через GitHub: Actions → Deploy to production → Run workflow на нужном теге/коммите. Можно использовать заранее созданные backup-ветки `backup/colleague-master-2026-04-30`.
+После аварийного восстановления не делай прямой `git reset`/обычный
+`docker compose up` на сервере. Ручной `Run workflow`
+всегда разворачивает только текущий `master`: workflow
+сверяет event SHA с `origin/master` и откажется выкатывать тег, старый commit
+или master, который изменился после запуска. Для отката сначала создать
+reviewed revert-коммит/PR в `master`, дождаться CI и approval environment
+`production`, затем запустить обычный deploy. Не использовать старые
+backup-ветки как непроверенный источник production-кода. Если миграция уже
+применена, отдельно следовать migration runbook: откат кода не является откатом
+данных.
 
 ---
 

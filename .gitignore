@@ -55,12 +55,10 @@ logs/
 *.db
 *.sqlite
 
-# Docker
-.dockerignore
-
 # Temporary files
 tmp/
 temp/
+.ops-monitor-state
 
 # Screenshots for Claude Code interactions (not committed)
 screenshots/*

@@ -1,7 +1,24 @@
-import { CommandContext } from 'grammy'
+import type { CommandContext } from 'grammy'
 import { mainKeyboard } from '../keyboards/main'
+import type { MyContext } from '../types/context'
 
-export async function startCommand(ctx: CommandContext<any>) {
+type LegacyApiFacade = {
+  call(method: string, ...args: string[]): Promise<any>
+}
+
+type TextWaitContext = MyContext & {
+  message: NonNullable<MyContext['message']> & { text: string }
+}
+
+type InteractiveCommandContext = CommandContext<MyContext> & {
+  waitFor(trigger: 'message:text'): Promise<TextWaitContext>
+}
+
+export async function startCommand(ctx: CommandContext<MyContext>) {
+  // Preserve the existing runtime integration surface while keeping the
+  // grammY context itself strongly typed across the bot.
+  const legacyApi = ctx.api as unknown as LegacyApiFacade
+  const interactiveCtx = ctx as unknown as InteractiveCommandContext
   const telegramId = ctx.from?.id?.toString()
 
   if (!telegramId) {
@@ -11,7 +28,7 @@ export async function startCommand(ctx: CommandContext<any>) {
 
   // Проверяем, авторизован ли уже пользователь
   try {
-    const broker = await ctx.api.call('getBrokerByTelegramId', telegramId)
+    const broker = await legacyApi.call('getBrokerByTelegramId', telegramId)
     if (broker) {
       ctx.session = { ...ctx.session, broker }
       await ctx.reply('Вы уже авторизованы!', {
@@ -32,7 +49,7 @@ export async function startCommand(ctx: CommandContext<any>) {
   )
 
   // Ожидаем ответ с номером телефона
-  const phoneCtx = await ctx.waitFor('message:text')
+  const phoneCtx = await interactiveCtx.waitFor('message:text')
   const phone = phoneCtx.message.text.trim()
 
   // Валидация номера телефона
@@ -44,11 +61,11 @@ export async function startCommand(ctx: CommandContext<any>) {
 
   try {
     // Отправляем SMS с кодом
-    await ctx.api.call('sendSmsOtp', phone)
+    await legacyApi.call('sendSmsOtp', phone)
     await ctx.reply('SMS с кодом отправлено. Введите 4-значный код:')
 
     // Ожидаем код подтверждения
-    const codeCtx = await ctx.waitFor('message:text')
+    const codeCtx = await interactiveCtx.waitFor('message:text')
     const code = codeCtx.message.text.trim()
 
     if (!/^\d{4}$/.test(code)) {
@@ -57,14 +74,14 @@ export async function startCommand(ctx: CommandContext<any>) {
     }
 
     // Проверяем код и получаем брокера
-    const authResult = await ctx.api.call('verifySmsOtp', phone, code)
+    const authResult = await legacyApi.call('verifySmsOtp', phone, code)
     if (!authResult.broker) {
       await ctx.reply('Брокер с таким номером не найден')
       return
     }
 
     // Связываем Telegram ID с брокером
-    await ctx.api.call('updateBrokerTelegramId', authResult.broker.id, telegramId)
+    await legacyApi.call('updateBrokerTelegramId', authResult.broker.id, telegramId)
 
     // Сохраняем в сессии
     ctx.session = { ...ctx.session, broker: authResult.broker }

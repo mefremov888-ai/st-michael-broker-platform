@@ -1,6 +1,19 @@
-import { Injectable, Inject, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  BadRequestException,
+  Logger,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
-import { AmoCrmAdapter, isSalesPipeline, isSalesExceptionStatus, isSalesDealStatus } from '@st-michael/integrations';
+import {
+  AmoCrmAdapter,
+  getMangoConfig,
+  isSalesPipeline,
+  isSalesExceptionStatus,
+  isSalesDealStatus,
+} from '@st-michael/integrations';
 import * as crypto from 'crypto';
 import {
   brokerTourSnapshotFromAmoContact,
@@ -21,7 +34,144 @@ export class WebhooksService {
   private verifyHmac(payload: string, signature: string, secret: string): boolean {
     if (!secret) return true; // Skip verification if no secret configured
     const computed = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signature));
+    const normalizedSignature = String(signature || '').trim();
+    if (!/^[a-f0-9]{64}$/i.test(normalizedSignature)) return false;
+    const expected = Buffer.from(computed, 'hex');
+    const actual = Buffer.from(normalizedSignature, 'hex');
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  }
+
+  /** Mango VPBX signs the exact JSON string with SHA-256(apiKey + json + salt). */
+  private mangoSignature(apiKey: string, json: string, apiSalt: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(apiKey + json + apiSalt)
+      .digest('hex');
+  }
+
+  /** Compare credential material without passing differently-sized buffers to timingSafeEqual. */
+  private constantTimeStringEqual(expected: string, actual: string): boolean {
+    const expectedDigest = crypto.createHash('sha256').update(expected).digest();
+    const actualDigest = crypto.createHash('sha256').update(actual).digest();
+    return crypto.timingSafeEqual(expectedDigest, actualDigest);
+  }
+
+  private verifyMangoSignature(
+    apiKey: string,
+    json: string,
+    apiSalt: string,
+    signature: unknown,
+  ): boolean {
+    if (typeof signature !== 'string') return false;
+    const normalizedSignature = signature.trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(normalizedSignature)) return false;
+    return this.constantTimeStringEqual(
+      this.mangoSignature(apiKey, json, apiSalt),
+      normalizedSignature,
+    );
+  }
+
+  /**
+   * Official Mango callbacks are form-urlencoded envelopes with
+   * `vpbx_api_key`, `sign` and the exact (signed) `json` string. The older
+   * JSON + x-mango-sign shape remains supported for existing installations.
+   */
+  private extractMangoEvent(body: any, headers: any): any {
+    const config = getMangoConfig();
+    const apiKey = String(config.apiKey || '').trim();
+    const apiSalt = String(config.apiSalt || '').trim();
+    // This is a public mutation endpoint. There is no legitimate unsigned
+    // mode: an empty or partial credential pair must fail closed as a server
+    // configuration error rather than accepting spoofed events.
+    if (!apiKey || !apiSalt) {
+      throw new ServiceUnavailableException('Mango webhook authentication is not configured');
+    }
+
+    const isOfficialEnvelope = Boolean(
+      body
+        && typeof body === 'object'
+        && (
+          Object.prototype.hasOwnProperty.call(body, 'json')
+          || Object.prototype.hasOwnProperty.call(body, 'vpbx_api_key')
+          || Object.prototype.hasOwnProperty.call(body, 'sign')
+        ),
+    );
+
+    if (isOfficialEnvelope) {
+      const envelopeApiKey = body?.vpbx_api_key;
+      const signature = body?.sign;
+      const rawJson = body?.json;
+
+      if (typeof rawJson !== 'string') {
+        throw new UnauthorizedException('Invalid Mango webhook credentials');
+      }
+
+      // Evaluate both checks so a wrong key does not skip signature work and
+      // produce a useful key-validity timing oracle.
+      const keyIsString = typeof envelopeApiKey === 'string';
+      const apiKeyMatches = this.constantTimeStringEqual(
+        apiKey,
+        keyIsString ? envelopeApiKey : '',
+      );
+      const signatureMatches = this.verifyMangoSignature(
+        apiKey,
+        rawJson,
+        apiSalt,
+        signature,
+      );
+      if (!keyIsString || !apiKeyMatches || !signatureMatches) {
+        throw new UnauthorizedException('Invalid Mango webhook credentials');
+      }
+
+      try {
+        const parsed = JSON.parse(rawJson);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Mango event must be an object');
+        }
+        return parsed;
+      } catch {
+        throw new BadRequestException('Malformed Mango webhook JSON');
+      }
+    }
+
+    // Backward-compatible JSON body mode. Mango's formula is still the same
+    // SHA-256 concatenation; it is not an HMAC.
+    const headerValue = headers?.['x-mango-sign'] ?? headers?.['X-Mango-Sign'];
+    const signature = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+    const rawJson = JSON.stringify(body);
+    if (!this.verifyMangoSignature(apiKey, rawJson, apiSalt, signature)) {
+      throw new UnauthorizedException('Invalid Mango webhook credentials');
+    }
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new BadRequestException('Malformed Mango webhook JSON');
+    }
+    return body;
+  }
+
+  /**
+   * Official Mango seq values are JSON integers. Reject unsafe JS numbers so
+   * two distinct large counters can never collapse to the same rounded value.
+   */
+  private parseMangoEventSeq(value: unknown): bigint | null {
+    const maxPostgresBigInt = 9_223_372_036_854_775_807n;
+    if (typeof value === 'bigint') {
+      return value >= 0n && value <= maxPostgresBigInt ? value : null;
+    }
+    if (typeof value === 'number') {
+      return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+    }
+    // Tolerate digit strings from form parsers/proxies without weakening the
+    // integer contract.
+    if (typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value)) {
+      try {
+        const parsed = BigInt(value);
+        return parsed <= maxPostgresBigInt ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   // ─── amoCRM Lead Update ─────────────────────────────
@@ -268,41 +418,140 @@ export class WebhooksService {
   }
 
   // ─── Mango Call Result ──────────────────────────────
-  async handleMangoCallResult(data: any, headers: any) {
-    const secret = process.env.MANGO_API_SALT || '';
-    if (secret && headers['x-mango-sign']) {
-      if (!this.verifyHmac(JSON.stringify(data), headers['x-mango-sign'], secret)) {
-        throw new BadRequestException('Invalid signature');
+  async handleMangoCallResult(body: any, headers: any) {
+    // Mango config may be hot-reloaded from SystemSetting. Reading process.env
+    // here would validate with stale/empty credentials after an admin update.
+    const data = this.extractMangoEvent(body, headers);
+
+    // `result: 1000` is a response to the callback command, not proof that a
+    // phone call completed. Completion is accepted only from a status event.
+    if (
+      Object.prototype.hasOwnProperty.call(data, 'result')
+      && !data.status
+      && !data.call_state
+    ) {
+      return { status: 'ignored', matched: false, reason: 'command_result' };
+    }
+
+    const callState = String(data?.call_state || '').trim().toLowerCase();
+    const externalStatus = String(data?.status || '').trim().toLowerCase();
+    const mangoEventSeq = callState ? this.parseMangoEventSeq(data?.seq) : null;
+    if (callState && mangoEventSeq === null) {
+      // Updating an official event without its ordering counter could let a
+      // delayed notification replace a newer terminal result.
+      return { status: 'ignored', matched: false, reason: 'invalid_seq' };
+    }
+    this.logger.log(
+      `Mango call result: call_id=${data.call_id}, state=${callState || externalStatus || '(empty)'}`,
+    );
+
+    let mappedStatus: string | undefined;
+    if (callState) {
+      // The local model has terminal states only (plus INITIATED). Ignoring
+      // Appeared/Connected/OnHold also prevents a late, lower-seq event from
+      // rolling a terminal call back after Mango delivers events out of order.
+      if (callState !== 'disconnected') {
+        if (['appeared', 'connected', 'onhold'].includes(callState)) {
+          return { status: 'ignored', matched: false, reason: 'non_terminal_state' };
+        }
+        this.logger.warn(`Ignoring Mango call event with unknown call_state=${callState}`);
+        return { status: 'ignored', matched: false, reason: 'unknown_call_state' };
+      }
+
+      const disconnectReason = Number(data.disconnect_reason);
+      // Mango callback creates two technical legs. A Disconnected/1000 event
+      // for the first leg is an intermediate command-success notification;
+      // the second leg later carries the actual terminal call reason.
+      if (disconnectReason === 1000) {
+        return { status: 'ignored', matched: false, reason: 'intermediate_leg' };
+      }
+      if ([1100, 1110, 1120].includes(disconnectReason)) {
+        mappedStatus = 'COMPLETED';
+      } else if (disconnectReason === 1111) {
+        mappedStatus = 'NO_ANSWER';
+      } else if (disconnectReason === 1121) {
+        mappedStatus = 'BUSY';
+      } else if (
+        (disconnectReason >= 1122 && disconnectReason <= 1124)
+        || (disconnectReason >= 1130 && disconnectReason <= 1134)
+        || (disconnectReason >= 4200 && disconnectReason <= 4299)
+      ) {
+        mappedStatus = 'UNAVAILABLE';
+      } else {
+        // Billing restrictions (2xxx), bad-number classes (32xx/34xx),
+        // overload/technical errors (5001/5003), missing and future unknown
+        // codes are failures. In particular, never treat arbitrary 11xx as
+        // success just because Mango documents 11xx as a broad normal class.
+        mappedStatus = 'FAILED';
+      }
+    } else {
+      // Backward compatibility with the previous normalized webhook shape.
+      const statusMap: Record<string, string> = {
+        completed: 'COMPLETED',
+        no_answer: 'NO_ANSWER',
+        busy: 'BUSY',
+        unavailable: 'UNAVAILABLE',
+        failed: 'FAILED',
+      };
+      mappedStatus = statusMap[externalStatus];
+      if (!mappedStatus) {
+        this.logger.warn(`Ignoring Mango call result with unknown status=${externalStatus || '(empty)'}`);
+        return { status: 'ignored', matched: false, reason: 'unknown_status' };
       }
     }
 
-    this.logger.log(`Mango call result: call_id=${data.call_id}, status=${data.status}`);
-
-    // Map Mango status
-    const statusMap: Record<string, string> = {
-      completed: 'COMPLETED',
-      no_answer: 'NO_ANSWER',
-      busy: 'BUSY',
-      unavailable: 'UNAVAILABLE',
-      failed: 'FAILED',
-    };
-
-    // 1) Прямой матч по mangoCallId — если webhook знает наш command_id
-    //    (Mango echoes back наш command_id для callback-команд).
-    const callIdCandidate = data.call_id || data.command_id;
-    let existingCall = callIdCandidate
-      ? await this.prisma.call.findFirst({ where: { mangoCallId: callIdCandidate } })
-      : null;
+    // 1) Прямой матч по command_id или call_id. VPBX callback получает наш
+    // command_id, поэтому проверяем оба идентификатора, не предполагая какой
+    // именно Mango вернёт основным.
+    const idCandidates = Array.from(
+      new Set(
+        [data.command_id, data.call_id]
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    const callIdCandidate = String(data.call_id || data.command_id || '').trim() || null;
+    let existingCall: any = null;
+    for (const mangoCallId of idCandidates) {
+      existingCall = await this.prisma.call.findFirst({ where: { mangoCallId } });
+      if (existingCall) break;
+    }
 
     // 2) Bug fix 2026-06-02: если по mangoCallId не нашлось — может быть,
     //    Mango прислал свой внутренний call_id, отличающийся от нашего
     //    command_id. Тогда ищем недавнюю INITIATED-запись по телефону
     //    брокера. Это позволяет «подвязать» webhook к записи, которую
     //    broker-calls.service создал при initiate.
-    if (!existingCall && (data.to_number || data.from_number)) {
-      const brokerPhone = data.direction === 'outbound' ? data.from_number : data.to_number;
-      if (brokerPhone) {
-        const brokerDigits = String(brokerPhone).replace(/\D/g, '').slice(-10);
+    // Callback from an extension has the broker in to_number, while a normal
+    // broker→client callback has the broker in from_number. Try both sides and
+    // only accept a broker that actually has a recent INITIATED call.
+    const fromNumber = data?.from?.number ?? data.from_number;
+    const toNumber = data?.to?.number ?? data.to_number;
+    const normalizedDirection = String(data.direction || '').trim().toLowerCase();
+    const isOutbound = normalizedDirection === 'outbound'
+      || Number(data.call_direction) === 2
+      || Boolean(data.command_id);
+    const orderedNumbers = normalizedDirection === 'inbound' || Number(data.call_direction) === 1
+      ? [toNumber, fromNumber]
+      : [fromNumber, toNumber];
+    const phoneSuffixes = Array.from(
+      new Set(
+        orderedNumbers
+          .map((value) => {
+            const raw = String(value || '').trim();
+            // For SIP URIs only the user part can represent a phone number;
+            // digits in a host name must not participate in broker matching.
+            const phonePart = /^sip:/i.test(raw)
+              ? raw.replace(/^sip:/i, '').split('@', 1)[0]
+              : raw;
+            return phonePart.replace(/\D/g, '');
+          })
+          .filter((value) => value.length >= 10)
+          .map((value) => value.slice(-10)),
+      ),
+    );
+    if (!existingCall) {
+      for (const brokerDigits of phoneSuffixes) {
         const broker = await this.prisma.broker.findFirst({
           where: { phone: { endsWith: brokerDigits } },
         });
@@ -315,30 +564,54 @@ export class WebhooksService {
             },
             orderBy: { initiatedAt: 'desc' },
           });
+          if (existingCall) break;
         }
       }
     }
 
     if (existingCall) {
-      await this.prisma.call.update({
-        where: { id: existingCall.id },
+      const updated = await this.prisma.call.updateMany({
+        where: mangoEventSeq === null
+          ? {
+              id: existingCall.id,
+              mangoEventSeq: null,
+              // Legacy normalized events have no ordering counter. They stay
+              // compatible for an initiated call, but never rewrite a result
+              // that is already terminal.
+              status: 'INITIATED' as any,
+            }
+          : {
+              id: existingCall.id,
+              OR: [
+                { mangoEventSeq: null },
+                { mangoEventSeq: { lt: mangoEventSeq } },
+              ],
+            },
         data: {
           mangoCallId: existingCall.mangoCallId || callIdCandidate,
-          status: (statusMap[data.status] || 'COMPLETED') as any,
+          mangoEventSeq,
+          status: mappedStatus as any,
           durationSec: data.duration || 0,
           recordingUrl: data.recording_url,
         },
       });
+      if (updated.count === 0) {
+        return {
+          status: 'ignored',
+          matched: true,
+          callId: existingCall.id,
+          reason: 'stale_or_duplicate_event',
+        };
+      }
       return { status: 'processed', callId: existingCall.id, action: 'updated' };
     }
 
     // 3) Старая логика — для звонков, инициированных НЕ из нашего кабинета
     //    (КЦ-обзвон, входящие, ручная инициация из Mango UI):
     //    матчим брокера по номеру и создаём новую запись.
-    if (data.to_number || data.from_number) {
-      const brokerPhone = data.direction === 'outbound' ? data.from_number : data.to_number;
+    for (const brokerDigits of phoneSuffixes) {
       const broker = await this.prisma.broker.findFirst({
-        where: { phone: brokerPhone },
+        where: { phone: { endsWith: brokerDigits } },
       });
 
       if (broker) {
@@ -346,8 +619,9 @@ export class WebhooksService {
           data: {
             brokerId: broker.id,
             mangoCallId: callIdCandidate,
-            direction: data.direction === 'outbound' ? 'OUTBOUND' : 'INBOUND',
-            status: (statusMap[data.status] || 'COMPLETED') as any,
+            mangoEventSeq,
+            direction: isOutbound ? 'OUTBOUND' : 'INBOUND',
+            status: mappedStatus as any,
             durationSec: data.duration || 0,
             recordingUrl: data.recording_url,
           },

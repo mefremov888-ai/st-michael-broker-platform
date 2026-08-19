@@ -49,8 +49,16 @@ export default function AdminBrokerDetailPage() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'profile' | 'clients' | 'deals' | 'meetings' | 'calls'>('profile');
 
-  const [form, setForm] = useState({ fullName: '', email: '', phone: '', role: 'BROKER', status: 'ACTIVE' });
+  const [form, setForm] = useState({
+    fullName: '',
+    email: '',
+    phone: '',
+    role: 'BROKER',
+    status: 'ACTIVE',
+    mangoEmployeeNum: '',
+  });
   const [saving, setSaving] = useState(false);
+  const [savingMango, setSavingMango] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState('');
 
@@ -75,12 +83,38 @@ export default function AdminBrokerDetailPage() {
         phone: b.phone || '',
         role: b.role || 'BROKER',
         status: b.status || 'ACTIVE',
+        mangoEmployeeNum: b.mangoEmployeeNum || '',
       });
       setDeals(d.deals || []);
       setClients(c.clients || []);
       setMeetings(m.meetings || []);
     } catch {}
     setLoading(false);
+  };
+
+  const handleSaveMangoEmployeeNum = async () => {
+    if (!isAdmin) return;
+    setSavingMango(true); setMessage('');
+    try {
+      const updated: any = await api(`/admin/brokers/${id}/mango-employee-num`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          mangoEmployeeNum: form.mangoEmployeeNum.trim() || null,
+        }),
+      });
+      setBroker((current: any) => ({
+        ...current,
+        mangoEmployeeNum: updated.mangoEmployeeNum,
+      }));
+      setForm((current) => ({
+        ...current,
+        mangoEmployeeNum: updated.mangoEmployeeNum || '',
+      }));
+      setMessage(updated.mangoEmployeeNum ? 'Внутренний номер Mango сохранён' : 'Внутренний номер Mango очищен');
+    } catch (e: any) {
+      setMessage(e.message || 'Ошибка сохранения внутреннего номера Mango');
+    }
+    setSavingMango(false);
   };
 
   useEffect(() => { if (id) load(); }, [id]);
@@ -222,6 +256,35 @@ export default function AdminBrokerDetailPage() {
             <div>
               <label className="label">Этап воронки</label>
               <input className="input bg-surface-secondary" value={broker.funnelStage} readOnly />
+            </div>
+            <div>
+              <label className="label">Mango EmployeeNUM</label>
+              <div className="flex gap-2">
+                <input
+                  className="input"
+                  value={form.mangoEmployeeNum}
+                  onChange={(e) => setForm({ ...form, mangoEmployeeNum: e.target.value })}
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={20}
+                  autoComplete="off"
+                  placeholder="Внутренний номер сотрудника"
+                  disabled={!isAdmin || savingMango}
+                />
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary whitespace-nowrap"
+                    onClick={handleSaveMangoEmployeeNum}
+                    disabled={savingMango}
+                  >
+                    {savingMango ? '…' : 'Сохранить Mango'}
+                  </button>
+                )}
+              </div>
+              <div className="text-xs text-text-muted mt-1">
+                Только цифры, максимум 20. Чтобы отвязать номер, очистите поле и сохраните Mango.
+              </div>
             </div>
           </div>
 

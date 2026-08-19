@@ -16,7 +16,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { DatabaseModule } from './database/database.module';
 import { AuditModule } from './audit/audit.module';
-import { HealthController } from './health.controller';
+import { HealthModule } from './health.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { AmocrmModule } from './amocrm/amocrm.module';
 import { AdminModule } from './admin/admin.module';
@@ -27,6 +27,8 @@ import { FavoritesModule } from './favorites/favorites.module';
 import { AgenciesModule } from './agencies/agencies.module';
 import { AmoTokenBootstrapService } from './common/amo-token-bootstrap.service';
 import { MangoBootstrapService } from './common/mango-bootstrap.service';
+import { OpsAlertModule } from './ops-alert/ops-alert.module';
+import { LoyaltyBaseModule } from './loyalty-base/loyalty-base.module';
 
 @Module({
   imports: [
@@ -47,6 +49,8 @@ import { MangoBootstrapService } from './common/mango-bootstrap.service';
       },
     }),
     DatabaseModule,
+    HealthModule,
+    OpsAlertModule,
     AuditModule,
     AuthModule,
     ClientFixationModule,
@@ -68,8 +72,8 @@ import { MangoBootstrapService } from './common/mango-bootstrap.service';
     PrivacyModule,
     FavoritesModule,
     AgenciesModule,
+    LoyaltyBaseModule,
   ],
-  controllers: [HealthController],
   providers: [AmoTokenBootstrapService, MangoBootstrapService],
 })
 export class AppModule {}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { parseApiError } from '@/lib/api';
@@ -16,7 +16,7 @@ type FieldErrors = Partial<Record<
   string
 >>;
 
-export default function RegisterPage() {
+function RegisterForm() {
   const searchParams = useSearchParams();
   // 2026-06-30: если /login сделал редирект сюда из-за неактивированного
   // аккаунта или отсутствующего — телефон передаётся через ?phone=XXX.
@@ -317,5 +317,13 @@ export default function RegisterPage() {
         <SupportContacts title="Возникли вопросы при регистрации?" />
       </div>
     </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense fallback={null}>
+      <RegisterForm />
+    </Suspense>
   );
 }

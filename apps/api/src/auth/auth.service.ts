@@ -143,13 +143,21 @@ export class AuthService {
 
     const existingByPhone = await this.prisma.broker.findUnique({ where: { phone: data.phone } });
 
-    // 2026-06-30: если телефон существует БЕЗ пароля — это «активация»
-    // импортированного брокера, а не дубль. Идём дальше и в конце обновляем
-    // существующего вместо создания нового. Если пароль есть — дубль.
-    const isActivation = !!existingByPhone && !existingByPhone.passwordHash;
+    // Public self-activation is intentionally limited to an imported pending
+    // BROKER. A passwordless MANAGER/ADMIN must never be activatable from the
+    // public registration form while preserving elevated privileges.
+    const isActivation = Boolean(
+      existingByPhone
+      && !existingByPhone.passwordHash
+      && existingByPhone.status === UserStatus.PENDING
+      && existingByPhone.role === 'BROKER',
+    );
 
-    if (existingByPhone && existingByPhone.passwordHash) {
-      errors.push({ field: 'phone', message: 'Брокер с этим номером телефона уже зарегистрирован' });
+    if (existingByPhone && !isActivation) {
+      errors.push({
+        field: 'phone',
+        message: 'Аккаунт с этим номером уже существует. Обратитесь к администратору',
+      });
     }
     // 2026-07-02: email-конфликт больше не блокирует регистрацию.
     // Ксения: у некоторых агентств (например СДМ) один общий email на всё
@@ -372,7 +380,15 @@ export class AuthService {
   }
 
   async forgotPassword(email: string) {
-    const broker = await this.prisma.broker.findFirst({ where: { email } });
+    // Password reset is recovery, not first activation. Imported PENDING
+    // brokers activate via /register; inactive/staff records are not eligible.
+    const broker = await this.prisma.broker.findFirst({
+      where: {
+        email,
+        status: UserStatus.ACTIVE,
+        passwordHash: { not: null },
+      },
+    });
     if (!broker) return { message: 'Если email зарегистрирован, на него отправлена ссылка' };
 
     const token = require('crypto').randomBytes(32).toString('hex');
@@ -442,7 +458,13 @@ export class AuthService {
 
   async resetPassword(token: string, newPassword: string) {
     const broker = await this.prisma.broker.findUnique({ where: { passwordResetToken: token } });
-    if (!broker || !broker.passwordResetExpiresAt || broker.passwordResetExpiresAt < new Date()) {
+    if (
+      !broker
+      || broker.status !== UserStatus.ACTIVE
+      || !broker.passwordHash
+      || !broker.passwordResetExpiresAt
+      || broker.passwordResetExpiresAt < new Date()
+    ) {
       throw new BadRequestException('Ссылка недействительна или истекла');
     }
 
@@ -483,15 +505,34 @@ export class AuthService {
         code: 'NEEDS_REGISTRATION',
       });
     }
-    if (!broker.passwordHash) {
+    if (broker.status === UserStatus.BLOCKED) {
+      throw new UnauthorizedException('Учётная запись заблокирована. Свяжитесь с менеджером.');
+    }
+
+    const canSelfActivate =
+      broker.status === UserStatus.PENDING
+      && broker.role === 'BROKER'
+      && !broker.passwordHash;
+
+    if (!broker.passwordHash && canSelfActivate) {
       throw new UnauthorizedException({
         message: 'Аккаунт ещё не активирован. Завершите регистрацию.',
         code: 'NEEDS_ACTIVATION',
       });
     }
 
-    if (broker.status === 'BLOCKED') {
-      throw new UnauthorizedException('Учётная запись заблокирована. Свяжитесь с менеджером.');
+    if (!broker.passwordHash) {
+      throw new UnauthorizedException({
+        message: 'Доступ к аккаунту пока не разрешён. Обратитесь к администратору.',
+        code: 'ACCOUNT_UNAVAILABLE',
+      });
+    }
+
+    if (broker.status !== UserStatus.ACTIVE) {
+      throw new UnauthorizedException({
+        message: 'Аккаунт ожидает активации администратором.',
+        code: 'ACCOUNT_PENDING',
+      });
     }
 
     const isValid = await bcrypt.compare(data.password, broker.passwordHash);
@@ -676,7 +717,7 @@ export class AuthService {
         where: { id: payload.sub },
       });
 
-      if (!broker || broker.status === 'BLOCKED') {
+      if (!broker || broker.status !== UserStatus.ACTIVE) {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
@@ -1144,7 +1185,7 @@ export class AuthService {
       where: { id: brokerId },
     });
 
-    if (!broker || broker.status === 'BLOCKED') {
+    if (!broker || broker.status !== UserStatus.ACTIVE) {
       return null;
     }
 
