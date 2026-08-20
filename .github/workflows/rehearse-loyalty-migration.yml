@@ -36,7 +36,11 @@ jobs:
           script: |
             set -e
             cd "${{ secrets.DEPLOY_PATH }}"
-            git show origin/master:scripts/rehearse-loyalty-migration.sh > /tmp/rehearse-loyalty-migration.sh
+            # Той же логикой, что и deploy.yml: не доверяем локальному origin
+            # (был случай, когда он смотрел на форк — см. project_deploy_origin_trap),
+            # берём скрипт fetch-ом с явного канонического URL.
+            git fetch https://github.com/sereganikitin/st-michael-broker-platform.git master
+            git show FETCH_HEAD:scripts/rehearse-loyalty-migration.sh > /tmp/rehearse-loyalty-migration.sh
             chmod 700 /tmp/rehearse-loyalty-migration.sh
-            /tmp/rehearse-loyalty-migration.sh "${{ secrets.DEPLOY_PATH }}"
+            /tmp/rehearse-loyalty-migration.sh "${{ secrets.DEPLOY_PATH }}" "$(git rev-parse FETCH_HEAD)"
             rm -f /tmp/rehearse-loyalty-migration.sh

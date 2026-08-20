@@ -23,21 +23,31 @@
 # README) этот скрипт НЕ делает — это отдельная, человеко-выполняемая часть.
 set -eu
 
-DEPLOY_PATH="${1:?usage: rehearse-loyalty-migration.sh <deploy_path>}"
+DEPLOY_PATH="${1:?usage: rehearse-loyalty-migration.sh <deploy_path> <trusted_sha>}"
+TRUSTED_SHA="${2:?usage: rehearse-loyalty-migration.sh <deploy_path> <trusted_sha>}"
 cd "$DEPLOY_PATH"
 
 REHEARSAL_ID="loyalty-rehearsal-$$"
 REHEARSAL_NET="${REHEARSAL_ID}-net"
 REHEARSAL_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 DUMP_FILE="/tmp/${REHEARSAL_ID}.dump"
+SCHEMA_CONTEXT=$(mktemp -d "/tmp/${REHEARSAL_ID}-schema.XXXXXX")
 
 cleanup() {
     echo "=== Уборка временных ресурсов ==="
     docker rm -f "$REHEARSAL_ID" >/dev/null 2>&1 || true
     docker network rm "$REHEARSAL_NET" >/dev/null 2>&1 || true
     rm -f -- "$DUMP_FILE"
+    rm -rf -- "$SCHEMA_CONTEXT"
 }
 trap cleanup EXIT
+
+# Рабочая директория на сервере обновляется только confirmed-деплоем, а его
+# как раз ещё не было — schema/migrations там могут быть старые. Берём их
+# из уже проверенного (fetch-ом с канонического URL) коммита, не из
+# рабочего дерева.
+echo "=== 0/6: Достаём packages/database из доверенного коммита $TRUSTED_SHA ==="
+git archive "$TRUSTED_SHA" -- packages/database | tar -x -C "$SCHEMA_CONTEXT"
 
 echo "=== 1/6: Снимаем pg_dump с живой базы (read-only) ==="
 docker compose exec -T postgres pg_dump -U postgres -Fc broker_platform > "$DUMP_FILE"
@@ -82,7 +92,7 @@ CLONE_DATABASE_URL="postgresql://postgres:${REHEARSAL_PASSWORD}@${REHEARSAL_ID}:
 
 docker run --rm --network "$REHEARSAL_NET" \
     -e DATABASE_URL="$CLONE_DATABASE_URL" \
-    -v "$(pwd)/packages/database:/app/packages/database:ro" \
+    -v "$SCHEMA_CONTEXT/packages/database:/app/packages/database:ro" \
     -w /app/packages/database \
     node:20-alpine sh -c "
         set -e
