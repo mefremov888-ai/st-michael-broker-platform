@@ -96,6 +96,7 @@ docker run --rm --network "$REHEARSAL_NET" \
     -w /app/packages/database \
     node:20-alpine sh -c "
         set -e
+        apk add --no-cache openssl >/dev/null
         echo '--- fetching prisma@5.22 (npx --yes, isolated from any workspace context) ---'
         npx --yes prisma@5.22 --version
         echo '--- migrate diff (ожидаем пустой diff, exit 0) ---'
