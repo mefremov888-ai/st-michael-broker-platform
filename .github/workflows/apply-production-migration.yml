@@ -84,6 +84,12 @@ jobs:
             echo "=== 3/5: Проверка контрольной суммы baseline из доверенного коммита ==="
             git fetch https://github.com/sereganikitin/st-michael-broker-platform.git master
             TRUSTED_SHA=$(git rev-parse FETCH_HEAD)
+            SCHEMA_CONTEXT=$(mktemp -d /tmp/apply-migration-schema.XXXXXX)
+            trap 'rm -rf -- "$SCHEMA_CONTEXT"' EXIT
+            # api-контейнер собран из старого образа (деплой стоит с PR #288) —
+            # там ещё нет папки 0_legacy_baseline вообще. Берём schema+migrations
+            # из доверенного коммита, не из уже собранного образа.
+            git archive "$TRUSTED_SHA" -- packages/database | tar -x -C "$SCHEMA_CONTEXT"
             EXPECTED_CHECKSUM=$(git show "$TRUSTED_SHA:packages/database/prisma/migrations/0_legacy_baseline/migration.sql" | sha256sum | awk '{print $1}')
             PINNED_CHECKSUM="646f98459abb9d4ed6746810f403188b45270656c5e6ea20e89d53465a870a08"
             if [ "$EXPECTED_CHECKSUM" != "$PINNED_CHECKSUM" ]; then
@@ -100,11 +106,15 @@ jobs:
             fi
 
             echo "=== 4/5: migrate resolve --applied 0_legacy_baseline (единственная запись в эту миграцию) ==="
-            docker compose run --rm --no-deps --entrypoint npx api prisma migrate resolve \
+            docker compose run --rm --no-deps \
+              -v "$SCHEMA_CONTEXT/packages/database:/app/packages/database:ro" \
+              --entrypoint npx api prisma migrate resolve \
               --applied 0_legacy_baseline --schema packages/database/prisma/schema.prisma
 
             echo "=== 5/5: migrate status ==="
-            docker compose run --rm --no-deps --entrypoint npx api prisma migrate status \
+            docker compose run --rm --no-deps \
+              -v "$SCHEMA_CONTEXT/packages/database:/app/packages/database:ro" \
+              --entrypoint npx api prisma migrate status \
               --schema packages/database/prisma/schema.prisma
 
             echo "=== Готово. migrate deploy НЕ выполнялся — это сделает подтверждённый Deploy to production. ==="
