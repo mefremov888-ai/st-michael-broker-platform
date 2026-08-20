@@ -96,18 +96,19 @@ docker run --rm --network "$REHEARSAL_NET" \
     -w /app/packages/database \
     node:20-alpine sh -c "
         set -e
-        npm install --no-save --no-audit --no-fund prisma@5.22 >/dev/null 2>&1
+        echo '--- fetching prisma@5.22 (npx --yes, isolated from any workspace context) ---'
+        npx --yes prisma@5.22 --version
         echo '--- migrate diff (ожидаем пустой diff, exit 0) ---'
-        npx prisma migrate diff \
+        npx --yes prisma@5.22 migrate diff \
             --from-url \"\$DATABASE_URL\" \
             --to-schema-datamodel prisma/baselines/0_legacy_baseline.prisma \
             --script --exit-code
         echo '--- migrate resolve --applied 0_legacy_baseline ---'
-        npx prisma migrate resolve --applied 0_legacy_baseline --schema prisma/schema.prisma
+        npx --yes prisma@5.22 migrate resolve --applied 0_legacy_baseline --schema prisma/schema.prisma
         echo '--- migrate deploy (применит 20260818000100_loyalty_base + mango safety) ---'
-        npx prisma migrate deploy --schema prisma/schema.prisma
+        npx --yes prisma@5.22 migrate deploy --schema prisma/schema.prisma
         echo '--- migrate status ---'
-        npx prisma migrate status --schema prisma/schema.prisma
+        npx --yes prisma@5.22 migrate status --schema prisma/schema.prisma
     "
 
 echo "=== 5/6: Финальные счётчики после миграции (должны не измениться) ==="
