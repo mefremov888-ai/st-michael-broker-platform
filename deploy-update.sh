@@ -192,6 +192,10 @@ for VAR_NAME in \
         update_env_value "$VAR_NAME" "$VAR_VALUE"
     fi
 done
+# 2026-08-20: пишем реально задеплоенный SHA в .env, читается через
+# GET /api/health (см. health.controller.ts) — способ проверить, что сервер
+# на самом деле обновился, а не просто "workflow прошёл зелёным".
+update_env_value "GIT_SHA" "$EXPECTED_DEPLOY_SHA"
 chmod 600 "$ENV_STAGING_FILE"
 docker compose --env-file "$ENV_STAGING_FILE" config --quiet >/dev/null
 

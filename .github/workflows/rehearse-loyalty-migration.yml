@@ -1,0 +1,42 @@
+name: Rehearse loyalty migration (safe, isolated)
+
+# Ручной запуск. Снимает бэкап живой базы и прогоняет миграцию
+# (0_legacy_baseline + 20260818000100_loyalty_base + mango safety) ТОЛЬКО
+# против одноразовой изолированной копии на сервере — см.
+# scripts/rehearse-loyalty-migration.sh для полного описания.
+#
+# Ничего не пишет и не меняет на боевой базе. Не заменяет шаги 7-8 из
+# packages/database/prisma/migrations/README.md (реальное применение на
+# проде) — это отдельная, человеко-выполняемая часть с прямым доступом к
+# PRODUCTION_DATABASE_URL, которую этот workflow намеренно не трогает.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: rehearse-loyalty-migration
+  cancel-in-progress: false
+
+jobs:
+  rehearse:
+    name: Run rehearsal on production server (isolated clone only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: SSH and rehearse
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 15m
+          envs: DEPLOY_PATH
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git show origin/master:scripts/rehearse-loyalty-migration.sh > /tmp/rehearse-loyalty-migration.sh
+            chmod 700 /tmp/rehearse-loyalty-migration.sh
+            /tmp/rehearse-loyalty-migration.sh "${{ secrets.DEPLOY_PATH }}"
+            rm -f /tmp/rehearse-loyalty-migration.sh

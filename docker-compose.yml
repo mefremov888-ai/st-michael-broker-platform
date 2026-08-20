@@ -56,6 +56,11 @@ services:
       # (database.module.ts: verbose при NODE_ENV!=production) — так лог api
       # дорос до 12 ГБ и уронил диск с postgres. Dockerfile.api его не ставит.
       NODE_ENV: production
+      # 2026-08-20: exposed read-only via GET /api/health so anyone (or a
+      # workflow) can check whether the running server actually matches the
+      # latest master commit, instead of trusting a green Actions checkmark
+      # that can hide a skipped SSH-deploy job.
+      GIT_SHA: ${GIT_SHA:-unknown}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in server .env}@postgres:5432/broker_platform
       REDIS_HOST: redis
       REDIS_PORT: 6379

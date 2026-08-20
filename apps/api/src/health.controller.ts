@@ -11,7 +11,15 @@ export class HealthController {
 
   @Get()
   check() {
-    return { status: 'ok', timestamp: new Date().toISOString() };
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      // 2026-08-20: до этого поля не было способа быстро узнать, реально ли
+      // последний push в master выложен на сервер, не копаясь в логах
+      // workflow — деплой стал ручным (см. deploy.yml, confirm_production)
+      // и молча пропускался несколько раз подряд, оставаясь незамеченным.
+      deployedSha: process.env.GIT_SHA || 'unknown',
+    };
   }
 
   @Get('ready')
