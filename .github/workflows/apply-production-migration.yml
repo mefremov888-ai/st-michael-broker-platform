@@ -1,0 +1,105 @@
+name: Apply production migration (one-off, resolve only)
+
+# Ручной запуск. ЕДИНСТВЕННОЕ реальное действие на боевой базе во всей этой
+# серии — см. packages/database/prisma/migrations/README.md, раздел
+# "Existing legacy production database", шаг 8 (без ручного вмешательства
+# человека, но с теми же проверками: fingerprint, идентичность, бэкап).
+#
+# Делает:
+#   1. Снимает и СОХРАНЯЕТ (не удаляет) полный бэкап живой базы как
+#      artifact workflow-запуска — не только для репетиции.
+#   2. Верифицирует identity (PRODUCTION_PG_SYSTEM_IDENTIFIER,
+#      PRODUCTION_MIN_BROKER_ROWS) и контрольную сумму baseline —
+#      теми же проверками, что и verify_prisma_baseline() в deploy-update.sh.
+#   3. Если И ТОЛЬКО ЕСЛИ все проверки прошли — выполняет
+#      `prisma migrate resolve --applied 0_legacy_baseline` через
+#      `docker compose run api`, то есть DATABASE_URL подставляет сам
+#      Docker Compose из серверного .env — этот workflow его не читает,
+#      не строит и не печатает.
+#   4. Печатает `migrate status` для подтверждения.
+#
+# НЕ делает `migrate deploy` — это остаётся задачей подтверждённого
+# Deploy to production (confirm_production=true), который сам применит
+# оставшиеся миграции с полным набором собственных проверок.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Rehearsal on isolated clone already passed clean
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Resolve legacy baseline on production (backup first)
+    if: inputs.confirm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH, backup, verify, resolve
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 10m
+          envs: DEPLOY_PATH,PRODUCTION_PG_SYSTEM_IDENTIFIER,PRODUCTION_MIN_BROKER_ROWS
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_PATH }}"
+
+            echo "=== 1/5: Реальный бэкап живой базы (сохраняется на сервере) ==="
+            BACKUP_FILE="/var/backups/stmichael/pre-baseline-$(date -u +%Y%m%dT%H%M%SZ).dump"
+            mkdir -p /var/backups/stmichael
+            docker compose exec -T postgres pg_dump -U postgres -Fc broker_platform > "$BACKUP_FILE"
+            echo "Бэкап сохранён: $BACKUP_FILE ($(du -h "$BACKUP_FILE" | cut -f1))"
+
+            echo "=== 2/5: Проверка идентичности базы ==="
+            ACTUAL_DATABASE=$(docker compose exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT current_database();")
+            ACTUAL_SYSTEM_IDENTIFIER=$(docker compose exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT system_identifier FROM pg_control_system();")
+            if [ "$ACTUAL_DATABASE" != "broker_platform" ] || [ "$ACTUAL_SYSTEM_IDENTIFIER" != "${PRODUCTION_PG_SYSTEM_IDENTIFIER:?missing}" ]; then
+              echo "✗ Database identity mismatch — stopping."
+              exit 1
+            fi
+            BROKER_ROWS=$(docker compose exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT COUNT(*) FROM public.brokers;")
+            if [ "$BROKER_ROWS" -lt "${PRODUCTION_MIN_BROKER_ROWS:?missing}" ]; then
+              echo "✗ Broker row-count invariant failed: $BROKER_ROWS < $PRODUCTION_MIN_BROKER_ROWS"
+              exit 1
+            fi
+            echo "✓ database=$ACTUAL_DATABASE system_identifier=$ACTUAL_SYSTEM_IDENTIFIER brokers=$BROKER_ROWS"
+
+            echo "=== 3/5: Проверка контрольной суммы baseline из доверенного коммита ==="
+            git fetch https://github.com/sereganikitin/st-michael-broker-platform.git master
+            TRUSTED_SHA=$(git rev-parse FETCH_HEAD)
+            EXPECTED_CHECKSUM=$(git show "$TRUSTED_SHA:packages/database/prisma/migrations/0_legacy_baseline/migration.sql" | sha256sum | awk '{print $1}')
+            PINNED_CHECKSUM="646f98459abb9d4ed6746810f403188b45270656c5e6ea20e89d53465a870a08"
+            if [ "$EXPECTED_CHECKSUM" != "$PINNED_CHECKSUM" ]; then
+              echo "✗ Baseline checksum in trusted commit does not match the pinned README value — stopping."
+              exit 1
+            fi
+            echo "✓ baseline checksum matches pinned value: $EXPECTED_CHECKSUM"
+
+            already_applied=$(docker compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+              "SELECT EXISTS (SELECT 1 FROM public.\"_prisma_migrations\" WHERE migration_name = '0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL)" 2>/dev/null || echo f)
+            if [ "$already_applied" = "t" ]; then
+              echo "Baseline already marked applied — nothing to do."
+              exit 0
+            fi
+
+            echo "=== 4/5: migrate resolve --applied 0_legacy_baseline (единственная запись в эту миграцию) ==="
+            docker compose run --rm --no-deps --entrypoint npx api prisma migrate resolve \
+              --applied 0_legacy_baseline --schema packages/database/prisma/schema.prisma
+
+            echo "=== 5/5: migrate status ==="
+            docker compose run --rm --no-deps --entrypoint npx api prisma migrate status \
+              --schema packages/database/prisma/schema.prisma
+
+            echo "=== Готово. migrate deploy НЕ выполнялся — это сделает подтверждённый Deploy to production. ==="
