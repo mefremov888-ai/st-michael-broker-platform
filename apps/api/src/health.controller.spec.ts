@@ -18,6 +18,7 @@ describe('HealthController', () => {
     expect(result).toEqual({
       status: 'ok',
       timestamp: expect.any(String),
+      deployedSha: expect.any(String),
     });
     expect(healthService.checkReadiness).not.toHaveBeenCalled();
   });
