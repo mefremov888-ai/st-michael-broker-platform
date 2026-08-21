@@ -1,0 +1,70 @@
+name: Inspect untracked deploy-path files (one-off, read-only)
+
+# Разовая диагностика. Deploy-workflow отказывается ехать дальше, пока в
+# рабочей папке на сервере лежат untracked-файлы (deploy-update.sh это
+# специально проверяет). Прежде чем их куда-то переносить — смотрим, что
+# внутри, ничего не меняя и не удаляя.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: SSH and print untracked files (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          envs: DEPLOY_PATH
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+
+            echo "=== Полный список untracked-файлов (git ls-files --others) ==="
+            git ls-files --others --exclude-standard | cat -A | sed -n '1,200p'
+
+            echo ""
+            echo "=== docker-compose.override.yml (если есть) ==="
+            if [ -f docker-compose.override.yml ]; then
+              echo "--- размер и права ---"
+              ls -la docker-compose.override.yml
+              echo "--- содержимое ---"
+              cat docker-compose.override.yml
+            else
+              echo "(файла нет)"
+            fi
+
+            echo ""
+            echo "=== docker-compose.yml.bak (диф с текущим tracked docker-compose.yml) ==="
+            if [ -f docker-compose.yml.bak ]; then
+              diff -u docker-compose.yml docker-compose.yml.bak || true
+            else
+              echo "(файла нет)"
+            fi
+
+            echo ""
+            echo "=== docker/nginx.conf.bak (диф с текущим tracked docker/nginx.conf) ==="
+            if [ -f docker/nginx.conf.bak ]; then
+              diff -u docker/nginx.conf docker/nginx.conf.bak || true
+            else
+              echo "(файла нет)"
+            fi
+
+            echo ""
+            echo "=== Все .env* untracked файлы: только имена и mtime, БЕЗ содержимого ==="
+            find . -maxdepth 1 -name '.env*' -not -name '.env' -printf '%f\t%TY-%Tm-%Td %TH:%TM\t%s bytes\n' 2>/dev/null | sort
+
+            echo ""
+            echo "=== Готово (ничего не изменено) ==="
