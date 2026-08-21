@@ -116,6 +116,26 @@ fi
 git reset --hard origin/master
 echo "    HEAD: $(git log --oneline -1)"
 
+# Production intentionally has one reviewed untracked Compose override for two
+# additional sites. It is permitted only as a regular file with an operator-
+# reviewed SHA-256 supplied by the protected GitHub production environment.
+OVERRIDE_FILE="docker-compose.override.yml"
+if ! printf '%s' "${PRODUCTION_COMPOSE_OVERRIDE_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "    ✗ PRODUCTION_COMPOSE_OVERRIDE_SHA256 (64 lowercase hex characters) is required."
+    exit 1
+fi
+if [ ! -f "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
+    echo "    ✗ Reviewed production docker-compose.override.yml is missing, not a regular file, or is a symlink."
+    exit 1
+fi
+ACTUAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+if [ "$ACTUAL_OVERRIDE_SHA256" != "$PRODUCTION_COMPOSE_OVERRIDE_SHA256" ]; then
+    echo "    ✗ Production docker-compose.override.yml SHA-256 mismatch."
+    echo "      The two external-site routes must be reviewed again before deployment."
+    exit 1
+fi
+echo "    ✓ Production docker-compose.override.yml matches the reviewed SHA-256."
+
 # Update optional integration credentials while holding the same server-side
 # lock as migrations/rollout. Values are read from the workflow environment,
 # never interpolated into shell source, and are persisted as literal quoted
@@ -217,6 +237,7 @@ UNEXPECTED_UNTRACKED=$(printf '%s\n' "$UNTRACKED_FILES" | awk '
     /^uploads\// { next }
     /^docker\/ssl\// { next }
     /^\.env\.staging\.[A-Za-z0-9]+$/ { next }
+    /^docker-compose\.override\.yml$/ { next }
     { print }
 ')
 if [ -n "$UNEXPECTED_UNTRACKED" ]; then

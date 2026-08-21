@@ -40,6 +40,8 @@ jobs:
             if [ -f docker-compose.override.yml ]; then
               echo "--- размер и права ---"
               ls -la docker-compose.override.yml
+              echo "--- SHA-256 для последующей fail-closed проверки ---"
+              sha256sum -- docker-compose.override.yml
               echo "--- содержимое ---"
               cat docker-compose.override.yml
             else
