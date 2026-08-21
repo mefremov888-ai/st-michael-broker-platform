@@ -1,0 +1,186 @@
+name: Inspect production loyalty state (read-only)
+
+# Manual, read-only verification of the production loyalty-base rollout.
+# The query emits only booleans and aggregate counts; it never outputs entity
+# identifiers, names, contact points, source payloads, or other personal data.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Read aggregate loyalty state over SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    steps:
+      - name: Inspect production loyalty state
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          # script_stop rewrites multiline shell blocks. set -eu and
+          # ON_ERROR_STOP keep this inspection fail-closed instead.
+          script_stop: false
+          command_timeout: 3m
+          envs: DEPLOY_PATH
+          script: |
+            set -eu
+
+            case "${DEPLOY_PATH:-}" in
+              /*) ;;
+              *) exit 1 ;;
+            esac
+
+            DEPLOY_ROOT=$(readlink -f -- "$DEPLOY_PATH")
+            if [ -z "$DEPLOY_ROOT" ] || [ "$DEPLOY_ROOT" = "/" ] || [ ! -d "$DEPLOY_ROOT" ]; then
+              exit 1
+            fi
+            cd -- "$DEPLOY_ROOT"
+            if [ "$(git rev-parse --show-toplevel 2>/dev/null || true)" != "$DEPLOY_ROOT" ]; then
+              exit 1
+            fi
+            if [ ! -f docker-compose.yml ] || [ -L docker-compose.yml ]; then
+              exit 1
+            fi
+            command -v docker >/dev/null
+            docker compose config --services | grep -qx postgres
+
+            docker compose exec -T postgres \
+              psql -U postgres -d broker_platform \
+                --no-psqlrc --quiet --tuples-only --no-align \
+                --set ON_ERROR_STOP=1 --single-transaction <<'SQL'
+            SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+
+            WITH
+            migration_state AS (
+              SELECT EXISTS (
+                SELECT 1
+                FROM public."_prisma_migrations"
+                WHERE migration_name = '20260818000100_loyalty_base'
+                  AND finished_at IS NOT NULL
+                  AND rolled_back_at IS NULL
+              ) AS migration_applied
+            ),
+            anna_dataset AS (
+              SELECT id, active_snapshot_id
+              FROM public.loyalty_datasets
+              WHERE code = 'ANNA'
+                AND base = 'ANNA'
+            ),
+            active_snapshot AS (
+              SELECT
+                snapshot.id,
+                snapshot.broker_count,
+                snapshot.agency_count
+              FROM anna_dataset AS dataset
+              JOIN public.loyalty_snapshots AS snapshot
+                ON snapshot.id = dataset.active_snapshot_id
+               AND snapshot.dataset_id = dataset.id
+               AND snapshot.status = 'PUBLISHED'
+            ),
+            anna_counts AS (
+              SELECT
+                COALESCE(MAX(active.broker_count), 0)::bigint AS declared_broker_count,
+                COUNT(record.id) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                )::bigint AS actual_broker_count,
+                COUNT(record.id) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                    AND record.source_archived_at IS NULL
+                    AND person.id IS NOT NULL
+                    AND person.archived_at IS NULL
+                )::bigint AS visible_broker_count,
+                COALESCE(MAX(active.agency_count), 0)::bigint AS declared_agency_count,
+                COUNT(record.id) FILTER (
+                  WHERE record.entity_type = 'AGENCY'
+                )::bigint AS actual_agency_count,
+                COUNT(record.id) FILTER (
+                  WHERE record.entity_type = 'AGENCY'
+                    AND record.source_archived_at IS NULL
+                    AND organization.id IS NOT NULL
+                    AND organization.archived_at IS NULL
+                )::bigint AS visible_agency_count
+              FROM active_snapshot AS active
+              LEFT JOIN public.loyalty_source_records AS record
+                ON record.snapshot_id = active.id
+              LEFT JOIN public.loyalty_persons AS person
+                ON person.id = record.person_id
+              LEFT JOIN public.loyalty_organizations AS organization
+                ON organization.id = record.organization_id
+            ),
+            publication_count AS (
+              SELECT COUNT(event.id)::bigint AS publication_events
+              FROM anna_dataset AS dataset
+              LEFT JOIN public.loyalty_publication_events AS event
+                ON event.dataset_id = dataset.id
+            ),
+            our_counts AS (
+              SELECT
+                (
+                  SELECT COUNT(*)::bigint
+                  FROM public.brokers
+                  WHERE role = 'BROKER'
+                    AND merged_into_id IS NULL
+                ) AS our_broker_count,
+                (
+                  SELECT COUNT(*)::bigint
+                  FROM public.agencies
+                ) AS our_agency_count
+            ),
+            state AS (
+              SELECT
+                migration.migration_applied,
+                EXISTS (SELECT 1 FROM anna_dataset) AS dataset_exists,
+                EXISTS (SELECT 1 FROM active_snapshot) AS active_published,
+                anna.declared_broker_count,
+                anna.actual_broker_count,
+                anna.visible_broker_count,
+                anna.declared_agency_count,
+                anna.actual_agency_count,
+                anna.visible_agency_count,
+                publication.publication_events,
+                ours.our_broker_count,
+                ours.our_agency_count
+              FROM migration_state AS migration
+              CROSS JOIN anna_counts AS anna
+              CROSS JOIN publication_count AS publication
+              CROSS JOIN our_counts AS ours
+            ),
+            markers AS (
+              SELECT 1 AS position, 'migration_applied=' || migration_applied::text AS marker FROM state
+              UNION ALL
+              SELECT 2, 'dataset_exists=' || dataset_exists::text FROM state
+              UNION ALL
+              SELECT 3, 'active_published=' || active_published::text FROM state
+              UNION ALL
+              SELECT 4, 'declared_broker_count=' || declared_broker_count::text FROM state
+              UNION ALL
+              SELECT 5, 'actual_broker_count=' || actual_broker_count::text FROM state
+              UNION ALL
+              SELECT 6, 'visible_broker_count=' || visible_broker_count::text FROM state
+              UNION ALL
+              SELECT 7, 'declared_agency_count=' || declared_agency_count::text FROM state
+              UNION ALL
+              SELECT 8, 'actual_agency_count=' || actual_agency_count::text FROM state
+              UNION ALL
+              SELECT 9, 'visible_agency_count=' || visible_agency_count::text FROM state
+              UNION ALL
+              SELECT 10, 'publication_events=' || publication_events::text FROM state
+              UNION ALL
+              SELECT 11, 'our_broker_count=' || our_broker_count::text FROM state
+              UNION ALL
+              SELECT 12, 'our_agency_count=' || our_agency_count::text FROM state
+            )
+            SELECT marker
+            FROM markers
+            ORDER BY position;
+            SQL
