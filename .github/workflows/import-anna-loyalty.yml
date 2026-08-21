@@ -1,0 +1,636 @@
+name: Import Anna loyalty snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_deployed_sha:
+        description: Exact 40-character production commit SHA
+        required: true
+        type: string
+      expected_payload_sha256:
+        description: Exact SHA-256 of the normalized JSON payload
+        required: true
+        type: string
+      chunk_count:
+        description: Number of populated ANNA_LOYALTY_PAYLOAD_NN secrets (1..32)
+        required: true
+        type: string
+      confirm_publish:
+        description: Publish the validated Anna snapshot to production
+        required: true
+        default: false
+        type: boolean
+      confirm_coverage_drop:
+        description: Allow a reviewed coverage decrease versus the active Anna snapshot
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    name: Validate and publish Anna snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    env:
+      MAX_CHUNKS: "32"
+      MAX_CHUNK_CHARS: "45000"
+      MAX_PAYLOAD_BYTES: "10485760"
+      EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+      EXPECTED_PAYLOAD_SHA256: ${{ inputs.expected_payload_sha256 }}
+      CHUNK_COUNT: ${{ inputs.chunk_count }}
+      CONFIRM_PUBLISH: ${{ inputs.confirm_publish }}
+      CONFIRM_COVERAGE_DROP: ${{ inputs.confirm_coverage_drop }}
+      SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+      SSH_USER: ${{ secrets.DEPLOY_USER }}
+      SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+      SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+    steps:
+      - name: Validate dispatch and create private runner workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_PUBLISH" = "true" || { echo "confirm_publish=true is required"; exit 1; }
+          test "$GITHUB_REF" = "refs/heads/master" || { echo "Run this workflow from master"; exit 1; }
+          [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid deployed SHA"; exit 1; }
+          test "$EXPECTED_DEPLOYED_SHA" = "$GITHUB_SHA" || { echo "Workflow SHA differs from expected production SHA"; exit 1; }
+          [[ "$EXPECTED_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid payload SHA-256"; exit 1; }
+          [[ "$CHUNK_COUNT" =~ ^[0-9]+$ ]] || { echo "Invalid chunk count"; exit 1; }
+          test "$CHUNK_COUNT" -ge 1 -a "$CHUNK_COUNT" -le "$MAX_CHUNKS" || { echo "Chunk count is outside the reviewed range"; exit 1; }
+          test "$CONFIRM_COVERAGE_DROP" = "true" -o "$CONFIRM_COVERAGE_DROP" = "false" || { echo "Invalid coverage confirmation"; exit 1; }
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || exit 1
+          root="$RUNNER_TEMP/st-michael-anna-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          install -d -m 700 "$root"
+          install -m 600 /dev/null "$root/payload.b64"
+          echo "ANNA_RUNNER_ROOT=$root" >> "$GITHUB_ENV"
+          echo "ANNA_PAYLOAD_B64=$root/payload.b64" >> "$GITHUB_ENV"
+          echo "ANNA_PAYLOAD_GZ=$root/payload.json.gz" >> "$GITHUB_ENV"
+          echo "ANNA_PAYLOAD_JSON=$root/payload.json" >> "$GITHUB_ENV"
+          echo "ANNA_SSH_KEY=$root/deploy-key" >> "$GITHUB_ENV"
+          echo "ANNA_KNOWN_HOSTS=$root/known_hosts" >> "$GITHUB_ENV"
+          echo "ANNA_REMOTE_DIR=/tmp/st-michael-anna-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+
+      - name: Load encrypted-channel chunk 01
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_01 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 1 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 02
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_02 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 2 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 03
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_03 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 3 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 04
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_04 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 4 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 05
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_05 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 5 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 06
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_06 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 6 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 07
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_07 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 7 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 08
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_08 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 8 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 09
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_09 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 9 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 10
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_10 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 10 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 11
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_11 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 11 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 12
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_12 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 12 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 13
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_13 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 13 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 14
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_14 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 14 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 15
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_15 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 15 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 16
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_16 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 16 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 17
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_17 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 17 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 18
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_18 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 18 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 19
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_19 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 19 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 20
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_20 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 20 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 21
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_21 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 21 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 22
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_22 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 22 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 23
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_23 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 23 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 24
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_24 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 24 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 25
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_25 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 25 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 26
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_26 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 26 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 27
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_27 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 27 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 28
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_28 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 28 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 29
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_29 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 29 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 30
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_30 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 30 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 31
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_31 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 31 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Load encrypted-channel chunk 32
+        shell: bash
+        env:
+          PAYLOAD_CHUNK: ${{ secrets.ANNA_LOYALTY_PAYLOAD_32 }}
+        run: |
+          set -euo pipefail
+          if [ "$CHUNK_COUNT" -ge 32 ]; then
+            test -n "$PAYLOAD_CHUNK" || { echo "Required payload chunk is missing"; exit 1; }
+            test "${#PAYLOAD_CHUNK}" -le "$MAX_CHUNK_CHARS" || { echo "Payload chunk exceeds the reviewed limit"; exit 1; }
+            [[ "$PAYLOAD_CHUNK" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo "Payload chunk is not base64"; exit 1; }
+            printf '%s' "$PAYLOAD_CHUNK" >> "$ANNA_PAYLOAD_B64"
+          fi
+
+      - name: Reconstruct and verify payload without logging content
+        shell: bash
+        run: |
+          set -euo pipefail
+          encoded_bytes=$(wc -c < "$ANNA_PAYLOAD_B64")
+          test "$encoded_bytes" -ge 1 -a "$encoded_bytes" -le $((MAX_CHUNKS * MAX_CHUNK_CHARS)) || { echo "Encoded payload size is invalid"; exit 1; }
+          base64 --decode "$ANNA_PAYLOAD_B64" > "$ANNA_PAYLOAD_GZ"
+          chmod 600 "$ANNA_PAYLOAD_GZ"
+          set +e
+          timeout 30 gzip -dc "$ANNA_PAYLOAD_GZ" | head -c $((MAX_PAYLOAD_BYTES + 1)) > "$ANNA_PAYLOAD_JSON"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          test "${pipeline_status[0]}" -eq 0 -a "${pipeline_status[1]}" -eq 0 || { echo "Payload decompression exceeded the safety boundary or failed"; exit 1; }
+          chmod 600 "$ANNA_PAYLOAD_JSON"
+          payload_bytes=$(wc -c < "$ANNA_PAYLOAD_JSON")
+          test "$payload_bytes" -ge 1 -a "$payload_bytes" -le "$MAX_PAYLOAD_BYTES" || { echo "Payload size is outside the reviewed range"; exit 1; }
+          actual_sha=$(sha256sum "$ANNA_PAYLOAD_JSON" | awk '{print $1}')
+          test "$actual_sha" = "$EXPECTED_PAYLOAD_SHA256" || { echo "Payload SHA-256 mismatch"; exit 1; }
+          echo "Payload reconstruction and checksum verification succeeded."
+
+      - name: Pin production SSH host key
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$ANNA_SSH_KEY"
+          chmod 600 "$ANNA_SSH_KEY"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$ANNA_KNOWN_HOSTS" 2>/dev/null
+          chmod 600 "$ANNA_KNOWN_HOSTS"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$ANNA_KNOWN_HOSTS" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+          echo "Production SSH host key verified."
+
+      - name: Transfer, validate and publish inside the running API
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote="${SSH_USER}@${SSH_HOST}"
+          ssh_options=(-i "$ANNA_SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ANNA_KNOWN_HOSTS" -o ConnectTimeout=15)
+          scp_options=(-i "$ANNA_SSH_KEY" -P "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ANNA_KNOWN_HOSTS" -o ConnectTimeout=15)
+          ssh "${ssh_options[@]}" "$remote" "bash -s -- '$EXPECTED_DEPLOYED_SHA' '$DEPLOY_PATH'" <<'REMOTE_PREFLIGHT'
+          set -euo pipefail
+          expected_deployed_sha=$1
+          deploy_path=$2
+          [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          cd "$deploy_path"
+          test "$(git rev-parse HEAD)" = "$expected_deployed_sha"
+          docker exec st-michael-api sh -c 'test "$GIT_SHA" = "$1"' sh "$expected_deployed_sha"
+          REMOTE_PREFLIGHT
+          ssh "${ssh_options[@]}" "$remote" "umask 077; test ! -e '$ANNA_REMOTE_DIR'; mkdir -- '$ANNA_REMOTE_DIR'; chmod 700 -- '$ANNA_REMOTE_DIR'"
+          scp "${scp_options[@]}" "$ANNA_PAYLOAD_JSON" "$remote:$ANNA_REMOTE_DIR/payload.json" >/dev/null
+          ssh "${ssh_options[@]}" "$remote" "bash -s -- '$ANNA_REMOTE_DIR' '$EXPECTED_PAYLOAD_SHA256' '$EXPECTED_DEPLOYED_SHA' '$DEPLOY_PATH' '$CONFIRM_COVERAGE_DROP'" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          remote_dir=$1
+          expected_payload_sha=$2
+          expected_deployed_sha=$3
+          deploy_path=$4
+          confirm_coverage_drop=$5
+          [[ "$remote_dir" =~ ^/tmp/st-michael-anna-[0-9]+-[0-9]+$ ]] || { echo "Unsafe remote directory"; exit 1; }
+          payload="$remote_dir/payload.json"
+          cleanup() {
+            rm -f -- "$payload"
+            rmdir -- "$remote_dir" 2>/dev/null || true
+          }
+          trap cleanup EXIT HUP INT TERM
+          chmod 600 -- "$payload"
+          test -f "$payload" -a ! -L "$payload"
+          payload_bytes=$(wc -c < "$payload")
+          test "$payload_bytes" -ge 1 -a "$payload_bytes" -le 10485760 || { echo "Remote payload size is invalid"; exit 1; }
+          actual_sha=$(sha256sum "$payload" | awk '{print $1}')
+          test "$actual_sha" = "$expected_payload_sha" || { echo "Remote payload SHA-256 mismatch"; exit 1; }
+          cd "$deploy_path"
+          exec 8>/tmp/st-michael-production-deploy.lock
+          flock -n 8 || { echo "Another production operation holds the server lock"; exit 1; }
+          test "$(git rev-parse HEAD)" = "$expected_deployed_sha" || { echo "Production worktree SHA mismatch"; exit 1; }
+          docker exec st-michael-api sh -c 'test "$GIT_SHA" = "$1"' sh "$expected_deployed_sha" || { echo "Running API SHA mismatch"; exit 1; }
+          cli_args=(
+            node apps/api/dist/loyalty-base/loyalty-import.cli.js
+            --expected-payload-sha256 "$expected_payload_sha"
+            --confirm-publish
+          )
+          if [ "$confirm_coverage_drop" = "true" ]; then
+            cli_args+=(--confirm-coverage-drop)
+          fi
+          docker exec -i st-michael-api "${cli_args[@]}" < "$payload"
+          REMOTE_SCRIPT
+
+      - name: Remove transient payload and SSH material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          cleanup_failed=0
+          if [ -n "${ANNA_REMOTE_DIR:-}" ] && [[ "$ANNA_REMOTE_DIR" =~ ^/tmp/st-michael-anna-[0-9]+-[0-9]+$ ]] &&
+             [ -f "${ANNA_SSH_KEY:-}" ] && [ -f "${ANNA_KNOWN_HOSTS:-}" ] &&
+             [[ "${SSH_USER:-}" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] &&
+             [[ "${SSH_PORT:-}" =~ ^[0-9]{1,5}$ ]] &&
+             [[ -n "${SSH_HOST:-}" && "$SSH_HOST" != -* && "$SSH_HOST" != *[[:space:]]* ]]; then
+            ssh -i "$ANNA_SSH_KEY" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ANNA_KNOWN_HOSTS" -o ConnectTimeout=10 \
+              "${SSH_USER}@${SSH_HOST}" "bash -s -- '$ANNA_REMOTE_DIR'" <<'REMOTE_CLEANUP' >/dev/null 2>&1 || cleanup_failed=1
+          set -eu
+          remote_dir=$1
+          [[ "$remote_dir" =~ ^/tmp/st-michael-anna-[0-9]+-[0-9]+$ ]]
+          if [ -d "$remote_dir" ]; then
+            rm -f -- "$remote_dir/payload.json"
+            rmdir -- "$remote_dir"
+          fi
+          test ! -e "$remote_dir"
+          REMOTE_CLEANUP
+          fi
+          if [ -n "${ANNA_RUNNER_ROOT:-}" ] && [[ "$ANNA_RUNNER_ROOT" =~ ^/.*/st-michael-anna-[0-9]+-[0-9]+$ ]]; then
+            rm -f -- "$ANNA_PAYLOAD_B64" "$ANNA_PAYLOAD_GZ" "$ANNA_PAYLOAD_JSON" "$ANNA_SSH_KEY" "$ANNA_KNOWN_HOSTS"
+            rmdir -- "$ANNA_RUNNER_ROOT" || cleanup_failed=1
+          fi
+          test "$cleanup_failed" -eq 0 || { echo "Transient import cleanup could not be fully verified"; exit 1; }
+          echo "Transient import material cleanup completed."
+
+      - name: Publish safe run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Anna loyalty import"
+            echo ""
+            echo "- Workflow commit: $GITHUB_SHA"
+            echo "- Payload SHA-256: $EXPECTED_PAYLOAD_SHA256"
+            echo "- Payload content was never stored as an artifact or committed to Git."
+            echo "- Dedicated payload secrets must be removed after this terminal run."
+          } >> "$GITHUB_STEP_SUMMARY"

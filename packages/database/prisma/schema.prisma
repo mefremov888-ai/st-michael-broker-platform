@@ -262,6 +262,28 @@ enum LoyaltyActivityVerdict {
   UNKNOWN
 }
 
+// Aggregate-only facts copied from a source such as Anna's curated legacy
+// workbook. They are deliberately not LoyaltyActivity rows: the source does
+// not contain one independently identifiable event per count.
+enum LoyaltyAggregateQuality {
+  SOURCE_REPORTED
+  PARTIAL
+  UNVERIFIED
+}
+
+enum LoyaltyAggregateExactness {
+  EXACT
+  APPROXIMATE
+  UNKNOWN
+}
+
+enum LoyaltyAggregatePeriodKind {
+  LIFETIME
+  DATE_RANGE
+  MONTHLY_BREAKDOWN
+  UNKNOWN
+}
+
 enum LoyaltyLinkStatus {
   PROPOSED
   CONFIRMED
@@ -969,6 +991,7 @@ model LoyaltySourceRecord {
   externalIdentities LoyaltyExternalIdentity[]
   activities         LoyaltyActivity[]
   metrics            LoyaltyMetricSnapshot[]
+  sourceAggregate    LoyaltySourceAggregate?
   fieldValues        LoyaltySourceFieldValue[]
   organizationRoles  LoyaltyPersonOrganizationRole[]
 
@@ -1092,21 +1115,64 @@ model LoyaltyActivity {
 }
 
 model LoyaltyMetricSnapshot {
-  id              String              @id @default(uuid())
-  sourceRecordId  String              @map("source_record_id")
-  sourceRecord    LoyaltySourceRecord @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
-  ruleVersion     String              @map("rule_version")
-  fixationCount   Int                 @default(0) @map("fixation_count")
-  meetingCount    Int                 @default(0) @map("meeting_count")
-  dealCount       Int                 @default(0) @map("deal_count")
-  brokerTourCount Int                 @default(0) @map("broker_tour_count")
-  callCount       Int                 @default(0) @map("call_count")
-  dealAmount      Decimal             @default(0) @map("deal_amount") @db.Decimal(18, 2)
-  calculatedAt    DateTime            @default(now()) @map("calculated_at")
+  id                    String              @id @default(uuid())
+  sourceRecordId        String              @map("source_record_id")
+  sourceRecord          LoyaltySourceRecord @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  ruleVersion           String              @map("rule_version")
+  fixationCount         Int                 @default(0) @map("fixation_count")
+  meetingCount          Int                 @default(0) @map("meeting_count")
+  dealCount             Int                 @default(0) @map("deal_count")
+  brokerTourCount       Int                 @default(0) @map("broker_tour_count")
+  callCount             Int                 @default(0) @map("call_count")
+  activityEvidenceCount Int                 @default(0) @map("activity_evidence_count")
+  dealAmount            Decimal             @default(0) @map("deal_amount") @db.Decimal(18, 2)
+  calculatedAt          DateTime            @default(now()) @map("calculated_at")
 
   @@unique([sourceRecordId, ruleVersion])
   @@index([ruleVersion, calculatedAt])
   @@map("loyalty_metric_snapshots")
+}
+
+// A single, snapshot-scoped aggregate statement for an imported source row.
+// Nullable measures mean "not reported", which is different from zero. The
+// explicit KPI flag makes cross-row totals opt-in and prevents broker/agency
+// rollups from being counted twice. Exact event rows always take precedence in
+// API reads whenever the active snapshot contains event-level evidence.
+model LoyaltySourceAggregate {
+  id                         String                     @id @default(uuid())
+  sourceRecordId             String                     @unique @map("source_record_id")
+  sourceRecord               LoyaltySourceRecord        @relation(fields: [sourceRecordId], references: [id], onDelete: Restrict)
+  sourceKind                 String                     @map("source_kind")
+  sourceVersion              String                     @map("source_version")
+  sourceLabel                String?                    @map("source_label")
+  quality                    LoyaltyAggregateQuality
+  exactness                  LoyaltyAggregateExactness
+  periodKind                 LoyaltyAggregatePeriodKind @default(UNKNOWN) @map("period_kind")
+  periodFrom                 DateTime?                  @map("period_from")
+  periodTo                   DateTime?                  @map("period_to")
+  contributesToSourceSummary Boolean                    @default(false) @map("contributes_to_source_summary")
+  fixationCount              Int?                       @map("fixation_count")
+  meetingCount               Int?                       @map("meeting_count")
+  dealCount                  Int?                       @map("deal_count")
+  brokerTourCount            Int?                       @map("broker_tour_count")
+  callCount                  Int?                       @map("call_count")
+  dealAmount                 Decimal?                   @map("deal_amount") @db.Decimal(18, 2)
+  currency                   String?
+  lastFixationAt             DateTime?                  @map("last_fixation_at")
+  lastMeetingAt              DateTime?                  @map("last_meeting_at")
+  lastDealAt                 DateTime?                  @map("last_deal_at")
+  lastCallAt                 DateTime?                  @map("last_call_at")
+  brokerTourVisited          Boolean?                   @map("broker_tour_visited")
+  brokerTourAt               DateTime?                  @map("broker_tour_at")
+  dealsByMonth               Json?                      @map("deals_by_month")
+  callBreakdown              Json?                      @map("call_breakdown")
+  provenance                 Json?
+  reportedAt                 DateTime?                  @map("reported_at")
+  createdAt                  DateTime                   @default(now()) @map("created_at")
+
+  @@index([quality, contributesToSourceSummary], map: "loyalty_source_aggregates_summary_idx")
+  @@index([sourceKind, sourceVersion])
+  @@map("loyalty_source_aggregates")
 }
 
 // Append-only pointer transition history. Snapshot rows are immutable source

@@ -1,0 +1,66 @@
+name: Inspect production SSH fingerprint
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Compare production ED25519 fingerprints
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    steps:
+      - name: Read and compare the production public host key
+        id: network
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          root=$(mktemp -d)
+          known_hosts="$root/known_hosts"
+          private_key="$root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          install -m 600 /dev/null "$known_hosts"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one network ED25519 fingerprint"; exit 1; }
+          [[ "${fingerprints[0]}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Invalid network fingerprint"; exit 1; }
+          server_stdout=$(ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            "${SSH_USER}@${SSH_HOST}" "set -eu; test -r /etc/ssh/ssh_host_ed25519_key.pub; ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '{print \$2}'")
+          mapfile -t server_fingerprints < <(printf '%s\n' "$server_stdout" | grep -Eo 'SHA256:[A-Za-z0-9+/]{43}' | sort -u)
+          test "${#server_fingerprints[@]}" -eq 1 || { echo "Expected exactly one server ED25519 fingerprint"; exit 1; }
+          test "${server_fingerprints[0]}" = "${fingerprints[0]}" || { echo "Production SSH fingerprint mismatch"; exit 1; }
+          echo "fingerprint=${fingerprints[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the non-secret fingerprint
+        shell: bash
+        env:
+          NETWORK_FINGERPRINT: ${{ steps.network.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Production SSH fingerprint"
+            echo ""
+            echo '```text'
+            echo "$NETWORK_FINGERPRINT"
+            echo '```'
+            echo "The value observed on the network matches the server's public ED25519 host key."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -45,6 +45,18 @@ const ACTIVITY_TYPES = [
   "CALL",
 ] as const;
 const ACTIVITY_VERDICTS = ["INCLUDED", "EXCLUDED", "UNKNOWN"] as const;
+const AGGREGATE_QUALITIES = [
+  "SOURCE_REPORTED",
+  "PARTIAL",
+  "UNVERIFIED",
+] as const;
+const AGGREGATE_EXACTNESS = ["EXACT", "APPROXIMATE", "UNKNOWN"] as const;
+const AGGREGATE_PERIOD_KINDS = [
+  "LIFETIME",
+  "DATE_RANGE",
+  "MONTHLY_BREAKDOWN",
+  "UNKNOWN",
+] as const;
 const RECONCILIATION_STATUSES = ["OPEN", "RESOLVED", "DISMISSED"] as const;
 const RECONCILIATION_DECISIONS = [
   "LINK",
@@ -273,6 +285,129 @@ export class LoyaltyOrganizationRoleDto {
   evidence?: Record<string, unknown>;
 }
 
+// Source-reported rollups are intentionally distinct from LoyaltyActivityDto.
+// A count without an event id/date remains aggregate evidence and must never be
+// expanded into invented activity rows.
+export class LoyaltySourceAggregateDto {
+  @IsString()
+  @Matches(/^[A-Za-z0-9._:-]{1,80}$/)
+  sourceKind!: string;
+
+  @IsString()
+  @Matches(/^[A-Za-z0-9._:-]{1,80}$/)
+  sourceVersion!: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 160)
+  sourceLabel?: string;
+
+  @IsIn(AGGREGATE_QUALITIES)
+  quality!: (typeof AGGREGATE_QUALITIES)[number];
+
+  @IsIn(AGGREGATE_EXACTNESS)
+  exactness!: (typeof AGGREGATE_EXACTNESS)[number];
+
+  @IsIn(AGGREGATE_PERIOD_KINDS)
+  periodKind!: (typeof AGGREGATE_PERIOD_KINDS)[number];
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  periodFrom?: string | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  periodTo?: string | null;
+
+  @IsBoolean()
+  contributesToSourceSummary!: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  fixationCount?: number | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  meetingCount?: number | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  dealCount?: number | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  brokerTourCount?: number | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  callCount?: number | null;
+
+  @IsOptional()
+  @Matches(/^\d{1,16}(?:\.\d{1,2})?$/)
+  dealAmount?: string | null;
+
+  @IsOptional()
+  @IsIn(["RUB"])
+  currency?: "RUB" | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  lastFixationAt?: string | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  lastMeetingAt?: string | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  lastDealAt?: string | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  lastCallAt?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  brokerTourVisited?: boolean | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  brokerTourAt?: string | null;
+
+  @IsOptional()
+  @IsObject()
+  dealsByMonth?: Record<string, number> | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(1000)
+  @IsObject({ each: true })
+  callBreakdown?: Array<Record<string, unknown>> | null;
+
+  @IsOptional()
+  @IsObject()
+  provenance?: Record<string, unknown> | null;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  reportedAt?: string | null;
+}
+
 export class LoyaltyImportRecordDto {
   // Stable source identity, supplied by the importer. It must not be derived
   // automatically from a mutable phone/name.
@@ -344,6 +479,119 @@ export class LoyaltyImportRecordDto {
   @ValidateNested({ each: true })
   @Type(() => LoyaltyOrganizationRoleDto)
   organizationRoles?: LoyaltyOrganizationRoleDto[];
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltySourceAggregateDto)
+  sourceAggregate?: LoyaltySourceAggregateDto;
+}
+
+export class LoyaltySourceReportedGroupManifestDto {
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  records!: number;
+
+  @IsDefined()
+  @ValidateIf((_object, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  fixations!: number | null;
+
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  fixationKnownRecords!: number;
+
+  @IsDefined()
+  @ValidateIf((_object, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  meetings!: number | null;
+
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  meetingKnownRecords!: number;
+
+  @IsDefined()
+  @ValidateIf((_object, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  deals!: number | null;
+
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  dealKnownRecords!: number;
+
+  @IsDefined()
+  @ValidateIf((_object, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  brokerTours!: number | null;
+
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  brokerTourKnownRecords!: number;
+
+  @IsDefined()
+  @ValidateIf((_object, value) => value !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  calls!: number | null;
+
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  callKnownRecords!: number;
+
+  @IsDefined()
+  @ValidateIf((_object, value) => value !== null)
+  @Matches(/^\d{1,16}(?:\.\d{1,2})?$/)
+  dealAmount!: string | null;
+
+  @IsDefined()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  dealAmountKnownRecords!: number;
+}
+
+export class LoyaltySourceReportedSummaryManifestDto {
+  @IsDefined()
+  @ValidateNested()
+  @Type(() => LoyaltySourceReportedGroupManifestDto)
+  brokers!: LoyaltySourceReportedGroupManifestDto;
+
+  @IsDefined()
+  @ValidateNested()
+  @Type(() => LoyaltySourceReportedGroupManifestDto)
+  agencies!: LoyaltySourceReportedGroupManifestDto;
 }
 
 export class LoyaltyImportDto {
@@ -375,6 +623,22 @@ export class LoyaltyImportDto {
   @Min(0)
   @Max(20000000)
   expectedActivities!: number;
+
+  // Optional for backward compatibility with event-only imports. It becomes
+  // mandatory in service validation as soon as any record has an aggregate.
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  expectedSourceAggregates?: number;
+
+  // Required by service validation whenever sourceAggregate is present. The
+  // two groups are intentionally independent and are never added together.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltySourceReportedSummaryManifestDto)
+  expectedSourceReportedSummary?: LoyaltySourceReportedSummaryManifestDto;
 
   @IsDefined()
   @Type(() => Number)

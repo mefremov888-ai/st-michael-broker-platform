@@ -1,0 +1,11 @@
+output/
+*.loyalty-import.json
+*.loyalty-import.json.gz
+*loyalty-import.json
+*loyalty-import.json.gz
+*.normalized.json
+*.normalized.json.gz
+anna-loyalty*.json
+anna-loyalty*.json.gz
+anna-loyalty*.gz
+anna-loyalty*.b64
