@@ -51,7 +51,9 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
-          script_stop: true
+          # script_stop rewrites every line and breaks multiline if/awk blocks.
+          # The remote script is fail-closed through set -eu instead.
+          script_stop: false
           command_timeout: 3m
           envs: EXPECTED_OVERRIDE_SHA256
           script: |
@@ -127,11 +129,12 @@ jobs:
               { print }
             ')
             if [ -n "$UNEXPECTED_UNTRACKED" ]; then
-              echo "После архивации остались неизвестные untracked-файлы:"
-              printf '%s\n' "$UNEXPECTED_UNTRACKED"
+              UNEXPECTED_COUNT=$(printf '%s\n' "$UNEXPECTED_UNTRACKED" | grep -c . || true)
+              echo "После архивации остались неизвестные untracked-файлы: $UNEXPECTED_COUNT"
               exit 1
             fi
-            printf '%s\n' "$UNTRACKED_FILES"
+            REMAINING_COUNT=$(printf '%s\n' "$UNTRACKED_FILES" | grep -c . || true)
+            echo "Разрешённых untracked-путей осталось: $REMAINING_COUNT"
 
             FINAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
             if [ "$FINAL_OVERRIDE_SHA256" != "$EXPECTED_OVERRIDE_SHA256" ]; then

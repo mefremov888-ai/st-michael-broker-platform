@@ -120,20 +120,24 @@ echo "    HEAD: $(git log --oneline -1)"
 # additional sites. It is permitted only as a regular file with an operator-
 # reviewed SHA-256 supplied by the protected GitHub production environment.
 OVERRIDE_FILE="docker-compose.override.yml"
-if ! printf '%s' "${PRODUCTION_COMPOSE_OVERRIDE_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$'; then
-    echo "    ✗ PRODUCTION_COMPOSE_OVERRIDE_SHA256 (64 lowercase hex characters) is required."
-    exit 1
-fi
-if [ ! -f "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
-    echo "    ✗ Reviewed production docker-compose.override.yml is missing, not a regular file, or is a symlink."
-    exit 1
-fi
-ACTUAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
-if [ "$ACTUAL_OVERRIDE_SHA256" != "$PRODUCTION_COMPOSE_OVERRIDE_SHA256" ]; then
-    echo "    ✗ Production docker-compose.override.yml SHA-256 mismatch."
-    echo "      The two external-site routes must be reviewed again before deployment."
-    exit 1
-fi
+verify_production_compose_override() {
+    local actual_override_sha256
+    if ! printf '%s' "${PRODUCTION_COMPOSE_OVERRIDE_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$'; then
+        echo "    ✗ PRODUCTION_COMPOSE_OVERRIDE_SHA256 (64 lowercase hex characters) is required."
+        return 1
+    fi
+    if [ ! -f "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
+        echo "    ✗ Reviewed production docker-compose.override.yml is missing, not a regular file, or is a symlink."
+        return 1
+    fi
+    actual_override_sha256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+    if [ "$actual_override_sha256" != "$PRODUCTION_COMPOSE_OVERRIDE_SHA256" ]; then
+        echo "    ✗ Production docker-compose.override.yml SHA-256 mismatch."
+        echo "      The two external-site routes must be reviewed again before deployment."
+        return 1
+    fi
+}
+verify_production_compose_override
 echo "    ✓ Production docker-compose.override.yml matches the reviewed SHA-256."
 
 # Update optional integration credentials while holding the same server-side
@@ -217,6 +221,7 @@ done
 # на самом деле обновился, а не просто "workflow прошёл зелёным".
 update_env_value "GIT_SHA" "$EXPECTED_DEPLOY_SHA"
 chmod 600 "$ENV_STAGING_FILE"
+verify_production_compose_override
 docker compose --env-file "$ENV_STAGING_FILE" config --quiet >/dev/null
 
 # `git reset --hard` does not remove untracked or ignored files. We still flag
@@ -354,6 +359,7 @@ if ! curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
     echo "    ✗ Existing external site is unavailable; use the incident runbook, not normal deployment."
     exit 1
 fi
+verify_production_compose_override
 verify_prisma_baseline
 mv "$ENV_STAGING_FILE" "$SERVER_ENV_FILE"
 ENV_STAGING_FILE=""
@@ -468,6 +474,7 @@ docker compose --project-name "$COMPOSE_PROJECT_NAME" \
 # This is an update-only workflow; fresh/empty databases are always rejected.
 echo ""
 echo "==> [3/5] Preflight baseline и Prisma migrations..."
+verify_production_compose_override
 $COMPOSE_CMD run --rm --no-deps --entrypoint npx api prisma migrate deploy \
     --schema=/app/packages/database/prisma/schema.prisma
 echo "    ✓ Миграции применены до замены API"
@@ -476,6 +483,7 @@ echo "    ✓ Миграции применены до замены API"
 # Redis and nginx are deliberately not recreated here: infrastructure/config
 # restarts need a separate maintenance window and must not cause surprise
 # downtime during an application release.
+verify_production_compose_override
 if ! $COMPOSE_CMD up -d --no-deps api web; then
     fail_after_rollout "Application container replacement failed."
 fi
