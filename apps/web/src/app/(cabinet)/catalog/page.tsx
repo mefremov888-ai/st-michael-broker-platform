@@ -37,6 +37,14 @@ function LotDetail({ lot, onClose, onBook, onVisit }: { lot: any; onClose: () =>
   const isFavorite = isFav(lot.id);
   const handleToggleFav = () => toggleFav(lot.id);
 
+  // 2026-08-21: галерея лота — [планировка, персональные фото с Я.Диска,
+  // остальные фото фида], порядок собран на бэке (Lot.photos). Пока фото не
+  // прогнаны через enrichLotsWithPhotos (старые лоты) — fallback на одну
+  // planImageUrl. См. docs/yandex-disk-photos-feed.md.
+  const photos: string[] = lot.photos?.length ? lot.photos : lot.planImageUrl ? [lot.planImageUrl] : [];
+  const [activePhoto, setActivePhoto] = useState(0);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+
   const handlePrint = () => {
     const w = window.open('', '_blank');
     if (!w) return;
@@ -98,9 +106,72 @@ function LotDetail({ lot, onClose, onBook, onVisit }: { lot: any; onClose: () =>
 
         {lot.propertyType && <div className="text-sm text-accent mb-4">{lot.propertyType}</div>}
 
-        {lot.planImageUrl && (
-          <div className="mb-6 bg-surface-secondary rounded-lg p-3">
-            <img src={lot.planImageUrl} alt="Планировка" className="w-full rounded max-h-80 object-contain" />
+        {photos.length > 0 && (
+          <div className="mb-6">
+            <div
+              className="bg-surface-secondary rounded-lg p-3 cursor-zoom-in"
+              onClick={() => setLightboxOpen(true)}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={photos[activePhoto]}
+                alt={activePhoto === 0 ? 'Планировка' : `Фото ${activePhoto + 1}`}
+                className="w-full rounded max-h-80 object-contain"
+              />
+            </div>
+            {photos.length > 1 && (
+              <div className="flex gap-2 mt-2 overflow-x-auto pb-1">
+                {photos.map((src, i) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={src + i}
+                    src={src}
+                    alt=""
+                    onClick={() => setActivePhoto(i)}
+                    className={`w-16 h-16 flex-shrink-0 object-cover rounded cursor-pointer border-2 transition ${
+                      i === activePhoto ? 'border-accent' : 'border-transparent opacity-70 hover:opacity-100'
+                    }`}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {lightboxOpen && photos.length > 0 && (
+          <div
+            className="fixed inset-0 bg-black/90 z-[60] flex items-center justify-center p-4"
+            onClick={() => setLightboxOpen(false)}
+          >
+            <button
+              className="absolute top-4 right-4 text-white/80 hover:text-white"
+              onClick={() => setLightboxOpen(false)}
+            >
+              <X className="w-7 h-7" />
+            </button>
+            {photos.length > 1 && (
+              <button
+                className="absolute left-2 sm:left-6 text-white/80 hover:text-white p-2"
+                onClick={(e) => { e.stopPropagation(); setActivePhoto((i) => (i - 1 + photos.length) % photos.length); }}
+              >
+                <ChevronLeft className="w-8 h-8" />
+              </button>
+            )}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={photos[activePhoto]}
+              alt=""
+              className="max-w-full max-h-full object-contain"
+              onClick={(e) => e.stopPropagation()}
+            />
+            {photos.length > 1 && (
+              <button
+                className="absolute right-2 sm:right-6 text-white/80 hover:text-white p-2"
+                onClick={(e) => { e.stopPropagation(); setActivePhoto((i) => (i + 1) % photos.length); }}
+              >
+                <ChevronRight className="w-8 h-8" />
+              </button>
+            )}
           </div>
         )}
 

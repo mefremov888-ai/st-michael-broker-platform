@@ -69,8 +69,27 @@ export class CatalogService {
 
       const propertyType = offer?.property_type || null;
       const images = Array.isArray(offer.image) ? offer.image : offer.image ? [offer.image] : [];
+      const imageUrl = (img: any): string | null => (typeof img === 'string' ? img : img?.['#text'] || null);
       const planImage = images.find((img: any) => (img?.['@_type'] || '') === 'plan');
-      const planImageUrl = typeof planImage === 'string' ? planImage : planImage?.['#text'] || null;
+      const planImageUrl = imageUrl(planImage);
+      // ProfitBase tags the apartment plan(s) as type="plan" and a separate
+      // per-floor site plan as type="plan floor" (one per floor, shared by
+      // every unit on it) — distinct from the generic house/facade/building
+      // photos that follow. Reuses Lot.layoutUrl, which already existed for
+      // exactly this but was only ever populated by the ProfitBase webhook,
+      // never by this feed sync.
+      const planFloorImage = images.find((img: any) => (img?.['@_type'] || '') === 'plan floor');
+      const layoutUrl = imageUrl(planFloorImage);
+      // Everything except type="plan" — offers often carry 2-3 apartment-plan
+      // renders, and only the first (planImageUrl above) is shown; the rest
+      // duplicate what personal Yandex.Disk photos already cover, so they're
+      // dropped here rather than surfacing again in the "remaining feed
+      // photos" tail. type="plan floor" (layoutUrl) is kept — it's placed
+      // separately by computePhotoOrder. See docs/yandex-disk-photos-feed.md.
+      const feedImageUrls = images
+        .filter((img: any) => (img?.['@_type'] || '') !== 'plan')
+        .map(imageUrl)
+        .filter((url: string | null): url is string => Boolean(url));
 
       // Parse additional features from custom-fields / property_type
       const customFields = Array.isArray(offer['custom-field']) ? offer['custom-field'] : offer['custom-field'] ? [offer['custom-field']] : [];
@@ -145,8 +164,9 @@ export class CatalogService {
         pricePerSqm,
         status: status as any,
         propertyType,
-        layoutUrl: null as string | null,
+        layoutUrl,
         planImageUrl,
+        feedImageUrls,
         description: offer?.['window-view'] || null,
         floorsTotal: Number(offer?.house?.['floors-total'] || 0) || null,
         buildingSection: offer?.['building-section'] ? String(offer['building-section']) : null,

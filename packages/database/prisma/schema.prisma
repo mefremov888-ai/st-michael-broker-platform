@@ -518,6 +518,13 @@ model Lot {
   propertyType     String?       @map("property_type")
   layoutUrl        String?       @map("layout_url")
   planImageUrl     String?       @map("plan_image_url")
+  // Raw image URLs from the ProfitBase feed, in feed order (plan is always
+  // first). Repopulated on every syncFromFeed() run.
+  feedImageUrls    String[]      @default([]) @map("feed_image_urls")
+  // Final gallery order for display: [plan, ...personal Yandex.Disk photos,
+  // ...remaining feed photos]. Computed by YandexDiskPhotosService after
+  // each feed sync — see docs/yandex-disk-photos-feed.md.
+  photos           String[]      @default([]) @map("photos")
   description      String?
   floorsTotal      Int?          @map("floors_total")
   buildingSection  String?       @map("building_section")

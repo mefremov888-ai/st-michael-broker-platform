@@ -57,6 +57,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
       { recheckDue: jest.fn() } as any,
       opsAlerts as any,
     );
@@ -669,6 +670,7 @@ describe("SchedulerService operations health alerts", () => {
     const service = new SchedulerService(
       prisma as any,
       notificationQueue as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,

@@ -17,6 +17,7 @@ function cleanClientName(raw: string | null | undefined): string {
   return cleaned || 'Без имени';
 }
 import { CatalogService } from '../catalog/catalog.service';
+import { YandexDiskPhotosService } from '../catalog/yandex-disk-photos.service';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
 import { GoogleSheetsSyncService } from '../admin/google-sheets-sync.service';
 import { AdminService } from '../admin/admin.service';
@@ -44,6 +45,7 @@ export class SchedulerService {
     @Inject('PrismaClient') private prisma: PrismaClient,
     @InjectQueue('notifications') private notificationQueue: Queue,
     private readonly catalogService: CatalogService,
+    private readonly yandexDiskPhotosService: YandexDiskPhotosService,
     private readonly gsheets: GoogleSheetsSyncService,
     private readonly adminService: AdminService,
     private readonly cms: CmsService,
@@ -435,15 +437,37 @@ export class SchedulerService {
       this.logger.error(`Yandex.Disk files sync failed: ${e}`);
     }
   }
-  // Daily catalog XML feed sync at 03:00
-  @Cron('0 3 * * *')
+  // 2026-08-21: was once a day at 03:00 — bumped to every 2h so price/status
+  // changes in ProfitBase (booked/sold, discounts) show up sooner. Kept
+  // separate from the heavier Yandex.Disk photo enrichment below, which
+  // stays daily (re-walking/re-downloading those folders every 2h would
+  // hammer Yandex's public API for no benefit — photo folders barely change).
+  @Cron('0 */2 * * *')
   async handleCatalogSync() {
-    this.logger.log('Starting daily Profitbase XML feed sync...');
+    this.logger.log('Starting Profitbase XML feed sync...');
     try {
       const result = await this.catalogService.syncFromFeed();
       this.logger.log(`Catalog sync complete: +${result.created}, ~${result.updated}, total ${result.total}`);
     } catch (e) {
       this.logger.error(`Catalog sync failed: ${e}`);
+    }
+  }
+
+  // 2026-08-21: daily, offset from the 03:00 (now every-2h) feed sync and
+  // the 04:00 Yandex materials sync so the two Yandex.Disk jobs don't
+  // overlap. Recomputes Lot.photos from the latest planImageUrl/
+  // feedImageUrls plus personal Yandex.Disk photos — see
+  // docs/yandex-disk-photos-feed.md.
+  @Cron('30 4 * * *')
+  async handleYandexDiskLotPhotosSync() {
+    this.logger.log('Starting Yandex.Disk lot-photos enrichment...');
+    try {
+      const result = await this.yandexDiskPhotosService.enrichLotsWithPhotos();
+      this.logger.log(
+        `Yandex.Disk lot-photos enrichment complete: source1=${result.matchedSource1}, source2=${result.matchedSource2}, updated=${result.updated}, failed=${result.failed}`,
+      );
+    } catch (e) {
+      this.logger.error(`Yandex.Disk lot-photos enrichment failed: ${e}`);
     }
   }
   // Run every day at 09:00

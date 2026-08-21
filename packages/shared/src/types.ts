@@ -73,6 +73,8 @@ export interface Lot {
   status: LotStatus;
   layoutUrl?: string;
   planImageUrl?: string;
+  feedImageUrls?: string[];
+  photos?: string[];
   description?: string;
   createdAt: Date;
   updatedAt: Date;
