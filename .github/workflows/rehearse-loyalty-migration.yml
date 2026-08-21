@@ -1,8 +1,9 @@
 name: Rehearse loyalty migration (safe, isolated)
 
 # Ручной запуск. Снимает бэкап живой базы и прогоняет миграцию
-# (0_legacy_baseline + 20260818000100_loyalty_base + mango safety) ТОЛЬКО
-# против одноразовой изолированной копии на сервере — см.
+# из доверенного master ТОЛЬКО против одноразовой изолированной копии на
+# сервере. Поддерживает и legacy-базу без Prisma history, и уже мигрированную
+# production-базу с pending migrations — см.
 # scripts/rehearse-loyalty-migration.sh для полного описания.
 #
 # Ничего не пишет и не меняет на боевой базе. Не заменяет шаги 7-8 из
@@ -40,7 +41,8 @@ jobs:
             # (был случай, когда он смотрел на форк — см. project_deploy_origin_trap),
             # берём скрипт fetch-ом с явного канонического URL.
             git fetch https://github.com/sereganikitin/st-michael-broker-platform.git master
-            git show FETCH_HEAD:scripts/rehearse-loyalty-migration.sh > /tmp/rehearse-loyalty-migration.sh
-            chmod 700 /tmp/rehearse-loyalty-migration.sh
-            /tmp/rehearse-loyalty-migration.sh "${{ secrets.DEPLOY_PATH }}" "$(git rev-parse FETCH_HEAD)"
-            rm -f /tmp/rehearse-loyalty-migration.sh
+            REHEARSAL_SCRIPT=$(mktemp /tmp/rehearse-loyalty-migration.XXXXXX.sh)
+            trap 'rm -f -- "$REHEARSAL_SCRIPT"' EXIT
+            git show FETCH_HEAD:scripts/rehearse-loyalty-migration.sh > "$REHEARSAL_SCRIPT"
+            chmod 700 "$REHEARSAL_SCRIPT"
+            "$REHEARSAL_SCRIPT" "${{ secrets.DEPLOY_PATH }}" "$(git rev-parse FETCH_HEAD)"

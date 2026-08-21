@@ -60,6 +60,16 @@ npx.cmd prisma migrate status --schema packages/database/prisma/schema.prisma
 6. Verify on the clone: API startup, loyalty dry-run, no active Anna snapshot,
    legacy broker/client counts, and application smoke tests. The migration is
    additive and must not modify rows in `brokers` or `agencies`.
+
+The clone rehearsal is also safe to rerun after production has adopted Prisma
+migration history. In that mode it must **not** compare the current schema to
+the legacy baseline and must **not** run `migrate resolve` again. Instead, it
+fails closed unless there are no unresolved failed rows, the active migration
+history is an exact continuous prefix of the migrations in the trusted commit,
+and every recorded checksum matches its checked-in `migration.sql`. Only then
+may `migrate deploy` apply pending migrations to the isolated clone. The full
+history and checksums are verified again afterward.
+
 7. Schedule a production maintenance window and pause the normal automated
    deploy. Start a **new shell** with no clone variables inherited. Load
    `PRODUCTION_DATABASE_URL` from the approved secret manager without printing
