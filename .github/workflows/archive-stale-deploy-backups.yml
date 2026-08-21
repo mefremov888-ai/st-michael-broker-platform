@@ -25,6 +25,10 @@ on:
         required: true
         default: false
         type: boolean
+      override_sha256:
+        description: SHA-256 живого docker-compose.override.yml из read-only инспектора
+        required: true
+        type: string
 
 concurrency:
   group: production-deploy
@@ -36,9 +40,12 @@ jobs:
     if: inputs.confirm
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: production
     steps:
       - name: SSH and archive
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          EXPECTED_OVERRIDE_SHA256: ${{ inputs.override_sha256 }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -46,10 +53,36 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 3m
-          envs: DEPLOY_PATH
+          envs: EXPECTED_OVERRIDE_SHA256
           script: |
             set -eu
             cd "${{ secrets.DEPLOY_PATH }}"
+
+            command -v flock >/dev/null
+            command -v sha256sum >/dev/null
+            printf '%s' "$EXPECTED_OVERRIDE_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
+              echo "Некорректный ожидаемый SHA-256 override-файла."
+              exit 1
+            }
+            exec 8>/tmp/st-michael-production-deploy.lock
+            flock -n 8 || {
+              echo "Другой production deploy уже держит серверный lock."
+              exit 1
+            }
+
+            OVERRIDE_FILE="docker-compose.override.yml"
+            if [ ! -f "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
+              echo "Живой docker-compose.override.yml отсутствует, не является обычным файлом или является symlink."
+              exit 1
+            fi
+            ACTUAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+            if [ "$ACTUAL_OVERRIDE_SHA256" != "$EXPECTED_OVERRIDE_SHA256" ]; then
+              echo "SHA-256 живого docker-compose.override.yml изменился после ручной проверки."
+              echo "Ожидался: $EXPECTED_OVERRIDE_SHA256"
+              echo "Получен:   $ACTUAL_OVERRIDE_SHA256"
+              exit 1
+            fi
+            echo "Живой docker-compose.override.yml проверен по SHA-256 и останется на месте."
 
             ARCHIVE_DIR="/var/backups/stmichael/pre-deploy-cleanup-$(date -u +%Y%m%dT%H%M%SZ)"
             sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ARCHIVE_DIR"
@@ -69,6 +102,7 @@ jobs:
             move_if_exists ".env.bak.1781522935"
             move_if_exists ".env.bak.1781522956"
             move_if_exists ".env.bak.1781523085"
+            move_if_exists ".env.bak.1781523182"
             move_if_exists ".env.bak.1781779686"
             move_if_exists ".env.tmp.4gJGKo"
             move_if_exists ".env.tmp.OmEGXO"
@@ -83,7 +117,27 @@ jobs:
 
             echo ""
             echo "=== Осталось untracked после архивации ==="
-            git ls-files --others --exclude-standard
+            UNTRACKED_FILES=$(git ls-files --others --exclude-standard)
+            UNEXPECTED_UNTRACKED=$(printf '%s\n' "$UNTRACKED_FILES" | awk '
+              NF == 0 { next }
+              /^uploads\// { next }
+              /^docker\/ssl\// { next }
+              /^\.env\.staging\.[A-Za-z0-9]+$/ { next }
+              /^docker-compose\.override\.yml$/ { next }
+              { print }
+            ')
+            if [ -n "$UNEXPECTED_UNTRACKED" ]; then
+              echo "После архивации остались неизвестные untracked-файлы:"
+              printf '%s\n' "$UNEXPECTED_UNTRACKED"
+              exit 1
+            fi
+            printf '%s\n' "$UNTRACKED_FILES"
+
+            FINAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+            if [ "$FINAL_OVERRIDE_SHA256" != "$EXPECTED_OVERRIDE_SHA256" ]; then
+              echo "Живой docker-compose.override.yml изменился во время архивирования."
+              exit 1
+            fi
 
             echo ""
             echo "=== Готово ==="
