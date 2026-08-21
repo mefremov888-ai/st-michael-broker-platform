@@ -39,6 +39,124 @@ the document non-publishable; stage rejects it. Included deals additionally
 require positive RUB amount and `contractType=DDU`. Monetary strings accept at
 most 16 integer digits and two decimal digits, matching Decimal(18,2).
 
+### Curated legacy aggregates (Anna)
+
+Anna's legacy export contains per-row CRM totals but not one stable id/date per
+fixation, meeting, deal or call. Such totals must be sent as the optional
+`record.sourceAggregate`; they must **not** be expanded into synthetic
+`activities`. If at least one record has this object, the top-level manifest
+must contain the exact `expectedSourceAggregates` count and a fail-closed
+`expectedSourceReportedSummary`:
+
+```json
+{
+  "expectedSourceAggregates": 6872,
+  "expectedSourceReportedSummary": {
+    "brokers": {
+      "records": 6670,
+      "fixations": 739,
+      "fixationKnownRecords": 6670,
+      "meetings": 375,
+      "meetingKnownRecords": 6670,
+      "deals": 198,
+      "dealKnownRecords": 6670,
+      "brokerTours": 1248,
+      "brokerTourKnownRecords": 6670,
+      "calls": 146,
+      "callKnownRecords": 6670,
+      "dealAmount": "4722766207.00",
+      "dealAmountKnownRecords": 6670
+    },
+    "agencies": {
+      "records": 202,
+      "fixations": 0,
+      "fixationKnownRecords": 202,
+      "meetings": 697,
+      "meetingKnownRecords": 202,
+      "deals": 223,
+      "dealKnownRecords": 202,
+      "brokerTours": null,
+      "brokerTourKnownRecords": 0,
+      "calls": null,
+      "callKnownRecords": 0,
+      "dealAmount": "4704307380.00",
+      "dealAmountKnownRecords": 202
+    }
+  }
+}
+```
+
+The numbers shown are the reviewed 2026-08-21 source controls. Import tooling
+must still derive every `*KnownRecords` value from field presence: an absent
+value is unknown; an explicitly present zero is known. The `calls=146` control
+is valid only when `callCount` is the exact sum of the present
+`callsMayAugust` breakdown; the importer must reject rather than reuse it for a
+different call definition. Decimal amounts are compared in integer kopecks,
+never floating point.
+
+Each row then carries its own aggregate statement:
+
+```json
+{
+  "sourceAggregate": {
+    "sourceKind": "ANNA_LEGACY_CRM",
+    "sourceVersion": "broker-source-enriched-v1",
+    "sourceLabel": "Anna curated CRM totals",
+    "quality": "SOURCE_REPORTED",
+    "exactness": "UNKNOWN",
+    "periodKind": "LIFETIME",
+    "contributesToSourceSummary": true,
+    "fixationCount": 4,
+    "meetingCount": null,
+    "dealCount": 2,
+    "brokerTourCount": 1,
+    "callCount": 8,
+    "dealAmount": "1500000.00",
+    "currency": "RUB",
+    "lastFixationAt": "2026-06-01",
+    "lastMeetingAt": null,
+    "lastDealAt": "2026-07-01",
+    "lastCallAt": "2026-08-01",
+    "brokerTourVisited": true,
+    "brokerTourAt": "2026-05-15",
+    "dealsByMonth": { "2026-07": 2 },
+    "callBreakdown": [{ "period": "2026-05", "count": 3 }],
+    "provenance": { "rawFields": ["crm.fixations", "crm.deals"] }
+  }
+}
+```
+
+All measures are nullable: `null`/omitted means unknown, while `0` is an
+explicit source-reported zero. `dealAmount` and `currency` must either both be
+absent or be a non-negative decimal plus `RUB`. `dealsByMonth` accepts only
+`YYYY-MM` keys and non-negative integer counts. `DATE_RANGE` requires both
+`periodFrom` and `periodTo`.
+
+`contributesToSourceSummary=true` is accepted only with
+`quality=SOURCE_REPORTED`. Broker and agency source summaries are always
+reported as separate groups and are never added together because their scopes
+may overlap. The flag means "show in the explicitly unconfirmed source block";
+it never promotes a rollup to a confirmed KPI.
+
+ANNA reads expose three related fields:
+
+- `metrics`: exact event-derived KPI values, or nullable values when exact
+  event evidence is unavailable;
+- `metricSource`: `EXACT_ACTIVITIES` or `UNAVAILABLE`;
+- `sourceReportedMetrics`: the original aggregate and provenance even when
+  exact events take precedence.
+
+If the active snapshot has any event-level activity evidence, overview KPIs use
+only INCLUDED, non-archived event rows. Without such evidence, confirmed
+activity KPIs are null rather than fabricated from rollups. Overview exposes
+the unconfirmed rollups under `sourceReportedSummary.brokers` and
+`sourceReportedSummary.agencies`; it never sums those groups. Source aggregates
+are snapshot/lifetime values unless their own period metadata says otherwise;
+`periodFilterApplied=false` prevents the UI from presenting them as selected-
+month/quarter facts. Overview also returns per-KPI `kpiMetadata` with basis,
+formula, period behavior, rule version and included/excluded semantics for
+tooltips.
+
 Publish is `POST /anna/import/:snapshotId/publish` with JSON body:
 
 ```json

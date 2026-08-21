@@ -11,6 +11,9 @@ concurrency:
   group: production-deploy
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   inspect:
     name: Read aggregate loyalty state over SSH
@@ -19,56 +22,81 @@ jobs:
     environment: production
     steps:
       - name: Inspect production loyalty state
-        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        shell: bash
         env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
-          # script_stop rewrites multiline shell blocks. set -eu and
-          # ON_ERROR_STOP keep this inspection fail-closed instead.
-          script_stop: false
-          command_timeout: 3m
-          envs: DEPLOY_PATH
-          script: |
-            set -eu
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
 
-            case "${DEPLOY_PATH:-}" in
-              /*) ;;
-              *) exit 1 ;;
-            esac
+          root=$(mktemp -d)
+          known_hosts="$root/known_hosts"
+          private_key="$root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
 
-            DEPLOY_ROOT=$(readlink -f -- "$DEPLOY_PATH")
-            if [ -z "$DEPLOY_ROOT" ] || [ "$DEPLOY_ROOT" = "/" ] || [ ! -d "$DEPLOY_ROOT" ]; then
-              exit 1
-            fi
-            cd -- "$DEPLOY_ROOT"
-            if [ "$(git rev-parse --show-toplevel 2>/dev/null || true)" != "$DEPLOY_ROOT" ]; then
-              exit 1
-            fi
-            if [ ! -f docker-compose.yml ] || [ -L docker-compose.yml ]; then
-              exit 1
-            fi
-            command -v docker >/dev/null
-            docker compose config --services | grep -qx postgres
+          ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH'" <<'REMOTE'
+          set -euo pipefail
+          deploy_path=$1
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
 
-            docker compose exec -T postgres \
-              psql -U postgres -d broker_platform \
-                --no-psqlrc --quiet --tuples-only --no-align \
-                --set ON_ERROR_STOP=1 --single-transaction <<'SQL'
+          deploy_root=$(readlink -f -- "$deploy_path")
+          if [ -z "$deploy_root" ] || [ "$deploy_root" = "/" ] || [ ! -d "$deploy_root" ]; then
+            exit 1
+          fi
+          cd -- "$deploy_root"
+          if [ "$(git rev-parse --show-toplevel 2>/dev/null || true)" != "$deploy_root" ]; then
+            exit 1
+          fi
+          if [ ! -f docker-compose.yml ] || [ -L docker-compose.yml ]; then
+            exit 1
+          fi
+          command -v docker >/dev/null
+          docker compose config --services | grep -qx postgres
+
+          docker compose exec -T postgres \
+            psql -U postgres -d broker_platform \
+              --no-psqlrc --quiet --tuples-only --no-align \
+              --set ON_ERROR_STOP=1 --single-transaction <<'SQL'
             SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 
             WITH
             migration_state AS (
-              SELECT EXISTS (
-                SELECT 1
-                FROM public."_prisma_migrations"
-                WHERE migration_name = '20260818000100_loyalty_base'
-                  AND finished_at IS NOT NULL
-                  AND rolled_back_at IS NULL
-              ) AS migration_applied
+              SELECT
+                EXISTS (
+                  SELECT 1
+                  FROM public."_prisma_migrations"
+                  WHERE migration_name = '20260818000100_loyalty_base'
+                    AND finished_at IS NOT NULL
+                    AND rolled_back_at IS NULL
+                ) AS loyalty_migration_applied,
+                EXISTS (
+                  SELECT 1
+                  FROM public."_prisma_migrations"
+                  WHERE migration_name = '20260821000100_loyalty_source_aggregates'
+                    AND finished_at IS NOT NULL
+                    AND rolled_back_at IS NULL
+                ) AS source_aggregate_migration_applied
             ),
             anna_dataset AS (
               SELECT id, active_snapshot_id
@@ -79,13 +107,59 @@ jobs:
             active_snapshot AS (
               SELECT
                 snapshot.id,
+                snapshot.content_hash,
+                snapshot.record_count,
                 snapshot.broker_count,
-                snapshot.agency_count
+                snapshot.agency_count,
+                snapshot.activity_count
               FROM anna_dataset AS dataset
               JOIN public.loyalty_snapshots AS snapshot
                 ON snapshot.id = dataset.active_snapshot_id
                AND snapshot.dataset_id = dataset.id
                AND snapshot.status = 'PUBLISHED'
+            ),
+            source_summary AS (
+              SELECT
+                COUNT(aggregate.id) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                )::bigint AS broker_source_aggregate_count,
+                COALESCE(SUM(aggregate.fixation_count) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                ), 0)::bigint AS broker_fixations,
+                COALESCE(SUM(aggregate.meeting_count) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                ), 0)::bigint AS broker_meetings,
+                COALESCE(SUM(aggregate.deal_count) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                ), 0)::bigint AS broker_deals,
+                COALESCE(SUM(aggregate.broker_tour_count) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                ), 0)::bigint AS broker_tours,
+                COALESCE(SUM(aggregate.call_count) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                ), 0)::bigint AS broker_dated_calls,
+                COALESCE(SUM(aggregate.deal_amount) FILTER (
+                  WHERE record.entity_type = 'BROKER'
+                ), 0)::numeric(18,2)::text AS broker_deal_amount_rub,
+                COUNT(aggregate.id) FILTER (
+                  WHERE record.entity_type = 'AGENCY'
+                )::bigint AS agency_source_aggregate_count,
+                COALESCE(SUM(aggregate.meeting_count) FILTER (
+                  WHERE record.entity_type = 'AGENCY'
+                ), 0)::bigint AS agency_meetings,
+                COALESCE(SUM(aggregate.deal_count) FILTER (
+                  WHERE record.entity_type = 'AGENCY'
+                ), 0)::bigint AS agency_deals,
+                COALESCE(SUM(aggregate.deal_amount) FILTER (
+                  WHERE record.entity_type = 'AGENCY'
+                ), 0)::numeric(18,2)::text AS agency_deal_amount_rub
+              FROM active_snapshot AS active
+              LEFT JOIN public.loyalty_source_records AS record
+                ON record.snapshot_id = active.id
+              LEFT JOIN public.loyalty_source_aggregates AS aggregate
+                ON aggregate.source_record_id = record.id
+               AND aggregate.quality = 'SOURCE_REPORTED'
+               AND aggregate.contributes_to_source_summary = true
             ),
             anna_counts AS (
               SELECT
@@ -138,49 +212,96 @@ jobs:
             ),
             state AS (
               SELECT
-                migration.migration_applied,
+                migration.loyalty_migration_applied,
+                migration.source_aggregate_migration_applied,
                 EXISTS (SELECT 1 FROM anna_dataset) AS dataset_exists,
                 EXISTS (SELECT 1 FROM active_snapshot) AS active_published,
+                COALESCE((SELECT content_hash FROM active_snapshot LIMIT 1), '') AS active_content_hash,
+                COALESCE((SELECT record_count FROM active_snapshot LIMIT 1), 0)::bigint AS declared_record_count,
+                COALESCE((SELECT activity_count FROM active_snapshot LIMIT 1), 0)::bigint AS exact_activity_count,
                 anna.declared_broker_count,
                 anna.actual_broker_count,
                 anna.visible_broker_count,
                 anna.declared_agency_count,
                 anna.actual_agency_count,
                 anna.visible_agency_count,
+                source.broker_source_aggregate_count,
+                source.broker_fixations,
+                source.broker_meetings,
+                source.broker_deals,
+                source.broker_tours,
+                source.broker_dated_calls,
+                source.broker_deal_amount_rub,
+                source.agency_source_aggregate_count,
+                source.agency_meetings,
+                source.agency_deals,
+                source.agency_deal_amount_rub,
                 publication.publication_events,
                 ours.our_broker_count,
                 ours.our_agency_count
               FROM migration_state AS migration
               CROSS JOIN anna_counts AS anna
+              CROSS JOIN source_summary AS source
               CROSS JOIN publication_count AS publication
               CROSS JOIN our_counts AS ours
             ),
             markers AS (
-              SELECT 1 AS position, 'migration_applied=' || migration_applied::text AS marker FROM state
+              SELECT 1 AS position, 'loyalty_migration_applied=' || loyalty_migration_applied::text AS marker FROM state
               UNION ALL
-              SELECT 2, 'dataset_exists=' || dataset_exists::text FROM state
+              SELECT 2, 'source_aggregate_migration_applied=' || source_aggregate_migration_applied::text FROM state
               UNION ALL
-              SELECT 3, 'active_published=' || active_published::text FROM state
+              SELECT 3, 'dataset_exists=' || dataset_exists::text FROM state
               UNION ALL
-              SELECT 4, 'declared_broker_count=' || declared_broker_count::text FROM state
+              SELECT 4, 'active_published=' || active_published::text FROM state
               UNION ALL
-              SELECT 5, 'actual_broker_count=' || actual_broker_count::text FROM state
+              SELECT 5, 'active_content_hash=' || active_content_hash FROM state
               UNION ALL
-              SELECT 6, 'visible_broker_count=' || visible_broker_count::text FROM state
+              SELECT 6, 'declared_record_count=' || declared_record_count::text FROM state
               UNION ALL
-              SELECT 7, 'declared_agency_count=' || declared_agency_count::text FROM state
+              SELECT 7, 'exact_activity_count=' || exact_activity_count::text FROM state
               UNION ALL
-              SELECT 8, 'actual_agency_count=' || actual_agency_count::text FROM state
+              SELECT 8, 'declared_broker_count=' || declared_broker_count::text FROM state
               UNION ALL
-              SELECT 9, 'visible_agency_count=' || visible_agency_count::text FROM state
+              SELECT 9, 'actual_broker_count=' || actual_broker_count::text FROM state
               UNION ALL
-              SELECT 10, 'publication_events=' || publication_events::text FROM state
+              SELECT 10, 'visible_broker_count=' || visible_broker_count::text FROM state
               UNION ALL
-              SELECT 11, 'our_broker_count=' || our_broker_count::text FROM state
+              SELECT 11, 'declared_agency_count=' || declared_agency_count::text FROM state
               UNION ALL
-              SELECT 12, 'our_agency_count=' || our_agency_count::text FROM state
+              SELECT 12, 'actual_agency_count=' || actual_agency_count::text FROM state
+              UNION ALL
+              SELECT 13, 'visible_agency_count=' || visible_agency_count::text FROM state
+              UNION ALL
+              SELECT 14, 'broker_source_aggregate_count=' || broker_source_aggregate_count::text FROM state
+              UNION ALL
+              SELECT 15, 'broker_fixations=' || broker_fixations::text FROM state
+              UNION ALL
+              SELECT 16, 'broker_meetings=' || broker_meetings::text FROM state
+              UNION ALL
+              SELECT 17, 'broker_deals=' || broker_deals::text FROM state
+              UNION ALL
+              SELECT 18, 'broker_tours=' || broker_tours::text FROM state
+              UNION ALL
+              SELECT 19, 'broker_dated_calls=' || broker_dated_calls::text FROM state
+              UNION ALL
+              SELECT 20, 'broker_deal_amount_rub=' || broker_deal_amount_rub FROM state
+              UNION ALL
+              SELECT 21, 'agency_source_aggregate_count=' || agency_source_aggregate_count::text FROM state
+              UNION ALL
+              SELECT 22, 'agency_meetings=' || agency_meetings::text FROM state
+              UNION ALL
+              SELECT 23, 'agency_deals=' || agency_deals::text FROM state
+              UNION ALL
+              SELECT 24, 'agency_deal_amount_rub=' || agency_deal_amount_rub FROM state
+              UNION ALL
+              SELECT 25, 'publication_events=' || publication_events::text FROM state
+              UNION ALL
+              SELECT 26, 'our_broker_count=' || our_broker_count::text FROM state
+              UNION ALL
+              SELECT 27, 'our_agency_count=' || our_agency_count::text FROM state
             )
             SELECT marker
             FROM markers
             ORDER BY position;
-            SQL
+          SQL
+          REMOTE

@@ -78,3 +78,9 @@ scripts/_pr_body_*.md
 scripts/_patch_*.py
 scripts/_push_helper.py
 scripts/_extract_log.py
+
+# Anna loyalty import payloads contain broker PII and must stay outside Git.
+anna-loyalty*.json
+anna-loyalty*.json.gz
+anna-loyalty*.gz
+anna-loyalty*.b64

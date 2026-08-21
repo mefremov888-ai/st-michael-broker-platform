@@ -22,6 +22,7 @@ import {
 
 const ANNA_DATASET_CODE = "ANNA";
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
+export const MAX_LOYALTY_CLI_IMPORT_BYTES = 50 * 1024 * 1024;
 const MAX_METADATA_BYTES = 32 * 1024;
 const MAX_ISSUES_RETURNED = 200;
 const MAX_POSTGRES_BIGINT = 9223372036854775807n;
@@ -30,6 +31,12 @@ const CANDIDATE_QUERY_BATCH_SIZE = 500;
 
 type EntityType = "BROKER" | "AGENCY";
 type BaseSlug = "anna" | "ours";
+
+export interface ImportPreparationOptions {
+  // Internal callers only. HTTP controllers never pass this option and keep
+  // the 10 MiB in-memory upload boundary.
+  maxImportBytes?: number;
+}
 
 interface ImportIssue {
   row: number;
@@ -82,6 +89,34 @@ interface PreparedRecord {
     validTo?: string;
     evidence?: Record<string, unknown>;
   }>;
+  sourceAggregate?: {
+    sourceKind: string;
+    sourceVersion: string;
+    sourceLabel?: string;
+    quality: "SOURCE_REPORTED" | "PARTIAL" | "UNVERIFIED";
+    exactness: "EXACT" | "APPROXIMATE" | "UNKNOWN";
+    periodKind: "LIFETIME" | "DATE_RANGE" | "MONTHLY_BREAKDOWN" | "UNKNOWN";
+    periodFrom?: string;
+    periodTo?: string;
+    contributesToSourceSummary: boolean;
+    fixationCount?: number;
+    meetingCount?: number;
+    dealCount?: number;
+    brokerTourCount?: number;
+    callCount?: number;
+    dealAmount?: string;
+    currency?: "RUB";
+    lastFixationAt?: string;
+    lastMeetingAt?: string;
+    lastDealAt?: string;
+    lastCallAt?: string;
+    brokerTourVisited?: boolean;
+    brokerTourAt?: string;
+    dealsByMonth?: Record<string, number>;
+    callBreakdown?: Array<Record<string, unknown>>;
+    provenance?: Record<string, unknown>;
+    reportedAt?: string;
+  };
   rowFingerprint: string;
 }
 
@@ -91,6 +126,27 @@ interface MatchCandidate {
   targetId: string;
   matchCodes: string[];
   score: string;
+}
+
+export interface SourceReportedGroupSummary {
+  records: number;
+  fixations: number | null;
+  fixationKnownRecords: number;
+  meetings: number | null;
+  meetingKnownRecords: number;
+  deals: number | null;
+  dealKnownRecords: number;
+  brokerTours: number | null;
+  brokerTourKnownRecords: number;
+  calls: number | null;
+  callKnownRecords: number;
+  dealAmount: string | null;
+  dealAmountKnownRecords: number;
+}
+
+export interface SourceReportedImportSummary {
+  brokers: SourceReportedGroupSummary;
+  agencies: SourceReportedGroupSummary;
 }
 
 interface PreparedImport {
@@ -106,6 +162,9 @@ interface PreparedImport {
     uniqueNormalizedPhones: number;
     externalIdentities: number;
     activities: number;
+    sourceAggregates: number;
+    sourceSummaryAggregates: number;
+    sourceReportedSummary: SourceReportedImportSummary;
     includedActivities: number;
     includedFixations: number;
     includedMeetings: number;
@@ -264,8 +323,11 @@ function annaBirthday(attributes: unknown): string | null {
   const object = attributes as Record<string, any>;
   const value = object.birthday ?? object.crm?.birthday;
   if (typeof value !== "string") return null;
-  const match = value.trim().match(/^(\d{2})\.(\d{2})(?:\.|$)/);
-  return match ? `${match[1]}.${match[2]}` : null;
+  const trimmed = value.trim();
+  const dayFirst = trimmed.match(/^(\d{2})\.(\d{2})(?:\.|$)/);
+  if (dayFirst) return `${dayFirst[1]}.${dayFirst[2]}`;
+  const iso = trimmed.match(/^\d{4}-(\d{2})-(\d{2})(?:T|$)/);
+  return iso ? `${iso[2]}.${iso[1]}` : null;
 }
 
 function maskContact(type: string, value: string): string {
@@ -316,9 +378,130 @@ export class LoyaltyBaseService {
     return { from, to };
   }
 
-  private prepareImport(dto: LoyaltyImportDto): PreparedImport {
-    if (Buffer.byteLength(JSON.stringify(dto), "utf8") > MAX_IMPORT_BYTES) {
-      throw new BadRequestException("Import document exceeds 10 MB");
+  private sourceReportedImportSummary(
+    records: PreparedRecord[],
+  ): SourceReportedImportSummary {
+    const summarize = (entityType: EntityType): SourceReportedGroupSummary => {
+      const aggregates = records
+        .filter(
+          (record) =>
+            record.entityType === entityType &&
+            record.sourceAggregate?.quality === "SOURCE_REPORTED" &&
+            record.sourceAggregate.contributesToSourceSummary === true,
+        )
+        .map((record) => record.sourceAggregate!);
+      const numeric = (
+        field:
+          | "fixationCount"
+          | "meetingCount"
+          | "dealCount"
+          | "brokerTourCount"
+          | "callCount",
+      ): { sum: number | null; known: number } => {
+        const values = aggregates
+          .map((aggregate) => aggregate[field])
+          .filter((value): value is number => value !== undefined);
+        return {
+          sum: values.length
+            ? values.reduce((total, value) => total + value, 0)
+            : null,
+          known: values.length,
+        };
+      };
+      const fixations = numeric("fixationCount");
+      const meetings = numeric("meetingCount");
+      const deals = numeric("dealCount");
+      const brokerTours = numeric("brokerTourCount");
+      const calls = numeric("callCount");
+      const amountValues = aggregates
+        .map((aggregate) => aggregate.dealAmount)
+        .filter((value): value is string => value !== undefined)
+        .map((value) => moneyToCents(value));
+      return {
+        records: aggregates.length,
+        fixations: fixations.sum,
+        fixationKnownRecords: fixations.known,
+        meetings: meetings.sum,
+        meetingKnownRecords: meetings.known,
+        deals: deals.sum,
+        dealKnownRecords: deals.known,
+        brokerTours: brokerTours.sum,
+        brokerTourKnownRecords: brokerTours.known,
+        calls: calls.sum,
+        callKnownRecords: calls.known,
+        dealAmount: amountValues.length
+          ? centsToMoney(
+              amountValues.reduce((total, value) => total + value, 0n),
+            )
+          : null,
+        dealAmountKnownRecords: amountValues.length,
+      };
+    };
+    return {
+      brokers: summarize("BROKER"),
+      agencies: summarize("AGENCY"),
+    };
+  }
+
+  private compareSourceReportedManifest(
+    actual: SourceReportedImportSummary,
+    expected: LoyaltyImportDto["expectedSourceReportedSummary"],
+    addIssue: (row: number, code: string) => void,
+  ) {
+    if (!expected) return;
+    const numericFields: Array<
+      Exclude<keyof SourceReportedGroupSummary, "dealAmount">
+    > = [
+      "records",
+      "fixations",
+      "fixationKnownRecords",
+      "meetings",
+      "meetingKnownRecords",
+      "deals",
+      "dealKnownRecords",
+      "brokerTours",
+      "brokerTourKnownRecords",
+      "calls",
+      "callKnownRecords",
+      "dealAmountKnownRecords",
+    ];
+    for (const [groupName, expectedGroup] of [
+      ["BROKER", expected.brokers],
+      ["AGENCY", expected.agencies],
+    ] as const) {
+      const actualGroup =
+        groupName === "BROKER" ? actual.brokers : actual.agencies;
+      for (const field of numericFields) {
+        if (expectedGroup[field] !== actualGroup[field]) {
+          addIssue(0, `EXPECTED_SOURCE_${groupName}_${field}_MISMATCH`);
+        }
+      }
+      const expectedAmount =
+        expectedGroup.dealAmount === null
+          ? null
+          : centsToMoney(moneyToCents(expectedGroup.dealAmount));
+      if (expectedAmount !== actualGroup.dealAmount) {
+        addIssue(0, `EXPECTED_SOURCE_${groupName}_dealAmount_MISMATCH`);
+      }
+    }
+  }
+
+  private prepareImport(
+    dto: LoyaltyImportDto,
+    options: ImportPreparationOptions = {},
+  ): PreparedImport {
+    const maxImportBytes = options.maxImportBytes ?? MAX_IMPORT_BYTES;
+    if (
+      !Number.isSafeInteger(maxImportBytes) ||
+      maxImportBytes < 1 ||
+      maxImportBytes > MAX_LOYALTY_CLI_IMPORT_BYTES
+    ) {
+      throw new BadRequestException("Invalid import byte limit");
+    }
+    if (Buffer.byteLength(JSON.stringify(dto), "utf8") > maxImportBytes) {
+      throw new BadRequestException(
+        `Import document exceeds ${Math.floor(maxImportBytes / (1024 * 1024))} MB`,
+      );
     }
 
     let issueCount = 0;
@@ -499,6 +682,105 @@ export class LoyaltyBaseService {
       }
       if (primaryRoles > 1) addIssue(row, "MULTIPLE_PRIMARY_ORGANIZATIONS");
 
+      let sourceAggregate: PreparedRecord["sourceAggregate"];
+      if (input.sourceAggregate) {
+        const aggregate = input.sourceAggregate;
+        const sourceKind = aggregate.sourceKind.trim();
+        const sourceVersion = aggregate.sourceVersion.trim();
+        if (!sourceKind) addIssue(row, "EMPTY_AGGREGATE_SOURCE_KIND");
+        if (!sourceVersion) addIssue(row, "EMPTY_AGGREGATE_SOURCE_VERSION");
+        if (
+          aggregate.contributesToSourceSummary &&
+          aggregate.quality !== "SOURCE_REPORTED"
+        ) {
+          addIssue(row, "SOURCE_SUMMARY_AGGREGATE_MUST_BE_SOURCE_REPORTED");
+        }
+        if (
+          aggregate.periodKind === "DATE_RANGE" &&
+          (!aggregate.periodFrom || !aggregate.periodTo)
+        ) {
+          addIssue(row, "AGGREGATE_DATE_RANGE_REQUIRED");
+        }
+        if (
+          aggregate.periodFrom &&
+          aggregate.periodTo &&
+          new Date(aggregate.periodFrom) > new Date(aggregate.periodTo)
+        ) {
+          addIssue(row, "INVALID_AGGREGATE_PERIOD");
+        }
+        if (
+          aggregate.dealAmount !== undefined &&
+          aggregate.dealAmount !== null &&
+          moneyToCents(aggregate.dealAmount) > MAX_DECIMAL_18_2_CENTS
+        ) {
+          addIssue(row, "AGGREGATE_DEAL_AMOUNT_OVERFLOW");
+        }
+        if (
+          (aggregate.dealAmount === undefined ||
+            aggregate.dealAmount === null) !==
+          (aggregate.currency === undefined || aggregate.currency === null)
+        ) {
+          addIssue(row, "AGGREGATE_AMOUNT_CURRENCY_PAIR_REQUIRED");
+        }
+        let dealsByMonth: Record<string, number> | undefined;
+        if (aggregate.dealsByMonth) {
+          dealsByMonth = {};
+          for (const [month, count] of Object.entries(aggregate.dealsByMonth)) {
+            if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) {
+              addIssue(row, "INVALID_AGGREGATE_MONTH_KEY");
+              continue;
+            }
+            if (
+              !Number.isSafeInteger(count) ||
+              count < 0 ||
+              count > 20_000_000
+            ) {
+              addIssue(row, "INVALID_AGGREGATE_MONTH_COUNT");
+              continue;
+            }
+            dealsByMonth[month] = count;
+          }
+        }
+        sourceAggregate = {
+          sourceKind,
+          sourceVersion,
+          sourceLabel: aggregate.sourceLabel?.trim(),
+          quality: aggregate.quality,
+          exactness: aggregate.exactness,
+          periodKind: aggregate.periodKind,
+          periodFrom: aggregate.periodFrom || undefined,
+          periodTo: aggregate.periodTo || undefined,
+          contributesToSourceSummary:
+            aggregate.contributesToSourceSummary === true,
+          fixationCount: aggregate.fixationCount ?? undefined,
+          meetingCount: aggregate.meetingCount ?? undefined,
+          dealCount: aggregate.dealCount ?? undefined,
+          brokerTourCount: aggregate.brokerTourCount ?? undefined,
+          callCount: aggregate.callCount ?? undefined,
+          dealAmount:
+            aggregate.dealAmount === undefined || aggregate.dealAmount === null
+              ? undefined
+              : centsToMoney(moneyToCents(aggregate.dealAmount)),
+          currency: aggregate.currency || undefined,
+          lastFixationAt: aggregate.lastFixationAt || undefined,
+          lastMeetingAt: aggregate.lastMeetingAt || undefined,
+          lastDealAt: aggregate.lastDealAt || undefined,
+          lastCallAt: aggregate.lastCallAt || undefined,
+          brokerTourVisited: aggregate.brokerTourVisited ?? undefined,
+          brokerTourAt: aggregate.brokerTourAt || undefined,
+          dealsByMonth,
+          callBreakdown: aggregate.callBreakdown
+            ? (sanitizeJson(aggregate.callBreakdown) as Array<
+                Record<string, unknown>
+              >)
+            : undefined,
+          provenance: aggregate.provenance
+            ? sanitizeJson(aggregate.provenance)
+            : undefined,
+          reportedAt: aggregate.reportedAt || undefined,
+        };
+      }
+
       const attributes = input.attributes
         ? sanitizeJson(input.attributes)
         : undefined;
@@ -517,6 +799,7 @@ export class LoyaltyBaseService {
         externalIdentities: identities,
         activities,
         organizationRoles: roles,
+        sourceAggregate,
       };
       prepared.push({
         ...recordWithoutFingerprint,
@@ -543,11 +826,51 @@ export class LoyaltyBaseService {
       addIssue(0, "EXPECTED_RECORD_COUNT_MISMATCH");
     }
 
+    const sourceReportedSummary = this.sourceReportedImportSummary(prepared);
+    const hasCompleteSourceReportedManifest = Boolean(
+      dto.expectedSourceReportedSummary?.brokers &&
+      dto.expectedSourceReportedSummary?.agencies,
+    );
+    if (
+      dto.expectedSourceReportedSummary &&
+      !hasCompleteSourceReportedManifest
+    ) {
+      addIssue(0, "EXPECTED_SOURCE_REPORTED_SUMMARY_GROUPS_REQUIRED");
+    }
+    const expectedSourceReportedSummary = hasCompleteSourceReportedManifest
+      ? {
+          brokers: {
+            ...dto.expectedSourceReportedSummary.brokers,
+            dealAmount:
+              dto.expectedSourceReportedSummary.brokers.dealAmount === null
+                ? null
+                : centsToMoney(
+                    moneyToCents(
+                      dto.expectedSourceReportedSummary.brokers.dealAmount,
+                    ),
+                  ),
+          },
+          agencies: {
+            ...dto.expectedSourceReportedSummary.agencies,
+            dealAmount:
+              dto.expectedSourceReportedSummary.agencies.dealAmount === null
+                ? null
+                : centsToMoney(
+                    moneyToCents(
+                      dto.expectedSourceReportedSummary.agencies.dealAmount,
+                    ),
+                  ),
+          },
+        }
+      : null;
+
     const hashDocument = {
       ruleVersion: dto.ruleVersion,
       expectedRecords: dto.expectedRecords ?? null,
       expectedUniquePhones: dto.expectedUniquePhones ?? null,
       expectedActivities: dto.expectedActivities ?? null,
+      expectedSourceAggregates: dto.expectedSourceAggregates ?? null,
+      expectedSourceReportedSummary,
       expectedExternalIdentities: dto.expectedExternalIdentities ?? null,
       expectedIncludedFixations: dto.expectedIncludedFixations ?? null,
       expectedIncludedMeetings: dto.expectedIncludedMeetings ?? null,
@@ -588,6 +911,12 @@ export class LoyaltyBaseService {
         (sum, record) => sum + record.activities.length,
         0,
       ),
+      sourceAggregates: prepared.filter((record) => record.sourceAggregate)
+        .length,
+      sourceSummaryAggregates: prepared.filter(
+        (record) => record.sourceAggregate?.contributesToSourceSummary,
+      ).length,
+      sourceReportedSummary,
       includedActivities: prepared.reduce(
         (sum, record) =>
           sum +
@@ -689,6 +1018,32 @@ export class LoyaltyBaseService {
       addIssue(0, "EXPECTED_ACTIVITY_COUNT_REQUIRED");
     else if (dto.expectedActivities !== summary.activities)
       addIssue(0, "EXPECTED_ACTIVITY_COUNT_MISMATCH");
+    if (
+      summary.sourceAggregates > 0 &&
+      dto.expectedSourceAggregates === undefined
+    ) {
+      addIssue(0, "EXPECTED_SOURCE_AGGREGATE_COUNT_REQUIRED");
+    } else if (
+      dto.expectedSourceAggregates !== undefined &&
+      dto.expectedSourceAggregates !== summary.sourceAggregates
+    ) {
+      addIssue(0, "EXPECTED_SOURCE_AGGREGATE_COUNT_MISMATCH");
+    }
+    if (
+      summary.sourceAggregates > 0 &&
+      dto.expectedSourceReportedSummary === undefined
+    ) {
+      addIssue(0, "EXPECTED_SOURCE_REPORTED_SUMMARY_REQUIRED");
+    } else if (
+      dto.expectedSourceReportedSummary &&
+      hasCompleteSourceReportedManifest
+    ) {
+      this.compareSourceReportedManifest(
+        summary.sourceReportedSummary,
+        dto.expectedSourceReportedSummary,
+        addIssue,
+      );
+    }
     if (dto.expectedExternalIdentities === undefined)
       addIssue(0, "EXPECTED_EXTERNAL_IDENTITY_COUNT_REQUIRED");
     else if (dto.expectedExternalIdentities !== summary.externalIdentities)
@@ -888,8 +1243,11 @@ export class LoyaltyBaseService {
     return candidates;
   }
 
-  async dryRunImport(dto: LoyaltyImportDto) {
-    const prepared = this.prepareImport(dto);
+  async dryRunImport(
+    dto: LoyaltyImportDto,
+    options: ImportPreparationOptions = {},
+  ) {
+    const prepared = this.prepareImport(dto, options);
     const [candidates, coverage] = await Promise.all([
       prepared.issueCount === 0
         ? this.findCandidates(prepared.records)
@@ -934,6 +1292,8 @@ export class LoyaltyBaseService {
       uniqueNormalizedPhones: summary.uniqueNormalizedPhones,
       externalIdentities: summary.externalIdentities,
       activities: summary.activities,
+      sourceAggregates: summary.sourceAggregates,
+      sourceSummaryAggregates: summary.sourceSummaryAggregates,
       includedActivities: summary.includedActivities,
       includedFixations: summary.includedFixations,
       includedMeetings: summary.includedMeetings,
@@ -941,6 +1301,7 @@ export class LoyaltyBaseService {
       includedBrokerTours: summary.includedBrokerTours,
       includedCalls: summary.includedCalls,
       includedDealAmount: summary.includedDealAmount,
+      ...this.sourceReportedCoverageDimensions(summary.sourceReportedSummary),
     };
     const droppedDimensions = active
       ? this.coverageDrops(
@@ -970,6 +1331,8 @@ export class LoyaltyBaseService {
       uniqueNormalizedPhones: Number(summary.uniqueNormalizedPhones || 0),
       externalIdentities: Number(summary.externalIdentities || 0),
       activities: Number(snapshot?.activityCount ?? summary.activities ?? 0),
+      sourceAggregates: Number(summary.sourceAggregates || 0),
+      sourceSummaryAggregates: Number(summary.sourceSummaryAggregates || 0),
       includedActivities: Number(summary.includedActivities || 0),
       includedFixations: Number(summary.includedFixations || 0),
       includedMeetings: Number(summary.includedMeetings || 0),
@@ -977,6 +1340,37 @@ export class LoyaltyBaseService {
       includedBrokerTours: Number(summary.includedBrokerTours || 0),
       includedCalls: Number(summary.includedCalls || 0),
       includedDealAmount: String(summary.includedDealAmount || "0.00"),
+      ...this.sourceReportedCoverageDimensions(summary.sourceReportedSummary),
+    };
+  }
+
+  private sourceReportedCoverageDimensions(summary: any) {
+    const group = (prefix: "Broker" | "Agency", value: any) => ({
+      [`source${prefix}Records`]: Number(value?.records || 0),
+      [`source${prefix}Fixations`]: Number(value?.fixations || 0),
+      [`source${prefix}FixationKnownRecords`]: Number(
+        value?.fixationKnownRecords || 0,
+      ),
+      [`source${prefix}Meetings`]: Number(value?.meetings || 0),
+      [`source${prefix}MeetingKnownRecords`]: Number(
+        value?.meetingKnownRecords || 0,
+      ),
+      [`source${prefix}Deals`]: Number(value?.deals || 0),
+      [`source${prefix}DealKnownRecords`]: Number(value?.dealKnownRecords || 0),
+      [`source${prefix}BrokerTours`]: Number(value?.brokerTours || 0),
+      [`source${prefix}BrokerTourKnownRecords`]: Number(
+        value?.brokerTourKnownRecords || 0,
+      ),
+      [`source${prefix}Calls`]: Number(value?.calls || 0),
+      [`source${prefix}CallKnownRecords`]: Number(value?.callKnownRecords || 0),
+      [`source${prefix}DealAmount`]: String(value?.dealAmount || "0.00"),
+      [`source${prefix}DealAmountKnownRecords`]: Number(
+        value?.dealAmountKnownRecords || 0,
+      ),
+    });
+    return {
+      ...group("Broker", summary?.brokers),
+      ...group("Agency", summary?.agencies),
     };
   }
 
@@ -985,7 +1379,7 @@ export class LoyaltyBaseService {
     next: Record<string, number | string>,
   ) {
     const lower = (dimension: string) =>
-      dimension === "includedDealAmount"
+      dimension.endsWith("DealAmount")
         ? moneyToCents(String(next[dimension])) <
           moneyToCents(String(current[dimension]))
         : Number(next[dimension]) < Number(current[dimension]);
@@ -1009,8 +1403,12 @@ export class LoyaltyBaseService {
     }
   }
 
-  async stageImport(dto: LoyaltyImportDto, actorId?: string) {
-    const prepared = this.prepareImport(dto);
+  async stageImport(
+    dto: LoyaltyImportDto,
+    actorId?: string,
+    options: ImportPreparationOptions = {},
+  ) {
+    const prepared = this.prepareImport(dto, options);
     if (prepared.issueCount > 0) {
       throw new BadRequestException({
         message: "Import document has validation issues",
@@ -1215,6 +1613,7 @@ export class LoyaltyBaseService {
         const identityRows: any[] = [];
         const activityRows: any[] = [];
         const metricRows: any[] = [];
+        const sourceAggregateRows: any[] = [];
         const fieldRows: any[] = [];
         const roleRows: any[] = [];
         for (const record of prepared.records) {
@@ -1381,8 +1780,58 @@ export class LoyaltyBaseService {
             dealCount: counts.DEAL,
             brokerTourCount: counts.BROKER_TOUR,
             callCount: counts.CALL,
+            activityEvidenceCount: record.activities.length,
             dealAmount: centsToMoney(dealAmountCents),
           });
+          if (record.sourceAggregate) {
+            const aggregate = record.sourceAggregate;
+            sourceAggregateRows.push({
+              id: randomUUID(),
+              sourceRecordId,
+              sourceKind: aggregate.sourceKind,
+              sourceVersion: aggregate.sourceVersion,
+              sourceLabel: aggregate.sourceLabel || null,
+              quality: aggregate.quality,
+              exactness: aggregate.exactness,
+              periodKind: aggregate.periodKind,
+              periodFrom: aggregate.periodFrom
+                ? new Date(aggregate.periodFrom)
+                : null,
+              periodTo: aggregate.periodTo
+                ? new Date(aggregate.periodTo)
+                : null,
+              contributesToSourceSummary: aggregate.contributesToSourceSummary,
+              fixationCount: aggregate.fixationCount ?? null,
+              meetingCount: aggregate.meetingCount ?? null,
+              dealCount: aggregate.dealCount ?? null,
+              brokerTourCount: aggregate.brokerTourCount ?? null,
+              callCount: aggregate.callCount ?? null,
+              dealAmount: aggregate.dealAmount ?? null,
+              currency: aggregate.currency ?? null,
+              lastFixationAt: aggregate.lastFixationAt
+                ? new Date(aggregate.lastFixationAt)
+                : null,
+              lastMeetingAt: aggregate.lastMeetingAt
+                ? new Date(aggregate.lastMeetingAt)
+                : null,
+              lastDealAt: aggregate.lastDealAt
+                ? new Date(aggregate.lastDealAt)
+                : null,
+              lastCallAt: aggregate.lastCallAt
+                ? new Date(aggregate.lastCallAt)
+                : null,
+              brokerTourVisited: aggregate.brokerTourVisited ?? null,
+              brokerTourAt: aggregate.brokerTourAt
+                ? new Date(aggregate.brokerTourAt)
+                : null,
+              dealsByMonth: aggregate.dealsByMonth,
+              callBreakdown: aggregate.callBreakdown,
+              provenance: aggregate.provenance,
+              reportedAt: aggregate.reportedAt
+                ? new Date(aggregate.reportedAt)
+                : null,
+            });
+          }
           for (const role of record.organizationRoles) {
             roleRows.push({
               id: randomUUID(),
@@ -1404,6 +1853,10 @@ export class LoyaltyBaseService {
         await this.createManyInChunks(tx.loyaltyExternalIdentity, identityRows);
         await this.createManyInChunks(tx.loyaltyActivity, activityRows);
         await this.createManyInChunks(tx.loyaltyMetricSnapshot, metricRows);
+        await this.createManyInChunks(
+          tx.loyaltySourceAggregate,
+          sourceAggregateRows,
+        );
         await this.createManyInChunks(tx.loyaltySourceFieldValue, fieldRows);
         await this.createManyInChunks(
           tx.loyaltyPersonOrganizationRole,
@@ -1512,11 +1965,114 @@ export class LoyaltyBaseService {
         if (snapshot.expectedRecords !== snapshot.recordCount) {
           throw new ConflictException("Snapshot coverage is incomplete");
         }
-        const actualCount = await tx.loyaltySourceRecord.count({
-          where: { snapshotId },
-        });
-        if (actualCount !== snapshot.recordCount)
-          throw new ConflictException("Snapshot record count is incomplete");
+        const summary =
+          snapshot.summary && typeof snapshot.summary === "object"
+            ? (snapshot.summary as any)
+            : {};
+        const [
+          actualRecords,
+          actualBrokers,
+          actualAgencies,
+          actualContactPoints,
+          actualExternalIdentities,
+          actualActivities,
+          actualMetrics,
+          actualSourceAggregates,
+          actualOrganizationRoles,
+          actualReconciliationCases,
+        ] = await Promise.all([
+          tx.loyaltySourceRecord.count({ where: { snapshotId } }),
+          tx.loyaltySourceRecord.count({
+            where: { snapshotId, entityType: "BROKER" },
+          }),
+          tx.loyaltySourceRecord.count({
+            where: { snapshotId, entityType: "AGENCY" },
+          }),
+          tx.loyaltyContactPoint.count({
+            where: { sourceRecord: { snapshotId } },
+          }),
+          tx.loyaltyExternalIdentity.count({
+            where: { sourceRecord: { snapshotId } },
+          }),
+          tx.loyaltyActivity.count({ where: { snapshotId } }),
+          tx.loyaltyMetricSnapshot.count({
+            where: {
+              sourceRecord: { snapshotId },
+              ruleVersion: snapshot.ruleVersion,
+            },
+          }),
+          tx.loyaltySourceAggregate.count({
+            where: { sourceRecord: { snapshotId } },
+          }),
+          tx.loyaltyPersonOrganizationRole.count({
+            where: { sourceRecord: { snapshotId } },
+          }),
+          tx.loyaltyReconciliationCase.count({ where: { snapshotId } }),
+        ]);
+        const expectedCounts: Array<{
+          name: string;
+          actual: number;
+          expected: number;
+        }> = [
+          {
+            name: "records",
+            actual: actualRecords,
+            expected: snapshot.recordCount,
+          },
+          {
+            name: "brokers",
+            actual: actualBrokers,
+            expected: snapshot.brokerCount,
+          },
+          {
+            name: "agencies",
+            actual: actualAgencies,
+            expected: snapshot.agencyCount,
+          },
+          {
+            name: "contact points",
+            actual: actualContactPoints,
+            expected: Number(summary.contactPoints || 0),
+          },
+          {
+            name: "external identities",
+            actual: actualExternalIdentities,
+            expected: Number(summary.externalIdentities || 0),
+          },
+          {
+            name: "activities",
+            actual: actualActivities,
+            expected: snapshot.activityCount,
+          },
+          {
+            name: "metric snapshots",
+            actual: actualMetrics,
+            expected: snapshot.recordCount,
+          },
+          {
+            name: "source aggregates",
+            actual: actualSourceAggregates,
+            expected: Number(summary.sourceAggregates || 0),
+          },
+          {
+            name: "organization roles",
+            actual: actualOrganizationRoles,
+            expected: Number(summary.organizationRoles || 0),
+          },
+          {
+            name: "reconciliation cases",
+            actual: actualReconciliationCases,
+            expected: Number(summary.candidateCount || 0),
+          },
+        ];
+        const incomplete = expectedCounts.find(
+          ({ actual, expected }) => actual !== expected,
+        );
+        if (incomplete) {
+          throw new ConflictException(
+            `Snapshot ${incomplete.name} coverage is incomplete`,
+          );
+        }
         if (
           snapshot.dataset.activeSnapshotId === snapshot.id &&
           snapshot.status === "PUBLISHED"
@@ -1665,6 +2221,13 @@ export class LoyaltyBaseService {
       verdict: "INCLUDED",
     };
     const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
+    // A snapshot is either event-derived or aggregate-derived for headline
+    // KPIs. We never add source rollups to exact activities, which prevents
+    // double counting. The source-reported rollups remain visible per record in
+    // both modes for audit/comparison.
+    if (Number(active.snapshot.activityCount) === 0) {
+      return this.annaSourceAggregateOverview(active, periodDto);
+    }
     const [
       brokerTotal,
       agencyTotal,
@@ -1742,6 +2305,10 @@ export class LoyaltyBaseService {
           (birthday) => birthday === moscowDateParts().dayMonth,
         ).length
       : null;
+    const sourceReportedView = await this.annaSourceAggregateOverview(
+      active,
+      periodDto,
+    );
     return {
       base: "anna",
       period: periodDto,
@@ -1762,6 +2329,504 @@ export class LoyaltyBaseService {
       agencies: { total: agencyTotal, top: agencyTop },
       activities: { fixations, meetings, deals },
       dealAmount: String(dealAmount._sum.amount || "0"),
+      sourceReportedSummary: sourceReportedView.sourceReportedSummary,
+      metricSource: {
+        kind: "EXACT_ACTIVITIES",
+        label: "Event-level activities",
+        exactness: "EXACT",
+        ruleVersion: active.snapshot.ruleVersion,
+        periodFilterApplied: true,
+      },
+      kpiMetadata: this.annaKpiMetadata(
+        "EXACT_ACTIVITIES",
+        active.snapshot.ruleVersion,
+        periodDto,
+      ),
+    };
+  }
+
+  private async annaSourceAggregateOverview(
+    active: any,
+    periodDto: { from: string; to: string },
+  ) {
+    const snapshotId = active.snapshot.id;
+    const activeOwner = (entityType: EntityType): any => ({
+      snapshotId,
+      entityType,
+      sourceArchivedAt: null,
+      ...(entityType === "BROKER"
+        ? { person: { is: { archivedAt: null } } }
+        : { organization: { is: { archivedAt: null } } }),
+    });
+    const [brokerTotal, agencyTotal, brokerRows, aggregateRows] =
+      await Promise.all([
+        this.prisma.loyaltySourceRecord.count({
+          where: activeOwner("BROKER"),
+        }),
+        this.prisma.loyaltySourceRecord.count({
+          where: activeOwner("AGENCY"),
+        }),
+        this.prisma.loyaltySourceRecord.findMany({
+          where: activeOwner("BROKER"),
+          select: {
+            id: true,
+            personId: true,
+            displayName: true,
+            attributes: true,
+            person: { select: { manualDisplayName: true } },
+            sourceAggregate: {
+              select: {
+                quality: true,
+                contributesToSourceSummary: true,
+                fixationCount: true,
+                meetingCount: true,
+                dealCount: true,
+                brokerTourCount: true,
+                lastCallAt: true,
+                brokerTourVisited: true,
+              },
+            },
+          },
+        }),
+        (this.prisma as any).loyaltySourceAggregate.findMany({
+          where: {
+            quality: "SOURCE_REPORTED",
+            sourceRecord: {
+              snapshotId,
+              sourceArchivedAt: null,
+              OR: [
+                {
+                  entityType: "BROKER",
+                  person: { is: { archivedAt: null } },
+                },
+                {
+                  entityType: "AGENCY",
+                  organization: { is: { archivedAt: null } },
+                },
+              ],
+            },
+          },
+          select: {
+            sourceKind: true,
+            sourceVersion: true,
+            sourceLabel: true,
+            quality: true,
+            exactness: true,
+            periodKind: true,
+            contributesToSourceSummary: true,
+            fixationCount: true,
+            meetingCount: true,
+            dealCount: true,
+            brokerTourCount: true,
+            callCount: true,
+            dealAmount: true,
+            lastDealAt: true,
+            sourceRecord: {
+              select: {
+                entityType: true,
+                personId: true,
+                organizationId: true,
+                displayName: true,
+                person: { select: { manualDisplayName: true } },
+                organization: { select: { manualDisplayName: true } },
+              },
+            },
+          },
+        }),
+      ]);
+    const rows = (aggregateRows || []) as any[];
+    const includedRows = rows.filter(
+      (row) => row.contributesToSourceSummary === true,
+    );
+    const sumNullable = (group: any[], field: string): number | null => {
+      const values = group
+        .map((row) => row[field])
+        .filter((value) => value !== null && value !== undefined)
+        .map(Number);
+      return values.length
+        ? values.reduce((sum, value) => sum + value, 0)
+        : null;
+    };
+    const sumAmount = (group: any[]): string | null => {
+      const amountValues = group
+        .map((row) => row.dealAmount)
+        .filter((value) => value !== null && value !== undefined)
+        .map((value) => moneyToCents(String(value)));
+      return amountValues.length
+        ? centsToMoney(amountValues.reduce((sum, value) => sum + value, 0n))
+        : null;
+    };
+    const brokers = (brokerRows as any[]) || [];
+    const knownBirthdays = brokers
+      .map((row) => annaBirthday(row.attributes))
+      .filter(Boolean) as string[];
+    const birthdaysToday = knownBirthdays.length
+      ? knownBirthdays.filter(
+          (birthday) => birthday === moscowDateParts().dayMonth,
+        ).length
+      : null;
+    const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
+    const sourceReportedBrokers = brokers.filter(
+      (row) =>
+        row.sourceAggregate?.quality === "SOURCE_REPORTED" &&
+        row.sourceAggregate?.contributesToSourceSummary === true,
+    );
+    // A zero callsMayAugust rollup only means that the dated legacy breakdown
+    // is empty. It is not evidence that the broker has never been called.
+    const sourceReportedCallKnown = sourceReportedBrokers.filter(
+      (row) => row.sourceAggregate.lastCallAt != null,
+    );
+    const notCalledCandidates = sourceReportedCallKnown.filter(
+      (row) => new Date(row.sourceAggregate.lastCallAt) < currentMonth.from,
+    );
+    const newCount = sourceReportedBrokers.filter((row) => {
+      const attributes = row.attributes || {};
+      const stage =
+        attributes.relationshipStage ||
+        attributes.stage ||
+        attributes.crm?.relationshipStage;
+      const aggregate = row.sourceAggregate;
+      return (
+        ["NEW", "NEW_BROKER", "Новый"].includes(stage) &&
+        [
+          aggregate.brokerTourCount,
+          aggregate.fixationCount,
+          aggregate.meetingCount,
+          aggregate.dealCount,
+        ].every((value) => value === 0)
+      );
+    }).length;
+    const btWithoutFixation = sourceReportedBrokers.filter(
+      (row) =>
+        row.sourceAggregate.brokerTourVisited === true &&
+        row.sourceAggregate.fixationCount === 0,
+    ).length;
+    const rowsFor = (entityType: EntityType) =>
+      includedRows.filter((row) => row.sourceRecord?.entityType === entityType);
+    const leader = (entityType: EntityType) =>
+      rowsFor(entityType)
+        .filter((row) => row.dealCount !== null && row.dealCount !== undefined)
+        .sort((left, right) => {
+          const dealDifference =
+            Number(right.dealCount) - Number(left.dealCount);
+          if (dealDifference) return dealDifference;
+          const rightAmount = moneyToCents(String(right.dealAmount || "0"));
+          const leftAmount = moneyToCents(String(left.dealAmount || "0"));
+          return rightAmount === leftAmount
+            ? 0
+            : rightAmount > leftAmount
+              ? 1
+              : -1;
+        })
+        .slice(0, 5)
+        .map((row) => ({
+          id: row.sourceRecord.personId || row.sourceRecord.organizationId,
+          name:
+            row.sourceRecord.person?.manualDisplayName ||
+            row.sourceRecord.organization?.manualDisplayName ||
+            row.sourceRecord.displayName ||
+            "—",
+          entityType,
+          deals: Number(row.dealCount),
+          dealAmount:
+            row.dealAmount === null || row.dealAmount === undefined
+              ? null
+              : String(row.dealAmount),
+          latestDealAt: row.lastDealAt || null,
+        }));
+    const sourceVersions = Array.from(
+      new Set(
+        includedRows.map((row) => `${row.sourceKind}:${row.sourceVersion}`),
+      ),
+    ).sort();
+    const sourceGroup = (entityType: EntityType) => {
+      const group = rowsFor(entityType);
+      const known = (field: string) =>
+        group.filter((row) => row[field] !== null && row[field] !== undefined)
+          .length;
+      return {
+        kind: "SOURCE_AGGREGATE",
+        label:
+          group.find((row) => row.sourceLabel)?.sourceLabel ||
+          (entityType === "BROKER"
+            ? "Данные среза Анны — брокеры"
+            : "Данные среза Анны — агентства"),
+        confirmationStatus: "NOT_CONFIRMED",
+        quality: "SOURCE_REPORTED",
+        exactness: Array.from(
+          new Set(group.map((row) => row.exactness)),
+        ).sort(),
+        periodKinds: Array.from(
+          new Set(group.map((row) => row.periodKind)),
+        ).sort(),
+        sourceVersions: Array.from(
+          new Set(group.map((row) => `${row.sourceKind}:${row.sourceVersion}`)),
+        ).sort(),
+        periodFilterApplied: false,
+        records: group.length,
+        fixations: sumNullable(group, "fixationCount"),
+        fixationKnownRecords: known("fixationCount"),
+        meetings: sumNullable(group, "meetingCount"),
+        meetingKnownRecords: known("meetingCount"),
+        deals: sumNullable(group, "dealCount"),
+        dealKnownRecords: known("dealCount"),
+        brokerTours: sumNullable(group, "brokerTourCount"),
+        brokerTourKnownRecords: known("brokerTourCount"),
+        calls: sumNullable(group, "callCount"),
+        callKnownRecords: known("callCount"),
+        dealAmount: sumAmount(group),
+        dealAmountKnownRecords: known("dealAmount"),
+        top: leader(entityType),
+      };
+    };
+    return {
+      base: "anna",
+      period: periodDto,
+      snapshot: {
+        id: active.snapshot.id,
+        publishedAt: active.snapshot.publishedAt,
+        ruleVersion: active.snapshot.ruleVersion,
+      },
+      brokers: {
+        total: brokerTotal,
+        notCalledCurrentMonth: null,
+        newCount: null,
+        btWithoutFixation: null,
+        birthdaysToday,
+        birthdayKnownCount: knownBirthdays.length,
+        top: [],
+      },
+      agencies: { total: agencyTotal, top: [] },
+      activities: {
+        fixations: null,
+        meetings: null,
+        deals: null,
+      },
+      dealAmount: null,
+      metricSource: {
+        kind: "UNAVAILABLE",
+        label: "Exact event-level KPI is unavailable for this snapshot",
+        exactness: "UNKNOWN",
+        ruleVersion: active.snapshot.ruleVersion,
+        periodFilterApplied: false,
+        requestedPeriod: periodDto,
+      },
+      sourceReportedSummary: {
+        kind: "SOURCE_AGGREGATE",
+        label: "Данные среза Анны",
+        confirmationStatus: "NOT_CONFIRMED",
+        quality: "SOURCE_REPORTED",
+        exactness: Array.from(
+          new Set(includedRows.map((row) => row.exactness)),
+        ).sort(),
+        sourceVersions,
+        periodFilterApplied: false,
+        requestedPeriod: periodDto,
+        warning:
+          "Source snapshot rollups are shown separately; broker and agency groups may overlap and are never added together.",
+        brokers: {
+          ...sourceGroup("BROKER"),
+          notCalledCurrentMonth: sourceReportedCallKnown.length
+            ? notCalledCandidates.length
+            : null,
+          notCalledKnownCount: sourceReportedCallKnown.length,
+          newCount,
+          btWithoutFixation,
+        },
+        agencies: sourceGroup("AGENCY"),
+      },
+      kpiMetadata: this.annaKpiMetadata(
+        "UNAVAILABLE",
+        active.snapshot.ruleVersion,
+        periodDto,
+      ),
+    };
+  }
+
+  private annaKpiMetadata(
+    basis: "EXACT_ACTIVITIES" | "UNAVAILABLE",
+    ruleVersion: string,
+    period: { from: string; to: string },
+  ) {
+    const exact = basis === "EXACT_ACTIVITIES";
+    const shared = {
+      source: basis,
+      ruleVersion,
+      exactness: exact ? "EXACT" : "UNKNOWN",
+      requestedPeriod: period,
+      periodFilterApplied: exact,
+      includedSemantics: exact
+        ? "Only event rows with verdict=INCLUDED and archivedAt=null"
+        : "No event-level evidence is available",
+      excludedSemantics: exact
+        ? "EXCLUDED/UNKNOWN and archived event rows are excluded"
+        : "Source rollups are not promoted to confirmed activity KPIs",
+    };
+    const sourceShared = {
+      source: "SOURCE_AGGREGATE",
+      ruleVersion,
+      confirmationStatus: "NOT_CONFIRMED",
+      exactness: "SOURCE_DECLARED",
+      requestedPeriod: period,
+      periodFilterApplied: false,
+      includedSemantics:
+        "Only quality=SOURCE_REPORTED and contributesToSourceSummary=true, grouped by entity type",
+      excludedSemantics:
+        "PARTIAL/UNVERIFIED and non-included rollups are excluded; broker and agency groups are never added together",
+    };
+    return {
+      "activities.fixations": {
+        ...shared,
+        formula: exact
+          ? "COUNT(included FIXATION events in requested period)"
+          : "Unavailable without identified FIXATION events",
+      },
+      "activities.meetings": {
+        ...shared,
+        formula: exact
+          ? "COUNT(included MEETING events in requested period)"
+          : "Unavailable without identified MEETING events",
+      },
+      "activities.deals": {
+        ...shared,
+        formula: exact
+          ? "COUNT(included DEAL events in requested period)"
+          : "Unavailable without identified DEAL events",
+      },
+      dealAmount: {
+        ...shared,
+        formula: exact
+          ? "SUM(amount) for included RUB DDU DEAL events in requested period"
+          : "Unavailable without identified included RUB DDU DEAL events",
+      },
+      "brokers.notCalledCurrentMonth": {
+        ...shared,
+        formula: exact
+          ? "No included CALL event in current Moscow month"
+          : "Unavailable as a confirmed KPI without identified CALL events",
+      },
+      "brokers.newCount": {
+        ...shared,
+        formula: exact
+          ? "Relationship stage is NEW/NEW_BROKER and no included BT, fixation, meeting or deal event exists"
+          : "Unavailable as a confirmed KPI without identified events",
+      },
+      "brokers.btWithoutFixation": {
+        ...shared,
+        formula: exact
+          ? "Included BROKER_TOUR exists and no included FIXATION exists"
+          : "Unavailable as a confirmed KPI without identified events",
+      },
+      "brokers.birthdaysToday": {
+        source: "ANNA_SOURCE_ATTRIBUTES",
+        ruleVersion,
+        exactness: "SOURCE_DECLARED",
+        requestedPeriod: period,
+        periodFilterApplied: false,
+        formula: "Exact DD.MM comparison in Europe/Moscow",
+        includedSemantics: "Only syntactically valid known birthdays",
+        excludedSemantics:
+          "Missing or malformed birthdays are unknown, not zero",
+      },
+      "brokers.top": {
+        ...shared,
+        formula: exact
+          ? "Top five by included DDU deals in requested period, then included amount; no aggregate/event mixing"
+          : "Unavailable without identified included DDU deal events",
+      },
+      "agencies.top": {
+        ...shared,
+        formula: exact
+          ? "Top five agencies by included DDU deals in requested period, then included amount"
+          : "Unavailable without identified included DDU deal events",
+      },
+      "sourceReportedSummary.brokers": {
+        ...sourceShared,
+        formula:
+          "Per-field sums over BROKER source rows only; null remains unknown and is not coerced to zero",
+      },
+      "sourceReportedSummary.brokers.fixations": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported fixationCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+      },
+      "sourceReportedSummary.brokers.meetings": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported meetingCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+      },
+      "sourceReportedSummary.brokers.deals": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported dealCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+      },
+      "sourceReportedSummary.brokers.dealAmount": {
+        ...sourceShared,
+        formula:
+          "Exact decimal sum in kopecks over source-reported BROKER dealAmount values; lifetime amount, requested period not applied",
+      },
+      "sourceReportedSummary.brokers.notCalledCurrentMonth": {
+        ...sourceShared,
+        formula:
+          "COUNT(BROKER rows with a known lastCallAt before the current Moscow month); null when no lastCallAt is known",
+        includedSemantics:
+          "Only an explicit source lastCallAt is evidence for this derived source-snapshot segment",
+        excludedSemantics:
+          "callCount=0 or an empty callsMayAugust breakdown is not evidence that no call occurred",
+      },
+      "sourceReportedSummary.brokers.newCount": {
+        ...sourceShared,
+        formula:
+          "COUNT(BROKER rows at explicit Новый/NEW stage with explicit zero BT, fixation, meeting and deal rollups)",
+        includedSemantics:
+          "Stage and every later-stage source count must be present and explicit",
+        excludedSemantics:
+          "Unknown counts are not coerced to zero and no stage is inferred from missing data",
+      },
+      "sourceReportedSummary.brokers.btWithoutFixation": {
+        ...sourceShared,
+        formula:
+          "COUNT(BROKER rows with explicit brokerTourVisited=true and explicit fixationCount=0)",
+        includedSemantics:
+          "BT is accepted only from the source BT flag/date, never inferred from another rollup",
+        excludedSemantics:
+          "Unknown BT or fixation values are excluded rather than treated as false/zero",
+      },
+      "sourceReportedSummary.agencies": {
+        ...sourceShared,
+        formula:
+          "Per-field sums over AGENCY source rows only; never added to broker rollups because source scopes may overlap",
+      },
+      "sourceReportedSummary.agencies.fixations": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported fixationCount) for AGENCY rows with known values; kept separate from broker rollups",
+      },
+      "sourceReportedSummary.agencies.meetings": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported meetingCount) for AGENCY rows with known values; kept separate from broker rollups",
+      },
+      "sourceReportedSummary.agencies.deals": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported dealCount) for AGENCY rows with known values; snapshot/lifetime, requested period not applied",
+      },
+      "sourceReportedSummary.agencies.dealAmount": {
+        ...sourceShared,
+        formula:
+          "Exact decimal sum in kopecks over source-reported AGENCY dealAmount values; never added to broker amounts",
+      },
+      "sourceReportedSummary.brokers.top": {
+        ...sourceShared,
+        formula:
+          "Source-snapshot/lifetime top five broker rows by reported deal count then reported amount; requested period is not applied",
+      },
+      "sourceReportedSummary.agencies.top": {
+        ...sourceShared,
+        formula:
+          "Source-snapshot/lifetime top five agency rows by reported deal count then reported amount; requested period is not applied",
+      },
     };
   }
 
@@ -2019,6 +3084,13 @@ export class LoyaltyBaseService {
       agencies: { total: 0, top: [] },
       activities: { fixations: 0, meetings: 0, deals: 0 },
       dealAmount: "0",
+      dataAvailable: false,
+      metricSource: {
+        kind: "UNAVAILABLE",
+        label: null,
+        exactness: "UNKNOWN",
+        periodFilterApplied: false,
+      },
     };
   }
 
@@ -2078,14 +3150,69 @@ export class LoyaltyBaseService {
         ? { some: { system: "AMOCRM" } }
         : { none: { system: "AMOCRM" } };
     }
-    if (query.activityType)
-      where.activities = {
-        some: { type: query.activityType, verdict: "INCLUDED" },
-      };
+    const usesExactActivities = Number(active.snapshot.activityCount) > 0;
+    if (query.activityType) {
+      if (usesExactActivities) {
+        where.activities = {
+          some: { type: query.activityType, verdict: "INCLUDED" },
+        };
+      } else {
+        const aggregateField: Record<string, string> = {
+          FIXATION: "fixationCount",
+          MEETING: "meetingCount",
+          DEAL: "dealCount",
+          BROKER_TOUR: "brokerTourCount",
+          CALL: "callCount",
+        };
+        where.sourceAggregate = {
+          is: {
+            quality: "SOURCE_REPORTED",
+            [aggregateField[query.activityType]]: { gt: 0 },
+          },
+        };
+      }
+    }
     if (entityType === "BROKER" && query.segment) {
       const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
-      const segmentFilter: any =
-        query.segment === "NOT_CALLED_CURRENT_MONTH"
+      const segmentFilter: any = !usesExactActivities
+        ? query.segment === "NOT_CALLED_CURRENT_MONTH"
+          ? {
+              sourceAggregate: {
+                is: {
+                  quality: "SOURCE_REPORTED",
+                  lastCallAt: { lt: currentMonth.from },
+                },
+              },
+            }
+          : query.segment === "NEW_BROKER"
+            ? {
+                AND: [this.annaNewStageFilter()],
+                sourceAggregate: {
+                  is: {
+                    quality: "SOURCE_REPORTED",
+                    brokerTourCount: 0,
+                    fixationCount: 0,
+                    meetingCount: 0,
+                    dealCount: 0,
+                  },
+                },
+              }
+            : query.segment === "BT_WITHOUT_FIXATION"
+              ? {
+                  sourceAggregate: {
+                    is: {
+                      quality: "SOURCE_REPORTED",
+                      brokerTourVisited: true,
+                      fixationCount: 0,
+                    },
+                  },
+                }
+              : {
+                  id: {
+                    in: await this.annaBirthdayRecordIds(active.snapshot.id),
+                  },
+                }
+        : query.segment === "NOT_CALLED_CURRENT_MONTH"
           ? {
               activities: {
                 none: {
@@ -2149,7 +3276,11 @@ export class LoyaltyBaseService {
         });
       where.AND = [...(where.AND || []), { OR: searchOr }];
     }
-    const include = this.annaRecordInclude(active.snapshot.id, false);
+    const include = this.annaRecordInclude(
+      active.snapshot.id,
+      active.snapshot.ruleVersion,
+      false,
+    );
     const [records, total] = await Promise.all([
       this.prisma.loyaltySourceRecord.findMany({
         where,
@@ -2173,7 +3304,11 @@ export class LoyaltyBaseService {
     };
   }
 
-  private annaRecordInclude(snapshotId: string, detailed: boolean): any {
+  private annaRecordInclude(
+    snapshotId: string,
+    ruleVersion: string,
+    detailed: boolean,
+  ): any {
     return {
       person: {
         include: {
@@ -2205,7 +3340,12 @@ export class LoyaltyBaseService {
       externalIdentities: {
         orderBy: [{ system: "asc" }, { isPrimary: "desc" }],
       },
-      metrics: { orderBy: { calculatedAt: "desc" }, take: 1 },
+      metrics: {
+        where: { ruleVersion },
+        orderBy: { calculatedAt: "desc" },
+        take: 1,
+      },
+      sourceAggregate: true,
       organizationRoles: {
         where: { validTo: null, sourceRecord: { snapshotId } },
         include: {
@@ -2225,7 +3365,7 @@ export class LoyaltyBaseService {
 
   private mapAnnaRecord(record: any, detailed: boolean) {
     const entity = record.person || record.organization;
-    const metric = record.metrics?.[0] || {};
+    const metricView = this.annaMetricView(record);
     const result: any = {
       id: entity?.id,
       sourceRecordId: record.id,
@@ -2248,15 +3388,9 @@ export class LoyaltyBaseService {
         isPrimary: point.isPrimary,
       })),
       externalIdentities: record.externalIdentities || [],
-      metrics: {
-        fixations: Number(metric.fixationCount || 0),
-        meetings: Number(metric.meetingCount || 0),
-        deals: Number(metric.dealCount || 0),
-        brokerTours: Number(metric.brokerTourCount || 0),
-        calls: Number(metric.callCount || 0),
-        dealAmount: String(metric.dealAmount || "0"),
-        ruleVersion: metric.ruleVersion || null,
-      },
+      metrics: metricView.metrics,
+      metricSource: metricView.source,
+      sourceReportedMetrics: metricView.sourceReported,
       linkedOurs: entity?.links?.[0]
         ? {
             type: entity.links[0].targetType,
@@ -2300,6 +3434,108 @@ export class LoyaltyBaseService {
       }));
     }
     return result;
+  }
+
+  private annaMetricView(record: any) {
+    const exact = record.metrics?.[0] || null;
+    const aggregate = record.sourceAggregate || null;
+    const exactEvidenceCount = Number(exact?.activityEvidenceCount || 0);
+    const exactAvailable = exactEvidenceCount > 0;
+    const sourceReported = aggregate
+      ? {
+          fixations:
+            aggregate.fixationCount === null ||
+            aggregate.fixationCount === undefined
+              ? null
+              : Number(aggregate.fixationCount),
+          meetings:
+            aggregate.meetingCount === null ||
+            aggregate.meetingCount === undefined
+              ? null
+              : Number(aggregate.meetingCount),
+          deals:
+            aggregate.dealCount === null || aggregate.dealCount === undefined
+              ? null
+              : Number(aggregate.dealCount),
+          brokerTours:
+            aggregate.brokerTourCount === null ||
+            aggregate.brokerTourCount === undefined
+              ? null
+              : Number(aggregate.brokerTourCount),
+          calls:
+            aggregate.callCount === null || aggregate.callCount === undefined
+              ? null
+              : Number(aggregate.callCount),
+          dealAmount:
+            aggregate.dealAmount === null || aggregate.dealAmount === undefined
+              ? null
+              : String(aggregate.dealAmount),
+          currency: aggregate.currency || null,
+          lastFixationAt: aggregate.lastFixationAt || null,
+          lastMeetingAt: aggregate.lastMeetingAt || null,
+          lastDealAt: aggregate.lastDealAt || null,
+          lastCallAt: aggregate.lastCallAt || null,
+          brokerTourVisited: aggregate.brokerTourVisited ?? null,
+          brokerTourAt: aggregate.brokerTourAt || null,
+          dealsByMonth: aggregate.dealsByMonth || null,
+          callBreakdown: aggregate.callBreakdown || null,
+          contributesToSourceSummary:
+            aggregate.contributesToSourceSummary === true,
+          sourceKind: aggregate.sourceKind,
+          sourceVersion: aggregate.sourceVersion,
+          sourceLabel: aggregate.sourceLabel || null,
+          quality: aggregate.quality,
+          exactness: aggregate.exactness,
+          periodKind: aggregate.periodKind,
+          periodFrom: aggregate.periodFrom || null,
+          periodTo: aggregate.periodTo || null,
+          reportedAt: aggregate.reportedAt || null,
+          provenance: aggregate.provenance || null,
+        }
+      : null;
+    if (exactAvailable) {
+      return {
+        metrics: {
+          fixations: Number(exact.fixationCount || 0),
+          meetings: Number(exact.meetingCount || 0),
+          deals: Number(exact.dealCount || 0),
+          brokerTours: Number(exact.brokerTourCount || 0),
+          calls: Number(exact.callCount || 0),
+          dealAmount: String(exact.dealAmount || "0"),
+          ruleVersion: exact.ruleVersion || null,
+        },
+        source: {
+          kind: "EXACT_ACTIVITIES",
+          label: "Event-level activities",
+          available: true,
+          exactness: "EXACT",
+          activityEvidenceCount: exactEvidenceCount,
+          periodKind: "SNAPSHOT_LIFETIME",
+          periodFilterApplied: false,
+        },
+        sourceReported,
+      };
+    }
+    return {
+      metrics: {
+        fixations: null,
+        meetings: null,
+        deals: null,
+        brokerTours: null,
+        calls: null,
+        dealAmount: null,
+        ruleVersion: null,
+      },
+      source: {
+        kind: "UNAVAILABLE",
+        label: aggregate
+          ? "Exact event-level KPI is unavailable; source rollup is separate"
+          : null,
+        available: false,
+        periodFilterApplied: false,
+      },
+      sourceReported,
+    };
   }
 
   private async listOurs(
@@ -2683,7 +3919,11 @@ export class LoyaltyBaseService {
             ? { personId: id }
             : { organizationId: id }),
         },
-        include: this.annaRecordInclude(active.snapshot.id, true),
+        include: this.annaRecordInclude(
+          active.snapshot.id,
+          active.snapshot.ruleVersion,
+          true,
+        ),
       });
       if (!record) throw new NotFoundException("Loyalty entity not found");
       return {

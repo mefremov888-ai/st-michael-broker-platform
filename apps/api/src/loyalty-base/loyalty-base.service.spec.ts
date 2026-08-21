@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException } from "@nestjs/common";
 import {
   LoyaltyBaseService,
+  MAX_LOYALTY_CLI_IMPORT_BYTES,
   loyaltyContentHash,
   normalizeLoyaltyContactPoint,
   positivePostgresBigIntOrNull,
@@ -35,18 +36,19 @@ function prismaMock() {
       findFirst: fn(),
       count: fn(),
     },
-    loyaltyContactPoint: { createMany: fn() },
-    loyaltyExternalIdentity: { createMany: fn() },
+    loyaltyContactPoint: { createMany: fn(), count: fn() },
+    loyaltyExternalIdentity: { createMany: fn(), count: fn() },
     loyaltyActivity: {
       createMany: fn(),
       count: fn(),
       aggregate: fn(),
       groupBy: fn(),
     },
-    loyaltyMetricSnapshot: { createMany: fn() },
+    loyaltyMetricSnapshot: { createMany: fn(), count: fn() },
+    loyaltySourceAggregate: { createMany: fn(), count: fn(), findMany: fn() },
     loyaltyPublicationEvent: { create: fn() },
     loyaltySourceFieldValue: { createMany: fn() },
-    loyaltyPersonOrganizationRole: { createMany: fn() },
+    loyaltyPersonOrganizationRole: { createMany: fn(), count: fn() },
     loyaltyReconciliationCase: {
       createMany: fn(),
       findUnique: fn(),
@@ -100,6 +102,64 @@ function importDocument(overrides: Record<string, unknown> = {}): any {
   };
 }
 
+function sourceSummaryGroup(overrides: Record<string, unknown> = {}) {
+  return {
+    records: 0,
+    fixations: null,
+    fixationKnownRecords: 0,
+    meetings: null,
+    meetingKnownRecords: 0,
+    deals: null,
+    dealKnownRecords: 0,
+    brokerTours: null,
+    brokerTourKnownRecords: 0,
+    calls: null,
+    callKnownRecords: 0,
+    dealAmount: null,
+    dealAmountKnownRecords: 0,
+    ...overrides,
+  };
+}
+
+function mockPersistedSnapshotCounts(
+  prisma: ReturnType<typeof prismaMock>,
+  overrides: Record<string, number> = {},
+) {
+  const counts = {
+    records: 1,
+    brokers: 1,
+    agencies: 0,
+    contactPoints: 0,
+    externalIdentities: 0,
+    activities: 0,
+    metrics: 1,
+    sourceAggregates: 0,
+    organizationRoles: 0,
+    reconciliationCases: 0,
+    ...overrides,
+  };
+  prisma.loyaltySourceRecord.count.mockImplementation(({ where }: any) => {
+    if (where?.entityType === "BROKER") return counts.brokers;
+    if (where?.entityType === "AGENCY") return counts.agencies;
+    return counts.records;
+  });
+  prisma.loyaltyContactPoint.count.mockResolvedValue(counts.contactPoints);
+  prisma.loyaltyExternalIdentity.count.mockResolvedValue(
+    counts.externalIdentities,
+  );
+  prisma.loyaltyActivity.count.mockResolvedValue(counts.activities);
+  prisma.loyaltyMetricSnapshot.count.mockResolvedValue(counts.metrics);
+  prisma.loyaltySourceAggregate.count.mockResolvedValue(
+    counts.sourceAggregates,
+  );
+  prisma.loyaltyPersonOrganizationRole.count.mockResolvedValue(
+    counts.organizationRoles,
+  );
+  prisma.loyaltyReconciliationCase.count.mockResolvedValue(
+    counts.reconciliationCases,
+  );
+}
+
 describe("LoyaltyBaseService", () => {
   it("normalizes Russian phones without using a mutable name as identity", () => {
     expect(normalizeLoyaltyContactPoint("PHONE", "8 (999) 000-00-01")).toBe(
@@ -149,6 +209,21 @@ describe("LoyaltyBaseService", () => {
     expect(prisma.loyaltyDataset.upsert).not.toHaveBeenCalled();
     expect(prisma.broker.update).not.toHaveBeenCalled();
     expect(prisma.agency.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps the HTTP-sized default while bounding trusted CLI overrides", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+
+    await expect(
+      service.dryRunImport(importDocument(), { maxImportBytes: 1 }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.dryRunImport(importDocument(), {
+        maxImportBytes: MAX_LOYALTY_CLI_IMPORT_BYTES + 1,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it("stage requires the hash returned by dry-run before any write", async () => {
@@ -311,6 +386,151 @@ describe("LoyaltyBaseService", () => {
     ]);
   });
 
+  it("stores Anna rollups atomically without fabricating event rows", async () => {
+    const prisma = prismaMock();
+    prisma.broker.findMany.mockResolvedValue([]);
+    prisma.agency.findMany.mockResolvedValue([]);
+    const service = new LoyaltyBaseService(prisma);
+    const raw = importDocument({
+      expectedUniquePhones: 0,
+      expectedExternalIdentities: 0,
+      expectedSourceAggregates: 1,
+      expectedSourceReportedSummary: {
+        brokers: sourceSummaryGroup({
+          records: 1,
+          fixations: 4,
+          fixationKnownRecords: 1,
+          deals: 2,
+          dealKnownRecords: 1,
+          dealAmount: "1500000.00",
+          dealAmountKnownRecords: 1,
+        }),
+        agencies: sourceSummaryGroup(),
+      },
+      records: [
+        {
+          externalKey: "anna-person-1",
+          entityType: "BROKER",
+          displayName: "Anna source row",
+          contactPoints: [],
+          externalIdentities: [],
+          activities: [],
+          sourceAggregate: {
+            sourceKind: "ANNA_LEGACY_CRM",
+            sourceVersion: "broker-source-enriched-v1",
+            sourceLabel: "Anna curated CRM totals",
+            quality: "SOURCE_REPORTED",
+            exactness: "UNKNOWN",
+            periodKind: "LIFETIME",
+            contributesToSourceSummary: true,
+            fixationCount: 4,
+            meetingCount: null,
+            dealCount: 2,
+            dealAmount: "1500000.00",
+            currency: "RUB",
+            lastDealAt: "2026-07-01",
+            dealsByMonth: { "2026-07": 2 },
+            callBreakdown: [{ period: "2026-05", count: 3 }],
+            provenance: { rawFields: ["crm.fixations", "crm.deals"] },
+          },
+        },
+      ],
+    });
+    const dryRun = await service.dryRunImport(raw);
+    expect(dryRun.publishable).toBe(true);
+    expect(dryRun.summary).toMatchObject({
+      activities: 0,
+      sourceAggregates: 1,
+      sourceSummaryAggregates: 1,
+    });
+    raw.expectedContentHash = dryRun.contentHash;
+    raw.expectedActiveSnapshotId = null;
+
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltyDataset.upsert.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: null,
+    });
+    prisma.loyaltySnapshot.findUnique.mockResolvedValue(null);
+    prisma.loyaltySnapshot.create.mockResolvedValue({
+      id: "snapshot-1",
+      contentHash: dryRun.contentHash,
+      status: "STAGED",
+    });
+    prisma.loyaltyPerson.findMany.mockResolvedValue([
+      { id: "person-1", externalKey: "anna-person-1" },
+    ]);
+    prisma.loyaltyOrganization.findMany.mockResolvedValue([]);
+    for (const delegate of [
+      prisma.loyaltyPerson,
+      prisma.loyaltyOrganization,
+      prisma.loyaltySourceRecord,
+      prisma.loyaltyContactPoint,
+      prisma.loyaltyExternalIdentity,
+      prisma.loyaltyMetricSnapshot,
+      prisma.loyaltySourceAggregate,
+      prisma.loyaltySourceFieldValue,
+      prisma.loyaltyPersonOrganizationRole,
+      prisma.loyaltyReconciliationCase,
+    ])
+      delegate.createMany.mockResolvedValue({ count: 1 });
+
+    await service.stageImport(raw, "admin-1");
+
+    expect(prisma.loyaltyActivity.createMany).not.toHaveBeenCalled();
+    expect(
+      prisma.loyaltyMetricSnapshot.createMany.mock.calls[0][0].data[0],
+    ).toMatchObject({ activityEvidenceCount: 0, dealCount: 0 });
+    expect(
+      prisma.loyaltySourceAggregate.createMany.mock.calls[0][0].data[0],
+    ).toMatchObject({
+      sourceKind: "ANNA_LEGACY_CRM",
+      sourceVersion: "broker-source-enriched-v1",
+      quality: "SOURCE_REPORTED",
+      contributesToSourceSummary: true,
+      fixationCount: 4,
+      meetingCount: null,
+      dealCount: 2,
+      dealAmount: "1500000.00",
+      dealsByMonth: { "2026-07": 2 },
+    });
+  });
+
+  it("fails closed when a source rollup manifest is missing", async () => {
+    const prisma = prismaMock();
+    prisma.broker.findMany.mockResolvedValue([]);
+    prisma.agency.findMany.mockResolvedValue([]);
+    const service = new LoyaltyBaseService(prisma);
+    const raw = importDocument({
+      expectedSourceAggregates: 1,
+      records: [
+        {
+          ...importDocument().records[0],
+          sourceAggregate: {
+            sourceKind: "ANNA_LEGACY_CRM",
+            sourceVersion: "broker-source-enriched-v1",
+            quality: "SOURCE_REPORTED",
+            exactness: "UNKNOWN",
+            periodKind: "LIFETIME",
+            contributesToSourceSummary: true,
+            dealCount: 2,
+          },
+        },
+      ],
+    });
+
+    const dryRun = await service.dryRunImport(raw);
+
+    expect(dryRun.publishable).toBe(false);
+    expect(dryRun.issues).toContainEqual({
+      row: 0,
+      code: "EXPECTED_SOURCE_REPORTED_SUMMARY_REQUIRED",
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it("publishes by one serializable pointer switch and validates previous ownership", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
@@ -327,6 +547,16 @@ describe("LoyaltyBaseService", () => {
         errorCount: 0,
         expectedRecords: 1,
         recordCount: 1,
+        brokerCount: 1,
+        agencyCount: 0,
+        activityCount: 0,
+        summary: {
+          contactPoints: 0,
+          externalIdentities: 0,
+          sourceAggregates: 0,
+          organizationRoles: 0,
+          candidateCount: 0,
+        },
         dataset: {
           id: "dataset-1",
           code: "ANNA",
@@ -334,7 +564,7 @@ describe("LoyaltyBaseService", () => {
         },
       })
       .mockResolvedValueOnce({ datasetId: "dataset-1", recordCount: 1 });
-    prisma.loyaltySourceRecord.count.mockResolvedValue(1);
+    mockPersistedSnapshotCounts(prisma);
     prisma.loyaltySnapshot.update.mockResolvedValue({});
     prisma.loyaltyDataset.update.mockResolvedValue({});
 
@@ -386,6 +616,46 @@ describe("LoyaltyBaseService", () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
+  it("refuses the pointer switch when persisted snapshot children are incomplete", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltySnapshot.findUnique.mockResolvedValue({
+      id: "snapshot-1",
+      datasetId: "dataset-1",
+      status: "STAGED",
+      contentHash: "a".repeat(64),
+      ruleVersion: "anna-v1",
+      errorCount: 0,
+      expectedRecords: 1,
+      recordCount: 1,
+      brokerCount: 1,
+      agencyCount: 0,
+      activityCount: 0,
+      summary: {
+        contactPoints: 0,
+        externalIdentities: 0,
+        sourceAggregates: 0,
+        organizationRoles: 0,
+        candidateCount: 0,
+      },
+      dataset: { id: "dataset-1", code: "ANNA", activeSnapshotId: null },
+    });
+    mockPersistedSnapshotCounts(prisma, { metrics: 0 });
+
+    await expect(
+      service.publishSnapshot("snapshot-1", {
+        confirmed: true,
+        expectedContentHash: "a".repeat(64),
+        expectedActiveSnapshotId: null,
+      }),
+    ).rejects.toThrow("Snapshot metric snapshots coverage is incomplete");
+    expect(prisma.loyaltyDataset.update).not.toHaveBeenCalled();
+    expect(prisma.loyaltyPublicationEvent.create).not.toHaveBeenCalled();
+  });
+
   it("does not duplicate publication history on an idempotent publish retry", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
@@ -401,6 +671,16 @@ describe("LoyaltyBaseService", () => {
       errorCount: 0,
       expectedRecords: 1,
       recordCount: 1,
+      brokerCount: 1,
+      agencyCount: 0,
+      activityCount: 0,
+      summary: {
+        contactPoints: 0,
+        externalIdentities: 0,
+        sourceAggregates: 0,
+        organizationRoles: 0,
+        candidateCount: 0,
+      },
       publishedAt: new Date("2026-08-01T00:00:00Z"),
       dataset: {
         id: "dataset-1",
@@ -408,7 +688,7 @@ describe("LoyaltyBaseService", () => {
         activeSnapshotId: "snapshot-1",
       },
     });
-    prisma.loyaltySourceRecord.count.mockResolvedValue(1);
+    mockPersistedSnapshotCounts(prisma);
 
     const result = await service.publishSnapshot(
       "snapshot-1",
@@ -766,8 +1046,12 @@ describe("LoyaltyBaseService", () => {
         agencyCount: 0,
         activityCount: 1,
         summary: {
+          contactPoints: 0,
           uniqueNormalizedPhones: 0,
           externalIdentities: 0,
+          sourceAggregates: 0,
+          organizationRoles: 0,
+          candidateCount: 0,
           includedActivities: 1,
           includedDeals: 0,
           includedCalls: 1,
@@ -790,7 +1074,7 @@ describe("LoyaltyBaseService", () => {
           includedDealAmount: "10.00",
         },
       });
-    prisma.loyaltySourceRecord.count.mockResolvedValue(1);
+    mockPersistedSnapshotCounts(prisma, { activities: 1 });
 
     await expect(
       service.publishSnapshot("small", {
@@ -1108,19 +1392,220 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
-  it("uses exact normalized DD.MM birthday parsing for the Anna drill-down", async () => {
+  it("uses only explicit source-reported rollups when a snapshot has no exact activities", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        activityCount: 0,
+        ruleVersion: "anna-v1",
+        publishedAt: new Date("2026-08-21T00:00:00.000Z"),
+      },
+    });
+    prisma.loyaltySourceRecord.count
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(0);
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([
+      {
+        id: "record-1",
+        personId: "person-1",
+        displayName: "Anna row",
+        attributes: { relationshipStage: "NEW" },
+        person: { manualDisplayName: null },
+        sourceAggregate: {
+          quality: "SOURCE_REPORTED",
+          contributesToSourceSummary: true,
+          fixationCount: 4,
+          meetingCount: 3,
+          dealCount: 2,
+          brokerTourCount: 1,
+          callCount: 0,
+          dealAmount: "1500000.00",
+          lastCallAt: null,
+          brokerTourVisited: true,
+        },
+      },
+    ]);
+    prisma.loyaltySourceAggregate.findMany.mockResolvedValue([
+      {
+        sourceKind: "ANNA_LEGACY_CRM",
+        sourceVersion: "broker-source-enriched-v1",
+        sourceLabel: "Anna curated CRM totals",
+        quality: "SOURCE_REPORTED",
+        exactness: "UNKNOWN",
+        contributesToSourceSummary: true,
+        fixationCount: 4,
+        meetingCount: 3,
+        dealCount: 2,
+        dealAmount: "1500000.00",
+        lastDealAt: new Date("2026-07-01T00:00:00.000Z"),
+        sourceRecord: {
+          entityType: "BROKER",
+          personId: "person-1",
+          organizationId: null,
+          displayName: "Anna row",
+          person: { manualDisplayName: null },
+          organization: null,
+        },
+      },
+    ]);
+
+    const result: any = await service.overview("anna", {});
+
+    expect(result).toMatchObject({
+      activities: { fixations: null, meetings: null, deals: null },
+      dealAmount: null,
+      metricSource: {
+        kind: "UNAVAILABLE",
+        periodFilterApplied: false,
+      },
+      sourceReportedSummary: {
+        kind: "SOURCE_AGGREGATE",
+        confirmationStatus: "NOT_CONFIRMED",
+        periodFilterApplied: false,
+        brokers: {
+          fixations: 4,
+          meetings: 3,
+          deals: 2,
+          dealAmount: "1500000.00",
+          notCalledCurrentMonth: null,
+          notCalledKnownCount: 0,
+        },
+        agencies: {
+          fixations: null,
+          meetings: null,
+          deals: null,
+          dealAmount: null,
+        },
+      },
+    });
+    expect(result.kpiMetadata["activities.deals"]).toMatchObject({
+      source: "UNAVAILABLE",
+      periodFilterApplied: false,
+    });
+    expect(result.kpiMetadata["sourceReportedSummary.brokers"]).toMatchObject({
+      source: "SOURCE_AGGREGATE",
+      confirmationStatus: "NOT_CONFIRMED",
+      periodFilterApplied: false,
+    });
+    const brokerOverviewSelect =
+      prisma.loyaltySourceRecord.findMany.mock.calls[0][0].select;
+    expect(brokerOverviewSelect.sourceAggregate.select).toMatchObject({
+      quality: true,
+      lastCallAt: true,
+      brokerTourVisited: true,
+    });
+    expect(brokerOverviewSelect.sourceAggregate.select).not.toHaveProperty(
+      "provenance",
+    );
+    const aggregateOverviewQuery =
+      prisma.loyaltySourceAggregate.findMany.mock.calls[0][0];
+    expect(aggregateOverviewQuery).not.toHaveProperty("include");
+    expect(aggregateOverviewQuery.select.sourceRecord.select).toMatchObject({
+      entityType: true,
+      displayName: true,
+      person: { select: { manualDisplayName: true } },
+      organization: { select: { manualDisplayName: true } },
+    });
+    expect(aggregateOverviewQuery.select).not.toHaveProperty("provenance");
+    expect(aggregateOverviewQuery.select).not.toHaveProperty("dealsByMonth");
+    expect(aggregateOverviewQuery.select).not.toHaveProperty("callBreakdown");
+    expect(prisma.loyaltyActivity.count).not.toHaveBeenCalled();
+    expect(prisma.loyaltyActivity.aggregate).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an empty legacy call breakdown as proof of no call", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        activityCount: 0,
+        ruleVersion: "anna-v1",
+        publishedAt: new Date("2026-08-21T00:00:00.000Z"),
+      },
+    });
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([]);
+    prisma.loyaltySourceRecord.count.mockResolvedValue(0);
+
+    await service.list("anna", "BROKER", {
+      page: 1,
+      pageSize: 30,
+      segment: "NOT_CALLED_CURRENT_MONTH",
+    } as any);
+
+    const segment =
+      prisma.loyaltySourceRecord.findMany.mock.calls[0][0].where.AND[0];
+    expect(segment).toEqual({
+      sourceAggregate: {
+        is: {
+          quality: "SOURCE_REPORTED",
+          lastCallAt: { lt: expect.any(Date) },
+        },
+      },
+    });
+    expect(JSON.stringify(segment)).not.toContain("callCount");
+  });
+
+  it("reads only metrics produced by the active snapshot rule version", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        activityCount: 0,
+        ruleVersion: "anna-active-v2",
+      },
+    });
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([]);
+    prisma.loyaltySourceRecord.count.mockResolvedValue(0);
+
+    await service.list("anna", "BROKER", {
+      page: 1,
+      pageSize: 30,
+    } as any);
+
+    expect(
+      prisma.loyaltySourceRecord.findMany.mock.calls[0][0].include.metrics,
+    ).toMatchObject({
+      where: { ruleVersion: "anna-active-v2" },
+      orderBy: { calculatedAt: "desc" },
+      take: 1,
+    });
+  });
+
+  it("uses exact DD.MM or ISO birthday parsing for the Anna drill-down", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
     const shifted = new Date(Date.now() + 3 * 60 * 60 * 1000);
     const today = `${String(shifted.getUTCDate()).padStart(2, "0")}.${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`;
     prisma.loyaltySourceRecord.findMany.mockResolvedValue([
       { id: "exact", attributes: { birthday: today } },
+      {
+        id: "iso",
+        attributes: {
+          birthday: `1990-${today.slice(3, 5)}-${today.slice(0, 2)}`,
+        },
+      },
       { id: "malformed", attributes: { birthday: `${today}0/foo` } },
     ]);
 
     const ids = await (service as any).annaBirthdayRecordIds("snapshot-1");
 
-    expect(ids).toEqual(["exact"]);
+    expect(ids).toEqual(["exact", "iso"]);
   });
 
   it("does not generate reconciliation candidates for archived source records", async () => {

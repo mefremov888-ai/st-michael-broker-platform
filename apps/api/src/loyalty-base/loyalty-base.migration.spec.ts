@@ -23,6 +23,13 @@ describe("loyalty base migration safety", () => {
       "../../../../packages/database/prisma/baselines/0_legacy_baseline.prisma",
     ),
   );
+  const aggregateSql = readFileSync(
+    resolve(
+      __dirname,
+      "../../../../packages/database/prisma/migrations/20260821000100_loyalty_source_aggregates/migration.sql",
+    ),
+    "utf8",
+  );
 
   it("is atomic and enforces cross-dataset ownership at the database boundary", () => {
     expect(sql.trimStart()).toContain("BEGIN;");
@@ -69,5 +76,25 @@ describe("loyalty base migration safety", () => {
     ).toBeLessThan(0);
     expect(baselineSql.trimStart()).toContain("BEGIN;");
     expect(baselineSql.trimEnd()).toMatch(/COMMIT;$/);
+  });
+
+  it("stores source rollups separately and never synthesizes activities", () => {
+    expect(aggregateSql.trimStart()).toMatch(/^--[\s\S]*?BEGIN;/);
+    expect(aggregateSql.trimEnd()).toMatch(/COMMIT;$/);
+    expect(aggregateSql).toContain('CREATE TABLE "loyalty_source_aggregates"');
+    expect(aggregateSql).toContain(
+      '"contributes_to_source_summary" BOOLEAN NOT NULL DEFAULT false',
+    );
+    expect(aggregateSql).toContain(
+      "loyalty_source_aggregates_summary_quality_check",
+    );
+    expect(aggregateSql).toContain('ADD COLUMN "activity_evidence_count"');
+    expect(aggregateSql).toContain(
+      'GROUP BY "source_record_id", "rule_version"',
+    );
+    expect(aggregateSql).toContain(
+      'evidence."rule_version" = metric."rule_version"',
+    );
+    expect(aggregateSql).not.toMatch(/INSERT\s+INTO\s+"loyalty_activities"/i);
   });
 });
