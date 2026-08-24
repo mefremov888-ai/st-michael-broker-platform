@@ -8,7 +8,10 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  StreamableFile,
   UploadedFile,
+  UseFilters,
   UseGuards,
   UseInterceptors,
 } from "@nestjs/common";
@@ -19,6 +22,7 @@ import {
   ApiOperation,
   ApiTags,
 } from "@nestjs/swagger";
+import type { Response } from "express";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
 import { UserRole } from "@st-michael/shared";
@@ -30,8 +34,10 @@ import {
   CurrentUserPayload,
 } from "../auth/current-user.decorator";
 import {
+  LoyaltyChangesQueryDto,
   LoyaltyEntityArchiveDto,
   LoyaltyEntityUpdateDto,
+  LoyaltyExportDto,
   LoyaltyImportDto,
   LoyaltyListQueryDto,
   LoyaltyLinkUnlinkDto,
@@ -43,6 +49,9 @@ import {
   LoyaltySearchDto,
 } from "./loyalty-base.dto";
 import { LoyaltyBaseService } from "./loyalty-base.service";
+import { LoyaltyFullScanBusyFilter } from "./loyalty-full-scan-busy.filter";
+import { LoyaltyImportPermissionGuard } from "./loyalty-import-permission.guard";
+import { LoyaltyPermissionService } from "../loyalty-workflow/loyalty-permission.service";
 
 const importUploadOptions = {
   limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 5 },
@@ -52,27 +61,35 @@ const importUploadOptions = {
 @ApiBearerAuth()
 @Controller("loyalty-base")
 @UseGuards(JwtAuthGuard, RolesGuard)
+@UseFilters(LoyaltyFullScanBusyFilter)
 @Roles(UserRole.ADMIN, UserRole.MANAGER)
 export class LoyaltyBaseController {
-  constructor(private readonly loyalty: LoyaltyBaseService) {}
+  constructor(
+    private readonly loyalty: LoyaltyBaseService,
+    private readonly permissions: LoyaltyPermissionService,
+  ) {}
 
   @Get(":base/overview")
   @ApiOperation({
     summary:
       "Loyalty base KPI overview (ANNA snapshot or read-only OUR projection)",
   })
-  overview(
+  async overview(
     @Param("base") base: string,
     @Query() query: LoyaltyOverviewQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.overview(base, query);
   }
 
   @Get(":base/brokers")
-  listBrokers(
+  async listBrokers(
     @Param("base") base: string,
     @Query() query: LoyaltyListQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.list(base, "BROKER", query);
   }
 
@@ -80,20 +97,49 @@ export class LoyaltyBaseController {
   @ApiOperation({
     summary: "Search brokers with sensitive filters in request body",
   })
-  searchBrokers(@Param("base") base: string, @Body() body: LoyaltySearchDto) {
+  async searchBrokers(
+    @Param("base") base: string,
+    @Body() body: LoyaltySearchDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.search(base, "BROKER", body);
   }
 
+  @Post(":base/brokers/export")
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: "Export the filtered broker selection as a masked UTF-8 CSV",
+  })
+  async exportBrokers(
+    @Param("base") base: string,
+    @Body() body: LoyaltyExportDto,
+    @CurrentUser() user: CurrentUserPayload,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "EXPORT"]);
+    const result = await this.loyalty.exportCsv(base, "BROKER", body, user?.id);
+    this.applyCsvHeaders(response, result);
+    return new StreamableFile(result.stream);
+  }
+
   @Get(":base/brokers/:id")
-  brokerDetail(@Param("base") base: string, @Param("id") id: string) {
+  async brokerDetail(
+    @Param("base") base: string,
+    @Param("id") id: string,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.detail(base, "BROKER", id);
   }
 
   @Get(":base/agencies")
-  listAgencies(
+  async listAgencies(
     @Param("base") base: string,
     @Query() query: LoyaltyListQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.list(base, "AGENCY", query);
   }
 
@@ -101,32 +147,85 @@ export class LoyaltyBaseController {
   @ApiOperation({
     summary: "Search agencies with sensitive filters in request body",
   })
-  searchAgencies(@Param("base") base: string, @Body() body: LoyaltySearchDto) {
+  async searchAgencies(
+    @Param("base") base: string,
+    @Body() body: LoyaltySearchDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.search(base, "AGENCY", body);
   }
 
+  @Post(":base/agencies/export")
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: "Export the filtered agency selection as a masked UTF-8 CSV",
+  })
+  async exportAgencies(
+    @Param("base") base: string,
+    @Body() body: LoyaltyExportDto,
+    @CurrentUser() user: CurrentUserPayload,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "EXPORT"]);
+    const result = await this.loyalty.exportCsv(base, "AGENCY", body, user?.id);
+    this.applyCsvHeaders(response, result);
+    return new StreamableFile(result.stream);
+  }
+
   @Get(":base/agencies/:id")
-  agencyDetail(@Param("base") base: string, @Param("id") id: string) {
+  async agencyDetail(
+    @Param("base") base: string,
+    @Param("id") id: string,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
     return this.loyalty.detail(base, "AGENCY", id);
   }
 
+  @Get("anna/brokers/:id/changes")
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: "Read the audit history of an Anna broker" })
+  async brokerChanges(
+    @Param("id") id: string,
+    @Query() query: LoyaltyChangesQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "AUDIT_READ"]);
+    return this.loyalty.entityChanges("BROKER", id, query);
+  }
+
+  @Get("anna/agencies/:id/changes")
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: "Read the audit history of an Anna agency" })
+  async agencyChanges(
+    @Param("id") id: string,
+    @Query() query: LoyaltyChangesQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "AUDIT_READ"]);
+    return this.loyalty.entityChanges("AGENCY", id, query);
+  }
+
   @Patch("anna/brokers/:id")
-  @Roles(UserRole.ADMIN)
-  updateAnnaBroker(
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async updateAnnaBroker(
     @Param("id") id: string,
     @Body() body: LoyaltyEntityUpdateDto,
     @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "ENTITY_EDIT"]);
     return this.loyalty.updateAnnaEntity("BROKER", id, body, user?.id);
   }
 
   @Delete("anna/brokers/:id")
-  @Roles(UserRole.ADMIN)
-  archiveAnnaBroker(
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async archiveAnnaBroker(
     @Param("id") id: string,
     @Body() body: LoyaltyEntityArchiveDto,
     @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "ENTITY_EDIT"]);
     return this.loyalty.archiveAnnaEntity(
       "BROKER",
       id,
@@ -136,22 +235,24 @@ export class LoyaltyBaseController {
   }
 
   @Patch("anna/agencies/:id")
-  @Roles(UserRole.ADMIN)
-  updateAnnaAgency(
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async updateAnnaAgency(
     @Param("id") id: string,
     @Body() body: LoyaltyEntityUpdateDto,
     @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "ENTITY_EDIT"]);
     return this.loyalty.updateAnnaEntity("AGENCY", id, body, user?.id);
   }
 
   @Delete("anna/agencies/:id")
-  @Roles(UserRole.ADMIN)
-  archiveAnnaAgency(
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async archiveAnnaAgency(
     @Param("id") id: string,
     @Body() body: LoyaltyEntityArchiveDto,
     @CurrentUser() user: CurrentUserPayload,
   ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "ENTITY_EDIT"]);
     return this.loyalty.archiveAnnaEntity(
       "AGENCY",
       id,
@@ -161,13 +262,16 @@ export class LoyaltyBaseController {
   }
 
   @Post("anna/import/dry-run")
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @ApiConsumes("multipart/form-data")
+  @UseGuards(LoyaltyImportPermissionGuard)
   @UseInterceptors(FileInterceptor("file", importUploadOptions))
   async dryRunImport(
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() body: unknown,
+    @CurrentUser() user: CurrentUserPayload,
   ): Promise<any> {
+    await this.permissions.require(user, "IMPORT");
     return this.loyalty.dryRunImport(
       await this.validatedImportDocument(file, body),
     );
@@ -176,6 +280,7 @@ export class LoyaltyBaseController {
   @Post("anna/import/stage")
   @Roles(UserRole.ADMIN)
   @ApiConsumes("multipart/form-data")
+  @UseGuards(LoyaltyImportPermissionGuard)
   @UseInterceptors(FileInterceptor("file", importUploadOptions))
   async stageImport(
     @UploadedFile() file: Express.Multer.File | undefined,
@@ -201,14 +306,22 @@ export class LoyaltyBaseController {
   }
 
   @Get("reconciliation")
-  @Roles(UserRole.ADMIN)
-  reconciliation(@Query() query: LoyaltyReconciliationQueryDto) {
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async reconciliation(
+    @Query() query: LoyaltyReconciliationQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "RECONCILE"]);
     return this.loyalty.reconciliation(query);
   }
 
   @Post("reconciliation/search")
-  @Roles(UserRole.ADMIN)
-  reconciliationSearch(@Body() body: LoyaltyReconciliationSearchDto) {
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async reconciliationSearch(
+    @Body() body: LoyaltyReconciliationSearchDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "RECONCILE"]);
     const normalized = Object.assign(
       new LoyaltyReconciliationQueryDto(),
       body,
@@ -218,20 +331,32 @@ export class LoyaltyBaseController {
   }
 
   @Get("reconciliation/anna-only")
-  @Roles(UserRole.ADMIN)
-  unmatchedAnna(@Query() query: LoyaltyReconciliationQueryDto) {
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async unmatchedAnna(
+    @Query() query: LoyaltyReconciliationQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "RECONCILE"]);
     return this.loyalty.unmatchedAnnaRecords(query);
   }
 
   @Get("reconciliation/cabinet-only")
-  @Roles(UserRole.ADMIN)
-  unmatchedCabinet(@Query() query: LoyaltyReconciliationQueryDto) {
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async unmatchedCabinet(
+    @Query() query: LoyaltyReconciliationQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "RECONCILE"]);
     return this.loyalty.unmatchedCabinetEntities(query);
   }
 
   @Get("reconciliation/links")
-  @Roles(UserRole.ADMIN)
-  activeLinks(@Query() query: LoyaltyReconciliationQueryDto) {
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  async activeLinks(
+    @Query() query: LoyaltyReconciliationQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.requireAll(user, ["READ_ALL", "RECONCILE"]);
     return this.loyalty.activeLinks(query);
   }
 
@@ -327,5 +452,23 @@ export class LoyaltyBaseController {
       });
     }
     return document;
+  }
+
+  private applyCsvHeaders(
+    response: Response,
+    result: {
+      fileName: string;
+      rowCount: number;
+      truncated: boolean;
+      filterHash: string;
+    },
+  ) {
+    response.set({
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${result.fileName}"`,
+      "X-Export-Row-Count": String(result.rowCount),
+      "X-Export-Truncated": String(result.truncated),
+      "X-Loyalty-Filter-Hash": result.filterHash,
+    });
   }
 }

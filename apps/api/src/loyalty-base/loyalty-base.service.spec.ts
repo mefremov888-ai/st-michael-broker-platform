@@ -1,31 +1,64 @@
-import { BadRequestException, ConflictException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  GoneException,
+} from "@nestjs/common";
 import {
   LoyaltyBaseService,
   MAX_LOYALTY_CLI_IMPORT_BYTES,
+  explicitGeography,
+  isLoyaltyAcquisitionPhone,
   loyaltyContentHash,
+  moscowCurrentMonthFilterPeriod,
   normalizeLoyaltyContactPoint,
   positivePostgresBigIntOrNull,
 } from "./loyalty-base.service";
 
 const fn = () => jest.fn();
 
+describe("loyalty filter boundary helpers", () => {
+  it("keeps Moscow calendar month boundaries instead of the preceding UTC date", () => {
+    expect(
+      moscowCurrentMonthFilterPeriod(new Date("2026-09-01T00:15:00.000+03:00")),
+    ).toMatchObject({ fromIso: "2026-09-01", toIso: "2026-09-30" });
+  });
+
+  it("keeps missing geography unknown instead of coercing it to REGION", () => {
+    expect(explicitGeography([null, ""])).toBeNull();
+    expect(explicitGeography(["Не указано"])).toBeNull();
+    expect(explicitGeography(["Москва"])).toBe("MOSCOW");
+    expect(explicitGeography(["Тула"])).toBe("REGION");
+    expect(explicitGeography([], true)).toBe("REGION");
+    expect(explicitGeography([], false)).toBe("MOSCOW");
+  });
+
+  it("excludes Moscow landlines from broker acquisition", () => {
+    expect(isLoyaltyAcquisitionPhone("+7 495 123-45-67")).toBe(false);
+    expect(isLoyaltyAcquisitionPhone("8 (499) 123-45-67")).toBe(false);
+    expect(isLoyaltyAcquisitionPhone("+7 916 123-45-67")).toBe(true);
+    expect(isLoyaltyAcquisitionPhone("not-a-phone")).toBe(false);
+  });
+});
+
 function prismaMock() {
   return {
     broker: { findMany: fn(), findUnique: fn(), count: fn(), update: fn() },
     agency: { findMany: fn(), findUnique: fn(), count: fn(), update: fn() },
-    client: { count: fn() },
-    meeting: { count: fn() },
+    client: { count: fn(), groupBy: fn() },
+    meeting: { count: fn(), groupBy: fn() },
     deal: { count: fn(), aggregate: fn(), groupBy: fn() },
     loyaltyDataset: { findUnique: fn(), upsert: fn(), update: fn() },
     loyaltySnapshot: { findUnique: fn(), create: fn(), update: fn() },
     loyaltyPerson: {
       createMany: fn(),
+      findUnique: fn(),
       findMany: fn(),
       update: fn(),
       updateMany: fn(),
     },
     loyaltyOrganization: {
       createMany: fn(),
+      findUnique: fn(),
       findMany: fn(),
       update: fn(),
       updateMany: fn(),
@@ -64,13 +97,45 @@ function prismaMock() {
       findUnique: fn(),
       count: fn(),
     },
-    loyaltyEntityChange: { create: fn() },
+    loyaltyEntityChange: { create: fn(), findMany: fn(), count: fn() },
+    loyaltyManualEntity: { findMany: fn(), findFirst: fn(), updateMany: fn() },
+    loyaltyCallAssignment: { updateMany: fn() },
+    loyaltyCallAttempt: { findMany: fn() },
+    loyaltyEngagementEvent: { findMany: fn() },
+    loyaltySyncRun: {
+      findUnique: jest.fn(({ where }: any) => {
+        const matched = String(where?.id || "").match(/-(\d+)$/);
+        const coveredRecords = matched ? Number(matched[1]) : 1;
+        return Promise.resolve({
+          id: where?.id,
+          source: "AMOCRM",
+          status: "SUCCEEDED",
+          contentHash: "a".repeat(64),
+          completedAt: new Date("2026-08-22T00:00:00.000Z"),
+          counts: {
+            complete: true,
+            readAt: "2026-08-21T23:59:59.000Z",
+            eventCoverageComplete: true,
+            coveredRecords,
+            activityRuleVersion: "anna-v1",
+            activityTypes: [
+              "FIXATION",
+              "MEETING",
+              "DEAL",
+              "BROKER_TOUR",
+              "CALL",
+            ],
+          },
+        });
+      }),
+    },
+    auditLog: { create: fn() },
     $transaction: fn(),
   } as any;
 }
 
 function importDocument(overrides: Record<string, unknown> = {}): any {
-  return {
+  const document: any = {
     sourceName: "anna-export.json",
     ruleVersion: "anna-v1",
     expectedRecords: 1,
@@ -100,6 +165,20 @@ function importDocument(overrides: Record<string, unknown> = {}): any {
     ],
     ...overrides,
   };
+  if (
+    Number(document.expectedActivities) > 0 &&
+    !Object.prototype.hasOwnProperty.call(overrides, "activityCoverage")
+  ) {
+    document.activityCoverage = {
+      mode: "FULL_SNAPSHOT",
+      coveredRecords: document.records.length,
+      activityTypes: ["FIXATION", "MEETING", "DEAL", "BROKER_TOUR", "CALL"],
+      sourceRunId: `test-full-scan-${document.records.length}`,
+      sourceContentHash: "a".repeat(64),
+      observedThrough: "2026-08-21T23:59:59.000Z",
+    };
+  }
+  return document;
 }
 
 function sourceSummaryGroup(overrides: Record<string, unknown> = {}) {
@@ -384,6 +463,187 @@ describe("LoyaltyBaseService", () => {
       "INCLUDED",
       "UNKNOWN",
     ]);
+  });
+
+  it("rejects event-bearing imports without an explicit coverage attestation", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const result = await service.dryRunImport(
+      importDocument({
+        expectedUniquePhones: 0,
+        expectedActivities: 1,
+        expectedExternalIdentities: 0,
+        activityCoverage: null,
+        records: [
+          {
+            externalKey: "partial-event-row",
+            entityType: "BROKER",
+            displayName: "Partial row",
+            contactPoints: [],
+            externalIdentities: [],
+            activities: [
+              {
+                sourceSystem: "AMOCRM",
+                externalId: "excluded-call",
+                type: "CALL",
+                occurredAt: "2026-08-21T10:00:00.000Z",
+                verdict: "EXCLUDED",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result.publishable).toBe(false);
+    expect(result.issues).toContainEqual({
+      row: 0,
+      code: "ACTIVITY_COVERAGE_REQUIRED",
+    });
+    expect(prisma.loyaltySnapshot.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects self-declared FULL coverage that is not attested by a successful amo scan", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltySyncRun.findUnique.mockResolvedValue({
+      id: "test-full-scan-1",
+      source: "AMOCRM",
+      status: "SUCCEEDED",
+      contentHash: "a".repeat(64),
+      completedAt: new Date("2026-08-22T00:00:00.000Z"),
+      counts: {
+        complete: true,
+        readAt: "2026-08-21T23:59:59.000Z",
+        eventCoverageComplete: false,
+        coveredRecords: 1,
+        activityRuleVersion: "anna-v1",
+        activityTypes: ["CALL"],
+      },
+    });
+    const result = await service.dryRunImport(
+      importDocument({
+        expectedUniquePhones: 0,
+        expectedActivities: 1,
+        expectedIncludedCalls: 1,
+        expectedExternalIdentities: 0,
+        records: [
+          {
+            externalKey: "unattested-event-row",
+            entityType: "BROKER",
+            displayName: "Unattested row",
+            contactPoints: [],
+            externalIdentities: [],
+            activities: [
+              {
+                sourceSystem: "AMOCRM",
+                externalId: "call-1",
+                type: "CALL",
+                occurredAt: "2026-08-21T10:00:00.000Z",
+                verdict: "INCLUDED",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result.publishable).toBe(false);
+    expect(result.issues).toContainEqual({
+      row: 0,
+      code: "FULL_ACTIVITY_COVERAGE_SYNC_RUN_NOT_ATTESTED",
+    });
+    expect(prisma.broker.findMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects a FULL coverage horizon that does not equal the trusted sync read timestamp", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const result = await service.dryRunImport(
+      importDocument({
+        expectedUniquePhones: 0,
+        expectedActivities: 1,
+        expectedIncludedCalls: 1,
+        expectedExternalIdentities: 0,
+        activityCoverage: {
+          mode: "FULL_SNAPSHOT",
+          coveredRecords: 1,
+          activityTypes: ["FIXATION", "MEETING", "DEAL", "BROKER_TOUR", "CALL"],
+          sourceRunId: "test-full-scan-1",
+          sourceContentHash: "a".repeat(64),
+          observedThrough: "2026-08-21T23:00:00.000Z",
+        },
+        records: [
+          {
+            externalKey: "mismatched-cutoff",
+            entityType: "BROKER",
+            displayName: "Mismatched cutoff",
+            contactPoints: [],
+            externalIdentities: [],
+            activities: [
+              {
+                sourceSystem: "AMOCRM",
+                externalId: "call-before-cutoff",
+                type: "CALL",
+                occurredAt: "2026-08-21T10:00:00.000Z",
+                verdict: "INCLUDED",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result.publishable).toBe(false);
+    expect(result.issues).toContainEqual({
+      row: 0,
+      code: "FULL_ACTIVITY_COVERAGE_SYNC_RUN_NOT_ATTESTED",
+    });
+  });
+
+  it("rejects activities newer than the declared observation horizon", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const result = await service.dryRunImport(
+      importDocument({
+        expectedUniquePhones: 0,
+        expectedActivities: 1,
+        expectedIncludedCalls: 1,
+        expectedExternalIdentities: 0,
+        activityCoverage: {
+          mode: "FULL_SNAPSHOT",
+          coveredRecords: 1,
+          activityTypes: ["FIXATION", "MEETING", "DEAL", "BROKER_TOUR", "CALL"],
+          sourceRunId: "test-full-scan-1",
+          sourceContentHash: "a".repeat(64),
+          observedThrough: "2026-08-21T09:00:00.000Z",
+        },
+        records: [
+          {
+            externalKey: "future-event",
+            entityType: "BROKER",
+            displayName: "Future event",
+            contactPoints: [],
+            externalIdentities: [],
+            activities: [
+              {
+                sourceSystem: "AMOCRM",
+                externalId: "call-after-cutoff",
+                type: "CALL",
+                occurredAt: "2026-08-21T10:00:00.000Z",
+                verdict: "INCLUDED",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result.publishable).toBe(false);
+    expect(result.issues).toContainEqual({
+      row: 1,
+      code: "ACTIVITY_AFTER_OBSERVED_THROUGH",
+    });
   });
 
   it("stores Anna rollups atomically without fabricating event rows", async () => {
@@ -766,13 +1026,47 @@ describe("LoyaltyBaseService", () => {
     prisma.loyaltyReconciliationCase.updateMany.mockResolvedValue({ count: 1 });
 
     await service.decideReconciliation(
-      { caseId: "case-1", decision: "REJECT_MATCH", expectedVersion: 1 },
+      {
+        caseId: "case-1",
+        decision: "REJECT_MATCH",
+        expectedVersion: 1,
+        reason: "Reviewed by administrator",
+      },
       "admin-1",
     );
 
     expect(prisma.loyaltyEntityLink.updateMany).not.toHaveBeenCalled();
     expect(prisma.loyaltyEntityLink.create).not.toHaveBeenCalled();
     expect(prisma.broker.update).not.toHaveBeenCalled();
+    expect(prisma.loyaltyReconciliationCase.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          decisionReason: "Reviewed by administrator",
+          decisionPayload: {
+            targetId: "broker-1",
+            fieldResolutions: null,
+          },
+        }),
+      }),
+    );
+    expect(prisma.loyaltyEntityChange.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        personId: "person-1",
+        action: "UPDATE",
+        changedFields: ["reconciliationDecision"],
+        actorId: "admin-1",
+        beforeValues: expect.objectContaining({
+          caseId: "case-1",
+          status: "OPEN",
+          version: 1,
+        }),
+        afterValues: expect.objectContaining({
+          caseId: "case-1",
+          decision: "REJECT_MATCH",
+          version: 2,
+        }),
+      }),
+    });
   });
 
   it("refuses a decision for a stale snapshot", async () => {
@@ -802,9 +1096,307 @@ describe("LoyaltyBaseService", () => {
         caseId: "case-old",
         decision: "LINK",
         expectedVersion: 1,
+        reason: "Reviewed by administrator",
       }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("SUPPLEMENT creates a real confirmed link and retains field resolutions as evidence", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const currentCase = {
+      id: "case-supplement",
+      snapshotId: "snapshot-1",
+      version: 1,
+      status: "OPEN",
+      decision: null,
+      personId: "person-1",
+      organizationId: null,
+      targetType: "BROKER",
+      targetId: "broker-1",
+      matchCodes: ["PHONE_EXACT"],
+      ruleVersion: "anna-v1",
+    };
+    prisma.loyaltyReconciliationCase.findUnique.mockResolvedValue(currentCase);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+      },
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue({
+      id: "source-1",
+    });
+    prisma.loyaltyManualEntity.findFirst.mockResolvedValue(null);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      role: "BROKER",
+      status: "ACTIVE",
+      source: "BROKER_CABINET",
+      mergedIntoId: null,
+    });
+    prisma.loyaltyPerson.findUnique.mockResolvedValue({
+      manualDisplayName: null,
+      manualCity: null,
+      manualAttributes: null,
+    });
+    prisma.loyaltyReconciliationCase.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyEntityLink.findFirst.mockResolvedValue(null);
+    prisma.loyaltyEntityLink.create.mockResolvedValue({ id: "link-1" });
+
+    await service.decideReconciliation(
+      {
+        caseId: "case-supplement",
+        decision: "SUPPLEMENT",
+        expectedVersion: 1,
+        reason: "Связь проверена, расхождение имени сохранено",
+        fieldResolutions: { displayName: "KEEP_SEPARATE_VALUES" },
+      },
+      "admin-1",
+    );
+
+    expect(prisma.loyaltyEntityLink.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        personId: "person-1",
+        targetType: "BROKER",
+        targetId: "broker-1",
+        status: "CONFIRMED",
+        evidence: {
+          matchCodes: ["PHONE_EXACT"],
+          decision: "SUPPLEMENT",
+          fieldResolutions: { displayName: "KEEP_SEPARATE_VALUES" },
+        },
+      }),
+    });
+  });
+
+  it.each([
+    ["non-broker role", { role: "MANAGER" }],
+    ["blocked account", { status: "BLOCKED" }],
+    ["closed-as-broker source", { source: "CLOSED_AS_BROKER" }],
+    ["merged duplicate", { mergedIntoId: "broker-primary" }],
+  ])(
+    "revalidates and rejects an ineligible OUR target inside the transaction: %s",
+    async (_label, override) => {
+      const prisma = prismaMock();
+      const service = new LoyaltyBaseService(prisma);
+      const currentCase = {
+        id: "case-link",
+        snapshotId: "snapshot-1",
+        version: 1,
+        status: "OPEN",
+        decision: null,
+        personId: "person-1",
+        organizationId: null,
+        targetType: "BROKER",
+        targetId: "broker-1",
+        matchCodes: ["PHONE_EXACT"],
+        ruleVersion: "anna-v1",
+      };
+      prisma.loyaltyReconciliationCase.findUnique.mockResolvedValue(
+        currentCase,
+      );
+      prisma.loyaltyDataset.findUnique.mockResolvedValue({
+        id: "dataset-1",
+        activeSnapshotId: "snapshot-1",
+        activeSnapshot: {
+          id: "snapshot-1",
+          datasetId: "dataset-1",
+          status: "PUBLISHED",
+        },
+      });
+      const tx = {
+        ...prisma,
+        loyaltyDataset: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: "dataset-1",
+            activeSnapshotId: "snapshot-1",
+          }),
+        },
+        loyaltySourceRecord: {
+          findFirst: jest.fn().mockResolvedValue({ id: "source-1" }),
+        },
+        loyaltyManualEntity: {
+          findFirst: jest.fn().mockResolvedValue(null),
+        },
+        broker: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: "broker-1",
+            role: "BROKER",
+            status: "ACTIVE",
+            source: "BROKER_CABINET",
+            mergedIntoId: null,
+            ...override,
+          }),
+        },
+      } as any;
+      prisma.$transaction.mockImplementation(async (callback: any) =>
+        callback(tx),
+      );
+
+      await expect(
+        service.decideReconciliation({
+          caseId: "case-link",
+          decision: "LINK",
+          expectedVersion: 1,
+          reason: "Reviewed by administrator",
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.loyaltySourceRecord.findFirst).toHaveBeenCalled();
+      expect(tx.broker.findUnique).toHaveBeenCalledWith({
+        where: { id: "broker-1" },
+        select: {
+          id: true,
+          role: true,
+          status: true,
+          source: true,
+          mergedIntoId: true,
+        },
+      });
+      expect(prisma.broker.findUnique).not.toHaveBeenCalled();
+      expect(
+        prisma.loyaltyReconciliationCase.updateMany,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("revalidates an active Anna source or manual owner before locking LINK", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const currentCase = {
+      id: "case-link",
+      snapshotId: "snapshot-1",
+      version: 1,
+      status: "OPEN",
+      decision: null,
+      personId: "person-1",
+      organizationId: null,
+      targetType: "BROKER",
+      targetId: "broker-1",
+      matchCodes: ["PHONE_EXACT"],
+      ruleVersion: "anna-v1",
+    };
+    prisma.loyaltyReconciliationCase.findUnique.mockResolvedValue(currentCase);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+      },
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue(null);
+    prisma.loyaltyManualEntity.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.decideReconciliation({
+        caseId: "case-link",
+        decision: "LINK",
+        expectedVersion: 1,
+        reason: "Reviewed by administrator",
+      }),
+    ).rejects.toThrow("Anna source/manual entity is no longer active");
+    expect(prisma.broker.findUnique).not.toHaveBeenCalled();
+    expect(prisma.loyaltyReconciliationCase.updateMany).not.toHaveBeenCalled();
+    expect(prisma.loyaltyManualEntity.findFirst).toHaveBeenCalledWith({
+      where: {
+        datasetId: "dataset-1",
+        entityType: "BROKER",
+        archivedAt: null,
+        personId: "person-1",
+        person: { is: { archivedAt: null } },
+      },
+      select: { id: true },
+    });
+  });
+
+  it("ARCHIVE soft-archives the Anna entity, overlay and active link atomically", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyReconciliationCase.findUnique.mockResolvedValue({
+      id: "case-archive",
+      snapshotId: "snapshot-1",
+      version: 2,
+      status: "OPEN",
+      decision: null,
+      personId: "person-1",
+      organizationId: null,
+      targetType: "BROKER",
+      targetId: "broker-1",
+      matchCodes: ["EXCLUDED_OR_STALE"],
+      ruleVersion: "anna-v1",
+    });
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+      },
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltyReconciliationCase.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyPerson.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyManualEntity.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyEntityLink.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyCallAssignment.updateMany.mockResolvedValue({ count: 4 });
+    prisma.loyaltyEntityChange.create.mockResolvedValue({ id: "change-1" });
+
+    await service.decideReconciliation(
+      {
+        caseId: "case-archive",
+        decision: "ARCHIVE",
+        expectedVersion: 2,
+        reason: "Контакт подтверждён как неактуальный",
+      },
+      "admin-1",
+    );
+
+    expect(prisma.loyaltyPerson.updateMany).toHaveBeenCalledWith({
+      where: { id: "person-1", archivedAt: null },
+      data: { archivedAt: expect.any(Date) },
+    });
+    expect(prisma.loyaltyManualEntity.updateMany).toHaveBeenCalledWith({
+      where: { personId: "person-1" },
+      data: expect.objectContaining({
+        archivedAt: expect.any(Date),
+        version: { increment: 1 },
+      }),
+    });
+    expect(prisma.loyaltyCallAssignment.updateMany).toHaveBeenCalledWith({
+      where: {
+        annaPersonId: "person-1",
+        status: { in: ["PENDING", "IN_PROGRESS"] },
+      },
+      data: expect.objectContaining({
+        status: "CANCELLED",
+        version: { increment: 1 },
+      }),
+    });
+    expect(prisma.loyaltyEntityChange.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        personId: "person-1",
+        action: "ARCHIVE",
+        changedFields: expect.arrayContaining(["openCallAssignments"]),
+        beforeValues: expect.objectContaining({ openCallAssignments: 4 }),
+        actorId: "admin-1",
+      }),
+    });
+    expect(prisma.broker.update).not.toHaveBeenCalled();
   });
 
   it("rejects snapshot-global duplicate activities before staging", async () => {
@@ -1114,6 +1706,7 @@ describe("LoyaltyBaseService", () => {
         caseId: "case-open",
         decision: "UNLINK",
         expectedVersion: 1,
+        reason: "Reviewed by administrator",
       }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(prisma.$transaction).not.toHaveBeenCalled();
@@ -1148,7 +1741,17 @@ describe("LoyaltyBaseService", () => {
     prisma.$transaction.mockImplementation(async (callback: any) =>
       callback(prisma),
     );
-    prisma.broker.findUnique.mockResolvedValue({ id: "broker-1" });
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue({
+      id: "source-1",
+    });
+    prisma.loyaltyManualEntity.findFirst.mockResolvedValue(null);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      role: "BROKER",
+      status: "ACTIVE",
+      source: "BROKER_CABINET",
+      mergedIntoId: null,
+    });
     prisma.loyaltyReconciliationCase.updateMany.mockResolvedValue({ count: 1 });
     prisma.loyaltyEntityLink.findFirst.mockResolvedValue({
       id: "link-old",
@@ -1164,6 +1767,7 @@ describe("LoyaltyBaseService", () => {
       caseId: "case-new",
       decision: "LINK",
       expectedVersion: 1,
+      reason: "Reviewed by administrator",
     });
     expect(prisma.loyaltyEntityLink.create).not.toHaveBeenCalled();
 
@@ -1178,6 +1782,7 @@ describe("LoyaltyBaseService", () => {
       caseId: "case-new",
       decision: "UNLINK",
       expectedVersion: 2,
+      reason: "Reviewed by administrator",
     });
     expect(prisma.loyaltyEntityLink.updateMany).toHaveBeenCalledWith({
       where: {
@@ -1244,19 +1849,37 @@ describe("LoyaltyBaseService", () => {
             fullName: "Broker",
             phone: "+79990000001",
             email: "broker@example.test",
+            lastCallAt: null,
+            brokerTourVisited: false,
+            brokerTourDate: null,
+            clients: [],
+            meetings: [],
+            deals: [],
+            callLogs: [],
           },
         },
       ],
-      _count: { brokerAgencies: 1, deals: 0 },
+      deals: [],
+      _count: { brokerAgencies: 1 },
     });
-    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
 
     const result = await service.detail("ours", "AGENCY", "agency-1");
 
     expect(
       prisma.agency.findUnique.mock.calls[0][0].include.brokerAgencies.include
         .broker.select,
-    ).toEqual({ id: true, fullName: true, phone: true, email: true });
+    ).toEqual(
+      expect.objectContaining({
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        clients: expect.any(Object),
+        meetings: expect.any(Object),
+        deals: expect.any(Object),
+        callLogs: expect.any(Object),
+      }),
+    );
     expect(result.item.brokers).toEqual([
       expect.objectContaining({
         id: "broker-1",
@@ -1270,46 +1893,26 @@ describe("LoyaltyBaseService", () => {
     ]);
   });
 
-  it("can optimistically revoke an orphan active link without a current reconciliation case", async () => {
+  it("retires the orphan unlink path without mutating a link", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
-    prisma.$transaction.mockImplementation(async (callback: any) =>
-      callback(prisma),
-    );
-    prisma.loyaltyEntityLink.updateMany.mockResolvedValue({ count: 1 });
-    prisma.loyaltyEntityLink.findUnique.mockResolvedValue({
-      id: "11111111-1111-4111-8111-111111111111",
-      status: "REVOKED",
-      version: 4,
-    });
 
-    const result = await service.unlinkActiveLink(
-      {
-        linkId: "11111111-1111-4111-8111-111111111111",
-        expectedVersion: 3,
-      },
-      "admin-1",
-    );
-
-    expect(result.status).toBe("REVOKED");
-    expect(prisma.loyaltyEntityLink.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "11111111-1111-4111-8111-111111111111",
-        version: 3,
-        status: "CONFIRMED",
-        revokedAt: null,
-        OR: [
-          { person: { is: { dataset: { is: { code: "ANNA" } } } } },
-          { organization: { is: { dataset: { is: { code: "ANNA" } } } } },
-        ],
-      },
-      data: {
-        status: "REVOKED",
-        revokedAt: expect.any(Date),
-        revokedById: "admin-1",
-        version: { increment: 1 },
-      },
+    const error = await service
+      .unlinkActiveLink(
+        {
+          linkId: "11111111-1111-4111-8111-111111111111",
+          expectedVersion: 3,
+        },
+        "admin-1",
+      )
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(GoneException);
+    expect(error.getStatus()).toBe(410);
+    expect(error.getResponse()).toMatchObject({
+      code: "LOYALTY_LEGACY_UNLINK_RETIRED",
     });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.loyaltyEntityLink.updateMany).not.toHaveBeenCalled();
   });
 
   it("lists active and orphan links with owner/target names but no contacts", async () => {
@@ -1366,6 +1969,26 @@ describe("LoyaltyBaseService", () => {
         id: "snapshot-1",
         datasetId: "dataset-1",
         status: "PUBLISHED",
+        recordCount: 1,
+        activityCount: 1,
+        summary: {
+          activityCoverage: {
+            mode: "FULL_SNAPSHOT",
+            coveredRecords: 1,
+            activityTypes: [
+              "FIXATION",
+              "MEETING",
+              "DEAL",
+              "BROKER_TOUR",
+              "CALL",
+            ],
+            sourceRunId: "test-full-scan-1",
+            sourceContentHash: "a".repeat(64),
+            observedThrough: "2099-12-31T23:59:58.000Z",
+            verifiedBySyncRun: true,
+            syncCompletedAt: "2099-12-31T23:59:59.000Z",
+          },
+        },
         ruleVersion: "anna-v1",
         publishedAt: new Date(),
       },
@@ -1390,6 +2013,141 @@ describe("LoyaltyBaseService", () => {
         { entityType: "AGENCY", organization: { is: { archivedAt: null } } },
       ],
     });
+  });
+
+  it("keeps overview not-called KPI in parity with the effective workflow drill-down", async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-08-24T12:00:00.000Z"));
+    try {
+      const prisma = prismaMock();
+      const service = new LoyaltyBaseService(prisma);
+      const brokerRecord = (personId: string) => ({
+        id: `source-${personId}`,
+        entityType: "BROKER",
+        personId,
+        organizationId: null,
+        displayName: personId,
+        city: "Moscow",
+        attributes: {},
+        sourceArchivedAt: null,
+        person: {
+          id: personId,
+          manualDisplayName: null,
+          manualCity: null,
+          manualAttributes: null,
+          archivedAt: null,
+          updatedAt: new Date("2026-08-24T00:00:00.000Z"),
+          contactOverrides: [],
+          links: [],
+        },
+        organization: null,
+        contactPoints: [],
+        externalIdentities: [],
+        metrics: [
+          {
+            ruleVersion: "anna-v1",
+            activityEvidenceCount: 0,
+            fixationCount: 0,
+            meetingCount: 0,
+            dealCount: 0,
+            brokerTourCount: 0,
+            callCount: 0,
+            dealAmount: "0.00",
+          },
+        ],
+        sourceAggregate: null,
+        organizationRoles: [],
+      });
+      const records = [
+        brokerRecord("person-called"),
+        brokerRecord("person-idle"),
+      ];
+      prisma.loyaltyDataset.findUnique.mockResolvedValue({
+        id: "dataset-1",
+        activeSnapshotId: "snapshot-1",
+        activeSnapshot: {
+          id: "snapshot-1",
+          datasetId: "dataset-1",
+          status: "PUBLISHED",
+          recordCount: 2,
+          activityCount: 0,
+          ruleVersion: "anna-v1",
+          publishedAt: new Date("2026-08-24T00:00:00.000Z"),
+          summary: {
+            sourceAggregates: 0,
+            activityCoverage: {
+              mode: "FULL_SNAPSHOT",
+              coveredRecords: 2,
+              activityTypes: [
+                "FIXATION",
+                "MEETING",
+                "DEAL",
+                "BROKER_TOUR",
+                "CALL",
+              ],
+              sourceRunId: "parity-run",
+              sourceContentHash: "a".repeat(64),
+              observedThrough: "2026-08-24T23:59:58.000Z",
+              verifiedBySyncRun: true,
+              syncCompletedAt: "2026-08-24T23:59:59.000Z",
+            },
+          },
+        },
+      });
+      prisma.loyaltyManualEntity.findMany.mockResolvedValue([]);
+      prisma.loyaltySourceRecord.findMany.mockImplementation((args: any) =>
+        args?.include?.metrics ? records : [],
+      );
+      prisma.loyaltySourceRecord.count.mockImplementation(({ where }: any) =>
+        where?.entityType === "BROKER" ? 2 : 0,
+      );
+      prisma.loyaltyActivity.count.mockResolvedValue(0);
+      prisma.loyaltyActivity.aggregate.mockResolvedValue({
+        _sum: { amount: null },
+      });
+      prisma.loyaltyActivity.groupBy.mockResolvedValue([]);
+      prisma.loyaltySourceAggregate.findMany.mockResolvedValue([]);
+      prisma.loyaltyCallAttempt.findMany.mockResolvedValue([
+        {
+          id: "attempt-1",
+          assignmentId: "assignment-1",
+          operatorId: "operator-1",
+          result: "CONNECTED",
+          comment: null,
+          nextStep: null,
+          nextActionAt: null,
+          source: "LOYALTY_CALL_QUEUE",
+          correctsAttemptId: null,
+          correctionReason: null,
+          occurredAt: new Date("2026-08-10T10:00:00.000Z"),
+          createdAt: new Date("2026-08-10T10:00:01.000Z"),
+          operator: { id: "operator-1", fullName: "Operator" },
+          assignment: {
+            annaPersonId: "person-called",
+            annaOrganizationId: null,
+            ourBrokerId: null,
+            ourAgencyId: null,
+            campaign: { id: "campaign-1", name: "August calls" },
+          },
+        },
+      ]);
+      prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+
+      const overview: any = await service.overview("anna", {});
+      const drillDown: any = await service.list("anna", "BROKER", {
+        page: 1,
+        pageSize: 30,
+        segment: "NOT_CALLED_CURRENT_MONTH",
+      } as any);
+
+      expect(overview.brokers.notCalledCurrentMonth).toBe(1);
+      expect(drillDown.total).toBe(overview.brokers.notCalledCurrentMonth);
+      expect(drillDown.items.map((item: any) => item.id)).toEqual([
+        "person-idle",
+      ]);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it("uses only explicit source-reported rollups when a snapshot has no exact activities", async () => {
@@ -1519,6 +2277,316 @@ describe("LoyaltyBaseService", () => {
     expect(prisma.loyaltyActivity.aggregate).not.toHaveBeenCalled();
   });
 
+  it("does not turn one partial or excluded event into exact zeroes for the whole snapshot", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        recordCount: 2,
+        activityCount: 1,
+        ruleVersion: "anna-v2-partial",
+        summary: {
+          sourceAggregates: 0,
+          activityCoverage: {
+            mode: "PARTIAL",
+            coveredRecords: 1,
+            activityTypes: ["CALL"],
+            sourceRunId: "partial-scan",
+            sourceContentHash: "b".repeat(64),
+            observedThrough: "2026-08-21T00:00:00.000Z",
+            verifiedBySyncRun: false,
+          },
+        },
+        publishedAt: new Date("2026-08-21T00:00:00.000Z"),
+      },
+    });
+    prisma.loyaltySourceRecord.count
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(0);
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([]);
+    prisma.loyaltySourceAggregate.findMany.mockResolvedValue([]);
+
+    const result: any = await service.overview("anna", {});
+
+    expect(result.metricSource).toMatchObject({
+      kind: "UNAVAILABLE",
+      exactness: "UNKNOWN",
+    });
+    expect(result.activities).toEqual({
+      fixations: null,
+      meetings: null,
+      deals: null,
+    });
+    expect(prisma.loyaltyActivity.count).not.toHaveBeenCalled();
+    expect(prisma.loyaltyActivity.aggregate).not.toHaveBeenCalled();
+  });
+
+  it("returns exact zeroes for zero-event rows only under trusted FULL snapshot coverage", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        recordCount: 1,
+        activityCount: 0,
+        ruleVersion: "anna-v1",
+        summary: {
+          activityCoverage: {
+            mode: "FULL_SNAPSHOT",
+            coveredRecords: 1,
+            activityTypes: [
+              "FIXATION",
+              "MEETING",
+              "DEAL",
+              "BROKER_TOUR",
+              "CALL",
+            ],
+            sourceRunId: "test-full-scan-1",
+            sourceContentHash: "a".repeat(64),
+            observedThrough: "2099-12-31T23:59:58.000Z",
+            verifiedBySyncRun: true,
+            syncCompletedAt: "2099-12-31T23:59:59.000Z",
+          },
+        },
+      },
+    });
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([
+      {
+        id: "record-zero",
+        entityType: "BROKER",
+        displayName: "Zero event broker",
+        attributes: {},
+        person: {
+          id: "person-zero",
+          manualDisplayName: null,
+          manualCity: null,
+          manualAttributes: null,
+          archivedAt: null,
+          contactOverrides: [],
+          links: [],
+        },
+        organization: null,
+        contactPoints: [],
+        externalIdentities: [],
+        organizationRoles: [],
+        metrics: [
+          {
+            ruleVersion: "anna-v1",
+            activityEvidenceCount: 0,
+            fixationCount: 0,
+            meetingCount: 0,
+            dealCount: 0,
+            brokerTourCount: 0,
+            callCount: 0,
+            dealAmount: "0.00",
+          },
+        ],
+        sourceAggregate: null,
+      },
+    ]);
+    prisma.loyaltyManualEntity.findMany.mockResolvedValue([]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+
+    const result: any = await service.list("anna", "BROKER", {
+      page: 1,
+      pageSize: 30,
+    } as any);
+
+    expect(result.items[0].metrics).toMatchObject({
+      fixations: 0,
+      meetings: 0,
+      deals: 0,
+      brokerTours: 0,
+      calls: 0,
+      dealAmount: "0.00",
+    });
+    expect(result.items[0].metricSource).toMatchObject({
+      kind: "EXACT_ACTIVITIES",
+      exactness: "EXACT",
+      activityEvidenceCount: 0,
+      observedThrough: "2099-12-31T23:59:58.000Z",
+    });
+  });
+
+  it("keeps partial month evidence unknown and applies only safe lifetime deductions", () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const partialAugust = {
+      from: new Date("2026-08-10T00:00:00.000Z"),
+      to: new Date("2026-08-20T23:59:59.999Z"),
+      fromIso: "2026-08-10",
+      toIso: "2026-08-20",
+    };
+    const fullAugust = {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      to: new Date("2026-08-31T23:59:59.999Z"),
+      fromIso: "2026-08-01",
+      toIso: "2026-08-31",
+    };
+    const september = {
+      from: new Date("2026-09-01T00:00:00.000Z"),
+      to: new Date("2026-09-30T23:59:59.999Z"),
+      fromIso: "2026-09-01",
+      toIso: "2026-09-30",
+    };
+
+    expect(
+      (service as any).callInPeriod({ period: "2026-08" }, partialAugust),
+    ).toBeNull();
+    expect(
+      (service as any).callInPeriod({ period: "2026-08" }, fullAugust),
+    ).toBe(true);
+    expect(
+      (service as any).callInPeriod({ period: "2026-08" }, september),
+    ).toBe(false);
+    expect(
+      (service as any).callPresenceInPeriod(
+        [{ period: "2026-08" }],
+        null,
+        september,
+      ),
+    ).toBeNull();
+
+    const monthlyItem = {
+      metricSource: { kind: "UNAVAILABLE" },
+      metrics: { deals: null },
+      sourceReportedMetrics: { dealsByMonth: { "2026-08": 3 } },
+    };
+    expect(
+      (service as any).annaDealsInPeriod({}, monthlyItem, partialAugust),
+    ).toBeNull();
+    expect(
+      (service as any).annaDealsInPeriod({}, monthlyItem, fullAugust),
+    ).toBe(3);
+    expect(
+      (service as any).annaDealsInPeriod({}, monthlyItem, september),
+    ).toBeNull();
+
+    const lifetimeItem = {
+      metricSource: { kind: "UNAVAILABLE" },
+      metrics: { deals: null },
+      sourceReportedMetrics: {
+        deals: 9,
+        lastDealAt: "2026-09-15",
+      },
+    };
+    expect(
+      (service as any).annaDealsInPeriod({}, lifetimeItem, fullAugust),
+    ).toBeNull();
+    expect(
+      (service as any).annaDealsInPeriod(
+        {},
+        {
+          ...lifetimeItem,
+          sourceReportedMetrics: { deals: 9, lastDealAt: "2026-07-31" },
+        },
+        fullAugust,
+      ),
+    ).toBe(0);
+    expect(
+      (service as any).annaDealsInPeriod(
+        {},
+        {
+          ...lifetimeItem,
+          sourceReportedMetrics: { deals: 9, lastDealAt: "2026-08-15" },
+        },
+        fullAugust,
+      ),
+    ).toBe(1);
+    expect(
+      (service as any).annaDealsInPeriod(
+        {},
+        {
+          ...lifetimeItem,
+          sourceReportedMetrics: { deals: 0, lastDealAt: null },
+        },
+        fullAugust,
+      ),
+    ).toBe(0);
+    expect(
+      (service as any).annaActivityPresence(
+        {},
+        {
+          metricSource: { kind: "UNAVAILABLE" },
+          metrics: { fixations: null },
+          sourceReportedMetrics: { fixations: 0 },
+        },
+        "FIXATION",
+      ),
+    ).toBe(false);
+    expect(
+      (service as any).annaActivityPresence(
+        {},
+        {
+          metricSource: { kind: "UNAVAILABLE" },
+          metrics: { fixations: null },
+          sourceReportedMetrics: { fixations: 0 },
+        },
+        "FIXATION",
+        fullAugust,
+      ),
+    ).toBe(false);
+    expect(
+      (service as any).annaActivityPresence(
+        {},
+        {
+          metricSource: { kind: "UNAVAILABLE" },
+          metrics: { calls: null },
+          sourceReportedMetrics: { calls: 0, callBreakdown: [] },
+        },
+        "CALL",
+        fullAugust,
+      ),
+    ).toBe(false);
+  });
+
+  it("does not return exact selected-period zeroes beyond observedThrough", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const period = {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      to: new Date("2026-08-31T23:59:59.999Z"),
+      fromIso: "2026-08-01",
+      toIso: "2026-08-31",
+    };
+    const item = {
+      metricSource: {
+        kind: "EXACT_ACTIVITIES",
+        observedThrough: "2026-08-15T23:59:59.999Z",
+      },
+      metrics: {
+        fixations: 0,
+        meetings: 0,
+        deals: 0,
+        brokerTours: 0,
+        calls: 0,
+      },
+    };
+
+    expect((service as any).annaPeriodMetrics({}, item, period)).toMatchObject({
+      availability: "UNAVAILABLE",
+      fixations: null,
+      deals: null,
+    });
+    expect(
+      (service as any).callPresenceInPeriod(
+        [],
+        0,
+        period,
+        new Date("2026-08-15T23:59:59.999Z"),
+      ),
+    ).toBeNull();
+  });
+
   it("does not treat an empty legacy call breakdown as proof of no call", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
@@ -1543,17 +2611,202 @@ describe("LoyaltyBaseService", () => {
       segment: "NOT_CALLED_CURRENT_MONTH",
     } as any);
 
-    const segment =
-      prisma.loyaltySourceRecord.findMany.mock.calls[0][0].where.AND[0];
-    expect(segment).toEqual({
-      sourceAggregate: {
-        is: {
-          quality: "SOURCE_REPORTED",
-          lastCallAt: { lt: expect.any(Date) },
-        },
+    const where = prisma.loyaltySourceRecord.findMany.mock.calls[0][0].where;
+    // The predicate must run only after workflow attempts are batch-attached;
+    // a source-only WHERE would drop a fresh queue call before reconciliation.
+    expect(where).not.toHaveProperty("AND");
+    expect(JSON.stringify(where)).not.toContain("callCount");
+  });
+
+  it("unions manual Anna overlays into the canonical list without false metrics", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        activityCount: 0,
+        ruleVersion: "anna-v1",
       },
     });
-    expect(JSON.stringify(segment)).not.toContain("callCount");
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([]);
+    prisma.loyaltyManualEntity.findMany.mockResolvedValue([
+      {
+        id: "overlay-1",
+        entityType: "BROKER",
+        personId: "person-manual-1",
+        displayName: "Manual broker",
+        city: "Moscow",
+        phoneNormalized: "+79990000001",
+        emailNormalized: null,
+        contactPoints: [
+          {
+            id: "point-1",
+            type: "PHONE",
+            value: "+79990000001",
+            label: "Manual contact",
+            isPrimary: true,
+          },
+        ],
+        attributes: { source: "MANUAL" },
+        version: 1,
+        archivedAt: null,
+        createdAt: new Date("2026-08-21T12:00:00Z"),
+        updatedAt: new Date("2026-08-21T12:00:00Z"),
+        person: {
+          id: "person-manual-1",
+          manualDisplayName: "Manual broker",
+          manualCity: "Moscow",
+          manualAttributes: { source: "MANUAL" },
+          archivedAt: null,
+          updatedAt: new Date("2026-08-21T12:00:00Z"),
+          links: [],
+          contactOverrides: [
+            {
+              id: "override-email-1",
+              type: "EMAIL",
+              value: "manual@example.test",
+              normalizedValue: "manual@example.test",
+              label: "Рабочая почта",
+              isPrimary: true,
+              version: 2,
+              archivedAt: null,
+            },
+          ],
+        },
+        organization: null,
+      },
+    ]);
+
+    const result: any = await service.list("anna", "BROKER", {
+      page: 1,
+      pageSize: 30,
+    } as any);
+
+    expect(result.total).toBe(1);
+    expect(result.items[0]).toMatchObject({
+      id: "person-manual-1",
+      sourceRecordId: null,
+      manualOverlay: true,
+      manualOverlayId: "overlay-1",
+      metrics: {
+        fixations: null,
+        meetings: null,
+        deals: null,
+        calls: null,
+      },
+      dataQualityCodes: expect.arrayContaining(["NEEDS_COMPLETION"]),
+      contactPoints: expect.arrayContaining([
+        expect.objectContaining({
+          id: "override-email-1",
+          type: "EMAIL",
+          value: "manual@example.test",
+          version: 2,
+          source: "MANUAL_OVERRIDE",
+        }),
+      ]),
+    });
+  });
+
+  it("blocks an import that collides with an unrelated active manual overlay", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const document = importDocument();
+    const dryRun = await service.dryRunImport(document);
+    prisma.loyaltyManualEntity.findMany.mockResolvedValue([
+      {
+        entityType: "BROKER",
+        phoneNormalized: "+79990000001",
+        emailNormalized: null,
+        person: { externalKey: "MANUAL:other-person" },
+        organization: null,
+      },
+    ]);
+
+    await expect(
+      service.stageImport({
+        ...document,
+        expectedContentHash: dryRun.contentHash,
+        expectedActiveSnapshotId: null,
+      }),
+    ).rejects.toThrow("MANUAL_OVERLAY_CONTACT_REQUIRES_RECONCILIATION");
+  });
+
+  it("updates a manual overlay with its own optimistic token", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const updatedAt = new Date("2026-08-21T12:00:00.000Z");
+    const manual = {
+      id: "overlay-1",
+      datasetId: "dataset-1",
+      entityType: "BROKER",
+      personId: "person-manual-1",
+      organizationId: null,
+      displayName: "Old name",
+      city: "Moscow",
+      phoneNormalized: "+79990000001",
+      emailNormalized: null,
+      contactPoints: [],
+      attributes: { source: "MANUAL" },
+      version: 1,
+      archivedAt: null,
+      createdAt: updatedAt,
+      updatedAt,
+      person: {
+        id: "person-manual-1",
+        manualDisplayName: "Old name",
+        manualCity: "Moscow",
+        manualAttributes: { source: "MANUAL" },
+        archivedAt: null,
+        updatedAt,
+        links: [],
+      },
+      organization: null,
+    };
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        ruleVersion: "anna-v1",
+      },
+    });
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue(null);
+    prisma.loyaltyManualEntity.findFirst.mockResolvedValue(manual);
+    prisma.loyaltyManualEntity.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyPerson.update.mockResolvedValue({});
+    prisma.loyaltyEntityChange.create.mockResolvedValue({});
+
+    const result: any = await service.updateAnnaEntity(
+      "BROKER",
+      "person-manual-1",
+      {
+        expectedUpdatedAt: updatedAt.toISOString(),
+        displayName: "New name",
+      } as any,
+      "admin-1",
+    );
+
+    expect(prisma.loyaltyManualEntity.updateMany).toHaveBeenCalledWith({
+      where: { id: "overlay-1", updatedAt },
+      data: expect.objectContaining({
+        displayName: "New name",
+        version: { increment: 1 },
+      }),
+    });
+    expect(prisma.loyaltyPerson.update).toHaveBeenCalledWith({
+      where: { id: "person-manual-1" },
+      data: expect.objectContaining({ manualDisplayName: "New name" }),
+    });
+    expect(result.item.manualOverlay).toBe(true);
   });
 
   it("reads only metrics produced by the active snapshot rule version", async () => {
@@ -1879,6 +3132,139 @@ describe("LoyaltyBaseService", () => {
     expect(prisma.loyaltyPerson.update).not.toHaveBeenCalled();
   });
 
+  it("restores an Anna entity and reopens its archived reconciliation case", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const expectedUpdatedAt = "2026-08-18T10:00:00.000Z";
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+    });
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue({
+      id: "record-1",
+      person: {
+        id: "person-1",
+        manualDisplayName: null,
+        manualCity: null,
+        manualAttributes: null,
+        archivedAt: new Date("2026-08-17T10:00:00.000Z"),
+        updatedAt: new Date(expectedUpdatedAt),
+      },
+      organization: null,
+    });
+    prisma.loyaltyPerson.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyReconciliationCase.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([]);
+    jest
+      .spyOn(service, "detail")
+      .mockResolvedValue({ item: { id: "person-1" } } as any);
+
+    await service.updateAnnaEntity(
+      "BROKER",
+      "person-1",
+      { expectedUpdatedAt, archived: false },
+      "admin-1",
+    );
+
+    expect(prisma.loyaltyReconciliationCase.updateMany).toHaveBeenCalledWith({
+      where: {
+        snapshotId: "snapshot-1",
+        status: "RESOLVED",
+        decision: "ARCHIVE",
+        personId: "person-1",
+      },
+      data: expect.objectContaining({
+        status: "OPEN",
+        decision: null,
+        decisionReason: null,
+        decisionPayload: null,
+        version: { increment: 1 },
+      }),
+    });
+    expect(prisma.loyaltyEntityChange.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "RESTORE",
+        changedFields: ["archivedAt", "reconciliationCases"],
+        actorId: "admin-1",
+      }),
+    });
+  });
+
+  it("archives an Anna entity, revokes active links and cancels its open call assignments", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const expectedUpdatedAt = "2026-08-18T10:00:00.000Z";
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback(prisma),
+    );
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+    });
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue({
+      id: "record-1",
+      person: {
+        id: "person-1",
+        manualDisplayName: null,
+        manualCity: null,
+        manualAttributes: null,
+        archivedAt: null,
+        updatedAt: new Date(expectedUpdatedAt),
+      },
+      organization: null,
+    });
+    prisma.loyaltyPerson.updateMany.mockResolvedValue({ count: 1 });
+    prisma.loyaltyEntityLink.updateMany.mockResolvedValue({ count: 2 });
+    prisma.loyaltyCallAssignment.updateMany.mockResolvedValue({ count: 3 });
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([]);
+    jest
+      .spyOn(service, "detail")
+      .mockResolvedValue({ item: { id: "person-1" } } as any);
+
+    await service.updateAnnaEntity(
+      "BROKER",
+      "person-1",
+      { expectedUpdatedAt, archived: true },
+      "admin-1",
+    );
+
+    expect(prisma.loyaltyEntityLink.updateMany).toHaveBeenCalledWith({
+      where: {
+        personId: "person-1",
+        status: "CONFIRMED",
+        revokedAt: null,
+      },
+      data: expect.objectContaining({
+        status: "REVOKED",
+        revokedById: "admin-1",
+        version: { increment: 1 },
+      }),
+    });
+    expect(prisma.loyaltyCallAssignment.updateMany).toHaveBeenCalledWith({
+      where: {
+        annaPersonId: "person-1",
+        status: { in: ["PENDING", "IN_PROGRESS"] },
+      },
+      data: expect.objectContaining({
+        status: "CANCELLED",
+        version: { increment: 1 },
+      }),
+    });
+    expect(prisma.loyaltyEntityChange.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "ARCHIVE",
+        changedFields: ["archivedAt", "activeLinks", "openCallAssignments"],
+        beforeValues: expect.objectContaining({
+          activeLinks: 2,
+          openCallAssignments: 3,
+        }),
+      }),
+    });
+  });
+
   it("returns conflict and writes no audit when an Anna entity token is stale", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
@@ -1914,5 +3300,1205 @@ describe("LoyaltyBaseService", () => {
     ).rejects.toBeInstanceOf(ConflictException);
     expect(prisma.loyaltyEntityChange.create).not.toHaveBeenCalled();
     expect(prisma.loyaltySourceFieldValue.createMany).not.toHaveBeenCalled();
+  });
+
+  it("canonicalizes legacy call results before hashing and shares the selected period", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const query: any = {
+      archived: "exclude",
+      page: 1,
+      pageSize: 30,
+    };
+    const filter = (service as any).normalizeListFilter(query, {
+      callPeriod: { from: "2026-08-01", to: "2026-08-31" },
+      dealsInPeriod: true,
+      lastCallResults: ["SEND_INFO"],
+    });
+
+    (service as any).assertFilterForEntity("anna", "BROKER", filter);
+
+    expect(filter.activityPeriod.fromIso).toBe("2026-08-01");
+    expect(filter.activityPeriod.toIso).toBe("2026-08-31");
+    expect(filter.lastCallResults).toEqual(["SEND_INFORMATION"]);
+    expect((service as any).listFilterHash("anna", "BROKER", filter)).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+  });
+
+  it("normalizes manual Anna attributes and fails closed for an unknown site value", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    expect(
+      (service as any).annaSpecializations({ specialization: "Премиум" }),
+    ).toEqual(["Бизнес / премиум"]);
+    expect((service as any).annaWorkFormat({ role: "Координатор" })).toBe(
+      "Координатор",
+    );
+    expect((service as any).annaStage({ stage: "VIP" }, "BROKER")).toBe(
+      "Повторные сделки / VIP",
+    );
+    expect((service as any).annaProjectStatus("Не указано")).toBeNull();
+    expect(
+      (service as any).matchesScenario("SITE_NOT_PLACED", {
+        projectsOnSite: null,
+      }),
+    ).toBe(false);
+    expect(
+      (service as any).matchesColumnFilters(
+        {
+          columns: {
+            contact: "HAS_PHONE",
+            activity: "NO_MEETINGS",
+            deals: "THREE_PLUS",
+          },
+        },
+        {
+          hasPhone: true,
+          statuses: ["TOP_SELLER"],
+          bt: null,
+          fixations: null,
+          meetings: 0,
+          callPresence: null,
+          assignees: [],
+          deals: 3,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      (service as any).matchesColumnFilters(
+        { columns: { calls: "NOT_CALLED_IN_PERIOD" } },
+        {
+          hasPhone: true,
+          statuses: [],
+          bt: null,
+          fixations: null,
+          meetings: null,
+          callPresence: null,
+          assignees: null,
+          deals: null,
+        },
+      ),
+    ).toBe(false);
+    expect(
+      (service as any).annaPeriodMetrics(
+        {
+          activities: [
+            {
+              type: "FIXATION",
+              occurredAt: new Date("2026-08-02T10:00:00.000Z"),
+            },
+            {
+              type: "DEAL",
+              occurredAt: new Date("2026-08-03T10:00:00.000Z"),
+              amount: "1500000.00",
+            },
+            {
+              type: "DEAL",
+              occurredAt: new Date("2026-07-03T10:00:00.000Z"),
+              amount: "999.00",
+            },
+          ],
+        },
+        {
+          metricSource: {
+            kind: "EXACT_ACTIVITIES",
+            observedThrough: "2026-09-01T00:00:00.000Z",
+          },
+        },
+        {
+          from: new Date("2026-08-01T00:00:00.000Z"),
+          to: new Date("2026-08-31T23:59:59.999Z"),
+          fromIso: "2026-08-01",
+          toIso: "2026-08-31",
+        },
+      ),
+    ).toEqual({
+      period: { from: "2026-08-01", to: "2026-08-31" },
+      availability: "EXACT",
+      fixations: 1,
+      meetings: 0,
+      deals: 1,
+      dealAmount: "1500000.00",
+      lastFixationAt: "2026-08-02",
+      lastMeetingAt: null,
+      lastDealAt: "2026-08-03",
+    });
+  });
+
+  it("streams a BOM CSV, neutralizes formulas, masks contacts and audits only counts", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    jest.spyOn(service, "list").mockResolvedValue({
+      base: "anna",
+      items: [
+        {
+          id: "person-1",
+          displayName: " \t\u000b=SUM(1,1)",
+          city: "Москва",
+          contactPoints: [
+            {
+              type: "PHONE",
+              value: "+79990000001",
+              maskedValue: "+7***01",
+            },
+            {
+              type: "EMAIL",
+              value: "secret@example.test",
+              maskedValue: "s***@example.test",
+            },
+          ],
+          externalIdentities: [],
+          metrics: { fixations: 99 },
+          metricSource: { kind: "UNAVAILABLE" },
+          sourceReportedMetrics: {
+            fixations: 7,
+            sourceLabel: "Срез Анны 17.08.2026",
+            exactness: "UNKNOWN",
+            periodKind: "LIFETIME",
+          },
+          attributes: {},
+        },
+      ],
+      total: 1,
+      filterHash: "a".repeat(64),
+    } as any);
+
+    const exported = await service.exportCsv(
+      "anna",
+      "BROKER",
+      { archived: "exclude", search: "secret query" } as any,
+      "admin-1",
+    );
+    const chunks: Buffer[] = [];
+    for await (const chunk of exported.stream) chunks.push(Buffer.from(chunk));
+    const csv = Buffer.concat(chunks).toString("utf8");
+
+    expect(csv.startsWith("\uFEFF")).toBe(true);
+    expect(csv).toContain("' \t\u000b=SUM(1,1)");
+    expect(csv).not.toContain('" \t\u000b=SUM(1,1)"');
+    expect(csv).toContain("+7***01");
+    expect(csv).not.toContain("+79990000001");
+    expect(csv).not.toContain("secret@example.test");
+    expect(csv).toContain("Точные фиксации");
+    expect(csv).toContain("Срез Анны: фиксации (не подтверждено)");
+    expect(csv).toContain("Срез Анны 17.08.2026");
+    expect(csv).not.toContain(",99,");
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "admin-1",
+        payload: {
+          base: "anna",
+          entityType: "BROKER",
+          rowCount: 1,
+          truncated: false,
+          maxRows: 50000,
+          filterHash: "a".repeat(64),
+        },
+      }),
+    });
+    expect(JSON.stringify(prisma.auditLog.create.mock.calls)).not.toContain(
+      "secret query",
+    );
+  });
+
+  it("exports lifetime and selected-period metrics in separate CSV columns", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    jest.spyOn(service, "list").mockResolvedValue({
+      base: "ours",
+      items: [
+        {
+          id: "broker-1",
+          displayName: "Period broker",
+          contactPoints: [],
+          externalIdentities: [],
+          metrics: {
+            fixations: 9,
+            meetings: 8,
+            deals: 7,
+            dealAmount: "700.00",
+          },
+          metricSource: {
+            kind: "LOCAL_PRELIMINARY",
+            exactness: "APPROXIMATE",
+          },
+          periodMetrics: {
+            availability: "LOCAL_PRELIMINARY",
+            period: { from: "2026-08-01", to: "2026-08-31" },
+            fixations: 2,
+            meetings: 1,
+            deals: 1,
+            dealAmount: "100.00",
+            lastFixationAt: "2026-08-07",
+            lastMeetingAt: null,
+            lastDealAt: "2026-08-09",
+          },
+          attributes: {},
+        },
+      ],
+      total: 1,
+      filterHash: "b".repeat(64),
+    } as any);
+
+    const exported = await service.exportCsv(
+      "ours",
+      "BROKER",
+      { archived: "exclude" } as any,
+      "admin-1",
+    );
+    const chunks: Buffer[] = [];
+    for await (const chunk of exported.stream) chunks.push(Buffer.from(chunk));
+    const csv = Buffer.concat(chunks).toString("utf8");
+
+    expect(csv).toContain("Выбранный период: доступность");
+    expect(csv).toContain("Выбранный период: последняя сделка");
+    expect(csv).toContain(
+      '"9","8","7","700.00","LOCAL_PRELIMINARY","2026-08-01","2026-08-31","2","1","1","100.00","2026-08-07","","2026-08-09"',
+    );
+  });
+
+  it("resolves workflow selections with the canonical IDs and hash", async () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    jest.spyOn(service, "list").mockResolvedValue({
+      _selectionIds: ["broker-2", "broker-1"],
+      total: 2,
+      filterHash: "b".repeat(64),
+      snapshotId: "snapshot-1",
+    } as any);
+
+    await expect(
+      service.resolveSelection("anna", "BROKER", {
+        archived: "exclude",
+        search: "",
+      } as any),
+    ).resolves.toEqual({
+      ids: ["broker-2", "broker-1"],
+      total: 2,
+      filterHash: "b".repeat(64),
+      snapshotId: "snapshot-1",
+    });
+  });
+
+  it.each([
+    ["BROKER", { partnershipStatuses: ["VIP_PARTNER"] }],
+    ["BROKER", { agencySizes: ["LARGE"] }],
+    ["BROKER", { websitePresent: true }],
+    ["BROKER", { projectsOnSite: ["YES"] }],
+    ["BROKER", { individualTerms: true }],
+    ["AGENCY", { scenario: "SITE_PLACED" }],
+    ["AGENCY", { specializations: ["RESIDENTIAL"] }],
+    ["AGENCY", { geography: ["MOSCOW"] }],
+    ["AGENCY", { workFormats: ["PRIVATE_BROKER"] }],
+    ["AGENCY", { relationshipStages: ["NEW"] }],
+    ["AGENCY", { dataQuality: ["MISSING_PHONE"] }],
+    ["AGENCY", { agencySizes: ["LARGE"] }],
+    ["AGENCY", { websitePresent: false }],
+    ["AGENCY", { projectsOnSite: ["NO"] }],
+  ] as const)(
+    "rejects an unsupported OUR %s dimension before a full scan: %j",
+    async (entityType, unsupportedFilter) => {
+      const prisma = prismaMock();
+      const service = new LoyaltyBaseService(prisma);
+
+      await expect(
+        service.list(
+          "ours",
+          entityType,
+          {} as any,
+          undefined,
+          unsupportedFilter as any,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.broker.findMany).not.toHaveBeenCalled();
+      expect(prisma.agency.findMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { archived: "only" },
+    { hasAmo: true },
+    { segment: "NOT_CALLED_CURRENT_MONTH" },
+  ])(
+    "rejects an unsupported flat OUR agency dimension before a full scan: %j",
+    async (unsupportedFilter) => {
+      const prisma = prismaMock();
+      const service = new LoyaltyBaseService(prisma);
+
+      await expect(
+        service.list("ours", "AGENCY", unsupportedFilter as any),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.agency.findMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps unsupported-filter rejection identical for list/search/export/selection", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const unsupported = { partnershipStatuses: ["VIP_PARTNER"] };
+    const actions = [
+      () =>
+        service.list(
+          "ours",
+          "BROKER",
+          {} as any,
+          undefined,
+          unsupported as any,
+        ),
+      () =>
+        service.search("ours", "BROKER", {
+          search: "",
+          filter: unsupported,
+        } as any),
+      () =>
+        service.exportCsv(
+          "ours",
+          "BROKER",
+          { search: "", filter: unsupported } as any,
+          "admin-1",
+        ),
+      () =>
+        service.resolveSelection("ours", "BROKER", {
+          search: "",
+          filter: unsupported,
+        } as any),
+    ];
+
+    for (const action of actions) {
+      const error = await action().catch((caught) => caught);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(error.getStatus()).toBe(400);
+      expect(error.getResponse()).toMatchObject({
+        code: "LOYALTY_FILTER_UNAVAILABLE",
+        base: "ours",
+        entityType: "BROKER",
+        fields: ["partnershipStatuses"],
+      });
+    }
+    expect(prisma.broker.findMany).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it("reads saved calls and engagement events across all four canonical targets", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const campaignId = "11111111-1111-4111-8111-111111111111";
+    const originalAt = new Date(Date.now() - 60_000);
+    const correctedAt = new Date();
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snapshot-1",
+      activeSnapshot: {
+        id: "snapshot-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        activityCount: 1,
+        ruleVersion: "anna-v1",
+      },
+    });
+    prisma.loyaltyManualEntity.findMany.mockResolvedValue([]);
+    const annaRecord = (entityType: "BROKER" | "AGENCY", id: string): any => ({
+      id: `record-${id}`,
+      entityType,
+      personId: entityType === "BROKER" ? id : null,
+      organizationId: entityType === "AGENCY" ? id : null,
+      displayName: id,
+      city: "Moscow",
+      attributes:
+        entityType === "BROKER"
+          ? {
+              calls: [
+                {
+                  date: "2026-01-01",
+                  campaign: "Legacy",
+                  result: "LEGACY_RESULT",
+                },
+              ],
+            }
+          : {
+              agencyContacts: [{ name: "Contact", phone: "+79990000001" }],
+            },
+      person:
+        entityType === "BROKER"
+          ? {
+              id,
+              updatedAt: correctedAt,
+              links: [],
+              contactOverrides: [],
+            }
+          : null,
+      organization:
+        entityType === "AGENCY"
+          ? {
+              id,
+              updatedAt: correctedAt,
+              links: [],
+              contactOverrides: [],
+              personRoles: [],
+              contactPeople: [
+                {
+                  id: "manual-contact",
+                  displayName: "Contact",
+                  role: "Director",
+                  actualityStatus: "CURRENT",
+                  contactPoints: [
+                    {
+                      type: "PHONE",
+                      value: "+79990000001",
+                      isPrimary: true,
+                    },
+                  ],
+                  version: 1,
+                },
+              ],
+            }
+          : null,
+      contactPoints: [],
+      externalIdentities: [],
+      metrics: [],
+      sourceAggregate: null,
+      organizationRoles: [],
+      activities:
+        entityType === "BROKER"
+          ? [
+              {
+                type: "CALL",
+                occurredAt: new Date("2026-02-01T10:00:00.000Z"),
+                metadata: { resultCode: "SNAPSHOT_RESULT" },
+              },
+            ]
+          : [],
+      fieldValues: [],
+    });
+    const annaBroker = annaRecord("BROKER", "anna-broker");
+    const annaAgency = annaRecord("AGENCY", "anna-agency");
+    const ourBroker: any = {
+      id: "our-broker",
+      role: "BROKER",
+      fullName: "Our broker",
+      phone: "+79990000002",
+      phones: [],
+      brokerAgencies: [],
+      callLogs: [],
+      clients: [],
+      meetings: [],
+      deals: [],
+      mergedIntoId: null,
+      assignedManagerId: null,
+      assignedManager: null,
+      brokerTourVisited: false,
+      _count: { clients: 0, deals: 0, meetings: 0, callLogs: 0, calls: 0 },
+    };
+    const ourAgency: any = {
+      id: "our-agency",
+      name: "Our agency",
+      inn: "7700000000",
+      phone: "+74950000000",
+      brokerAgencies: [],
+      _count: { brokerAgencies: 0, deals: 0 },
+    };
+    const assignment = (target: Record<string, string | null>) => ({
+      ...target,
+      campaign: { id: campaignId, name: "Campaign" },
+    });
+    const attempt = (
+      id: string,
+      target: Record<string, string | null>,
+      result: string,
+      correctsAttemptId: string | null = null,
+      occurredAt = originalAt,
+    ) => ({
+      id,
+      assignmentId: `assignment-${id}`,
+      operatorId: "operator-1",
+      result,
+      comment: `${id} comment`,
+      nextStep: `${id} next step`,
+      nextActionAt: correctedAt,
+      source: "LOYALTY_CALL_QUEUE",
+      correctsAttemptId,
+      correctionReason: correctsAttemptId ? "Corrected" : null,
+      occurredAt,
+      createdAt: occurredAt,
+      operator: { id: "operator-1", fullName: "Operator" },
+      assignment: assignment(target),
+    });
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([
+      attempt(
+        "anna-original",
+        {
+          annaPersonId: "anna-broker",
+          annaOrganizationId: null,
+          ourBrokerId: null,
+          ourAgencyId: null,
+        },
+        "NO_ANSWER",
+      ),
+      attempt(
+        "anna-correction",
+        {
+          annaPersonId: "anna-broker",
+          annaOrganizationId: null,
+          ourBrokerId: null,
+          ourAgencyId: null,
+        },
+        "SEND_INFORMATION",
+        "anna-original",
+        correctedAt,
+      ),
+      attempt(
+        "anna-agency-call",
+        {
+          annaPersonId: null,
+          annaOrganizationId: "anna-agency",
+          ourBrokerId: null,
+          ourAgencyId: null,
+        },
+        "COOPERATION_AGREED",
+      ),
+      attempt(
+        "our-broker-call",
+        {
+          annaPersonId: null,
+          annaOrganizationId: null,
+          ourBrokerId: "our-broker",
+          ourAgencyId: null,
+        },
+        "SEND_INFORMATION",
+      ),
+      attempt(
+        "our-agency-call",
+        {
+          annaPersonId: null,
+          annaOrganizationId: null,
+          ourBrokerId: null,
+          ourAgencyId: "our-agency",
+        },
+        "AGREEMENTS_EXIST",
+      ),
+    ]);
+    const event = (id: string, target: Record<string, string | null>) => ({
+      id,
+      ...target,
+      type: "INDIVIDUAL_TERMS",
+      occurredAt: originalAt,
+      createdAt: originalAt,
+      comment: "Terms",
+      amount: null,
+      value: "2%",
+      validUntil: null,
+      attachmentUrl: null,
+      basisUrl: null,
+      createdById: "operator-1",
+      createdBy: { id: "operator-1", fullName: "Operator" },
+      correctsEventId: null,
+      correctionReason: null,
+      archivedAt: null,
+    });
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([
+      event("anna-event", {
+        annaPersonId: "anna-broker",
+        annaOrganizationId: null,
+        ourBrokerId: null,
+        ourAgencyId: null,
+      }),
+      {
+        ...event("anna-event-correction", {
+          annaPersonId: "anna-broker",
+          annaOrganizationId: null,
+          ourBrokerId: null,
+          ourAgencyId: null,
+        }),
+        occurredAt: new Date(originalAt.getTime() - 86_400_000),
+        createdAt: correctedAt,
+        value: "3%",
+        correctsEventId: "anna-event",
+        correctionReason: "Earlier business date confirmed",
+      },
+      {
+        ...event("anna-award", {
+          annaPersonId: "anna-broker",
+          annaOrganizationId: null,
+          ourBrokerId: null,
+          ourAgencyId: null,
+        }),
+        type: "AWARD",
+      },
+      event("our-agency-event", {
+        annaPersonId: null,
+        annaOrganizationId: null,
+        ourBrokerId: null,
+        ourAgencyId: "our-agency",
+      }),
+      {
+        ...event("our-agency-award", {
+          annaPersonId: null,
+          annaOrganizationId: null,
+          ourBrokerId: null,
+          ourAgencyId: "our-agency",
+        }),
+        type: "AWARD",
+      },
+    ]);
+    prisma.loyaltySourceRecord.findMany.mockResolvedValue([annaBroker]);
+    const annaList: any = await service.list(
+      "anna",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { lastCallResults: ["SEND_INFORMATION"], rewardPresent: true } as any,
+    );
+    expect(annaList.total).toBe(1);
+    expect(annaList.items[0]).toMatchObject({
+      lastCallResult: "SEND_INFORMATION",
+      lastCallCampaignId: campaignId,
+      lastCallOperator: "Operator",
+      lastCallNextStep: "anna-correction next step",
+      rewardPresent: true,
+    });
+    expect(annaList.items[0].metrics.calls).toBeNull();
+    expect(annaList.facets.engagementTypes).toEqual([
+      { value: "AWARD", matches: 1 },
+      { value: "INDIVIDUAL_TERMS", matches: 1 },
+    ]);
+    expect(prisma.loyaltyCallAttempt.findMany).toHaveBeenCalledTimes(1);
+
+    prisma.loyaltySourceRecord.findFirst
+      .mockResolvedValueOnce(annaBroker)
+      .mockResolvedValueOnce(annaAgency);
+    const annaBrokerDetail: any = await service.detail(
+      "anna",
+      "BROKER",
+      "anna-broker",
+    );
+    const annaAgencyDetail: any = await service.detail(
+      "anna",
+      "AGENCY",
+      "anna-agency",
+    );
+    expect(annaBrokerDetail.item.calls.map((call: any) => call.result)).toEqual(
+      expect.arrayContaining([
+        "LEGACY_RESULT",
+        "SNAPSHOT_RESULT",
+        "NO_ANSWER",
+        "SEND_INFORMATION",
+      ]),
+    );
+    expect(annaBrokerDetail.item.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "anna-original",
+          type: "CALL",
+          superseded: true,
+        }),
+        expect.objectContaining({
+          id: "anna-correction",
+          effective: true,
+          correctionReason: "Corrected",
+        }),
+      ]),
+    );
+    expect(annaBrokerDetail.item.activities).toHaveLength(1);
+    expect(annaBrokerDetail.item.loyaltyHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "anna-event", superseded: true }),
+        expect.objectContaining({
+          id: "anna-event-correction",
+          effective: true,
+          value: "3%",
+        }),
+      ]),
+    );
+    expect(annaAgencyDetail.item.calls).toEqual([
+      expect.objectContaining({ id: "anna-agency-call", type: "CALL" }),
+    ]);
+    expect(annaAgencyDetail.item.agencyContactPeople).toEqual([
+      expect.objectContaining({
+        id: "manual-contact",
+        source: "MANUAL_OVERLAY",
+      }),
+    ]);
+
+    prisma.broker.findMany.mockResolvedValue([ourBroker]);
+    prisma.agency.findMany.mockResolvedValue([ourAgency]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+    const ourBrokerList: any = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { lastCallResults: ["SEND_INFORMATION"] } as any,
+    );
+    const ourAgencyList: any = await service.list(
+      "ours",
+      "AGENCY",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      {
+        lastCallResults: ["AGREEMENTS_EXIST"],
+        rewardPresent: true,
+        specialTermsProposed: true,
+      } as any,
+    );
+    expect(ourBrokerList.items[0]).toMatchObject({
+      lastCallResult: "SEND_INFORMATION",
+      lastCallCampaignId: campaignId,
+    });
+    expect(ourBrokerList.items[0].metrics.calls).toBe(0);
+    expect(ourAgencyList.items[0]).toMatchObject({
+      lastCallResult: "AGREEMENTS_EXIST",
+      rewardPresent: true,
+      specialTermsProposed: true,
+    });
+
+    prisma.broker.findUnique.mockResolvedValue(ourBroker);
+    prisma.agency.findUnique.mockResolvedValue(ourAgency);
+    const ourBrokerDetail: any = await service.detail(
+      "ours",
+      "BROKER",
+      "our-broker",
+    );
+    const ourAgencyDetail: any = await service.detail(
+      "ours",
+      "AGENCY",
+      "our-agency",
+    );
+    expect(ourBrokerDetail.item.calls).toEqual([
+      expect.objectContaining({ id: "our-broker-call", type: "CALL" }),
+    ]);
+    expect(ourAgencyDetail.item.calls).toEqual([
+      expect.objectContaining({ id: "our-agency-call", type: "CALL" }),
+    ]);
+    expect(ourAgencyDetail.item.loyaltyHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "our-agency-event" }),
+        expect.objectContaining({ id: "our-agency-award" }),
+      ]),
+    );
+  });
+
+  it("labels OUR overview KPIs as local preliminary with per-metric provenance", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.count
+      .mockResolvedValueOnce(10)
+      .mockResolvedValueOnce(4)
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(1);
+    prisma.agency.count.mockResolvedValue(3);
+    prisma.client.count.mockResolvedValue(3);
+    prisma.meeting.count.mockResolvedValue(2);
+    prisma.deal.count.mockResolvedValue(1);
+    prisma.deal.aggregate.mockResolvedValue({
+      _sum: { amount: "12500000.50" },
+    });
+    prisma.broker.findMany.mockResolvedValue([]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+
+    const result: any = await service.overview("ours", {
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+
+    expect(result.metricSource).toMatchObject({
+      kind: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+      periodFilterApplied: true,
+      contributingRecords: 6,
+    });
+    expect(result.dataAvailability).toMatchObject({
+      exactActivities: false,
+      localPreliminary: true,
+      exactness: "APPROXIMATE",
+      unknownValuesRemainNull: true,
+    });
+    expect(result.kpiMetadata["activities.deals"]).toMatchObject({
+      source: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+      provenance: "Deal.id / Deal.signedAt / Deal.status",
+    });
+    expect(result.kpiMetadata["agencies.top"].formula).toContain(
+      "explicit Deal.agencyId",
+    );
+    expect(result.activities).toEqual({ fixations: 3, meetings: 2, deals: 1 });
+    expect(result.dealAmount).toBe("12500000.50");
+  });
+
+  it("ranks and filters OUR brokers by selected-period aggregates rather than lifetime totals", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const broker = (
+      id: string,
+      fullName: string,
+      lifetime: { fixations: number; meetings: number; deals: number },
+    ) => ({
+      id,
+      fullName,
+      phone: `+79990000${id === "lifetime" ? "001" : id === "period" ? "002" : "003"}`,
+      email: null,
+      status: "ACTIVE",
+      funnelStage: "DEAL",
+      region: "MSK",
+      isRegional: false,
+      isCoordinator: false,
+      specialization: null,
+      category: "WARM",
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      lastCallAt: null,
+      updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      assignedManagerId: null,
+      assignedManager: null,
+      phones: [],
+      brokerAgencies: [],
+      callLogs: [],
+      clients: lifetime.fixations
+        ? [{ createdAt: new Date("2025-01-10T00:00:00.000Z") }]
+        : [],
+      meetings: lifetime.meetings
+        ? [{ date: new Date("2025-01-11T00:00:00.000Z") }]
+        : [],
+      deals: lifetime.deals
+        ? [{ signedAt: new Date("2025-01-12T00:00:00.000Z") }]
+        : [],
+      _count: {
+        clients: lifetime.fixations,
+        meetings: lifetime.meetings,
+        deals: lifetime.deals,
+        callLogs: 0,
+      },
+    });
+    prisma.broker.findMany.mockResolvedValue([
+      broker("lifetime", "Lifetime leader", {
+        fixations: 7,
+        meetings: 8,
+        deals: 9,
+      }),
+      broker("period", "Period leader", {
+        fixations: 1,
+        meetings: 1,
+        deals: 2,
+      }),
+      broker("unknown", "Unknown amount", {
+        fixations: 0,
+        meetings: 0,
+        deals: 3,
+      }),
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.client.groupBy.mockResolvedValue([
+      {
+        brokerId: "period",
+        _count: { _all: 1 },
+        _max: { createdAt: new Date("2026-08-07T10:00:00.000Z") },
+      },
+    ]);
+    prisma.meeting.groupBy.mockResolvedValue([
+      {
+        brokerId: "period",
+        _count: { _all: 1 },
+        _max: { date: new Date("2026-08-08T10:00:00.000Z") },
+      },
+    ]);
+    prisma.deal.groupBy.mockImplementation((args: any) => {
+      if (args?._max?.signedAt) {
+        return Promise.resolve([
+          {
+            brokerId: "period",
+            _count: { _all: 2 },
+            _sum: { amount: "200.00" },
+            _max: { signedAt: new Date("2026-08-09T10:00:00.000Z") },
+          },
+          {
+            brokerId: "unknown",
+            _count: { _all: 1 },
+            _sum: { amount: null },
+            _max: { signedAt: null },
+          },
+        ]);
+      }
+      return Promise.resolve([
+        { brokerId: "lifetime", _sum: { amount: "900.00" } },
+        { brokerId: "period", _sum: { amount: "200.00" } },
+        { brokerId: "unknown", _sum: { amount: "300.00" } },
+      ]);
+    });
+
+    const canonical: any = {
+      activityPeriod: { from: "2026-08-01", to: "2026-08-31" },
+    };
+    const ranked: any = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30, sortBy: "deals", sortOrder: "desc" } as any,
+      undefined,
+      canonical,
+    );
+
+    expect(ranked.items.map((item: any) => item.id)).toEqual([
+      "period",
+      "unknown",
+      "lifetime",
+    ]);
+    expect(ranked.items[0].periodMetrics).toMatchObject({
+      availability: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+      fixations: 1,
+      meetings: 1,
+      deals: 2,
+      dealAmount: "200.00",
+      lastFixationAt: "2026-08-07",
+      lastMeetingAt: "2026-08-08",
+      lastDealAt: "2026-08-09",
+    });
+    expect(ranked.items[2].periodMetrics).toMatchObject({
+      fixations: 0,
+      deals: 0,
+      lastFixationAt: null,
+      lastDealAt: null,
+    });
+    expect(ranked.items[1].periodMetrics.dealAmount).toBeNull();
+    expect(ranked.dataAvailability.activityPeriod).toBe("LOCAL_PRELIMINARY");
+
+    const periodFixationsOnly: any = await service.list(
+      "ours",
+      "BROKER",
+      {
+        page: 1,
+        pageSize: 30,
+        sortBy: "fixations",
+        sortOrder: "desc",
+        columns: { activity: "HAS_FIXATIONS" },
+      } as any,
+      undefined,
+      canonical,
+    );
+    expect(periodFixationsOnly.items.map((item: any) => item.id)).toEqual([
+      "period",
+    ]);
+  });
+
+  it("keeps OUR broker period aggregate SQL batches bounded", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.client.groupBy.mockResolvedValue([]);
+    prisma.meeting.groupBy.mockResolvedValue([]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+    const ids = Array.from({ length: 501 }, (_, index) => `broker-${index}`);
+
+    const result: Map<string, any> = await (
+      service as any
+    ).ourBrokerPeriodMetrics(ids, {
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      to: new Date("2026-08-31T23:59:59.999Z"),
+      fromIso: "2026-08-01",
+      toIso: "2026-08-31",
+    });
+
+    expect(result.size).toBe(501);
+    expect(prisma.client.groupBy).toHaveBeenCalledTimes(2);
+    for (const [args] of prisma.client.groupBy.mock.calls) {
+      expect(args.where.brokerId.in.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  it("deduplicates current relation rows for OUR agency list/detail and exposes bounded PII-free evidence", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const sharedClient = {
+      id: "client-1",
+      createdAt: new Date("2026-08-02T10:00:00.000Z"),
+      fixationStatus: "FIXED",
+      amoLeadId: 101n,
+    };
+    const sharedMeeting = {
+      id: "meeting-1",
+      date: new Date("2026-08-03T10:00:00.000Z"),
+      status: "CONFIRMED",
+      type: "OFFICE",
+    };
+    const periodDeal = {
+      id: "deal-1",
+      signedAt: new Date("2026-08-04T10:00:00.000Z"),
+      amount: "100.10",
+      agencyId: "agency-1",
+      status: "SIGNED",
+      amoDealId: 201n,
+    };
+    const laterDeal = {
+      id: "deal-2",
+      signedAt: new Date("2026-09-04T10:00:00.000Z"),
+      amount: "200.20",
+      agencyId: null,
+      status: "PAID",
+      amoDealId: 202n,
+    };
+    const sharedCall = {
+      id: "call-log-1",
+      createdAt: new Date("2026-08-05T10:00:00.000Z"),
+      campaign: "August",
+      result: "AGREEMENTS_EXIST",
+      operatorId: "operator-1",
+      comment: "must not enter activity evidence",
+      nextCallAt: null,
+    };
+    const broker = (id: string, deals: any[]) => ({
+      id,
+      fullName: `Broker ${id}`,
+      phone: "+79990000001",
+      email: null,
+      lastCallAt: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      clients: [sharedClient],
+      meetings: [sharedMeeting],
+      deals,
+      callLogs: [sharedCall],
+    });
+    const agency: any = {
+      id: "agency-1",
+      name: "Agency",
+      legalName: "Agency LLC",
+      inn: "7700000000",
+      phone: null,
+      email: null,
+      updatedAt: new Date("2026-08-06T10:00:00.000Z"),
+      brokerAgencies: [
+        { isPrimary: true, broker: broker("broker-1", [periodDeal]) },
+        {
+          isPrimary: false,
+          broker: broker("broker-2", [periodDeal, laterDeal]),
+        },
+      ],
+      deals: [periodDeal],
+      _count: { brokerAgencies: 2 },
+    };
+    prisma.agency.findMany.mockResolvedValue([agency]);
+    prisma.agency.findUnique.mockResolvedValue(agency);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+
+    const list: any = await service.list(
+      "ours",
+      "AGENCY",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      {
+        includeLowSignal: true,
+        activityPeriod: { from: "2026-08-01", to: "2026-08-31" },
+      } as any,
+    );
+
+    expect(list.items[0].metrics).toMatchObject({
+      brokers: 2,
+      fixations: 1,
+      meetings: 1,
+      deals: 2,
+      calls: 1,
+      dealAmount: "300.30",
+    });
+    expect(list.items[0].periodMetrics).toMatchObject({
+      availability: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+      fixations: 1,
+      meetings: 1,
+      deals: 1,
+      dealAmount: "100.10",
+    });
+    expect(list.items[0].computedStatuses).toEqual(["SELLING_PARTNER"]);
+    expect(list.dataAvailability).toMatchObject({
+      exactActivities: false,
+      localPreliminary: true,
+      defaultVisibilityApplied: false,
+    });
+
+    const detail: any = await service.detail("ours", "AGENCY", "agency-1");
+    expect(detail.item.metrics).toMatchObject({
+      fixations: 1,
+      meetings: 1,
+      deals: 2,
+      calls: 1,
+      dealAmount: "300.30",
+    });
+    expect(detail.item.activityEvidence).toMatchObject({
+      count: 5,
+      truncated: false,
+      limit: 200,
+      availability: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+    });
+    expect(detail.item.activities.map((row: any) => row.type).sort()).toEqual([
+      "CALL",
+      "DEAL",
+      "DEAL",
+      "FIXATION",
+      "MEETING",
+    ]);
+    expect(detail.item.activities.some((row: any) => "comment" in row)).toBe(
+      false,
+    );
+    expect(detail.item.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "LOCAL_DEAL:deal-1",
+          amoDealId: "201",
+          amount: "100.10",
+          status: "SIGNED",
+          source: "LOCAL_DEAL",
+        }),
+      ]),
+    );
+  });
+
+  it("applies the OUR agency low-signal visibility rule, supports All, and fails loudly for unavailable fields", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const agency: any = {
+      id: "agency-low-signal",
+      name: "Low signal",
+      inn: "7700000001",
+      phone: null,
+      email: null,
+      brokerAgencies: [],
+      deals: [],
+      _count: { brokerAgencies: 0 },
+    };
+    prisma.agency.findMany.mockResolvedValue([agency]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+
+    const hidden: any = await service.list("ours", "AGENCY", {
+      page: 1,
+      pageSize: 30,
+    } as any);
+    expect(hidden.total).toBe(0);
+    expect(hidden.dataAvailability.defaultVisibilityApplied).toBe(true);
+
+    const all: any = await service.list(
+      "ours",
+      "AGENCY",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { includeLowSignal: true } as any,
+    );
+    expect(all.total).toBe(1);
+    expect(all.filterHash).not.toBe(hidden.filterHash);
+
+    await expect(
+      service.list(
+        "ours",
+        "AGENCY",
+        { page: 1, pageSize: 30 } as any,
+        undefined,
+        { websitePresent: true } as any,
+      ),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: "LOYALTY_FILTER_UNAVAILABLE",
+        fields: ["websitePresent"],
+      }),
+    });
   });
 });

@@ -2,6 +2,7 @@ import { Transform, Type } from "class-transformer";
 import {
   ArrayMaxSize,
   ArrayMinSize,
+  ArrayUnique,
   IsArray,
   IsBoolean,
   IsDefined,
@@ -62,13 +63,173 @@ const RECONCILIATION_DECISIONS = [
   "LINK",
   "KEEP_SEPARATE",
   "REJECT_MATCH",
+  "SUPPLEMENT",
+  "ARCHIVE",
   "UNLINK",
+] as const;
+const RECONCILIATION_CATEGORIES = [
+  "PHONE_MATCHED",
+  "ANNA_ONLY",
+  "CABINET_ONLY",
+  "PHONE_TO_MULTIPLE_CARDS",
+  "INVALID_PHONE",
+  "NAME_OR_AGENCY_CONFLICT",
+  "EXCLUDED_OR_STALE",
 ] as const;
 const LOYALTY_SEGMENTS = [
   "NOT_CALLED_CURRENT_MONTH",
   "NEW_BROKER",
   "BT_WITHOUT_FIXATION",
   "BIRTHDAY_TODAY",
+] as const;
+const LOYALTY_CALL_RESULTS = [
+  "INFORMED",
+  "DO_NOT_CALL",
+  "NOT_INTERESTED",
+  "NO_ANSWER",
+  "SEND_INFORMATION",
+  "BROKER_TOUR_BOOKED",
+  "BROKER_TOUR_DECLINED",
+  "INVALID_PHONE",
+  "NOT_A_BROKER",
+  "COOPERATION_DECLINED",
+  "BROKER_TOUR_SCHEDULED",
+  "CALLBACK",
+  "AGREEMENTS_EXIST",
+  "COOPERATION_AGREED",
+  // Deprecated input aliases retained for old clients. Responses/facets use
+  // the workflow enum above.
+  "SEND_INFO",
+  "SCHEDULED_TOUR",
+  "REFUSED_TOUR",
+  "INVALID_NUMBER",
+  "NOT_BROKER",
+  "REFUSED_COOPERATION",
+  "CALLBACK",
+  "AGREEMENTS",
+  "COOPERATION_AGREED",
+] as const;
+const LOYALTY_CALL_SCENARIOS = [
+  "NOT_CALLED_IN_PERIOD",
+  "CALLED_IN_PERIOD",
+  "BT_DROPPED",
+  "BT_FIXATION_NO_MEETING",
+  "BT_MEETING_NO_DEAL",
+  "NEW_NO_BT",
+  "HAS_DEALS",
+  "UNASSIGNED",
+  "BT_VISITED",
+  "BT_NOT_VISITED",
+  "SITE_PLACED",
+  "SITE_NOT_PLACED",
+  "INDIVIDUAL_TERMS",
+  "NO_INDIVIDUAL_TERMS",
+  "HAS_MEETINGS",
+  "NO_MEETINGS",
+] as const;
+const LOYALTY_SPECIALIZATIONS = [
+  "Бизнес / премиум",
+  "Коммерция — аренда",
+  "Коммерция — продажа",
+  "Вторичка",
+  "COMM",
+  "RESIDENTIAL",
+  "BOTH",
+] as const;
+const LOYALTY_WORK_FORMATS = [
+  "Агентство",
+  "Частный брокер",
+  "Координатор",
+] as const;
+const LOYALTY_STAGES = [
+  "Новый",
+  "Звонили",
+  "Приглашён на БТ",
+  "Был на БТ",
+  "Фиксация",
+  "Встреча",
+  "Сделка",
+  "Повторные сделки / VIP",
+  "Новое",
+  "Установлен контакт",
+  "Назначена встреча",
+  "Согласован БТ",
+  "БТ проведён",
+  "Размещение на сайте",
+  "Активный партнёр",
+  "VIP партнёр",
+  "NEW_BROKER",
+  "BROKER_TOUR",
+  "FIXATION",
+  "MEETING",
+  "DEAL",
+] as const;
+const LOYALTY_STATUSES = [
+  "TOP_SELLER",
+  "SELLER",
+  "OFFERING",
+  "FIXATING",
+  "BROKER_TOUR",
+  "DORMANT",
+  "NEW",
+  "VIP_PARTNER",
+  "SELLING_PARTNER",
+  "ACTIVE_PARTNER",
+  "FIXATING_PARTNER",
+  "WARM_PARTNER",
+  "STARTING_PARTNER",
+  "DORMANT_PARTNER",
+  "NEW_AGENCY",
+] as const;
+const LOYALTY_DATA_QUALITY_FILTERS = [
+  "FULL",
+  "NEEDS_COMPLETION",
+  "NOT_FOUND_IN_CRM",
+  "CONFLICT",
+] as const;
+const LOYALTY_PARTNERSHIP_STATUSES = [
+  "Новое",
+  "Установлен контакт",
+  "Назначена встреча",
+  "Согласован БТ",
+  "БТ проведён",
+  "Размещение на сайте",
+  "Активный партнёр",
+  "VIP партнёр",
+] as const;
+const LOYALTY_SORT_FIELDS = [
+  "name",
+  "city",
+  "lastCallAt",
+  "fixations",
+  "meetings",
+  "deals",
+  "dealAmount",
+  "brokerTours",
+  "brokerCount",
+  "rating",
+  "updatedAt",
+] as const;
+const LOYALTY_COLUMN_CONTACT_FILTERS = ["HAS_PHONE", "NO_PHONE"] as const;
+const LOYALTY_COLUMN_ACTIVITY_FILTERS = [
+  "BT_VISITED",
+  "BT_NOT_VISITED",
+  "HAS_FIXATIONS",
+  "NO_FIXATIONS",
+  "HAS_MEETINGS",
+  "NO_MEETINGS",
+] as const;
+const LOYALTY_COLUMN_CALL_FILTERS = [
+  "CALLED_IN_PERIOD",
+  "NOT_CALLED_IN_PERIOD",
+] as const;
+const LOYALTY_COLUMN_DEAL_FILTERS = [
+  "HAS_DEALS",
+  "NO_DEALS",
+  "ONE_TO_TWO",
+  "ONE_TO_FOUR",
+  "THREE_PLUS",
+  "FIVE_PLUS",
 ] as const;
 
 export class LoyaltyOverviewQueryDto {
@@ -81,7 +242,206 @@ export class LoyaltyOverviewQueryDto {
   to?: string;
 }
 
-export class LoyaltyListQueryDto {
+export class LoyaltyListFiltersDto {
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  from?: string;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  to?: string;
+
+  @IsOptional()
+  @IsIn(LOYALTY_SORT_FIELDS)
+  sortBy?: (typeof LOYALTY_SORT_FIELDS)[number];
+
+  @IsOptional()
+  @IsIn(["asc", "desc"])
+  sortOrder?: "asc" | "desc";
+
+  @IsDefined()
+  @Transform(({ value }) => {
+    if (value === false || value === "false") return "exclude";
+    if (value === true || value === "true") return "only";
+    if (value === "all") return "include";
+    return value;
+  })
+  @IsIn(["exclude", "include", "only"])
+  archived: "exclude" | "include" | "only" = "exclude";
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  includeLowSignal?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 100)
+  city?: string;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  hasAmo?: boolean;
+
+  @IsOptional()
+  @IsIn(ACTIVITY_TYPES)
+  activityType?: (typeof ACTIVITY_TYPES)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_SEGMENTS)
+  segment?: (typeof LOYALTY_SEGMENTS)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_CALL_RESULTS)
+  callResult?: (typeof LOYALTY_CALL_RESULTS)[number];
+
+  @IsOptional()
+  @IsUUID("4")
+  callCampaign?: string;
+
+  @IsOptional()
+  @IsIn(LOYALTY_CALL_SCENARIOS)
+  callScenario?: (typeof LOYALTY_CALL_SCENARIOS)[number];
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 160)
+  assignee?: string;
+
+  @IsOptional()
+  @IsIn(LOYALTY_SPECIALIZATIONS)
+  specialization?: (typeof LOYALTY_SPECIALIZATIONS)[number];
+
+  @IsOptional()
+  @IsIn(["MOSCOW", "REGION"])
+  geography?: "MOSCOW" | "REGION";
+
+  @IsOptional()
+  @IsIn(LOYALTY_WORK_FORMATS)
+  workFormat?: (typeof LOYALTY_WORK_FORMATS)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_STAGES)
+  stage?: (typeof LOYALTY_STAGES)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_STATUSES)
+  status?: (typeof LOYALTY_STATUSES)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_DATA_QUALITY_FILTERS)
+  dataQuality?: (typeof LOYALTY_DATA_QUALITY_FILTERS)[number];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  dealsMin?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  dealsMax?: number;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  dealsInPeriod?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  noDeals?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  called?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  staleDays?: number;
+
+  @IsOptional()
+  @IsIn(LOYALTY_PARTNERSHIP_STATUSES)
+  partnershipStatus?: (typeof LOYALTY_PARTNERSHIP_STATUSES)[number];
+
+  @IsOptional()
+  @IsIn(["Крупное", "Среднее", "Небольшое"])
+  agencySize?: "Крупное" | "Среднее" | "Небольшое";
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  brokerTourVisited?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  websitePresent?: boolean;
+
+  @IsOptional()
+  @IsIn(["YES", "NO", "IN_PROGRESS"])
+  projectsOnSite?: "YES" | "NO" | "IN_PROGRESS";
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  individualTerms?: boolean;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  specialTermsProposed?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  meetingsMin?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  meetingsMax?: number;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  rewardPresent?: boolean;
+}
+
+export class LoyaltyListQueryDto extends LoyaltyListFiltersDto {
   @IsDefined()
   @Type(() => Number)
   @IsInt()
@@ -95,75 +455,208 @@ export class LoyaltyListQueryDto {
   @Min(1)
   @Max(100)
   pageSize = 30;
-
-  @IsOptional()
-  @Transform(({ value }) => {
-    if (value === false || value === "false") return "exclude";
-    if (value === true || value === "true") return "only";
-    if (value === "all") return "include";
-    return value;
-  })
-  @IsIn(["exclude", "include", "only"])
-  archived: "exclude" | "include" | "only" = "exclude";
-
-  @IsOptional()
-  @IsString()
-  @Length(1, 100)
-  city?: string;
-
-  @IsOptional()
-  @Transform(({ value }) =>
-    value === "true" ? true : value === "false" ? false : value,
-  )
-  @IsBoolean()
-  hasAmo?: boolean;
-
-  @IsOptional()
-  @IsIn(ACTIVITY_TYPES)
-  activityType?: (typeof ACTIVITY_TYPES)[number];
-
-  @IsOptional()
-  @IsIn(LOYALTY_SEGMENTS)
-  segment?: (typeof LOYALTY_SEGMENTS)[number];
 }
 
-export class LoyaltyNestedListFiltersDto {
+export class LoyaltyNestedListFiltersDto extends LoyaltyListFiltersDto {}
+
+export class LoyaltyFilterPeriodDto {
+  @IsISO8601({ strict: true })
+  from!: string;
+
+  @IsISO8601({ strict: true })
+  to!: string;
+}
+
+export class LoyaltyFilterRangeDto {
   @IsOptional()
-  @Transform(({ value }) => {
-    if (value === false || value === "false") return "exclude";
-    if (value === true || value === "true") return "only";
-    if (value === "all") return "include";
-    return value;
-  })
-  @IsIn(["exclude", "include", "only"])
-  archived?: "exclude" | "include" | "only";
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  min?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(20000000)
+  max?: number;
+}
+
+// Canonical POST-body filter used by list selection and CSV export. Flat
+// fields remain a backwards-compatible transport and are normalized by the
+// service before predicates are evaluated.
+export class LoyaltyCanonicalFilterDto {
+  @IsOptional()
+  @IsBoolean()
+  includeLowSignal?: boolean;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  callPeriod?: LoyaltyFilterPeriodDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  activityPeriod?: LoyaltyFilterPeriodDto;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsUUID("4", { each: true })
+  campaignIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsIn(LOYALTY_CALL_RESULTS, { each: true })
+  lastCallResults?: Array<(typeof LOYALTY_CALL_RESULTS)[number]>;
+
+  @IsOptional()
+  @IsIn(LOYALTY_CALL_SCENARIOS)
+  scenario?: (typeof LOYALTY_CALL_SCENARIOS)[number];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
+  @Length(1, 160, { each: true })
+  assigneeIds?: string[];
+
+  @IsOptional()
+  @IsBoolean()
+  unassigned?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsIn(LOYALTY_SPECIALIZATIONS, { each: true })
+  specializations?: Array<(typeof LOYALTY_SPECIALIZATIONS)[number]>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(2)
+  @IsIn(["MOSCOW", "REGION"], { each: true })
+  geography?: Array<"MOSCOW" | "REGION">;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @IsIn(LOYALTY_WORK_FORMATS, { each: true })
+  workFormats?: Array<(typeof LOYALTY_WORK_FORMATS)[number]>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsIn(LOYALTY_STAGES, { each: true })
+  relationshipStages?: Array<(typeof LOYALTY_STAGES)[number]>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsIn(LOYALTY_STATUSES, { each: true })
+  brokerStatuses?: Array<(typeof LOYALTY_STATUSES)[number]>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(4)
+  @IsIn(LOYALTY_DATA_QUALITY_FILTERS, { each: true })
+  dataQuality?: Array<(typeof LOYALTY_DATA_QUALITY_FILTERS)[number]>;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterRangeDto)
+  dealCount?: LoyaltyFilterRangeDto;
+
+  @IsOptional()
+  @IsBoolean()
+  dealsInPeriod?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  bt?: boolean;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterRangeDto)
+  meetings?: LoyaltyFilterRangeDto;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsIn(LOYALTY_PARTNERSHIP_STATUSES, { each: true })
+  partnershipStatuses?: Array<(typeof LOYALTY_PARTNERSHIP_STATUSES)[number]>;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @IsIn(["Крупное", "Среднее", "Небольшое"], { each: true })
+  agencySizes?: Array<"Крупное" | "Среднее" | "Небольшое">;
+
+  @IsOptional()
+  @IsBoolean()
+  websitePresent?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @IsIn(["YES", "NO", "IN_PROGRESS"], { each: true })
+  projectsOnSite?: Array<"YES" | "NO" | "IN_PROGRESS">;
+
+  @IsOptional()
+  @IsBoolean()
+  individualTerms?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  specialTermsProposed?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  rewardPresent?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(3650)
+  staleDays?: number;
+}
+
+export class LoyaltyColumnFiltersDto {
+  @IsOptional()
+  @IsIn(LOYALTY_COLUMN_CONTACT_FILTERS)
+  contact?: (typeof LOYALTY_COLUMN_CONTACT_FILTERS)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_STATUSES)
+  statusStage?: (typeof LOYALTY_STATUSES)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_COLUMN_ACTIVITY_FILTERS)
+  activity?: (typeof LOYALTY_COLUMN_ACTIVITY_FILTERS)[number];
+
+  @IsOptional()
+  @IsIn(LOYALTY_COLUMN_CALL_FILTERS)
+  calls?: (typeof LOYALTY_COLUMN_CALL_FILTERS)[number];
 
   @IsOptional()
   @IsString()
-  @Length(1, 100)
-  city?: string;
+  @Length(1, 160)
+  assignee?: string;
 
   @IsOptional()
-  @Transform(({ value }) =>
-    value === "true" ? true : value === "false" ? false : value,
-  )
-  @IsBoolean()
-  hasAmo?: boolean;
-
-  @IsOptional()
-  @IsIn(ACTIVITY_TYPES)
-  activityType?: (typeof ACTIVITY_TYPES)[number];
-
-  @IsOptional()
-  @IsIn(LOYALTY_SEGMENTS)
-  segment?: (typeof LOYALTY_SEGMENTS)[number];
+  @IsIn(LOYALTY_COLUMN_DEAL_FILTERS)
+  deals?: (typeof LOYALTY_COLUMN_DEAL_FILTERS)[number];
 }
 
 // Sensitive search text belongs in a POST body, never in URLs/access logs.
 export class LoyaltySearchDto extends LoyaltyListQueryDto {
+  @IsOptional()
   @IsString()
-  @Length(1, 160)
-  search!: string;
+  @Length(0, 160)
+  search = "";
 
   // Compatibility for clients that group non-sensitive filters. Flat fields
   // remain canonical; the controller normalizes this object before use.
@@ -171,6 +664,54 @@ export class LoyaltySearchDto extends LoyaltyListQueryDto {
   @ValidateNested()
   @Type(() => LoyaltyNestedListFiltersDto)
   filters?: LoyaltyNestedListFiltersDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyCanonicalFilterDto)
+  filter?: LoyaltyCanonicalFilterDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyColumnFiltersDto)
+  columns?: LoyaltyColumnFiltersDto;
+}
+
+export class LoyaltyExportDto extends LoyaltyListFiltersDto {
+  @IsOptional()
+  @IsString()
+  @Length(0, 160)
+  search = "";
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyNestedListFiltersDto)
+  filters?: LoyaltyNestedListFiltersDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyCanonicalFilterDto)
+  filter?: LoyaltyCanonicalFilterDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyColumnFiltersDto)
+  columns?: LoyaltyColumnFiltersDto;
+}
+
+export class LoyaltyChangesQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  page = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  pageSize = 30;
 }
 
 export class LoyaltyContactPointDto {
@@ -594,6 +1135,35 @@ export class LoyaltySourceReportedSummaryManifestDto {
   agencies!: LoyaltySourceReportedGroupManifestDto;
 }
 
+export class LoyaltyActivityCoverageDto {
+  @IsIn(["PARTIAL", "FULL_SNAPSHOT"])
+  mode!: "PARTIAL" | "FULL_SNAPSHOT";
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  coveredRecords!: number;
+
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(5)
+  @ArrayUnique()
+  @IsIn(ACTIVITY_TYPES, { each: true })
+  activityTypes!: (typeof ACTIVITY_TYPES)[number][];
+
+  @IsString()
+  @Matches(/^[A-Za-z0-9._:-]{1,100}$/)
+  sourceRunId!: string;
+
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/)
+  sourceContentHash!: string;
+
+  @IsISO8601({ strict: true })
+  observedThrough!: string;
+}
+
 export class LoyaltyImportDto {
   @IsString()
   @Length(1, 160)
@@ -623,6 +1193,13 @@ export class LoyaltyImportDto {
   @Min(0)
   @Max(20000000)
   expectedActivities!: number;
+
+  // Any event-bearing import must declare what was actually scanned. Merely
+  // seeing one event never proves that missing calls/deals are exact zeroes.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyActivityCoverageDto)
+  activityCoverage?: LoyaltyActivityCoverageDto;
 
   // Optional for backward compatibility with event-only imports. It becomes
   // mandatory in service validation as soon as any record has an aggregate.
@@ -766,6 +1343,10 @@ export class LoyaltyReconciliationQueryDto {
   @IsOptional()
   @IsIn(["anna", "ours", "all"])
   base?: "anna" | "ours" | "all";
+
+  @IsOptional()
+  @IsIn(RECONCILIATION_CATEGORIES)
+  category?: (typeof RECONCILIATION_CATEGORIES)[number];
 }
 
 export class LoyaltyNestedReconciliationFiltersDto {
@@ -780,6 +1361,10 @@ export class LoyaltyNestedReconciliationFiltersDto {
   @IsOptional()
   @IsIn(["anna", "ours", "all"])
   base?: "anna" | "ours" | "all";
+
+  @IsOptional()
+  @IsIn(RECONCILIATION_CATEGORIES)
+  category?: (typeof RECONCILIATION_CATEGORIES)[number];
 }
 
 export class LoyaltyReconciliationSearchDto extends LoyaltyReconciliationQueryDto {
@@ -805,6 +1390,19 @@ export class LoyaltyReconciliationDecisionDto {
   @IsInt()
   @Min(1)
   expectedVersion!: number;
+
+  @Transform(({ value }) => (typeof value === "string" ? value.trim() : value))
+  @IsString()
+  @Length(3, 1000)
+  reason!: string;
+
+  @IsOptional()
+  @IsObject()
+  fieldResolutions?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsUUID()
+  targetId?: string;
 }
 
 export class LoyaltyLinkUnlinkDto {

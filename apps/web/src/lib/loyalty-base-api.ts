@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiUpload } from "./api";
+import { apiDownload, apiGet, apiPatch, apiPost, apiUpload } from "./api";
 
 export type LoyaltyBaseKey = "anna" | "ours";
 export type LoyaltyEntityType = "brokers" | "agencies";
@@ -8,11 +8,202 @@ export type LoyaltySegment =
   | "BT_WITHOUT_FIXATION"
   | "BIRTHDAY_TODAY";
 
+export type LoyaltyCallResult =
+  | "INFORMED"
+  | "DO_NOT_CALL"
+  | "NOT_INTERESTED"
+  | "NO_ANSWER"
+  | "SEND_INFORMATION"
+  | "BROKER_TOUR_BOOKED"
+  | "BROKER_TOUR_DECLINED"
+  | "INVALID_PHONE"
+  | "NOT_A_BROKER"
+  | "COOPERATION_DECLINED"
+  | "BROKER_TOUR_SCHEDULED"
+  | "CALLBACK"
+  | "AGREEMENTS_EXIST"
+  | "COOPERATION_AGREED";
+
+export const BROKER_CALL_RESULTS = [
+  ["INFORMED", "Проинформирован"],
+  ["DO_NOT_CALL", "Просил не звонить"],
+  ["NOT_INTERESTED", "Неинтересно"],
+  ["NO_ANSWER", "НДЗ"],
+  ["SEND_INFORMATION", "Просил отправить информацию"],
+  ["BROKER_TOUR_BOOKED", "Запись на БТ"],
+  ["BROKER_TOUR_DECLINED", "Отказ от БТ"],
+  ["INVALID_PHONE", "Некорректный номер"],
+  ["NOT_A_BROKER", "Уже не брокер"],
+] as const satisfies ReadonlyArray<readonly [LoyaltyCallResult, string]>;
+
+export const AGENCY_CALL_RESULTS = [
+  ["NO_ANSWER", "НДЗ"],
+  ["COOPERATION_DECLINED", "Отказ от сотрудничества"],
+  ["BROKER_TOUR_SCHEDULED", "Назначен БТ"],
+  ["CALLBACK", "Перезвонить"],
+  ["SEND_INFORMATION", "Отправить информацию"],
+  ["AGREEMENTS_EXIST", "Есть договорённости"],
+  ["COOPERATION_AGREED", "Договорились о сотрудничестве"],
+] as const satisfies ReadonlyArray<readonly [LoyaltyCallResult, string]>;
+
+export type LoyaltyCallScenario =
+  | "NOT_CALLED_IN_PERIOD"
+  | "CALLED_IN_PERIOD"
+  | "BT_DROPPED"
+  | "BT_FIXATION_NO_MEETING"
+  | "BT_MEETING_NO_DEAL"
+  | "NEW_NO_BT"
+  | "HAS_DEALS"
+  | "UNASSIGNED"
+  | "BT_VISITED"
+  | "BT_NOT_VISITED"
+  | "SITE_PLACED"
+  | "SITE_NOT_PLACED"
+  | "INDIVIDUAL_TERMS"
+  | "NO_INDIVIDUAL_TERMS"
+  | "HAS_MEETINGS"
+  | "NO_MEETINGS";
+
+export type LoyaltyBrokerStatus =
+  | "TOP_SELLER"
+  | "SELLER"
+  | "OFFERING"
+  | "FIXATING"
+  | "BROKER_TOUR"
+  | "DORMANT"
+  | "NEW";
+
+export type LoyaltyAgencyStatus =
+  | "VIP_PARTNER"
+  | "SELLING_PARTNER"
+  | "ACTIVE_PARTNER"
+  | "FIXATING_PARTNER"
+  | "WARM_PARTNER"
+  | "STARTING_PARTNER"
+  | "DORMANT_PARTNER"
+  | "NEW_AGENCY";
+
+export type LoyaltyDataQuality =
+  | "FULL"
+  | "NEEDS_COMPLETION"
+  | "NOT_FOUND_IN_CRM"
+  | "CONFLICT";
+
+export type LoyaltySortField =
+  | "name"
+  | "city"
+  | "lastCallAt"
+  | "fixations"
+  | "meetings"
+  | "deals"
+  | "dealAmount"
+  | "brokerTours"
+  | "brokerCount"
+  | "rating"
+  | "updatedAt";
+
+export interface LoyaltyCanonicalFilter {
+  includeLowSignal?: boolean;
+  callPeriod?: { from: string; to: string };
+  activityPeriod?: { from: string; to: string };
+  campaignIds?: string[];
+  lastCallResults?: LoyaltyCallResult[];
+  scenario?: LoyaltyCallScenario;
+  assigneeIds?: string[];
+  unassigned?: boolean;
+  specializations?: string[];
+  geography?: Array<"MOSCOW" | "REGION">;
+  workFormats?: Array<"Агентство" | "Частный брокер" | "Координатор">;
+  relationshipStages?: string[];
+  brokerStatuses?: Array<LoyaltyBrokerStatus | LoyaltyAgencyStatus>;
+  dataQuality?: LoyaltyDataQuality[];
+  dealCount?: { min?: number; max?: number };
+  dealsInPeriod?: boolean;
+  bt?: boolean;
+  meetings?: { min?: number; max?: number };
+  partnershipStatuses?: string[];
+  agencySizes?: Array<"Крупное" | "Среднее" | "Небольшое">;
+  websitePresent?: boolean;
+  projectsOnSite?: Array<"YES" | "NO" | "IN_PROGRESS">;
+  individualTerms?: boolean;
+  specialTermsProposed?: boolean;
+  rewardPresent?: boolean;
+  staleDays?: number;
+}
+
+export interface LoyaltyColumnFilters {
+  contact?: "HAS_PHONE" | "NO_PHONE";
+  statusStage?: LoyaltyBrokerStatus | LoyaltyAgencyStatus;
+  activity?:
+    | "BT_VISITED"
+    | "BT_NOT_VISITED"
+    | "HAS_FIXATIONS"
+    | "NO_FIXATIONS"
+    | "HAS_MEETINGS"
+    | "NO_MEETINGS";
+  calls?: "CALLED_IN_PERIOD" | "NOT_CALLED_IN_PERIOD";
+  assignee?: string;
+  deals?:
+    | "HAS_DEALS"
+    | "NO_DEALS"
+    | "ONE_TO_TWO"
+    | "ONE_TO_FOUR"
+    | "THREE_PLUS"
+    | "FIVE_PLUS";
+}
+
+export interface LoyaltyListRequest {
+  page: number;
+  pageSize: number;
+  search: string;
+  city?: string;
+  hasAmo?: boolean;
+  archived: "exclude" | "include" | "only";
+  segment?: LoyaltySegment;
+  sortBy?: LoyaltySortField;
+  sortOrder?: "asc" | "desc";
+  filter: LoyaltyCanonicalFilter;
+  columns?: LoyaltyColumnFilters;
+}
+
+export interface LoyaltyFacetValue {
+  value: string;
+  matches: number;
+}
+
+export interface LoyaltyFacets {
+  cities: LoyaltyFacetValue[];
+  assignees: LoyaltyFacetValue[];
+  specializations: LoyaltyFacetValue[];
+  stages: LoyaltyFacetValue[];
+  statuses: LoyaltyFacetValue[];
+  dataQuality: LoyaltyFacetValue[];
+  agencySizes: LoyaltyFacetValue[];
+}
+
 export interface LoyaltyLeader {
   id: string;
   name: string;
   deals: number;
   dealAmount: string | null;
+}
+
+export type LoyaltyLeaderMode = "EXACT" | "LOCAL_PRELIMINARY" | "UNAVAILABLE";
+
+/**
+ * Anna leaders remain fail-closed unless event-level activity data is exact.
+ * OUR leaders may be shown from the explicitly labelled local preliminary
+ * operational rollup; this never upgrades Anna source rollups to exact data.
+ */
+export function loyaltyLeaderMode(
+  base: LoyaltyBaseKey,
+  metricSourceKind: string,
+): LoyaltyLeaderMode {
+  if (base === "anna")
+    return metricSourceKind === "EXACT_ACTIVITIES" ? "EXACT" : "UNAVAILABLE";
+  if (metricSourceKind === "EXACT_ACTIVITIES") return "EXACT";
+  if (metricSourceKind === "LOCAL_PRELIMINARY") return "LOCAL_PRELIMINARY";
+  return "UNAVAILABLE";
 }
 
 export function selectLoyaltyLeader(
@@ -38,6 +229,16 @@ export interface LoyaltyMetricSource {
   periodFilterApplied: boolean | null;
   contributingRecords: number | null;
   sourceVersions: string[];
+}
+
+export function hasLoyaltyActivityEvidence(
+  source: LoyaltyMetricSource | null | undefined,
+): boolean {
+  if (source?.kind === "EXACT_ACTIVITIES") return true;
+  return (
+    source?.kind === "LOCAL_PRELIMINARY" &&
+    (source.contributingRecords ?? 0) > 0
+  );
 }
 
 export interface LoyaltyKpiMethodology {
@@ -121,6 +322,8 @@ export interface LoyaltyRecord {
   phone: string;
   email: string;
   city: string;
+  geography: string;
+  role: string;
   status: string;
   stage: string;
   assignee: string;
@@ -128,19 +331,30 @@ export interface LoyaltyRecord {
   hasAmo: boolean | null;
   amoContactUrl: string;
   archived: boolean;
+  updatedAt: string;
   fixations: number | null;
   meetings: number | null;
   deals: number | null;
   dealAmount: string | null;
   lastCallAt: string;
+  lastCallResult: string;
   lastActivityAt: string;
+  daysWithoutContact: number | null;
   nextTask: string;
+  nextTaskAt: string;
+  taskAssignee: string;
   birthday: string;
   workFormat: string;
   specialization: string;
   sourceIds: string[];
   aliases: string[];
   memberships: string[];
+  agencies: Array<{
+    id: string;
+    name: string;
+    role: string;
+    isPrimary: boolean | null;
+  }>;
   comment: string;
   contactPoints: Array<{
     id: string;
@@ -155,6 +369,14 @@ export interface LoyaltyRecord {
     role: string;
     phone: string;
     email: string;
+    status: string;
+    contactPoints: Array<{
+      id: string;
+      type: string;
+      label: string;
+      value: string;
+      isPrimary: boolean | null;
+    }>;
   }>;
   history: Array<{
     id: string;
@@ -162,6 +384,19 @@ export interface LoyaltyRecord {
     occurredAt: string;
     title: string;
     description: string;
+    assignmentId?: string;
+    campaignId?: string;
+    campaignName?: string;
+    employeeId?: string;
+    employeeName?: string;
+    result?: string;
+    comment?: string;
+    nextStep?: string;
+    nextActionAt?: string;
+    correctionReason?: string;
+    isCorrection?: boolean;
+    effective?: boolean;
+    superseded?: boolean;
   }>;
   recognitions: Array<{
     id: string;
@@ -181,9 +416,15 @@ export interface LoyaltyRecord {
     sitePlacementRequirements: string;
     lastAgencyMeetingDate: string;
     agencyBtFormat: string;
+    agencyBtDate: string;
     activeBrokers: number | null;
     lastContractDate: string;
     partnershipStatus: string;
+    legalName: string;
+    nextAgreement: string;
+    specialTerms: string;
+    specialTermsStatus: string;
+    specialTermsValidUntil: string;
     rating: number | null;
     crmSource: string;
     paymentControl: number | null;
@@ -221,6 +462,61 @@ export interface LoyaltyRecord {
     brokerTourAt: string;
     dealsByMonth: Record<string, number>;
   } | null;
+  periodMetrics: {
+    period: { from: string; to: string } | null;
+    availability: "EXACT" | "LOCAL_PRELIMINARY" | "UNAVAILABLE";
+    fixations: number | null;
+    meetings: number | null;
+    deals: number | null;
+    dealAmount: string | null;
+    lastFixationAt: string;
+    lastMeetingAt: string;
+    lastDealAt: string;
+  } | null;
+}
+
+export interface LoyaltyDisplayMetrics {
+  fixations: number | null;
+  meetings: number | null;
+  deals: number | null;
+  dealAmount: string | null;
+  selectedPeriod: boolean;
+  availability: "EXACT" | "LOCAL_PRELIMINARY" | "UNAVAILABLE";
+  label: string;
+}
+
+/** Keep lifetime and selected-period metrics separate and never fill a
+ * selected-period unknown from a lifetime value. */
+export function loyaltyMetricsForDisplay(
+  record: LoyaltyRecord,
+): LoyaltyDisplayMetrics {
+  const period = record.periodMetrics;
+  if (period && period.availability !== "UNAVAILABLE") {
+    return {
+      fixations: period.fixations,
+      meetings: period.meetings,
+      deals: period.deals,
+      dealAmount: period.dealAmount,
+      selectedPeriod: true,
+      availability: period.availability,
+      label:
+        period.availability === "EXACT"
+          ? "За выбранный период · точно"
+          : "За выбранный период · предварительно",
+    };
+  }
+  return {
+    fixations: record.fixations,
+    meetings: record.meetings,
+    deals: record.deals,
+    dealAmount: record.dealAmount,
+    selectedPeriod: false,
+    availability: "UNAVAILABLE",
+    label:
+      record.metricSource?.kind === "EXACT_ACTIVITIES"
+        ? "За всё время · точно"
+        : "Точные метрики недоступны",
+  };
 }
 
 export interface LoyaltyListResponse {
@@ -231,6 +527,11 @@ export interface LoyaltyListResponse {
   pageSize: number;
   total: number;
   totalPages: number;
+  selectionCount: number;
+  filterHash: string;
+  snapshotId: string | null;
+  facets: LoyaltyFacets;
+  dataAvailability: Record<string, unknown>;
 }
 
 export interface LoyaltyListFilters {
@@ -241,6 +542,10 @@ export interface LoyaltyListFilters {
   city?: string;
   hasAmo?: "" | "true" | "false";
   segment?: LoyaltySegment | "";
+  sortBy?: LoyaltySortField;
+  sortOrder?: "asc" | "desc";
+  filter?: LoyaltyCanonicalFilter;
+  columns?: LoyaltyColumnFilters;
 }
 
 export type ReconciliationDecision =
@@ -639,7 +944,7 @@ export function normalizeLoyaltyOverview(
         return source[key] === null ? null : numberValue(source[key]);
       }
     }
-    return 0;
+    return null;
   };
 
   return {
@@ -739,13 +1044,66 @@ export function normalizeLoyaltyOverview(
 
 function normalizeContact(value: unknown) {
   const item = asRecord(value);
-  const points = arrayValue(item.contactPoints).map(asRecord);
-  const pointValue = (type: string) => {
-    const point = points.find(
-      (candidate) => stringValue(candidate.type).toUpperCase() === type,
+  const current = booleanValue(pick(item, "isCurrent", "actual"));
+  const rawPoints = arrayValue(item.contactPoints).map(asRecord);
+  const points = rawPoints
+    .map((point) => ({
+      id: stringValue(pick(point, "id", "externalId")),
+      type: stringValue(point.type).toUpperCase(),
+      label: stringValue(point.label),
+      value: stringValue(pick(point, "value", "maskedValue")),
+      isPrimary: booleanValue(point.isPrimary),
+    }))
+    .filter((point) => point.type && point.value);
+  const fallbackValues = [
+    ...stringArray(pick(item, "phones", "phoneNumbers")),
+    stringValue(pick(item, "phone", "primaryPhone")),
+  ]
+    .filter(Boolean)
+    .map((entry, index) => ({
+      id: "",
+      type: "PHONE",
+      label: "",
+      value: entry,
+      isPrimary: index === 0,
+    }))
+    .concat(
+      [
+        ...stringArray(pick(item, "emails", "emailAddresses")),
+        stringValue(pick(item, "email", "primaryEmail")),
+      ]
+        .filter(Boolean)
+        .map((entry, index) => ({
+          id: "",
+          type: "EMAIL",
+          label: "",
+          value: entry,
+          isPrimary: index === 0,
+        })),
     );
-    return stringValue(pick(point || {}, "value", "maskedValue"));
+  const seenPoints = new Set<string>();
+  const contactPoints = [...points, ...fallbackValues].filter((point) => {
+    const key = `${point.type}:${point.value.trim().toLocaleLowerCase("ru-RU")}`;
+    if (seenPoints.has(key)) return false;
+    seenPoints.add(key);
+    return true;
+  });
+  const pointValue = (type: string) => {
+    const point =
+      contactPoints.find(
+        (candidate) => candidate.type === type && candidate.isPrimary === true,
+      ) || contactPoints.find((candidate) => candidate.type === type);
+    return point?.value || "";
   };
+  const rawStatus = stringValue(pick(item, "status", "actualityStatus"));
+  const status =
+    rawStatus === "CURRENT"
+      ? "Актуален"
+      : rawStatus === "FORMER"
+        ? "Бывший сотрудник"
+        : rawStatus === "UNKNOWN"
+          ? "Неизвестно"
+          : rawStatus;
   return {
     id: stringValue(pick(item, "id", "externalId")),
     name: stringValue(pick(item, "name", "displayName", "fullName")),
@@ -758,6 +1116,11 @@ function normalizeContact(value: unknown) {
       pick(item, "email", "primaryEmail"),
       pointValue("EMAIL"),
     ),
+    status: stringValue(
+      status,
+      current === null ? "" : current ? "Актуален" : "Неактуален",
+    ),
+    contactPoints,
   };
 }
 
@@ -814,16 +1177,43 @@ function normalizeHistory(value: unknown) {
       `Договорённость: ${stringValue(item.agreement)}`,
     stringValue(item.nextAt) &&
       `Следующий контакт: ${stringValue(item.nextAt)}`,
+    stringValue(item.nextStep) &&
+      `Следующий шаг: ${stringValue(item.nextStep)}`,
+    stringValue(item.nextActionAt) &&
+      `Следующее действие: ${stringValue(item.nextActionAt)}`,
+    stringValue(item.correctionReason) &&
+      `Причина исправления: ${stringValue(item.correctionReason)}`,
   ].filter(Boolean);
+  const isCall = Boolean(
+    stringValue(item.assignmentId) ||
+    stringValue(item.resultCode) ||
+    stringValue(item.nextStep) ||
+    stringValue(item.nextActionAt),
+  );
+  const effective = booleanValue(item.effective);
+  const superseded = booleanValue(item.superseded);
   return {
     id: stringValue(pick(item, "id", "externalId")),
     type: stringValue(
       pick(item, "type", "eventType", "kind"),
-      "SOURCE_HISTORY",
+      isCall ? "CALL" : "SOURCE_HISTORY",
     ),
     occurredAt: stringValue(pick(item, "occurredAt", "date", "createdAt")),
     title,
     description: details.join(" · "),
+    assignmentId: stringValue(item.assignmentId),
+    campaignId: stringValue(item.campaignId),
+    campaignName: stringValue(item.campaignName),
+    employeeId: stringValue(item.employeeId),
+    employeeName: stringValue(item.employeeName),
+    result: stringValue(pick(item, "resultCode", "result")),
+    comment: explicitDescription,
+    nextStep: stringValue(item.nextStep),
+    nextActionAt: stringValue(item.nextActionAt),
+    correctionReason: stringValue(item.correctionReason),
+    isCorrection: booleanValue(item.isCorrection) === true,
+    effective: effective === null ? undefined : effective,
+    superseded: superseded === null ? undefined : superseded,
   };
 }
 
@@ -893,6 +1283,9 @@ export function normalizeLoyaltyRecord(
   const activitySummary = nonEmptyRecord(item.activities) || {};
   const metricSourceRaw = nonEmptyRecord(item.metricSource);
   const sourceReportedRaw = nonEmptyRecord(item.sourceReportedMetrics);
+  const periodMetricsRaw = nonEmptyRecord(
+    pick(item, "periodMetrics", "activityPeriodMetrics", "filteredMetrics"),
+  );
   const activityItems = arrayValue(item.activities);
   const attributes = nonEmptyRecord(item.attributes) || {};
   const attributeCrm = nonEmptyRecord(attributes.crm) || {};
@@ -955,18 +1348,71 @@ export function normalizeLoyaltyRecord(
     sourceReportedRaw?.brokerTourAt,
   );
   const annaDetails = {
-    agencySize: stringValue(attributes.agencySize),
-    brokerCount: nullableNumberValue(attributes.brokerCount),
-    website: stringValue(attributes.website),
-    projectsOnSite: stringValue(attributes.projectsOnSite),
+    agencySize: stringValue(
+      pick(item, "agencySize"),
+      stringValue(attributes.agencySize),
+    ),
+    brokerCount: nullableNumberValue(
+      pick(item, "brokerCount") ?? attributes.brokerCount,
+    ),
+    website: stringValue(
+      pick(item, "website"),
+      stringValue(attributes.website),
+    ),
+    projectsOnSite: stringValue(
+      pick(item, "projectsOnSite"),
+      stringValue(attributes.projectsOnSite),
+    ),
     sitePlacementRequirements: stringValue(
       pick(attributes, "sitePlacementRequirements", "requirements"),
     ),
-    lastAgencyMeetingDate: stringValue(attributes.lastAgencyMeetingDate),
-    agencyBtFormat: stringValue(attributes.agencyBtFormat),
-    activeBrokers: nullableNumberValue(attributes.activeBrokers),
-    lastContractDate: stringValue(attributes.lastContractDate),
-    partnershipStatus: stringValue(attributes.partnershipStatus),
+    lastAgencyMeetingDate: stringValue(
+      pick(item, "lastAgencyMeetingDate", "lastMeetingAt"),
+      stringValue(attributes.lastAgencyMeetingDate),
+    ),
+    agencyBtFormat: stringValue(
+      pick(item, "agencyBtFormat", "brokerTourFormat"),
+      stringValue(attributes.agencyBtFormat),
+    ),
+    agencyBtDate: stringValue(
+      pick(item, "agencyBtDate", "brokerTourAt"),
+      stringValue(
+        pick(attributes, "agencyBtDate", "brokerTourAt", "outboundBtDate"),
+        stringValue(sourceReportedRaw?.brokerTourAt),
+      ),
+    ),
+    activeBrokers: nullableNumberValue(
+      pick(item, "activeBrokers", "activeBrokerCount") ??
+        pick(attributes, "activeBrokers", "activeBrokerCount"),
+    ),
+    lastContractDate: stringValue(
+      pick(item, "lastContractDate", "lastAgreement"),
+      stringValue(pick(attributes, "lastContractDate", "lastAgreement")),
+    ),
+    partnershipStatus: stringValue(
+      pick(item, "partnershipStatus", "partnershipLevel"),
+      stringValue(pick(attributes, "partnershipStatus", "partnershipLevel")),
+    ),
+    legalName: stringValue(
+      pick(item, "legalName"),
+      stringValue(attributes.legalName),
+    ),
+    nextAgreement: stringValue(
+      pick(item, "nextAgreement"),
+      stringValue(attributes.nextAgreement),
+    ),
+    specialTerms: stringValue(
+      pick(item, "specialTerms"),
+      stringValue(attributes.specialTerms),
+    ),
+    specialTermsStatus: stringValue(
+      pick(item, "specialTermsStatus"),
+      stringValue(attributes.specialTermsStatus),
+    ),
+    specialTermsValidUntil: stringValue(
+      pick(item, "specialTermsValidUntil"),
+      stringValue(attributes.specialTermsValidUntil),
+    ),
     rating: nullableNumberValue(attributes.rating),
     crmSource: stringValue(attributes.crmSource),
     paymentControl: nullableNumberValue(attributes.paymentControl),
@@ -1027,28 +1473,56 @@ export function normalizeLoyaltyRecord(
       pick(item, "city", "region", "geography"),
       stringValue(pick(attributes, "city", "region", "geography")),
     ),
-    status: stringValue(
-      pick(
-        item,
-        "computedStatus",
-        "loyaltyStatus",
-        "partnershipLevel",
-        "status",
-        "category",
+    geography: stringValue(
+      pick(item, "geography", "regionType"),
+      stringValue(
+        pick(attributes, "geography", "regionType"),
+        booleanValue(item.isRegional) === true
+          ? "REGION"
+          : booleanValue(item.isRegional) === false
+            ? "MOSCOW"
+            : "",
       ),
+    ),
+    role: stringValue(
+      pick(item, "role", "brokerRole", "position"),
+      stringValue(
+        pick(attributes, "role", "brokerRole", "position"),
+        booleanValue(item.isCoordinator) === true ? "Координатор" : "",
+      ),
+    ),
+    status:
+      stringArray(item.computedStatuses)[0] ||
       stringValue(
         pick(
-          attributes,
+          item,
           "computedStatus",
           "loyaltyStatus",
           "partnershipLevel",
           "status",
           "category",
         ),
+        stringValue(
+          pick(
+            attributes,
+            "computedStatus",
+            "loyaltyStatus",
+            "partnershipLevel",
+            "status",
+            "category",
+          ),
+          "",
+        ),
       ),
-    ),
     stage: stringValue(
-      pick(item, "relationshipStage", "partnershipStage", "stage"),
+      pick(
+        item,
+        "relationshipStage",
+        "partnershipStage",
+        "normalizedStage",
+        "funnelStage",
+        "stage",
+      ),
       stringValue(
         pick(attributes, "relationshipStage", "partnershipStage", "stage"),
       ),
@@ -1063,12 +1537,16 @@ export function normalizeLoyaltyRecord(
           "assignee",
           "responsibleName",
         ),
+        stringValue(
+          pick(asRecord(item.assignee), "name", "fullName", "displayName"),
+        ),
       ),
     ),
     dataQuality: stringValue(
       pick(item, "dataQuality", "qualityStatus", "verification"),
       stringValue(
         pick(attributes, "dataQuality", "qualityStatus", "verification"),
+        stringArray(item.dataQualityCodes)[0] || "",
       ),
     ),
     hasAmo: hasAmoRaw !== undefined ? booleanValue(hasAmoRaw) : hasAmoIdentity,
@@ -1076,28 +1554,25 @@ export function normalizeLoyaltyRecord(
     archived:
       Boolean(pick(item, "archivedAt")) ||
       booleanValue(pick(item, "archived", "isArchived")) === true,
+    updatedAt: stringValue(pick(item, "updatedAt", "publishedAt", "createdAt")),
     fixations: nullableNumberValue(
       pick(item, "fixations", "fixationCount") ??
         pick(metrics, "fixations", "fixationCount") ??
-        pick(activitySummary, "fixations") ??
-        pick(sourceReportedRaw || {}, "fixations"),
+        pick(activitySummary, "fixations"),
     ),
     meetings: nullableNumberValue(
       pick(item, "meetings", "meetingCount") ??
         pick(metrics, "meetings", "meetingCount") ??
-        pick(activitySummary, "meetings") ??
-        pick(sourceReportedRaw || {}, "meetings"),
+        pick(activitySummary, "meetings"),
     ),
     deals: nullableNumberValue(
       pick(item, "deals", "dealCount") ??
         pick(metrics, "deals", "dealCount") ??
-        pick(activitySummary, "deals") ??
-        pick(sourceReportedRaw || {}, "deals"),
+        pick(activitySummary, "deals"),
     ),
     dealAmount: nullableDecimalValue(
       pick(item, "dealAmount", "dealAmountRub", "sales", "amount") ??
-        pick(metrics, "dealAmount", "dealAmountRub", "sales", "amount") ??
-        pick(sourceReportedRaw || {}, "dealAmount"),
+        pick(metrics, "dealAmount", "dealAmountRub", "sales", "amount"),
     ),
     lastCallAt: stringValue(
       pick(item, "lastCallAt", "lastCallDate"),
@@ -1106,6 +1581,10 @@ export function normalizeLoyaltyRecord(
         stringValue(pick(sourceReportedRaw || {}, "lastCallAt"), lastCallAt),
       ),
     ),
+    lastCallResult: stringValue(
+      pick(item, "lastCallResult", "callResult"),
+      stringValue(pick(attributes, "lastCallResult", "callResult")),
+    ),
     lastActivityAt: stringValue(
       pick(item, "lastActivityAt", "lastActivityDate"),
       stringValue(
@@ -1113,9 +1592,21 @@ export function normalizeLoyaltyRecord(
         firstActivityAt || sourceLastActivityAt,
       ),
     ),
+    daysWithoutContact: nullableNumberValue(
+      pick(item, "daysWithoutContact", "staleDays") ??
+        pick(attributes, "daysWithoutContact", "staleDays"),
+    ),
     nextTask: stringValue(
       pick(item, "nextTask", "nextStep", "nextAgreement"),
       stringValue(pick(attributes, "nextTask", "nextStep", "nextAgreement")),
+    ),
+    nextTaskAt: stringValue(
+      pick(item, "nextTaskAt", "nextTaskDate", "nextStepAt"),
+      stringValue(pick(attributes, "nextTaskAt", "nextTaskDate", "nextStepAt")),
+    ),
+    taskAssignee: stringValue(
+      pick(item, "taskAssignee", "nextTaskAssignee"),
+      stringValue(pick(attributes, "taskAssignee", "nextTaskAssignee")),
     ),
     birthday: stringValue(
       pick(item, "birthday", "birthDate"),
@@ -1125,12 +1616,19 @@ export function normalizeLoyaltyRecord(
       ),
     ),
     workFormat: stringValue(
-      pick(item, "workFormat", "format"),
-      stringValue(pick(attributes, "workFormat", "format")),
+      pick(item, "workFormat", "normalizedWorkFormat", "format"),
+      stringValue(
+        pick(attributes, "workFormat", "format"),
+        booleanValue(item.isCoordinator) === true ? "Координатор" : "",
+      ),
     ),
     specialization: stringArray(
-      pick(item, "specializations", "specialization") ??
-        pick(attributes, "specializations", "specialization"),
+      pick(
+        item,
+        "specializations",
+        "normalizedSpecializations",
+        "specialization",
+      ) ?? pick(attributes, "specializations", "specialization"),
     ).join(", "),
     sourceIds: stringArray(
       pick(item, "sourceIds", "crmIds", "externalIds"),
@@ -1152,15 +1650,25 @@ export function normalizeLoyaltyRecord(
       pick(item, "memberships", "sources") ??
         pick(attributes, "memberships", "sources"),
     ),
+    agencies: agencies.map((agency) => ({
+      id: stringValue(pick(agency, "id", "externalId", "uuid")),
+      name: stringValue(pick(agency, "displayName", "name", "legalName")),
+      role: stringValue(pick(agency, "role", "brokerRole", "position")),
+      isPrimary: booleanValue(pick(agency, "isPrimary", "primary")),
+    })),
     comment: stringValue(
       pick(item, "comment", "note"),
       stringValue(pick(attributes, "comment", "note")),
     ),
     contactPoints: normalizedContactPoints,
-    contacts: combinedArrays(
-      pick(attributes, "contacts", "contactPersons", "agencyContacts"),
-      pick(item, "contacts", "contactPersons", "agencyContacts"),
-      entityType === "agencies" ? item.brokers : undefined,
+    contacts: (entityType === "agencies" &&
+    arrayValue(item.agencyContactPeople).length
+      ? arrayValue(item.agencyContactPeople)
+      : combinedArrays(
+          pick(attributes, "contacts", "contactPersons", "agencyContacts"),
+          pick(item, "contacts", "contactPersons", "agencyContacts"),
+          entityType === "agencies" ? item.brokers : undefined,
+        )
     ).map(normalizeContact),
     history: combinedArrays(
       activityItems,
@@ -1210,6 +1718,30 @@ export function normalizeLoyaltyRecord(
           ),
         }
       : null,
+    periodMetrics: periodMetricsRaw
+      ? {
+          period: (() => {
+            const raw = nonEmptyRecord(periodMetricsRaw.period);
+            const from = stringValue(raw?.from);
+            const to = stringValue(raw?.to);
+            return from && to ? { from, to } : null;
+          })(),
+          availability:
+            stringValue(periodMetricsRaw.availability) === "EXACT"
+              ? "EXACT"
+              : stringValue(periodMetricsRaw.availability) ===
+                  "LOCAL_PRELIMINARY"
+                ? "LOCAL_PRELIMINARY"
+                : "UNAVAILABLE",
+          fixations: nullableNumberValue(periodMetricsRaw.fixations),
+          meetings: nullableNumberValue(periodMetricsRaw.meetings),
+          deals: nullableNumberValue(periodMetricsRaw.deals),
+          dealAmount: nullableDecimalValue(periodMetricsRaw.dealAmount),
+          lastFixationAt: stringValue(periodMetricsRaw.lastFixationAt),
+          lastMeetingAt: stringValue(periodMetricsRaw.lastMeetingAt),
+          lastDealAt: stringValue(periodMetricsRaw.lastDealAt),
+        }
+      : null,
   };
 }
 
@@ -1244,6 +1776,17 @@ export function normalizeLoyaltyList(
     pick(root, "totalPages") ?? pick(pagination, "totalPages", "pages"),
     Math.max(1, Math.ceil(total / Math.max(1, pageSize))),
   );
+  const rawFacets = asRecord(root.facets);
+  const facet = (key: string): LoyaltyFacetValue[] =>
+    arrayValue(rawFacets[key])
+      .map((raw) => {
+        const item = asRecord(raw);
+        return {
+          value: stringValue(pick(item, "value", "id", "label")),
+          matches: numberValue(pick(item, "matches", "count")),
+        };
+      })
+      .filter((item) => item.value);
   return {
     base:
       stringValue(root.base) === "ours"
@@ -1261,6 +1804,22 @@ export function normalizeLoyaltyList(
     pageSize,
     total,
     totalPages,
+    selectionCount: numberValue(root.selectionCount, total),
+    filterHash: stringValue(root.filterHash),
+    snapshotId:
+      root.snapshotId === null || root.snapshotId === undefined
+        ? null
+        : stringValue(root.snapshotId) || null,
+    facets: {
+      cities: facet("cities"),
+      assignees: facet("assignees"),
+      specializations: facet("specializations"),
+      stages: facet("stages"),
+      statuses: facet("statuses"),
+      dataQuality: facet("dataQuality"),
+      agencySizes: facet("agencySizes"),
+    },
+    dataAvailability: asRecord(root.dataAvailability),
   };
 }
 
@@ -1640,27 +2199,29 @@ export async function getLoyaltyList(
   entityType: LoyaltyEntityType,
   filters: LoyaltyListFilters,
 ) {
-  const { search = "", ...nonSensitiveFilters } = filters;
+  const search = filters.search?.trim() || "";
   const hasAmoValue =
     filters.hasAmo === "" || filters.hasAmo === undefined
       ? undefined
       : filters.hasAmo === "true";
-  const value = search
-    ? await apiPost<unknown>(`/loyalty-base/${base}/${entityType}/search`, {
-        search,
-        page: filters.page,
-        pageSize: filters.pageSize,
-        archived: filters.archived,
-        city: filters.city || undefined,
-        hasAmo: hasAmoValue,
-        segment: filters.segment || undefined,
-      })
-    : await apiGet<unknown>(
-        `/loyalty-base/${base}/${entityType}${queryString({
-          ...nonSensitiveFilters,
-          hasAmo: hasAmoValue,
-        })}`,
-      );
+  // Search text and the full canonical filter live in the POST body so names,
+  // phones and emails never leak into proxy/access-log URLs.
+  const value = await apiPost<unknown>(
+    `/loyalty-base/${base}/${entityType}/search`,
+    {
+      search,
+      page: filters.page,
+      pageSize: filters.pageSize,
+      archived: filters.archived,
+      sortBy: filters.sortBy,
+      sortOrder: filters.sortOrder,
+      city: filters.city || undefined,
+      hasAmo: hasAmoValue,
+      segment: filters.segment || undefined,
+      filter: filters.filter || {},
+      columns: filters.columns,
+    },
+  );
   return normalizeLoyaltyList(
     value,
     base,
@@ -1668,6 +2229,23 @@ export async function getLoyaltyList(
     filters.page,
     filters.pageSize,
   );
+}
+
+export async function exportLoyaltyList(
+  base: LoyaltyBaseKey,
+  entityType: LoyaltyEntityType,
+  request: Omit<LoyaltyListRequest, "page" | "pageSize">,
+) {
+  return apiDownload(`/loyalty-base/${base}/${entityType}/export`, request);
+}
+
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export async function getLoyaltyDetail(
@@ -1679,6 +2257,57 @@ export async function getLoyaltyDetail(
     `/loyalty-base/${base}/${entityType}/${encodeURIComponent(id)}`,
   );
   return normalizeLoyaltyDetail(value, entityType);
+}
+
+export async function updateAnnaLoyaltyRecord(
+  entityType: LoyaltyEntityType,
+  id: string,
+  body: {
+    expectedUpdatedAt: string;
+    displayName?: string;
+    city?: string;
+    attributes?: Record<string, unknown>;
+    archived?: boolean;
+  },
+) {
+  const value = await apiPatch<unknown>(
+    `/loyalty-base/anna/${entityType}/${encodeURIComponent(id)}`,
+    body,
+  );
+  return normalizeLoyaltyDetail(value, entityType);
+}
+
+export interface LoyaltyChangeEntry {
+  id: string;
+  action: string;
+  actor: string;
+  occurredAt: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+}
+
+export async function getAnnaLoyaltyChanges(
+  entityType: LoyaltyEntityType,
+  id: string,
+) {
+  const value = asRecord(
+    await apiGet<unknown>(
+      `/loyalty-base/anna/${entityType}/${encodeURIComponent(id)}/changes?page=1&pageSize=100`,
+    ),
+  );
+  return arrayValue(value.items ?? value.data).map(
+    (raw): LoyaltyChangeEntry => {
+      const item = asRecord(raw);
+      return {
+        id: stringValue(item.id),
+        action: stringValue(item.action),
+        actor: stringValue(item.actorName ?? item.actorId),
+        occurredAt: stringValue(item.occurredAt ?? item.createdAt),
+        before: nonEmptyRecord(item.before),
+        after: nonEmptyRecord(item.after),
+      };
+    },
+  );
 }
 
 export async function getReconciliationCases(filters: {
