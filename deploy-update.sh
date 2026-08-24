@@ -17,8 +17,9 @@ if [ -n "${DEPLOY_REPO_DIR:-}" ]; then
 else
     cd "$(dirname "$0")"
 fi
+DEPLOY_ROOT=$(pwd -P)
 
-for REQUIRED_TOOL in git docker curl flock sha256sum awk grep sed tar mktemp rm cp readlink sudo; do
+for REQUIRED_TOOL in git docker curl df flock sha256sum awk grep sed tar mktemp rm cp readlink sudo; do
     if ! command -v "$REQUIRED_TOOL" >/dev/null 2>&1; then
         echo "Required deployment tool is missing: $REQUIRED_TOOL"
         exit 1
@@ -366,6 +367,63 @@ ENV_STAGING_FILE=""
 chmod 600 "$SERVER_ENV_FILE"
 echo "    ✓ Existing database identity, baseline and Redis preflight passed"
 
+# Image builds need predictable headroom and must never attempt implicit cleanup.
+# Reclaiming production disk is a separate, explicitly reviewed operation.
+MIN_DEPLOY_AVAILABLE_KIB=8388608
+require_deploy_disk_headroom() {
+    local disk_label="$1"
+    local disk_path="$2"
+    local available_kib
+
+    if [ -z "$disk_path" ] || [ "${disk_path#/}" = "$disk_path" ] \
+        || [ "$disk_path" = "/" ] || [ ! -d "$disk_path" ]; then
+        echo "    ✗ $disk_label path must be an existing absolute non-root directory."
+        exit 1
+    fi
+    if ! available_kib=$(df -Pk -- "$disk_path" | awk 'NR == 2 { print $4 }'); then
+        echo "    ✗ Cannot determine available disk space for $disk_label."
+        exit 1
+    fi
+    if ! printf '%s' "$available_kib" | grep -Eq '^[0-9]+$'; then
+        echo "    ✗ Invalid available disk-space result for $disk_label."
+        exit 1
+    fi
+    if [ "$available_kib" -lt "$MIN_DEPLOY_AVAILABLE_KIB" ]; then
+        echo "    ✗ Insufficient $disk_label disk: available=${available_kib} KiB; required=${MIN_DEPLOY_AVAILABLE_KIB} KiB (8 GiB)."
+        echo "      Deployment stops before image builds; run only a separately reviewed cleanup workflow."
+        exit 1
+    fi
+    echo "    ✓ $disk_label disk preflight passed: available=${available_kib} KiB; required=${MIN_DEPLOY_AVAILABLE_KIB} KiB (8 GiB)."
+}
+
+if ! DOCKER_ROOT_REPORTED=$(docker info --format '{{.DockerRootDir}}'); then
+    echo "    ✗ Cannot determine DockerRootDir; refusing to build images."
+    exit 1
+fi
+if [[ ! "$DOCKER_ROOT_REPORTED" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "    ✗ DockerRootDir is not a strictly valid absolute path."
+    exit 1
+fi
+case "$DOCKER_ROOT_REPORTED/" in
+    *"/../"*|*"/./"*|*"//"*)
+        echo "    ✗ DockerRootDir contains an unsafe path component."
+        exit 1
+        ;;
+esac
+if ! DOCKER_ROOT=$(readlink -f -- "$DOCKER_ROOT_REPORTED"); then
+    echo "    ✗ DockerRootDir cannot be resolved."
+    exit 1
+fi
+if [ -z "$DOCKER_ROOT" ] || [ "${DOCKER_ROOT#/}" = "$DOCKER_ROOT" ] \
+    || [ "$DOCKER_ROOT" = "/" ] || [ ! -d "$DOCKER_ROOT" ]; then
+    echo "    ✗ Resolved DockerRootDir must be an existing absolute non-root directory."
+    exit 1
+fi
+
+require_deploy_disk_headroom "deploy repository" "$DEPLOY_ROOT"
+require_deploy_disk_headroom "release context" "$RELEASE_CONTEXT"
+require_deploy_disk_headroom "Docker root" "$DOCKER_ROOT"
+
 # 2) Rebuild images while the current containers continue serving traffic.
 echo ""
 echo "==> [2/5] Rebuild образов..."
@@ -422,8 +480,108 @@ reload_nginx_upstreams() {
     fi
 }
 
+previous_api_schema_is_compatible() {
+    local rollback_schema_status
+    local loyalty_schema_state
+    local incompatible_decision_rows
+    local current_api_running
+
+    # The tagged image is the rollback authority. The production checkout may
+    # belong to a failed prior attempt, so PREVIOUS_DEPLOY_SHA is not enough.
+    # Inspect the image without network access, application environment, or a
+    # writable root filesystem, and never print schema contents.
+    if docker run --rm --network none --read-only --entrypoint /bin/sh \
+        "$ROLLBACK_API_TAG" -c '
+          schema=/app/packages/database/prisma/schema.prisma
+          test -r "$schema" || exit 20
+          awk '\''
+            $1 == "enum" && $2 == "LoyaltyReconciliationDecision" { in_enum = 1; next }
+            in_enum && $1 == "}" { in_enum = 0 }
+            in_enum && $1 == "SUPPLEMENT" { supplement = 1 }
+            in_enum && $1 == "ARCHIVE" { archive = 1 }
+            END { exit (supplement && archive ? 0 : 10) }
+          '\'' "$schema"
+        '; then
+        return 0
+    else
+        rollback_schema_status=$?
+    fi
+
+    if [ "$rollback_schema_status" -ne 10 ]; then
+        echo "    ✗ Could not inspect the tagged previous API schema; refusing old-image rollback."
+        return 1
+    fi
+    echo "    Previous API image lacks SUPPLEMENT/ARCHIVE; verifying that neither value has been written."
+
+    if ! loyalty_schema_state=$($COMPOSE_CMD exec -T postgres \
+        psql -U postgres -d broker_platform -Atqc \
+        "SELECT CASE
+           WHEN to_regclass('public.loyalty_reconciliation_cases') IS NULL THEN 'absent'
+           WHEN NOT EXISTS (
+             SELECT 1
+             FROM pg_type t
+             JOIN pg_namespace n ON n.oid = t.typnamespace
+             WHERE n.nspname = 'public'
+               AND t.typname = 'LoyaltyReconciliationDecision'
+           ) THEN 'absent'
+           ELSE 'present'
+         END"); then
+        echo "    ✗ Could not verify whether the previous API understands the migrated loyalty schema."
+        return 1
+    fi
+
+    if [ "$loyalty_schema_state" = "absent" ]; then
+        return 0
+    fi
+    if [ "$loyalty_schema_state" != "present" ]; then
+        echo "    ✗ Unexpected loyalty schema compatibility result; refusing old-image rollback."
+        return 1
+    fi
+
+    # The currently running API understands the expanded enum and can still
+    # commit SUPPLEMENT/ARCHIVE while a compatibility query is in flight. Stop
+    # it first and verify the fixed production container is actually quiesced;
+    # only then can the following COUNT authoritatively fence old-image
+    # rollback. A failed stop/verification must never fall through to old up.
+    if ! $COMPOSE_CMD stop -t 30 api; then
+        echo "    ✗ Could not quiesce the current API before the rollback compatibility check."
+        return 1
+    fi
+    if ! current_api_running=$(docker inspect --format '{{.State.Running}}' st-michael-api 2>/dev/null); then
+        echo "    ✗ Could not verify that the current API is stopped; refusing old-image rollback."
+        return 1
+    fi
+    if [ "$current_api_running" != "false" ]; then
+        echo "    ✗ Current API is still running; refusing the old-image compatibility check."
+        return 1
+    fi
+
+    if ! incompatible_decision_rows=$($COMPOSE_CMD exec -T postgres \
+        psql -U postgres -d broker_platform -Atqc \
+        "SELECT COUNT(*)
+         FROM public.loyalty_reconciliation_cases
+         WHERE decision::text IN ('SUPPLEMENT', 'ARCHIVE')"); then
+        echo "    ✗ Could not verify loyalty decisions before old-image rollback."
+        return 1
+    fi
+    if ! printf '%s' "$incompatible_decision_rows" | grep -Eq '^[0-9]+$'; then
+        echo "    ✗ Invalid loyalty decision compatibility result; refusing old-image rollback."
+        return 1
+    fi
+    if [ "$incompatible_decision_rows" -ne 0 ]; then
+        echo "    ✗ Fast rollback is unsafe: SUPPLEMENT/ARCHIVE decisions already exist."
+        echo "      The previous API image may not understand the expanded enum and will not be started."
+        echo "      Apply a compatible forward fix or restore the confirmed predeploy database backup."
+        return 1
+    fi
+}
+
 rollback_application() {
     echo "    Attempting fast application rollback; additive DB migrations stay applied."
+    if ! previous_api_schema_is_compatible; then
+        echo "    ✗ Incompatible previous API rollback blocked before container replacement."
+        return 1
+    fi
     if ! $COMPOSE_CMD -f docker-compose.yml -f "$ROLLBACK_OVERRIDE" up -d \
         --no-deps --no-build --pull never --force-recreate api web; then
         echo "    ✗ Fast rollback command failed; page the production operator immediately."
@@ -487,11 +645,8 @@ verify_production_compose_override
 if ! $COMPOSE_CMD up -d --no-deps api web; then
     fail_after_rollout "Application container replacement failed."
 fi
-if ! reload_nginx_upstreams; then
-    fail_after_rollout "nginx could not refresh the recreated API/web upstream addresses."
-fi
 
-# 4) Wait for API to be ready
+# 4) Wait for API to be ready before exposing its new Docker address in nginx.
 echo ""
 echo "==> [4/5] Ждём готовности API..."
 API_READY=0
@@ -506,6 +661,9 @@ for i in {1..30}; do
 done
 if [ "$API_READY" -ne 1 ]; then
     fail_after_rollout "Readiness не пройден: проверить API, PostgreSQL, Redis и обязательные миграции."
+fi
+if ! reload_nginx_upstreams; then
+    fail_after_rollout "nginx could not expose the ready API/web upstream addresses."
 fi
 
 echo "    Проверяю обязательные контейнеры..."

@@ -17,8 +17,12 @@ Pinned SHA-256 fingerprints:
 ## Fresh database
 
 Do not mark anything as applied. Run the normal deploy command; Prisma applies
-the legacy baseline first and then all dated additive migrations in order
-(`20260818000100_loyalty_base`, followed by the Mango safety migration).
+the legacy baseline first and then all dated additive migrations in order:
+`20260818000100_loyalty_base`, `20260818000200_mango_release_safety`,
+`20260821000100_loyalty_source_aggregates`,
+`20260821180000_lot_photos`, `20260824000100_loyalty_workflows`,
+`20260824000200_loyalty_event_restore_version` and
+`20260824000300_loyalty_event_attachments`.
 
 ```powershell
 npx.cmd prisma migrate deploy --schema packages/database/prisma/schema.prisma
@@ -60,6 +64,45 @@ npx.cmd prisma migrate status --schema packages/database/prisma/schema.prisma
 6. Verify on the clone: API startup, loyalty dry-run, no active Anna snapshot,
    legacy broker/client counts, and application smoke tests. The migration is
    additive and must not modify rows in `brokers` or `agencies`.
+
+The workflow migration creates only new `loyalty_*` tables, enum values,
+constraints, indexes and triggers. It must preserve the active Anna snapshot,
+all imported source rows and all cabinet broker/agency rows. Clone verification
+must additionally cover: one-target checks, duplicate assignment prevention,
+global `submission_id` idempotency, append-only call attempts, immutable
+engagement events, a single active read-only sync per source, and the manual
+overlay guard that keeps ADMIN-created Anna contacts outside immutable
+published snapshots. Application rollback never rolls this additive migration
+back. The new tables and nullable columns are roll-forward compatible, but the
+enum expansion is practically backward-compatible only until a reconciliation
+case is written with `SUPPLEMENT` or `ARCHIVE`. After either value is used, an
+old Prisma client that lacks those enum members may fail while reading
+`loyalty_reconciliation_cases`. Roll back only to an API image that understands
+the expanded enum; otherwise use a compatible forward fix or restore the
+confirmed predeploy database backup. The deploy script refuses to start an
+incompatible old API once either new decision value exists.
+
+Migration `20260824000300_loyalty_event_attachments` must run only after event
+versioning in `20260824000200`. It stores evidence in a protected PostgreSQL
+`BYTEA` table rather than a public nginx path. Database checks cap each file at
+5 MiB and verify its recorded length, MIME allow-list and SHA-256 shape. A
+parent-row lock serializes concurrent inserts and enforces a lifetime maximum
+of 20 files / 50 MiB per event, including archived evidence. A trigger makes
+bytes and metadata immutable, forbids physical deletion, and permits only a
+single active-to-archived transition paired with a one-step version increment.
+Clone verification must exercise those checks and confirm that workflow audit
+rows contain metadata/digests only, never `BYTEA` content. This migration is
+also additive and roll-forward only: application rollback leaves protected
+rows unused; schema or evidence removal requires a separate reviewed migration
+and a recoverable backup, never a manual `DROP`/`DELETE`.
+
+The attachment API is staff-only. A route guard verifies `READ_ALL` plus
+`ENTITY_EDIT` before Multer can buffer an upload, and the service repeats the
+same check as defence in depth; downloads require `READ_ALL`. Create, download
+access and archive operations append metadata-only workflow audits. Downloads
+are authenticated, `no-store`, `nosniff`, same-origin attachment responses;
+the original filename appears only as an RFC 5987-encoded value with a fixed
+ASCII fallback. Nginx must not expose this table through `/files/`.
 
 The clone rehearsal is also safe to rerun after production has adopted Prisma
 migration history. In that mode it must **not** compare the current schema to

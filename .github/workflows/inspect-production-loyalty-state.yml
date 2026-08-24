@@ -80,24 +80,57 @@ jobs:
               --set ON_ERROR_STOP=1 --single-transaction <<'SQL'
             SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM public."_prisma_migrations"
+                WHERE migration_name = '20260818000100_loyalty_base'
+                  AND finished_at IS NOT NULL
+                  AND rolled_back_at IS NULL
+              ) AS loyalty_migration_applied,
+              EXISTS (
+                SELECT 1
+                FROM public."_prisma_migrations"
+                WHERE migration_name = '20260821000100_loyalty_source_aggregates'
+                  AND finished_at IS NOT NULL
+                  AND rolled_back_at IS NULL
+              ) AS source_aggregate_migration_applied,
+              EXISTS (
+                SELECT 1
+                FROM public."_prisma_migrations"
+                WHERE migration_name = '20260824000100_loyalty_workflows'
+                  AND finished_at IS NOT NULL
+                  AND rolled_back_at IS NULL
+              ) AS workflow_migration_applied,
+              EXISTS (
+                SELECT 1
+                FROM public."_prisma_migrations"
+                WHERE migration_name = '20260824000200_loyalty_event_restore_version'
+                  AND finished_at IS NOT NULL
+                  AND rolled_back_at IS NULL
+              ) AS event_restore_migration_applied,
+              EXISTS (
+                SELECT 1
+                FROM public."_prisma_migrations"
+                WHERE migration_name = '20260824000300_loyalty_event_attachments'
+                  AND finished_at IS NOT NULL
+                  AND rolled_back_at IS NULL
+              ) AS attachment_migration_applied
+            \gset
+
+            SELECT marker
+            FROM (
+              VALUES
+                (1, 'loyalty_migration_applied=' || :'loyalty_migration_applied'),
+                (2, 'source_aggregate_migration_applied=' || :'source_aggregate_migration_applied'),
+                (3, 'workflow_migration_applied=' || :'workflow_migration_applied'),
+                (4, 'event_restore_migration_applied=' || :'event_restore_migration_applied'),
+                (5, 'attachment_migration_applied=' || :'attachment_migration_applied')
+            ) AS markers(position, marker)
+            ORDER BY position;
+
+            \if :loyalty_migration_applied
             WITH
-            migration_state AS (
-              SELECT
-                EXISTS (
-                  SELECT 1
-                  FROM public."_prisma_migrations"
-                  WHERE migration_name = '20260818000100_loyalty_base'
-                    AND finished_at IS NOT NULL
-                    AND rolled_back_at IS NULL
-                ) AS loyalty_migration_applied,
-                EXISTS (
-                  SELECT 1
-                  FROM public."_prisma_migrations"
-                  WHERE migration_name = '20260821000100_loyalty_source_aggregates'
-                    AND finished_at IS NOT NULL
-                    AND rolled_back_at IS NULL
-                ) AS source_aggregate_migration_applied
-            ),
             anna_dataset AS (
               SELECT id, active_snapshot_id
               FROM public.loyalty_datasets
@@ -117,49 +150,6 @@ jobs:
                 ON snapshot.id = dataset.active_snapshot_id
                AND snapshot.dataset_id = dataset.id
                AND snapshot.status = 'PUBLISHED'
-            ),
-            source_summary AS (
-              SELECT
-                COUNT(aggregate.id) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                )::bigint AS broker_source_aggregate_count,
-                COALESCE(SUM(aggregate.fixation_count) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                ), 0)::bigint AS broker_fixations,
-                COALESCE(SUM(aggregate.meeting_count) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                ), 0)::bigint AS broker_meetings,
-                COALESCE(SUM(aggregate.deal_count) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                ), 0)::bigint AS broker_deals,
-                COALESCE(SUM(aggregate.broker_tour_count) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                ), 0)::bigint AS broker_tours,
-                COALESCE(SUM(aggregate.call_count) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                ), 0)::bigint AS broker_dated_calls,
-                COALESCE(SUM(aggregate.deal_amount) FILTER (
-                  WHERE record.entity_type = 'BROKER'
-                ), 0)::numeric(18,2)::text AS broker_deal_amount_rub,
-                COUNT(aggregate.id) FILTER (
-                  WHERE record.entity_type = 'AGENCY'
-                )::bigint AS agency_source_aggregate_count,
-                COALESCE(SUM(aggregate.meeting_count) FILTER (
-                  WHERE record.entity_type = 'AGENCY'
-                ), 0)::bigint AS agency_meetings,
-                COALESCE(SUM(aggregate.deal_count) FILTER (
-                  WHERE record.entity_type = 'AGENCY'
-                ), 0)::bigint AS agency_deals,
-                COALESCE(SUM(aggregate.deal_amount) FILTER (
-                  WHERE record.entity_type = 'AGENCY'
-                ), 0)::numeric(18,2)::text AS agency_deal_amount_rub
-              FROM active_snapshot AS active
-              LEFT JOIN public.loyalty_source_records AS record
-                ON record.snapshot_id = active.id
-              LEFT JOIN public.loyalty_source_aggregates AS aggregate
-                ON aggregate.source_record_id = record.id
-               AND aggregate.quality = 'SOURCE_REPORTED'
-               AND aggregate.contributes_to_source_summary = true
             ),
             anna_counts AS (
               SELECT
@@ -212,8 +202,6 @@ jobs:
             ),
             state AS (
               SELECT
-                migration.loyalty_migration_applied,
-                migration.source_aggregate_migration_applied,
                 EXISTS (SELECT 1 FROM anna_dataset) AS dataset_exists,
                 EXISTS (SELECT 1 FROM active_snapshot) AS active_published,
                 COALESCE((SELECT content_hash FROM active_snapshot LIMIT 1), '') AS active_content_hash,
@@ -225,83 +213,280 @@ jobs:
                 anna.declared_agency_count,
                 anna.actual_agency_count,
                 anna.visible_agency_count,
-                source.broker_source_aggregate_count,
-                source.broker_fixations,
-                source.broker_meetings,
-                source.broker_deals,
-                source.broker_tours,
-                source.broker_dated_calls,
-                source.broker_deal_amount_rub,
-                source.agency_source_aggregate_count,
-                source.agency_meetings,
-                source.agency_deals,
-                source.agency_deal_amount_rub,
                 publication.publication_events,
                 ours.our_broker_count,
                 ours.our_agency_count
-              FROM migration_state AS migration
-              CROSS JOIN anna_counts AS anna
-              CROSS JOIN source_summary AS source
+              FROM anna_counts AS anna
               CROSS JOIN publication_count AS publication
               CROSS JOIN our_counts AS ours
             ),
             markers AS (
-              SELECT 1 AS position, 'loyalty_migration_applied=' || loyalty_migration_applied::text AS marker FROM state
+              SELECT 6 AS position, 'dataset_exists=' || dataset_exists::text AS marker FROM state
               UNION ALL
-              SELECT 2, 'source_aggregate_migration_applied=' || source_aggregate_migration_applied::text FROM state
+              SELECT 7, 'active_published=' || active_published::text FROM state
               UNION ALL
-              SELECT 3, 'dataset_exists=' || dataset_exists::text FROM state
+              SELECT 8, 'active_content_hash=' || active_content_hash FROM state
               UNION ALL
-              SELECT 4, 'active_published=' || active_published::text FROM state
+              SELECT 9, 'declared_record_count=' || declared_record_count::text FROM state
               UNION ALL
-              SELECT 5, 'active_content_hash=' || active_content_hash FROM state
+              SELECT 10, 'exact_activity_count=' || exact_activity_count::text FROM state
               UNION ALL
-              SELECT 6, 'declared_record_count=' || declared_record_count::text FROM state
+              SELECT 11, 'declared_broker_count=' || declared_broker_count::text FROM state
               UNION ALL
-              SELECT 7, 'exact_activity_count=' || exact_activity_count::text FROM state
+              SELECT 12, 'actual_broker_count=' || actual_broker_count::text FROM state
               UNION ALL
-              SELECT 8, 'declared_broker_count=' || declared_broker_count::text FROM state
+              SELECT 13, 'visible_broker_count=' || visible_broker_count::text FROM state
               UNION ALL
-              SELECT 9, 'actual_broker_count=' || actual_broker_count::text FROM state
+              SELECT 14, 'declared_agency_count=' || declared_agency_count::text FROM state
               UNION ALL
-              SELECT 10, 'visible_broker_count=' || visible_broker_count::text FROM state
+              SELECT 15, 'actual_agency_count=' || actual_agency_count::text FROM state
               UNION ALL
-              SELECT 11, 'declared_agency_count=' || declared_agency_count::text FROM state
+              SELECT 16, 'visible_agency_count=' || visible_agency_count::text FROM state
               UNION ALL
-              SELECT 12, 'actual_agency_count=' || actual_agency_count::text FROM state
+              SELECT 17, 'publication_events=' || publication_events::text FROM state
               UNION ALL
-              SELECT 13, 'visible_agency_count=' || visible_agency_count::text FROM state
+              SELECT 18, 'our_broker_count=' || our_broker_count::text FROM state
               UNION ALL
-              SELECT 14, 'broker_source_aggregate_count=' || broker_source_aggregate_count::text FROM state
-              UNION ALL
-              SELECT 15, 'broker_fixations=' || broker_fixations::text FROM state
-              UNION ALL
-              SELECT 16, 'broker_meetings=' || broker_meetings::text FROM state
-              UNION ALL
-              SELECT 17, 'broker_deals=' || broker_deals::text FROM state
-              UNION ALL
-              SELECT 18, 'broker_tours=' || broker_tours::text FROM state
-              UNION ALL
-              SELECT 19, 'broker_dated_calls=' || broker_dated_calls::text FROM state
-              UNION ALL
-              SELECT 20, 'broker_deal_amount_rub=' || broker_deal_amount_rub FROM state
-              UNION ALL
-              SELECT 21, 'agency_source_aggregate_count=' || agency_source_aggregate_count::text FROM state
-              UNION ALL
-              SELECT 22, 'agency_meetings=' || agency_meetings::text FROM state
-              UNION ALL
-              SELECT 23, 'agency_deals=' || agency_deals::text FROM state
-              UNION ALL
-              SELECT 24, 'agency_deal_amount_rub=' || agency_deal_amount_rub FROM state
-              UNION ALL
-              SELECT 25, 'publication_events=' || publication_events::text FROM state
-              UNION ALL
-              SELECT 26, 'our_broker_count=' || our_broker_count::text FROM state
-              UNION ALL
-              SELECT 27, 'our_agency_count=' || our_agency_count::text FROM state
+              SELECT 19, 'our_agency_count=' || our_agency_count::text FROM state
             )
             SELECT marker
             FROM markers
             ORDER BY position;
+            \else
+              SELECT marker
+              FROM (
+                VALUES
+                  (6, 'dataset_exists=unavailable'),
+                  (7, 'active_published=unavailable'),
+                  (8, 'active_content_hash=unavailable'),
+                  (9, 'declared_record_count=unavailable'),
+                  (10, 'exact_activity_count=unavailable'),
+                  (11, 'declared_broker_count=unavailable'),
+                  (12, 'actual_broker_count=unavailable'),
+                  (13, 'visible_broker_count=unavailable'),
+                  (14, 'declared_agency_count=unavailable'),
+                  (15, 'actual_agency_count=unavailable'),
+                  (16, 'visible_agency_count=unavailable'),
+                  (17, 'publication_events=unavailable'),
+                  (18, 'our_broker_count=unavailable'),
+                  (19, 'our_agency_count=unavailable')
+              ) AS markers(position, marker)
+              ORDER BY position;
+            \endif
+
+            SELECT (
+              :'loyalty_migration_applied'::boolean
+              AND :'source_aggregate_migration_applied'::boolean
+            ) AS source_aggregate_schema_ready,
+            (
+              :'loyalty_migration_applied'::boolean
+              AND :'workflow_migration_applied'::boolean
+            ) AS workflow_schema_ready,
+            (
+              :'loyalty_migration_applied'::boolean
+              AND :'workflow_migration_applied'::boolean
+              AND :'event_restore_migration_applied'::boolean
+            ) AS event_restore_schema_ready,
+            (
+              :'loyalty_migration_applied'::boolean
+              AND :'workflow_migration_applied'::boolean
+              AND :'event_restore_migration_applied'::boolean
+              AND :'attachment_migration_applied'::boolean
+            ) AS attachment_schema_ready
+            \gset
+
+            \if :source_aggregate_schema_ready
+              WITH
+              anna_dataset AS (
+                SELECT id, active_snapshot_id
+                FROM public.loyalty_datasets
+                WHERE code = 'ANNA'
+                  AND base = 'ANNA'
+              ),
+              active_snapshot AS (
+                SELECT snapshot.id
+                FROM anna_dataset AS dataset
+                JOIN public.loyalty_snapshots AS snapshot
+                  ON snapshot.id = dataset.active_snapshot_id
+                 AND snapshot.dataset_id = dataset.id
+                 AND snapshot.status = 'PUBLISHED'
+              ),
+              source_summary AS (
+                SELECT
+                  COUNT(aggregate.id) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  )::bigint AS broker_source_aggregate_count,
+                  COALESCE(SUM(aggregate.fixation_count) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  ), 0)::bigint AS broker_fixations,
+                  COALESCE(SUM(aggregate.meeting_count) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  ), 0)::bigint AS broker_meetings,
+                  COALESCE(SUM(aggregate.deal_count) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  ), 0)::bigint AS broker_deals,
+                  COALESCE(SUM(aggregate.broker_tour_count) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  ), 0)::bigint AS broker_tours,
+                  COALESCE(SUM(aggregate.call_count) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  ), 0)::bigint AS broker_dated_calls,
+                  COALESCE(SUM(aggregate.deal_amount) FILTER (
+                    WHERE record.entity_type = 'BROKER'
+                  ), 0)::numeric(18,2)::text AS broker_deal_amount_rub,
+                  COUNT(aggregate.id) FILTER (
+                    WHERE record.entity_type = 'AGENCY'
+                  )::bigint AS agency_source_aggregate_count,
+                  COALESCE(SUM(aggregate.meeting_count) FILTER (
+                    WHERE record.entity_type = 'AGENCY'
+                  ), 0)::bigint AS agency_meetings,
+                  COALESCE(SUM(aggregate.deal_count) FILTER (
+                    WHERE record.entity_type = 'AGENCY'
+                  ), 0)::bigint AS agency_deals,
+                  COALESCE(SUM(aggregate.deal_amount) FILTER (
+                    WHERE record.entity_type = 'AGENCY'
+                  ), 0)::numeric(18,2)::text AS agency_deal_amount_rub
+                FROM active_snapshot AS active
+                LEFT JOIN public.loyalty_source_records AS record
+                  ON record.snapshot_id = active.id
+                LEFT JOIN public.loyalty_source_aggregates AS aggregate
+                  ON aggregate.source_record_id = record.id
+                 AND aggregate.quality = 'SOURCE_REPORTED'
+                 AND aggregate.contributes_to_source_summary = true
+              ),
+              markers(position, marker) AS (
+                SELECT 20, 'broker_source_aggregate_count=' || broker_source_aggregate_count::text FROM source_summary
+                UNION ALL
+                SELECT 21, 'broker_fixations=' || broker_fixations::text FROM source_summary
+                UNION ALL
+                SELECT 22, 'broker_meetings=' || broker_meetings::text FROM source_summary
+                UNION ALL
+                SELECT 23, 'broker_deals=' || broker_deals::text FROM source_summary
+                UNION ALL
+                SELECT 24, 'broker_tours=' || broker_tours::text FROM source_summary
+                UNION ALL
+                SELECT 25, 'broker_dated_calls=' || broker_dated_calls::text FROM source_summary
+                UNION ALL
+                SELECT 26, 'broker_deal_amount_rub=' || broker_deal_amount_rub FROM source_summary
+                UNION ALL
+                SELECT 27, 'agency_source_aggregate_count=' || agency_source_aggregate_count::text FROM source_summary
+                UNION ALL
+                SELECT 28, 'agency_meetings=' || agency_meetings::text FROM source_summary
+                UNION ALL
+                SELECT 29, 'agency_deals=' || agency_deals::text FROM source_summary
+                UNION ALL
+                SELECT 30, 'agency_deal_amount_rub=' || agency_deal_amount_rub FROM source_summary
+              )
+              SELECT marker FROM markers ORDER BY position;
+            \else
+              SELECT marker
+              FROM (
+                VALUES
+                  (20, 'broker_source_aggregate_count=unavailable'),
+                  (21, 'broker_fixations=unavailable'),
+                  (22, 'broker_meetings=unavailable'),
+                  (23, 'broker_deals=unavailable'),
+                  (24, 'broker_tours=unavailable'),
+                  (25, 'broker_dated_calls=unavailable'),
+                  (26, 'broker_deal_amount_rub=unavailable'),
+                  (27, 'agency_source_aggregate_count=unavailable'),
+                  (28, 'agency_meetings=unavailable'),
+                  (29, 'agency_deals=unavailable'),
+                  (30, 'agency_deal_amount_rub=unavailable')
+              ) AS markers(position, marker)
+              ORDER BY position;
+            \endif
+
+            \if :workflow_schema_ready
+              WITH workflow_counts AS (
+                SELECT
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_call_campaigns) AS campaigns,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_call_assignments) AS assignments,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_call_attempts) AS call_attempts,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_tasks WHERE status = 'OPEN') AS open_tasks,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_engagement_events WHERE archived_at IS NULL) AS active_engagement_events,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_user_grants WHERE revoked_at IS NULL) AS active_grants,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_sync_runs WHERE status = 'SUCCEEDED') AS successful_sync_dry_runs,
+                  (SELECT COUNT(*)::bigint FROM public.loyalty_sync_runs WHERE status = 'RUNNING') AS running_sync_dry_runs
+              ),
+              markers(position, marker) AS (
+                SELECT 31, 'workflow_campaigns=' || campaigns::text FROM workflow_counts
+                UNION ALL
+                SELECT 32, 'workflow_assignments=' || assignments::text FROM workflow_counts
+                UNION ALL
+                SELECT 33, 'workflow_call_attempts=' || call_attempts::text FROM workflow_counts
+                UNION ALL
+                SELECT 34, 'workflow_open_tasks=' || open_tasks::text FROM workflow_counts
+                UNION ALL
+                SELECT 35, 'workflow_active_engagement_events=' || active_engagement_events::text FROM workflow_counts
+                UNION ALL
+                SELECT 36, 'workflow_active_grants=' || active_grants::text FROM workflow_counts
+                UNION ALL
+                SELECT 37, 'successful_sync_dry_runs=' || successful_sync_dry_runs::text FROM workflow_counts
+                UNION ALL
+                SELECT 38, 'running_sync_dry_runs=' || running_sync_dry_runs::text FROM workflow_counts
+              )
+              SELECT marker FROM markers ORDER BY position;
+            \else
+              SELECT marker
+              FROM (
+                VALUES
+                  (31, 'workflow_campaigns=unavailable'),
+                  (32, 'workflow_assignments=unavailable'),
+                  (33, 'workflow_call_attempts=unavailable'),
+                  (34, 'workflow_open_tasks=unavailable'),
+                  (35, 'workflow_active_engagement_events=unavailable'),
+                  (36, 'workflow_active_grants=unavailable'),
+                  (37, 'successful_sync_dry_runs=unavailable'),
+                  (38, 'running_sync_dry_runs=unavailable')
+              ) AS markers(position, marker)
+              ORDER BY position;
+            \endif
+
+            \if :event_restore_schema_ready
+              SELECT 'event_restore_versioning=' ||
+                CASE
+                  WHEN EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'loyalty_engagement_events'
+                      AND column_name = 'version'
+                  )
+                  AND EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'loyalty_workflow_audits_append_only'
+                      AND NOT tgisinternal
+                  )
+                  THEN 'available'
+                  ELSE 'drift'
+                END;
+            \else
+              SELECT 'event_restore_versioning=unavailable';
+            \endif
+
+            \if :attachment_schema_ready
+              WITH attachment_counts AS (
+                SELECT
+                  COUNT(*)::bigint AS total_attachments,
+                  COUNT(*) FILTER (WHERE archived_at IS NULL)::bigint AS active_attachments
+                FROM public.loyalty_event_attachments
+              ),
+              markers(position, marker) AS (
+                SELECT 40, 'total_attachments=' || total_attachments::text FROM attachment_counts
+                UNION ALL
+                SELECT 41, 'active_attachments=' || active_attachments::text FROM attachment_counts
+              )
+              SELECT marker FROM markers ORDER BY position;
+            \else
+              SELECT marker
+              FROM (
+                VALUES
+                  (40, 'total_attachments=unavailable'),
+                  (41, 'active_attachments=unavailable')
+              ) AS markers(position, marker)
+              ORDER BY position;
+            \endif
           SQL
           REMOTE

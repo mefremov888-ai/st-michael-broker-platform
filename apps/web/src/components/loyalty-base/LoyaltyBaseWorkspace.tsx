@@ -736,6 +736,7 @@ export function LoyaltyBaseWorkspace() {
         <>
           {importOpen && isAdmin && base === "anna" && (
             <AnnaImportPanel
+              canPublish={Boolean(isAdmin)}
               onPublished={() => {
                 void loadOverview();
                 void loadList();

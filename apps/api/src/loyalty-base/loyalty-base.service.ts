@@ -1,14 +1,19 @@
 import {
   BadRequestException,
   ConflictException,
+  GoneException,
   Inject,
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
+import { Readable } from "stream";
 import { PrismaClient } from "@st-michael/database";
 import {
+  LoyaltyCanonicalFilterDto,
+  LoyaltyChangesQueryDto,
   LoyaltyEntityUpdateDto,
+  LoyaltyExportDto,
   LoyaltyImportDto,
   LoyaltyImportRecordDto,
   LoyaltyLinkUnlinkDto,
@@ -19,6 +24,13 @@ import {
   LoyaltyReconciliationQueryDto,
   LoyaltySearchDto,
 } from "./loyalty-base.dto";
+import { withLoyaltyFullScanSlot } from "./loyalty-full-scan-coordinator";
+
+export {
+  LOYALTY_FULL_SCAN_RETRY_AFTER_SECONDS,
+  LoyaltyFullScanBusyException,
+  MAX_CONCURRENT_LOYALTY_FULL_SCANS,
+} from "./loyalty-full-scan-coordinator";
 
 const ANNA_DATASET_CODE = "ANNA";
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
@@ -28,9 +40,212 @@ const MAX_ISSUES_RETURNED = 200;
 const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 const MAX_DECIMAL_18_2_CENTS = 999999999999999999n;
 const CANDIDATE_QUERY_BATCH_SIZE = 500;
+export const MAX_LOYALTY_EXPORT_ROWS = 50000;
+
+const REQUIRED_ACTIVITY_COVERAGE_TYPES = [
+  "FIXATION",
+  "MEETING",
+  "DEAL",
+  "BROKER_TOUR",
+  "CALL",
+] as const;
 
 type EntityType = "BROKER" | "AGENCY";
 type BaseSlug = "anna" | "ours";
+
+interface LoyaltyFilterPeriod {
+  from: Date;
+  to: Date;
+  fromIso: string;
+  toIso: string;
+}
+
+interface CanonicalLoyaltyFilter {
+  archived: "exclude" | "include" | "only";
+  includeLowSignal: boolean;
+  city?: string;
+  hasAmo?: boolean;
+  activityType?: string;
+  segment?: string;
+  callPeriod?: LoyaltyFilterPeriod;
+  activityPeriod?: LoyaltyFilterPeriod;
+  campaignIds: string[];
+  lastCallResults: string[];
+  scenario?: string;
+  assigneeIds: string[];
+  unassigned?: boolean;
+  specializations: string[];
+  geography: string[];
+  workFormats: string[];
+  relationshipStages: string[];
+  brokerStatuses: string[];
+  dataQuality: string[];
+  dealCount: { min?: number; max?: number };
+  dealsInPeriod?: boolean;
+  called?: boolean;
+  bt?: boolean;
+  meetings: { min?: number; max?: number };
+  partnershipStatuses: string[];
+  agencySizes: string[];
+  websitePresent?: boolean;
+  projectsOnSite: string[];
+  individualTerms?: boolean;
+  specialTermsProposed?: boolean;
+  rewardPresent?: boolean;
+  staleDays?: number;
+  columns: {
+    contact?: string;
+    statusStage?: string;
+    activity?: string;
+    calls?: string;
+    assignee?: string;
+    deals?: string;
+  };
+  sortBy: string;
+  sortOrder: "asc" | "desc";
+}
+
+interface LoyaltyCallView {
+  type?: "CALL";
+  id?: string | null;
+  assignmentId?: string | null;
+  date?: string | null;
+  occurredAt?: string | null;
+  period?: string | null;
+  campaign?: string | null;
+  campaignId?: string | null;
+  campaignName?: string | null;
+  employee?: string | null;
+  employeeId?: string | null;
+  employeeName?: string | null;
+  result?: string | null;
+  resultCode?: string | null;
+  agreement?: string | null;
+  comment?: string | null;
+  nextStep?: string | null;
+  nextActionAt?: string | null;
+  source?: string | null;
+  correctsAttemptId?: string | null;
+  correctionReason?: string | null;
+  isCorrection?: boolean;
+  effective?: boolean;
+  superseded?: boolean;
+  correctedAt?: string | null;
+}
+
+interface LoyaltyWorkflowCallReadModel {
+  effective: LoyaltyCallView[];
+  history: LoyaltyCallView[];
+}
+
+interface LoyaltyEngagementView {
+  id: string;
+  type: string;
+  occurredAt: string | null;
+  comment: string | null;
+  amount: string | null;
+  value: string | null;
+  validUntil: string | null;
+  attachmentUrl: string | null;
+  basisUrl: string | null;
+  createdById: string | null;
+  createdByName: string | null;
+  correctsEventId: string | null;
+  correctionReason: string | null;
+  archivedAt: string | null;
+  effective: boolean;
+  superseded: boolean;
+}
+
+interface LoyaltyEngagementReadModel {
+  effective: LoyaltyEngagementView[];
+  history: LoyaltyEngagementView[];
+}
+
+export interface LoyaltyResolvedSelection {
+  ids: string[];
+  total: number;
+  filterHash: string;
+  snapshotId: string | null;
+}
+
+const BROKER_CALL_RESULT_ALIASES: Record<string, string[]> = {
+  INFORMED: ["Проинформирован", "INFORMED", "ALREADY_KNOWS"],
+  DO_NOT_CALL: [
+    "Просил не звонить",
+    "REFUSED_COMMUNICATION",
+    "ASKED_NOT_TO_CALL",
+  ],
+  NOT_INTERESTED: ["Неинтересно", "NOT_INTERESTED", "NOT_RELEVANT", "NEGATIVE"],
+  NO_ANSWER: ["НДЗ", "NDZ", "DOUBLE_NDZ", "NO_ANSWER"],
+  SEND_INFORMATION: [
+    "Просил отправить информацию",
+    "ONLY_SEND_INFO",
+    "SEND_INFO",
+  ],
+  BROKER_TOUR_BOOKED: ["Запись на БТ", "SCHEDULED_TOUR"],
+  BROKER_TOUR_DECLINED: ["Отказ от БТ", "REFUSED_TOUR"],
+  INVALID_PHONE: ["Некорректный номер", "WRONG_NUMBER", "INVALID_NUMBER"],
+  NOT_A_BROKER: ["Уже не брокер", "NOT_BROKER", "NOT_BROKER_ANYMORE"],
+};
+
+const AGENCY_CALL_RESULT_ALIASES: Record<string, string[]> = {
+  NO_ANSWER: ["НДЗ"],
+  COOPERATION_DECLINED: ["Отказ от сотрудничества", "REFUSED_COOPERATION"],
+  BROKER_TOUR_SCHEDULED: ["Назначен БТ", "SCHEDULED_TOUR"],
+  CALLBACK: ["Перезвонить"],
+  SEND_INFORMATION: ["Отправить информацию", "SEND_INFO"],
+  AGREEMENTS_EXIST: ["Есть договорённости", "AGREEMENTS"],
+  COOPERATION_AGREED: ["Договорились о сотрудничестве"],
+};
+
+const BROKER_LOYALTY_STATUSES = [
+  "TOP_SELLER",
+  "SELLER",
+  "OFFERING",
+  "FIXATING",
+  "BROKER_TOUR",
+  "DORMANT",
+  "NEW",
+];
+const AGENCY_LOYALTY_STATUSES = [
+  "VIP_PARTNER",
+  "SELLING_PARTNER",
+  "ACTIVE_PARTNER",
+  "FIXATING_PARTNER",
+  "WARM_PARTNER",
+  "STARTING_PARTNER",
+  "DORMANT_PARTNER",
+  "NEW_AGENCY",
+];
+const BROKER_LOYALTY_SCENARIOS = [
+  "NOT_CALLED_IN_PERIOD",
+  "CALLED_IN_PERIOD",
+  "BT_DROPPED",
+  "BT_FIXATION_NO_MEETING",
+  "BT_MEETING_NO_DEAL",
+  "NEW_NO_BT",
+  "HAS_DEALS",
+  "UNASSIGNED",
+  "BT_VISITED",
+  "BT_NOT_VISITED",
+  "HAS_MEETINGS",
+  "NO_MEETINGS",
+];
+const AGENCY_LOYALTY_SCENARIOS = [
+  "NOT_CALLED_IN_PERIOD",
+  "CALLED_IN_PERIOD",
+  "HAS_DEALS",
+  "UNASSIGNED",
+  "BT_VISITED",
+  "BT_NOT_VISITED",
+  "SITE_PLACED",
+  "SITE_NOT_PLACED",
+  "INDIVIDUAL_TERMS",
+  "NO_INDIVIDUAL_TERMS",
+  "HAS_MEETINGS",
+  "NO_MEETINGS",
+];
 
 export interface ImportPreparationOptions {
   // Internal callers only. HTTP controllers never pass this option and keep
@@ -162,6 +377,16 @@ interface PreparedImport {
     uniqueNormalizedPhones: number;
     externalIdentities: number;
     activities: number;
+    activityCoverage: {
+      mode: "PARTIAL" | "FULL_SNAPSHOT";
+      coveredRecords: number;
+      activityTypes: string[];
+      sourceRunId: string;
+      sourceContentHash: string;
+      observedThrough: string;
+      verifiedBySyncRun?: boolean;
+      syncCompletedAt?: string;
+    } | null;
     sourceAggregates: number;
     sourceSummaryAggregates: number;
     sourceReportedSummary: SourceReportedImportSummary;
@@ -304,6 +529,52 @@ function moscowCurrentMonthRange(value = new Date()) {
   };
 }
 
+export function moscowCurrentMonthFilterPeriod(
+  value = new Date(),
+): LoyaltyFilterPeriod {
+  const parts = moscowDateParts(value);
+  const month = String(parts.month + 1).padStart(2, "0");
+  const lastDay = new Date(
+    Date.UTC(parts.year, parts.month + 1, 0),
+  ).getUTCDate();
+  return {
+    ...moscowCurrentMonthRange(value),
+    fromIso: `${parts.year}-${month}-01`,
+    toIso: `${parts.year}-${month}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
+export function explicitGeography(
+  values: unknown[],
+  isRegional?: boolean | null,
+): "MOSCOW" | "REGION" | null {
+  if (isRegional === true) return "REGION";
+  const known = values
+    .map((value) => String(value ?? "").trim())
+    .filter(
+      (value) =>
+        value.length > 0 &&
+        !/^(?:-|—|unknown|неизвестно|не указано|нет данных|null)$/i.test(value),
+    );
+  if (known.some((value) => /^(?:москва|moscow|msk)$/i.test(value)))
+    return "MOSCOW";
+  if (known.length > 0) return "REGION";
+  return isRegional === false ? "MOSCOW" : null;
+}
+
+export function isLoyaltyAcquisitionPhone(value: unknown): boolean {
+  const normalized = normalizeLoyaltyContactPoint("PHONE", String(value ?? ""));
+  return Boolean(normalized && !/^\+?7(?:495|499)/.test(normalized));
+}
+
+function hasLoyaltyAcquisitionPhone(points: unknown[]): boolean {
+  return points.some((point: any) =>
+    isLoyaltyAcquisitionPhone(
+      point?.normalizedValue || point?.value || point?.phone || point,
+    ),
+  );
+}
+
 function parseMoscowBoundary(value: string, endOfDay: boolean): Date {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) return new Date(value);
@@ -344,6 +615,76 @@ function maskContact(type: string, value: string): string {
   return value.length > 3 ? `${value.slice(0, 1)}***${value.slice(-1)}` : "***";
 }
 
+function uniqueSorted(values: Array<string | null | undefined>): string[] {
+  return Array.from(
+    new Set(values.map((value) => String(value || "").trim()).filter(Boolean)),
+  ).sort((left, right) => left.localeCompare(right, "ru"));
+}
+
+function lower(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("ru");
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function truthyText(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  return ["1", "true", "yes", "да", "есть", "размещены"].includes(lower(value));
+}
+
+function dateOnly(value: unknown): string | null {
+  if (!value) return null;
+  const text = String(value).trim();
+  const iso = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  const parsed = new Date(text);
+  return Number.isFinite(parsed.getTime())
+    ? parsed.toISOString().slice(0, 10)
+    : null;
+}
+
+function daysSinceDate(value: unknown, now = new Date()): number | null {
+  const normalized = dateOnly(value);
+  if (!normalized) return null;
+  const parsed = new Date(`${normalized}T00:00:00.000Z`);
+  return Math.max(
+    0,
+    Math.floor((now.getTime() - parsed.getTime()) / (24 * 60 * 60 * 1000)),
+  );
+}
+
+function hasText(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function csvCell(value: unknown): string {
+  let text =
+    value === null || value === undefined
+      ? ""
+      : typeof value === "object"
+        ? JSON.stringify(value)
+        : String(value);
+  // Excel also evaluates formulas inside a quoted RFC 4180 field and can skip
+  // leading whitespace/control characters before the formula marker. Prefix
+  // the entire original value so its displayed whitespace/content is kept.
+  if (/^[\s\u0000-\u001f\u007f]*[=+\-@]/u.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function csvLine(values: unknown[]): string {
+  return `${values.map(csvCell).join(",")}\r\n`;
+}
+
+export function loyaltyFilterHash(value: unknown): string {
+  return loyaltyContentHash(value);
+}
+
 @Injectable()
 export class LoyaltyBaseService {
   constructor(@Inject("PrismaClient") private readonly prisma: PrismaClient) {}
@@ -376,6 +717,262 @@ export class LoyaltyBaseService {
       throw new BadRequestException("Overview period is too large");
     }
     return { from, to };
+  }
+
+  private parseOptionalFilterPeriod(
+    value: { from?: string; to?: string } | undefined,
+    label: string,
+  ): LoyaltyFilterPeriod | undefined {
+    if (!value?.from && !value?.to) return undefined;
+    if (!value.from || !value.to) {
+      throw new BadRequestException(`${label} requires both from and to`);
+    }
+    const from = parseMoscowBoundary(value.from, false);
+    const to = parseMoscowBoundary(value.to, true);
+    if (
+      !Number.isFinite(from.getTime()) ||
+      !Number.isFinite(to.getTime()) ||
+      from > to
+    ) {
+      throw new BadRequestException(`Invalid ${label}`);
+    }
+    if (to.getTime() - from.getTime() > 5 * 366 * 24 * 60 * 60 * 1000) {
+      throw new BadRequestException(`${label} is too large`);
+    }
+    return {
+      from,
+      to,
+      fromIso: value.from,
+      toIso: value.to,
+    };
+  }
+
+  private normalizeListFilter(
+    query: LoyaltyListQueryDto | LoyaltyExportDto,
+    canonical?: LoyaltyCanonicalFilterDto,
+  ): CanonicalLoyaltyFilter {
+    const flatPeriod =
+      query.from || query.to ? { from: query.from, to: query.to } : undefined;
+    const callPeriod = this.parseOptionalFilterPeriod(
+      canonical?.callPeriod || flatPeriod,
+      "callPeriod",
+    );
+    const activityPeriod = this.parseOptionalFilterPeriod(
+      canonical?.activityPeriod || canonical?.callPeriod || flatPeriod,
+      "activityPeriod",
+    );
+    const range = (
+      nested: { min?: number; max?: number } | undefined,
+      flatMin?: number,
+      flatMax?: number,
+      label = "range",
+    ) => {
+      const result = {
+        min: nested?.min ?? flatMin,
+        max: nested?.max ?? flatMax,
+      };
+      if (
+        result.min !== undefined &&
+        result.max !== undefined &&
+        result.min > result.max
+      ) {
+        throw new BadRequestException(`${label}.min must not exceed max`);
+      }
+      return result;
+    };
+    const assigneeIds = uniqueSorted([
+      ...(canonical?.assigneeIds || []),
+      query.assignee && query.assignee !== "UNASSIGNED"
+        ? query.assignee
+        : undefined,
+    ]);
+    const columnInput = (query as any).columns || {};
+    const result: CanonicalLoyaltyFilter = {
+      archived: query.archived || "exclude",
+      includeLowSignal:
+        canonical?.includeLowSignal ?? query.includeLowSignal ?? false,
+      city: query.city?.trim(),
+      hasAmo: query.hasAmo,
+      activityType: query.activityType,
+      segment: query.segment,
+      callPeriod,
+      activityPeriod,
+      campaignIds: uniqueSorted([
+        ...(canonical?.campaignIds || []),
+        query.callCampaign,
+      ]),
+      lastCallResults: uniqueSorted([
+        ...(canonical?.lastCallResults || []),
+        query.callResult,
+      ]),
+      scenario: canonical?.scenario || query.callScenario,
+      assigneeIds,
+      unassigned:
+        canonical?.unassigned === true || query.assignee === "UNASSIGNED"
+          ? true
+          : canonical?.unassigned,
+      specializations: uniqueSorted([
+        ...(canonical?.specializations || []),
+        query.specialization,
+      ]),
+      geography: uniqueSorted([
+        ...(canonical?.geography || []),
+        query.geography,
+      ]),
+      workFormats: uniqueSorted([
+        ...(canonical?.workFormats || []),
+        query.workFormat,
+      ]),
+      relationshipStages: uniqueSorted([
+        ...(canonical?.relationshipStages || []),
+        query.stage,
+      ]),
+      brokerStatuses: uniqueSorted([
+        ...(canonical?.brokerStatuses || []),
+        query.status,
+      ]),
+      dataQuality: uniqueSorted([
+        ...(canonical?.dataQuality || []),
+        query.dataQuality,
+      ]),
+      dealCount: range(
+        canonical?.dealCount,
+        query.dealsMin,
+        query.dealsMax,
+        "dealCount",
+      ),
+      dealsInPeriod:
+        canonical?.dealsInPeriod ??
+        query.dealsInPeriod ??
+        (query.noDeals === true ? false : undefined),
+      called: query.called,
+      bt: canonical?.bt ?? query.brokerTourVisited,
+      meetings: range(
+        canonical?.meetings,
+        query.meetingsMin,
+        query.meetingsMax,
+        "meetings",
+      ),
+      partnershipStatuses: uniqueSorted([
+        ...(canonical?.partnershipStatuses || []),
+        query.partnershipStatus,
+      ]),
+      agencySizes: uniqueSorted([
+        ...(canonical?.agencySizes || []),
+        query.agencySize,
+      ]),
+      websitePresent: canonical?.websitePresent ?? query.websitePresent,
+      projectsOnSite: uniqueSorted([
+        ...(canonical?.projectsOnSite || []),
+        query.projectsOnSite,
+      ]),
+      individualTerms: canonical?.individualTerms ?? query.individualTerms,
+      specialTermsProposed:
+        canonical?.specialTermsProposed ?? query.specialTermsProposed,
+      rewardPresent: canonical?.rewardPresent ?? query.rewardPresent,
+      staleDays: canonical?.staleDays ?? query.staleDays,
+      columns: {
+        contact: columnInput.contact,
+        statusStage: columnInput.statusStage,
+        activity: columnInput.activity,
+        calls: columnInput.calls,
+        assignee: hasText(columnInput.assignee)
+          ? String(columnInput.assignee).trim()
+          : undefined,
+        deals: columnInput.deals,
+      },
+      sortBy: query.sortBy || "name",
+      sortOrder: query.sortOrder || "asc",
+    };
+    if (
+      (result.dealsInPeriod !== undefined ||
+        ["HAS_DEALS"].includes(result.scenario || "")) &&
+      !result.activityPeriod &&
+      result.dealsInPeriod !== undefined
+    ) {
+      throw new BadRequestException(
+        "dealsInPeriod requires activityPeriod (or flat from/to)",
+      );
+    }
+    if (
+      (["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(
+        result.scenario || "",
+      ) ||
+        query.called !== undefined ||
+        result.columns.calls !== undefined) &&
+      !result.callPeriod
+    ) {
+      throw new BadRequestException(
+        "called/scenario requires callPeriod (or flat from/to)",
+      );
+    }
+    return result;
+  }
+
+  private serializableFilter(filter: CanonicalLoyaltyFilter) {
+    return {
+      ...filter,
+      callPeriod: filter.callPeriod
+        ? {
+            from: filter.callPeriod.fromIso,
+            to: filter.callPeriod.toIso,
+          }
+        : undefined,
+      activityPeriod: filter.activityPeriod
+        ? {
+            from: filter.activityPeriod.fromIso,
+            to: filter.activityPeriod.toIso,
+          }
+        : undefined,
+    };
+  }
+
+  private campaignAliases(ids: string[]): string[] {
+    if (!ids.length) return [];
+    let configured: Record<string, unknown> = {};
+    const raw = process.env.LOYALTY_CAMPAIGN_MAP_JSON;
+    if (raw && Buffer.byteLength(raw, "utf8") <= 32 * 1024) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          configured = parsed;
+        }
+      } catch {
+        configured = {};
+      }
+    }
+    return uniqueSorted(
+      ids.flatMap((id) => {
+        const mapped = configured[id];
+        if (mapped && typeof mapped === "object" && !Array.isArray(mapped)) {
+          const config = mapped as Record<string, unknown>;
+          return [
+            id,
+            ...(typeof config.name === "string" ? [config.name] : []),
+            ...(Array.isArray(config.aliases)
+              ? config.aliases.filter(
+                  (item): item is string => typeof item === "string",
+                )
+              : []),
+          ];
+        }
+        return Array.isArray(mapped)
+          ? [id, ...mapped.filter((item) => typeof item === "string")]
+          : typeof mapped === "string"
+            ? [id, mapped]
+            : [id];
+      }),
+    );
+  }
+
+  private resultAliases(entityType: EntityType, codes: string[]): string[] {
+    const dictionary =
+      entityType === "BROKER"
+        ? BROKER_CALL_RESULT_ALIASES
+        : AGENCY_CALL_RESULT_ALIASES;
+    return uniqueSorted(
+      codes.flatMap((code) => [code, ...(dictionary[code] || [])]),
+    );
   }
 
   private sourceReportedImportSummary(
@@ -826,6 +1423,84 @@ export class LoyaltyBaseService {
       addIssue(0, "EXPECTED_RECORD_COUNT_MISMATCH");
     }
 
+    const preparedActivityCount = prepared.reduce(
+      (sum, record) => sum + record.activities.length,
+      0,
+    );
+    let activityCoverage: PreparedImport["summary"]["activityCoverage"] = null;
+    if (dto.activityCoverage) {
+      const observedThrough = new Date(dto.activityCoverage.observedThrough);
+      const activityTypes = Array.from(
+        new Set(dto.activityCoverage.activityTypes || []),
+      ).sort();
+      activityCoverage = {
+        mode: dto.activityCoverage.mode,
+        coveredRecords: Number(dto.activityCoverage.coveredRecords),
+        activityTypes,
+        sourceRunId: String(dto.activityCoverage.sourceRunId || "").trim(),
+        sourceContentHash: String(
+          dto.activityCoverage.sourceContentHash || "",
+        ).toLowerCase(),
+        observedThrough: Number.isNaN(observedThrough.getTime())
+          ? String(dto.activityCoverage.observedThrough || "")
+          : observedThrough.toISOString(),
+      };
+      if (!["PARTIAL", "FULL_SNAPSHOT"].includes(activityCoverage.mode)) {
+        addIssue(0, "INVALID_ACTIVITY_COVERAGE_MODE");
+      }
+      if (
+        activityTypes.length === 0 ||
+        activityTypes.some(
+          (type) => !REQUIRED_ACTIVITY_COVERAGE_TYPES.includes(type as any),
+        )
+      ) {
+        addIssue(0, "INVALID_ACTIVITY_COVERAGE_TYPES");
+      }
+      if (
+        !/^[A-Za-z0-9._:-]{1,100}$/.test(activityCoverage.sourceRunId) ||
+        !/^[a-f0-9]{64}$/.test(activityCoverage.sourceContentHash) ||
+        Number.isNaN(observedThrough.getTime())
+      ) {
+        addIssue(0, "INVALID_ACTIVITY_COVERAGE_PROVENANCE");
+      }
+      if (
+        !Number.isSafeInteger(activityCoverage.coveredRecords) ||
+        activityCoverage.coveredRecords < 0 ||
+        activityCoverage.coveredRecords > prepared.length
+      ) {
+        addIssue(0, "INVALID_ACTIVITY_COVERED_RECORD_COUNT");
+      }
+      if (preparedActivityCount > 0 && activityCoverage.coveredRecords === 0) {
+        addIssue(0, "ACTIVITY_COVERAGE_EMPTY_WITH_EVENTS");
+      }
+      if (activityCoverage.mode === "FULL_SNAPSHOT") {
+        if (activityCoverage.coveredRecords !== prepared.length) {
+          addIssue(0, "FULL_ACTIVITY_COVERAGE_RECORD_COUNT_MISMATCH");
+        }
+        const missingTypes = REQUIRED_ACTIVITY_COVERAGE_TYPES.filter(
+          (type) => !activityTypes.includes(type),
+        );
+        if (missingTypes.length) {
+          addIssue(0, "FULL_ACTIVITY_COVERAGE_TYPES_INCOMPLETE");
+        }
+      }
+      if (!Number.isNaN(observedThrough.getTime())) {
+        for (const record of prepared) {
+          if (
+            record.activities.some(
+              (activity) =>
+                new Date(activity.occurredAt).getTime() >
+                observedThrough.getTime(),
+            )
+          ) {
+            addIssue(record.row, "ACTIVITY_AFTER_OBSERVED_THROUGH");
+          }
+        }
+      }
+    } else if (preparedActivityCount > 0) {
+      addIssue(0, "ACTIVITY_COVERAGE_REQUIRED");
+    }
+
     const sourceReportedSummary = this.sourceReportedImportSummary(prepared);
     const hasCompleteSourceReportedManifest = Boolean(
       dto.expectedSourceReportedSummary?.brokers &&
@@ -881,6 +1556,7 @@ export class LoyaltyBaseService {
         dto.expectedIncludedDealAmount === undefined
           ? null
           : centsToMoney(moneyToCents(dto.expectedIncludedDealAmount)),
+      ...(activityCoverage ? { activityCoverage } : {}),
       records: prepared.map(
         ({ rowFingerprint: _fingerprint, ...record }) => record,
       ),
@@ -907,10 +1583,8 @@ export class LoyaltyBaseService {
         (sum, record) => sum + record.externalIdentities.length,
         0,
       ),
-      activities: prepared.reduce(
-        (sum, record) => sum + record.activities.length,
-        0,
-      ),
+      activities: preparedActivityCount,
+      activityCoverage,
       sourceAggregates: prepared.filter((record) => record.sourceAggregate)
         .length,
       sourceSummaryAggregates: prepared.filter(
@@ -1123,8 +1797,8 @@ export class LoyaltyBaseService {
     );
 
     const brokerById = new Map<string, any>();
-    const rememberBrokers = (rows: any[]) => {
-      for (const broker of rows) brokerById.set(broker.id, broker);
+    const rememberBrokers = (rows: any[] | undefined | null) => {
+      for (const broker of rows || []) brokerById.set(broker.id, broker);
     };
     for (const phoneBatch of chunks(brokerPhones)) {
       rememberBrokers(
@@ -1170,7 +1844,8 @@ export class LoyaltyBaseService {
         where: { inn: { in: taxIdBatch } },
         select: { id: true, inn: true },
       });
-      for (const agency of rows as any[]) agencyById.set(agency.id, agency);
+      for (const agency of (rows || []) as any[])
+        agencyById.set(agency.id, agency);
     }
     const brokers = Array.from(brokerById.values());
     const agencies = Array.from(agencyById.values());
@@ -1248,8 +1923,19 @@ export class LoyaltyBaseService {
     options: ImportPreparationOptions = {},
   ) {
     const prepared = this.prepareImport(dto, options);
-    const [candidates, coverage] = await Promise.all([
+    const coverageIssues =
       prepared.issueCount === 0
+        ? await this.activityCoverageSyncIssues(prepared, dto.ruleVersion)
+        : [];
+    if (
+      coverageIssues.length === 0 &&
+      prepared.summary.activityCoverage?.mode === "FULL_SNAPSHOT"
+    ) {
+      prepared.summary.activityCoverage.verifiedBySyncRun = true;
+    }
+    const issueCount = prepared.issueCount + coverageIssues.length;
+    const [candidates, coverage] = await Promise.all([
+      issueCount === 0
         ? this.findCandidates(prepared.records)
         : Promise.resolve([]),
       this.coverageRisk(prepared.summary),
@@ -1265,11 +1951,11 @@ export class LoyaltyBaseService {
       dryRun: true,
       contentHash: prepared.contentHash,
       expectedActiveSnapshotId: coverage.activeSnapshotId,
-      publishable: prepared.issueCount === 0,
-      status: prepared.issueCount === 0 ? "VALID" : "INVALID",
+      publishable: issueCount === 0,
+      status: issueCount === 0 ? "VALID" : "INVALID",
       summary: {
         ...prepared.summary,
-        issueCount: prepared.issueCount,
+        issueCount,
         candidateCount: candidates.length,
         ambiguousRecords: Array.from(candidateCounts.values()).filter(
           (count) => count > 1,
@@ -1278,8 +1964,62 @@ export class LoyaltyBaseService {
         coverageDropRequiresConfirmation: coverage.requiresConfirmation,
         coverageDrops: coverage.droppedDimensions,
       },
-      issues: prepared.issues,
+      issues: [...prepared.issues, ...coverageIssues].slice(
+        0,
+        MAX_ISSUES_RETURNED,
+      ),
     };
+  }
+
+  private async activityCoverageSyncIssues(
+    prepared: PreparedImport,
+    ruleVersion: string,
+  ): Promise<ImportIssue[]> {
+    const coverage = prepared.summary.activityCoverage;
+    if (!coverage || coverage.mode !== "FULL_SNAPSHOT") return [];
+    const syncRun = await (this.prisma as any).loyaltySyncRun?.findUnique?.({
+      where: { id: coverage.sourceRunId },
+      select: {
+        id: true,
+        source: true,
+        status: true,
+        contentHash: true,
+        counts: true,
+        completedAt: true,
+      },
+    });
+    const counts =
+      syncRun?.counts && typeof syncRun.counts === "object"
+        ? syncRun.counts
+        : {};
+    const types = new Set(
+      Array.isArray(counts.activityTypes) ? counts.activityTypes : [],
+    );
+    const observedThrough = new Date(coverage.observedThrough);
+    const completedAt = new Date(syncRun?.completedAt || "");
+    const readAt = new Date(counts.readAt || syncRun?.completedAt || "");
+    const trustedTime =
+      Number.isFinite(observedThrough.getTime()) &&
+      Number.isFinite(completedAt.getTime()) &&
+      Number.isFinite(readAt.getTime()) &&
+      observedThrough.getTime() === readAt.getTime() &&
+      readAt.getTime() <= completedAt.getTime();
+    const attested =
+      syncRun?.source === "AMOCRM" &&
+      syncRun?.status === "SUCCEEDED" &&
+      syncRun?.contentHash === coverage.sourceContentHash &&
+      trustedTime &&
+      counts.complete === true &&
+      counts.eventCoverageComplete === true &&
+      Number(counts.coveredRecords) === coverage.coveredRecords &&
+      counts.activityRuleVersion === ruleVersion &&
+      REQUIRED_ACTIVITY_COVERAGE_TYPES.every((type) => types.has(type));
+    if (!attested) {
+      return [{ row: 0, code: "FULL_ACTIVITY_COVERAGE_SYNC_RUN_NOT_ATTESTED" }];
+    }
+    coverage.verifiedBySyncRun = true;
+    coverage.syncCompletedAt = completedAt.toISOString();
+    return [];
   }
 
   private async coverageRisk(summary: PreparedImport["summary"]) {
@@ -1403,17 +2143,75 @@ export class LoyaltyBaseService {
     }
   }
 
+  private async assertNoManualOverlayImportConflicts(
+    records: PreparedRecord[],
+  ): Promise<void> {
+    const delegate = (this.prisma as any).loyaltyManualEntity;
+    if (!delegate?.findMany) return;
+    const overlays =
+      (await delegate.findMany({
+        where: {
+          dataset: { code: ANNA_DATASET_CODE, base: "ANNA" },
+          archivedAt: null,
+        },
+        select: {
+          entityType: true,
+          phoneNormalized: true,
+          emailNormalized: true,
+          person: { select: { externalKey: true } },
+          organization: { select: { externalKey: true } },
+        },
+      })) || [];
+    if (!overlays.length) return;
+    const ownerByContact = new Map<string, string>();
+    for (const overlay of overlays) {
+      const stableExternalKey =
+        overlay.person?.externalKey || overlay.organization?.externalKey;
+      for (const value of [
+        overlay.phoneNormalized,
+        overlay.emailNormalized,
+      ].filter(Boolean)) {
+        ownerByContact.set(`${overlay.entityType}:${value}`, stableExternalKey);
+      }
+    }
+    for (const record of records) {
+      for (const point of record.contactPoints) {
+        const stableExternalKey = ownerByContact.get(
+          `${record.entityType}:${point.normalizedValue}`,
+        );
+        if (stableExternalKey && stableExternalKey !== record.externalKey) {
+          throw new ConflictException(
+            "MANUAL_OVERLAY_CONTACT_REQUIRES_RECONCILIATION",
+          );
+        }
+      }
+    }
+  }
+
   async stageImport(
     dto: LoyaltyImportDto,
     actorId?: string,
     options: ImportPreparationOptions = {},
   ) {
     const prepared = this.prepareImport(dto, options);
-    if (prepared.issueCount > 0) {
+    const coverageIssues = await this.activityCoverageSyncIssues(
+      prepared,
+      dto.ruleVersion,
+    );
+    if (
+      coverageIssues.length === 0 &&
+      prepared.summary.activityCoverage?.mode === "FULL_SNAPSHOT"
+    ) {
+      prepared.summary.activityCoverage.verifiedBySyncRun = true;
+    }
+    if (prepared.issueCount > 0 || coverageIssues.length > 0) {
       throw new BadRequestException({
         message: "Import document has validation issues",
-        issueCount: prepared.issueCount,
-        issues: prepared.issues,
+        issueCount: prepared.issueCount + coverageIssues.length,
+        issues: [...prepared.issues, ...coverageIssues].slice(
+          0,
+          MAX_ISSUES_RETURNED,
+        ),
       });
     }
     if (
@@ -1424,6 +2222,7 @@ export class LoyaltyBaseService {
         "expectedContentHash does not match the submitted document",
       );
     }
+    await this.assertNoManualOverlayImportConflicts(prepared.records);
     const [candidates, coverage] = await Promise.all([
       this.findCandidates(prepared.records),
       this.coverageRisk(prepared.summary),
@@ -2183,6 +2982,73 @@ export class LoyaltyBaseService {
       : null;
   }
 
+  private trustedFullSnapshotActivityCoverage(snapshot: any): {
+    observedThrough: Date;
+    observedThroughIso: string;
+    syncCompletedAt: Date;
+  } | null {
+    const coverage = snapshot?.summary?.activityCoverage;
+    if (
+      !coverage ||
+      coverage.mode !== "FULL_SNAPSHOT" ||
+      coverage.verifiedBySyncRun !== true
+    ) {
+      return null;
+    }
+    if (
+      !Number.isSafeInteger(Number(coverage.coveredRecords)) ||
+      Number(coverage.coveredRecords) !== Number(snapshot.recordCount)
+    ) {
+      return null;
+    }
+    const types = new Set(
+      Array.isArray(coverage.activityTypes) ? coverage.activityTypes : [],
+    );
+    if (!REQUIRED_ACTIVITY_COVERAGE_TYPES.every((type) => types.has(type))) {
+      return null;
+    }
+    if (
+      typeof coverage.sourceRunId !== "string" ||
+      !/^[A-Za-z0-9._:-]{1,100}$/.test(coverage.sourceRunId) ||
+      typeof coverage.sourceContentHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(coverage.sourceContentHash) ||
+      typeof coverage.observedThrough !== "string" ||
+      typeof coverage.syncCompletedAt !== "string"
+    ) {
+      return null;
+    }
+    const observedThrough = new Date(coverage.observedThrough);
+    const syncCompletedAt = new Date(coverage.syncCompletedAt);
+    if (
+      !Number.isFinite(observedThrough.getTime()) ||
+      !Number.isFinite(syncCompletedAt.getTime()) ||
+      observedThrough.getTime() > syncCompletedAt.getTime()
+    ) {
+      return null;
+    }
+    return {
+      observedThrough,
+      observedThroughIso: observedThrough.toISOString(),
+      syncCompletedAt,
+    };
+  }
+
+  private fullSnapshotActivityCoverage(
+    snapshot: any,
+    requestedThrough?: Date,
+  ): boolean {
+    const coverage = this.trustedFullSnapshotActivityCoverage(snapshot);
+    return Boolean(
+      coverage &&
+      (!requestedThrough ||
+        requestedThrough.getTime() <= coverage.observedThrough.getTime()),
+    );
+  }
+
+  private snapshotHasSourceAggregates(snapshot: any): boolean {
+    return Number(snapshot?.summary?.sourceAggregates || 0) > 0;
+  }
+
   async overview(baseInput: string, query: LoyaltyOverviewQueryDto) {
     const base = this.parseBase(baseInput);
     const period = this.parsePeriod(query);
@@ -2198,6 +3064,28 @@ export class LoyaltyBaseService {
       to: period.to.toISOString(),
     };
     if (!active) return this.emptyOverview("anna", periodDto);
+    const manualFilter = this.normalizeListFilter(
+      { archived: "exclude" } as LoyaltyListQueryDto,
+      undefined,
+    );
+    const [manualBrokers, manualAgencies] = await Promise.all([
+      this.annaManualRecords(
+        active.dataset.id,
+        active.snapshot.id,
+        "BROKER",
+        manualFilter,
+      ),
+      this.annaManualRecords(
+        active.dataset.id,
+        active.snapshot.id,
+        "AGENCY",
+        manualFilter,
+      ),
+    ]);
+    const manualRecords = {
+      brokers: manualBrokers,
+      agencies: manualAgencies,
+    };
     const snapshotId = active.snapshot.id;
     const currentWhere = (entityType: EntityType): any => ({
       snapshotId,
@@ -2220,13 +3108,24 @@ export class LoyaltyBaseService {
       archivedAt: null,
       verdict: "INCLUDED",
     };
-    const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
+    const trustedCoverage = this.trustedFullSnapshotActivityCoverage(
+      active.snapshot,
+    );
+    const now = new Date();
+    const currentMonthRange = moscowCurrentMonthRange(now);
     // A snapshot is either event-derived or aggregate-derived for headline
     // KPIs. We never add source rollups to exact activities, which prevents
     // double counting. The source-reported rollups remain visible per record in
     // both modes for audit/comparison.
-    if (Number(active.snapshot.activityCount) === 0) {
-      return this.annaSourceAggregateOverview(active, periodDto);
+    if (
+      !this.fullSnapshotActivityCoverage(active.snapshot, period.to) ||
+      !trustedCoverage ||
+      trustedCoverage.observedThrough.getTime() <
+        currentMonthRange.from.getTime() ||
+      manualBrokers.length > 0 ||
+      manualAgencies.length > 0
+    ) {
+      return this.annaSourceAggregateOverview(active, periodDto, manualRecords);
     }
     const [
       brokerTotal,
@@ -2236,7 +3135,7 @@ export class LoyaltyBaseService {
       deals,
       dealAmount,
       notCalled,
-      newCount,
+      newRows,
       btWithoutFixation,
       birthdayRows,
       brokerTop,
@@ -2257,27 +3156,36 @@ export class LoyaltyBaseService {
         where: { ...activityWhere, type: "DEAL" },
         _sum: { amount: true },
       }),
-      this.prisma.loyaltySourceRecord.count({
+      this.annaNotCalledCurrentMonthCount(
+        active,
+        trustedCoverage.observedThroughIso,
+      ),
+      this.prisma.loyaltySourceRecord.findMany({
         where: {
           ...currentWhere("BROKER"),
+          AND: [
+            this.annaNewStageFilter(),
+            {
+              person: {
+                is: {
+                  callAssignments: { none: { attempts: { some: {} } } },
+                },
+              },
+            },
+          ],
           activities: {
             none: {
-              type: "CALL",
-              occurredAt: { gte: currentMonth.from, lte: currentMonth.to },
+              type: {
+                in: ["CALL", "BROKER_TOUR", "FIXATION", "MEETING", "DEAL"],
+              },
               verdict: "INCLUDED",
             },
           },
         },
-      }),
-      this.prisma.loyaltySourceRecord.count({
-        where: {
-          ...currentWhere("BROKER"),
-          AND: [this.annaNewStageFilter()],
-          activities: {
-            none: {
-              type: { in: ["BROKER_TOUR", "FIXATION", "MEETING", "DEAL"] },
-              verdict: "INCLUDED",
-            },
+        select: {
+          contactPoints: {
+            where: { type: "PHONE" },
+            select: { value: true, normalizedValue: true },
           },
         },
       }),
@@ -2297,6 +3205,9 @@ export class LoyaltyBaseService {
       this.annaDealLeaders(snapshotId, "BROKER", period),
       this.annaDealLeaders(snapshotId, "AGENCY", period),
     ]);
+    const newCount = (newRows as any[]).filter((row) =>
+      hasLoyaltyAcquisitionPhone(row.contactPoints || []),
+    ).length;
     const knownBirthdays = (birthdayRows as any[])
       .map((row) => annaBirthday(row.attributes))
       .filter(Boolean) as string[];
@@ -2335,6 +3246,7 @@ export class LoyaltyBaseService {
         label: "Event-level activities",
         exactness: "EXACT",
         ruleVersion: active.snapshot.ruleVersion,
+        observedThrough: trustedCoverage.observedThroughIso,
         periodFilterApplied: true,
       },
       kpiMetadata: this.annaKpiMetadata(
@@ -2345,9 +3257,51 @@ export class LoyaltyBaseService {
     };
   }
 
+  private async annaNotCalledCurrentMonthCount(
+    active: any,
+    activityObservedThrough: string,
+  ): Promise<number> {
+    const include = this.annaRecordInclude(
+      active.snapshot.id,
+      active.snapshot.ruleVersion,
+      false,
+    );
+    if (Number(active.snapshot.activityCount) > 0) {
+      include.activities = {
+        where: { archivedAt: null, verdict: "INCLUDED" },
+        select: {
+          type: true,
+          occurredAt: true,
+          amount: true,
+          metadata: true,
+        },
+      };
+    }
+    const records = (await this.prisma.loyaltySourceRecord.findMany({
+      where: {
+        snapshotId: active.snapshot.id,
+        entityType: "BROKER",
+        sourceArchivedAt: null,
+        person: { is: { archivedAt: null } },
+      },
+      include,
+    })) as any[];
+    const workflowCalls = await this.workflowCallReadModels(
+      "anna",
+      "BROKER",
+      records.map((record) => this.workflowTargetId(record, "BROKER")),
+    );
+    this.attachWorkflowCallReadModels(records, "BROKER", workflowCalls);
+    return records.reduce((total, record) => {
+      const item = this.mapAnnaRecord(record, false, activityObservedThrough);
+      return total + (this.isAnnaNotCalledCurrentMonth(record, item) ? 1 : 0);
+    }, 0);
+  }
+
   private async annaSourceAggregateOverview(
     active: any,
     periodDto: { from: string; to: string },
+    manualRecords?: { brokers: any[]; agencies: any[] },
   ) {
     const snapshotId = active.snapshot.id;
     const activeOwner = (entityType: EntityType): any => ({
@@ -2358,7 +3312,7 @@ export class LoyaltyBaseService {
         ? { person: { is: { archivedAt: null } } }
         : { organization: { is: { archivedAt: null } } }),
     });
-    const [brokerTotal, agencyTotal, brokerRows, aggregateRows] =
+    const [sourceBrokerTotal, sourceAgencyTotal, brokerRows, aggregateRows] =
       await Promise.all([
         this.prisma.loyaltySourceRecord.count({
           where: activeOwner("BROKER"),
@@ -2373,6 +3327,10 @@ export class LoyaltyBaseService {
             personId: true,
             displayName: true,
             attributes: true,
+            contactPoints: {
+              where: { type: "PHONE" },
+              select: { value: true, normalizedValue: true },
+            },
             person: { select: { manualDisplayName: true } },
             sourceAggregate: {
               select: {
@@ -2382,6 +3340,7 @@ export class LoyaltyBaseService {
                 meetingCount: true,
                 dealCount: true,
                 brokerTourCount: true,
+                callCount: true,
                 lastCallAt: true,
                 brokerTourVisited: true,
               },
@@ -2456,8 +3415,10 @@ export class LoyaltyBaseService {
         ? centsToMoney(amountValues.reduce((sum, value) => sum + value, 0n))
         : null;
     };
+    const manualBrokers = manualRecords?.brokers || [];
+    const manualAgencies = manualRecords?.agencies || [];
     const brokers = (brokerRows as any[]) || [];
-    const knownBirthdays = brokers
+    const knownBirthdays = [...brokers, ...manualBrokers]
       .map((row) => annaBirthday(row.attributes))
       .filter(Boolean) as string[];
     const birthdaysToday = knownBirthdays.length
@@ -2493,7 +3454,10 @@ export class LoyaltyBaseService {
           aggregate.fixationCount,
           aggregate.meetingCount,
           aggregate.dealCount,
-        ].every((value) => value === 0)
+        ].every((value) => value === 0) &&
+        aggregate.callCount === 0 &&
+        aggregate.lastCallAt == null &&
+        hasLoyaltyAcquisitionPhone(row.contactPoints || [])
       );
     }).length;
     const btWithoutFixation = sourceReportedBrokers.filter(
@@ -2588,7 +3552,7 @@ export class LoyaltyBaseService {
         ruleVersion: active.snapshot.ruleVersion,
       },
       brokers: {
-        total: brokerTotal,
+        total: Number(sourceBrokerTotal) + manualBrokers.length,
         notCalledCurrentMonth: null,
         newCount: null,
         btWithoutFixation: null,
@@ -2596,7 +3560,10 @@ export class LoyaltyBaseService {
         birthdayKnownCount: knownBirthdays.length,
         top: [],
       },
-      agencies: { total: agencyTotal, top: [] },
+      agencies: {
+        total: Number(sourceAgencyTotal) + manualAgencies.length,
+        top: [],
+      },
       activities: {
         fixations: null,
         meetings: null,
@@ -2901,6 +3868,10 @@ export class LoyaltyBaseService {
 
   private async oursOverview(period: { from: Date; to: Date }) {
     const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
+    const periodDto = {
+      from: period.from.toISOString(),
+      to: period.to.toISOString(),
+    };
     const confirmedDeals = this.ourConfirmedDealWhere(period);
     const acceptedMeetings: any = {
       status: { in: ["CONFIRMED", "COMPLETED"] },
@@ -2914,7 +3885,7 @@ export class LoyaltyBaseService {
       deals,
       dealAmount,
       notCalled,
-      newCount,
+      newRows,
       btWithoutFixation,
       birthdayRows,
       brokerTop,
@@ -2939,17 +3910,28 @@ export class LoyaltyBaseService {
       this.prisma.broker.count({
         where: {
           role: "BROKER",
+          status: "ACTIVE",
           mergedIntoId: null,
           callLogs: {
             none: {
               createdAt: { gte: currentMonth.from, lte: currentMonth.to },
             },
           },
+          loyaltyAssignmentsAsTarget: {
+            none: {
+              attempts: {
+                some: {
+                  occurredAt: { gte: currentMonth.from, lte: currentMonth.to },
+                },
+              },
+            },
+          },
         },
       }),
-      this.prisma.broker.count({
+      this.prisma.broker.findMany({
         where: {
           role: "BROKER",
+          status: "ACTIVE",
           mergedIntoId: null,
           funnelStage: "NEW_BROKER",
           brokerTourVisited: false,
@@ -2957,6 +3939,15 @@ export class LoyaltyBaseService {
           clients: { none: { fixationStatus: "FIXED" } },
           meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
           deals: { none: this.ourConfirmedDealWhere() },
+          callLogs: { none: {} },
+          loyaltyAssignmentsAsTarget: {
+            none: { attempts: { some: {} } },
+          },
+          lastCallAt: null,
+        },
+        select: {
+          phone: true,
+          phones: { select: { phone: true } },
         },
       }),
       this.prisma.broker.count({
@@ -2974,6 +3965,9 @@ export class LoyaltyBaseService {
       this.oursDealLeaders("BROKER", period),
       this.oursDealLeaders("AGENCY", period),
     ]);
+    const newCount = (newRows as any[]).filter((row) =>
+      hasLoyaltyAcquisitionPhone([row.phone, ...(row.phones || [])]),
+    ).length;
     const today = moscowDateParts().dayMonth;
     const knownBirthdays = (birthdayRows as any[]).filter(
       (row) => row.birthDate,
@@ -2989,7 +3983,7 @@ export class LoyaltyBaseService {
       : null;
     return {
       base: "ours",
-      period: { from: period.from.toISOString(), to: period.to.toISOString() },
+      period: periodDto,
       snapshot: null,
       brokers: {
         total: brokerTotal,
@@ -3003,6 +3997,132 @@ export class LoyaltyBaseService {
       agencies: { total: agencyTotal, top: agencyTop },
       activities: { fixations, meetings, deals },
       dealAmount: String(dealAmount._sum.amount || "0"),
+      dataAvailability: {
+        exactActivities: false,
+        localPreliminary: true,
+        sourceReportedAggregates: false,
+        callPeriod: "LOCAL_PRELIMINARY_LEGACY_CALL_LOGS",
+        activityPeriod: "LOCAL_PRELIMINARY",
+        exactness: "APPROXIMATE",
+        unknownValuesRemainNull: true,
+      },
+      metricSource: {
+        kind: "LOCAL_PRELIMINARY",
+        label: "Current local operational rows",
+        exactness: "APPROXIMATE",
+        ruleVersion: "ours-local-preliminary-v1",
+        periodFilterApplied: true,
+        requestedPeriod: periodDto,
+        contributingRecords:
+          Number(fixations || 0) + Number(meetings || 0) + Number(deals || 0),
+        sourceVersions: ["LOCAL_DB:CURRENT"],
+        methodology:
+          "Local operational tables with per-KPI definitions below; no amoCRM or Anna snapshot exactness is inferred",
+      },
+      kpiMetadata: this.oursKpiMetadata(periodDto),
+    };
+  }
+
+  private oursKpiMetadata(period: { from: string; to: string }) {
+    const shared = {
+      source: "LOCAL_PRELIMINARY",
+      ruleVersion: "ours-local-preliminary-v1",
+      exactness: "APPROXIMATE",
+      requestedPeriod: period,
+      periodFilterApplied: true,
+      includedSemantics:
+        "Qualifying rows in current local operational tables only",
+      excludedSemantics:
+        "Anna source rollups, unconfirmed statuses and missing values are excluded; missing evidence is never promoted to exactness",
+    };
+    return {
+      "activities.fixations": {
+        ...shared,
+        formula:
+          "COUNT(Client rows with fixationStatus=FIXED and createdAt in requested period)",
+        provenance: "Client.id / Client.createdAt",
+      },
+      "activities.meetings": {
+        ...shared,
+        formula:
+          "COUNT(Meeting rows with status CONFIRMED or COMPLETED and date in requested period)",
+        provenance: "Meeting.id / Meeting.date / Meeting.status",
+      },
+      "activities.deals": {
+        ...shared,
+        formula:
+          "COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID and signedAt in requested period)",
+        provenance: "Deal.id / Deal.signedAt / Deal.status",
+      },
+      dealAmount: {
+        ...shared,
+        formula:
+          "Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows",
+        provenance: "Deal.id / Deal.amount",
+      },
+      "brokers.notCalledCurrentMonth": {
+        ...shared,
+        periodFilterApplied: false,
+        formula:
+          "COUNT(active, unmerged BROKER rows with no legacy CallLog.createdAt in the current Europe/Moscow month)",
+        includedSemantics:
+          "Legacy CallLog rows only; the current Moscow month is used instead of the requested rating period",
+        excludedSemantics:
+          "Workflow attempts are not part of this overview query, so this is preliminary rather than an exact no-call fact",
+        provenance: "Broker.id / CallLog.createdAt",
+      },
+      "brokers.newCount": {
+        ...shared,
+        periodFilterApplied: false,
+        formula:
+          "COUNT(active, unmerged BROKER rows at NEW_BROKER with no BT flag/date and no qualifying local fixation, meeting or deal row)",
+        provenance:
+          "Broker.funnelStage / Broker.brokerTourVisited / Client / Meeting / Deal",
+      },
+      "brokers.btWithoutFixation": {
+        ...shared,
+        periodFilterApplied: false,
+        formula:
+          "COUNT(active, unmerged BROKER rows with brokerTourVisited=true and no FIXED Client row)",
+        provenance: "Broker.brokerTourVisited / Client.fixationStatus",
+      },
+      "brokers.birthdaysToday": {
+        source: "LOCAL_PRELIMINARY",
+        ruleVersion: "ours-local-preliminary-v1",
+        exactness: "APPROXIMATE",
+        requestedPeriod: period,
+        periodFilterApplied: false,
+        formula:
+          "COUNT(known Broker.birthDate values whose UTC day/month equals today's Europe/Moscow day/month)",
+        includedSemantics: "Only known local birthDate values",
+        excludedSemantics:
+          "Missing birthdays remain unknown; birthdaysToday is null when none are known",
+        provenance: "Broker.birthDate",
+      },
+      "brokers.top": {
+        ...shared,
+        formula:
+          "Top five by qualifying local DDU deal count, amount, latest signedAt and stable broker ID",
+        provenance: "Deal.brokerId / Deal.id / Deal.amount / Deal.signedAt",
+      },
+      "agencies.top": {
+        ...shared,
+        formula:
+          "Top five by qualifying local DDU deals with an explicit Deal.agencyId; current BrokerAgency relations are not backfilled into this overview ranking",
+        provenance: "Deal.agencyId / Deal.id / Deal.amount / Deal.signedAt",
+      },
+      "brokers.total": {
+        ...shared,
+        periodFilterApplied: false,
+        formula: "COUNT(Broker where role=BROKER and mergedIntoId is null)",
+        provenance: "Broker.id / Broker.role / Broker.mergedIntoId",
+      },
+      "agencies.total": {
+        ...shared,
+        periodFilterApplied: false,
+        formula: "COUNT(current Agency rows)",
+        provenance: "Agency.id",
+      },
     };
   }
 
@@ -3099,11 +4219,17 @@ export class LoyaltyBaseService {
     entityType: EntityType,
     query: LoyaltyListQueryDto,
     search?: string,
+    canonicalInput?: LoyaltyCanonicalFilterDto,
+    includeSelectionIds = false,
   ) {
     const base = this.parseBase(baseInput);
-    return base === "anna"
-      ? this.listAnna(entityType, query, search)
-      : this.listOurs(entityType, query, search);
+    const filter = this.normalizeListFilter(query, canonicalInput);
+    this.assertFilterForEntity(base, entityType, filter);
+    return withLoyaltyFullScanSlot(() =>
+      base === "anna"
+        ? this.listAnna(entityType, query, filter, search, includeSelectionIds)
+        : this.listOurs(entityType, query, filter, search, includeSelectionIds),
+    );
   }
 
   async search(base: string, entityType: EntityType, dto: LoyaltySearchDto) {
@@ -3112,195 +4238,2100 @@ export class LoyaltyBaseService {
       dto,
       dto.filters || {},
     );
-    return this.list(base, entityType, normalized, dto.search.trim());
+    return this.list(
+      base,
+      entityType,
+      normalized,
+      dto.search.trim(),
+      dto.filter,
+    );
+  }
+
+  /**
+   * Resolves exactly the same canonical predicate used by list/search/export.
+   * The method is intentionally service-only: workflow modules receive stable
+   * entity IDs and a hash, while search text and record contents never enter
+   * workflow or audit logs.
+   */
+  async resolveSelection(
+    base: string,
+    entityType: EntityType,
+    dto: LoyaltySearchDto | LoyaltyExportDto,
+  ): Promise<LoyaltyResolvedSelection> {
+    const query = Object.assign(
+      new LoyaltyListQueryDto(),
+      dto,
+      dto.filters || {},
+      { page: 1, pageSize: 1 },
+    );
+    const result: any = await this.list(
+      base,
+      entityType,
+      query,
+      dto.search?.trim() || undefined,
+      dto.filter,
+      true,
+    );
+    return {
+      ids: Array.isArray(result._selectionIds)
+        ? result._selectionIds.map(String)
+        : [],
+      total: Number(result.total || 0),
+      filterHash: String(result.filterHash || ""),
+      snapshotId:
+        typeof result.snapshotId === "string" ? result.snapshotId : null,
+    };
+  }
+
+  private assertFilterForEntity(
+    base: BaseSlug,
+    entityType: EntityType,
+    filter: CanonicalLoyaltyFilter,
+  ) {
+    const deprecatedResults: Record<string, string> = {
+      SEND_INFO: "SEND_INFORMATION",
+      REFUSED_TOUR: "BROKER_TOUR_DECLINED",
+      INVALID_NUMBER: "INVALID_PHONE",
+      NOT_BROKER: "NOT_A_BROKER",
+      REFUSED_COOPERATION: "COOPERATION_DECLINED",
+      AGREEMENTS: "AGREEMENTS_EXIST",
+      SCHEDULED_TOUR:
+        entityType === "BROKER"
+          ? "BROKER_TOUR_BOOKED"
+          : "BROKER_TOUR_SCHEDULED",
+    };
+    filter.lastCallResults = uniqueSorted(
+      filter.lastCallResults.map(
+        (result) => deprecatedResults[result] || result,
+      ),
+    );
+    const allowedResults = Object.keys(
+      entityType === "BROKER"
+        ? BROKER_CALL_RESULT_ALIASES
+        : AGENCY_CALL_RESULT_ALIASES,
+    );
+    if (
+      filter.lastCallResults.some((result) => !allowedResults.includes(result))
+    ) {
+      throw new BadRequestException(
+        `lastCallResults contains a value unsupported for ${entityType}`,
+      );
+    }
+    const allowedStatuses =
+      entityType === "BROKER"
+        ? BROKER_LOYALTY_STATUSES
+        : AGENCY_LOYALTY_STATUSES;
+    if (
+      filter.brokerStatuses.some((status) => !allowedStatuses.includes(status))
+    ) {
+      throw new BadRequestException(
+        `brokerStatuses contains a value unsupported for ${entityType}`,
+      );
+    }
+    if (
+      filter.columns.statusStage &&
+      !allowedStatuses.includes(filter.columns.statusStage)
+    ) {
+      throw new BadRequestException(
+        `columns.statusStage contains a value unsupported for ${entityType}`,
+      );
+    }
+    const allowedScenarios =
+      entityType === "BROKER"
+        ? BROKER_LOYALTY_SCENARIOS
+        : AGENCY_LOYALTY_SCENARIOS;
+    if (filter.scenario && !allowedScenarios.includes(filter.scenario)) {
+      throw new BadRequestException(
+        `scenario contains a value unsupported for ${entityType}`,
+      );
+    }
+    if (filter.assigneeIds.length && filter.unassigned === true) {
+      throw new BadRequestException(
+        "assigneeIds and unassigned=true are mutually exclusive",
+      );
+    }
+    if (base !== "ours") return;
+
+    const unavailableFields = uniqueSorted(
+      entityType === "BROKER"
+        ? [
+            filter.partnershipStatuses.length
+              ? "partnershipStatuses"
+              : undefined,
+            filter.agencySizes.length ? "agencySizes" : undefined,
+            filter.websitePresent !== undefined ? "websitePresent" : undefined,
+            filter.projectsOnSite.length ? "projectsOnSite" : undefined,
+            filter.individualTerms !== undefined
+              ? "individualTerms"
+              : undefined,
+          ]
+        : [
+            filter.archived === "only" ? "archived" : undefined,
+            filter.hasAmo !== undefined ? "hasAmo" : undefined,
+            filter.segment ? "segment" : undefined,
+            filter.scenario &&
+            ![
+              "HAS_DEALS",
+              "HAS_MEETINGS",
+              "NO_MEETINGS",
+              "BT_VISITED",
+              "BT_NOT_VISITED",
+              "INDIVIDUAL_TERMS",
+              "NO_INDIVIDUAL_TERMS",
+              "NOT_CALLED_IN_PERIOD",
+              "CALLED_IN_PERIOD",
+              "UNASSIGNED",
+            ].includes(filter.scenario)
+              ? "scenario"
+              : undefined,
+            filter.specializations.length ? "specializations" : undefined,
+            filter.geography.length ? "geography" : undefined,
+            filter.workFormats.length ? "workFormats" : undefined,
+            filter.relationshipStages.length ? "relationshipStages" : undefined,
+            filter.dataQuality.length ? "dataQuality" : undefined,
+            filter.agencySizes.length ? "agencySizes" : undefined,
+            filter.websitePresent !== undefined ? "websitePresent" : undefined,
+            filter.projectsOnSite.length ? "projectsOnSite" : undefined,
+          ],
+    );
+    if (unavailableFields.length) {
+      throw new BadRequestException({
+        code: "LOYALTY_FILTER_UNAVAILABLE",
+        message:
+          "The selected filter has no authoritative field in the OUR entity model",
+        base,
+        entityType,
+        fields: unavailableFields,
+        unknownValuesRemainNull: true,
+      });
+    }
   }
 
   private async listAnna(
     entityType: EntityType,
     query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
     search?: string,
+    includeSelectionIds = false,
   ) {
     const active = await this.activeAnnaSnapshot();
     const page = query.page || 1;
     const pageSize = query.pageSize || 30;
-    if (!active)
+    if (!active) {
+      const filterHash = this.listFilterHash(
+        "anna",
+        entityType,
+        filter,
+        search,
+      );
       return {
         base: "anna",
         entityType,
+        snapshotId: null,
         items: [],
         page,
         pageSize,
         total: 0,
         totalPages: 0,
+        selectionCount: 0,
+        filterHash,
+        facets: this.loyaltyFacets([]),
+        dataAvailability: {
+          exactActivities: false,
+          sourceReportedAggregates: false,
+          callPeriod: "UNAVAILABLE",
+          activityPeriod: "UNAVAILABLE",
+          unknownValuesRemainNull: true,
+        },
+        ...(includeSelectionIds ? { _selectionIds: [] } : {}),
       };
+    }
     const relationName = entityType === "BROKER" ? "person" : "organization";
     const where: any = { snapshotId: active.snapshot.id, entityType };
-    if (query.archived === "exclude") {
+    if (filter.archived === "exclude") {
       where.sourceArchivedAt = null;
       where[relationName] = { is: { archivedAt: null } };
-    } else if (query.archived === "only") {
+    } else if (filter.archived === "only") {
       where.OR = [
         { sourceArchivedAt: { not: null } },
         { [relationName]: { is: { archivedAt: { not: null } } } },
       ];
     }
-    if (query.city) where.city = { equals: query.city, mode: "insensitive" };
-    if (query.hasAmo !== undefined) {
-      where.externalIdentities = query.hasAmo
+    if (filter.hasAmo !== undefined) {
+      where.externalIdentities = filter.hasAmo
         ? { some: { system: "AMOCRM" } }
         : { none: { system: "AMOCRM" } };
     }
-    const usesExactActivities = Number(active.snapshot.activityCount) > 0;
-    if (query.activityType) {
-      if (usesExactActivities) {
-        where.activities = {
-          some: { type: query.activityType, verdict: "INCLUDED" },
-        };
-      } else {
-        const aggregateField: Record<string, string> = {
-          FIXATION: "fixationCount",
-          MEETING: "meetingCount",
-          DEAL: "dealCount",
-          BROKER_TOUR: "brokerTourCount",
-          CALL: "callCount",
-        };
-        where.sourceAggregate = {
-          is: {
-            quality: "SOURCE_REPORTED",
-            [aggregateField[query.activityType]]: { gt: 0 },
-          },
-        };
-      }
-    }
-    if (entityType === "BROKER" && query.segment) {
-      const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
-      const segmentFilter: any = !usesExactActivities
-        ? query.segment === "NOT_CALLED_CURRENT_MONTH"
-          ? {
-              sourceAggregate: {
-                is: {
-                  quality: "SOURCE_REPORTED",
-                  lastCallAt: { lt: currentMonth.from },
-                },
-              },
-            }
-          : query.segment === "NEW_BROKER"
-            ? {
-                AND: [this.annaNewStageFilter()],
-                sourceAggregate: {
-                  is: {
-                    quality: "SOURCE_REPORTED",
-                    brokerTourCount: 0,
-                    fixationCount: 0,
-                    meetingCount: 0,
-                    dealCount: 0,
-                  },
-                },
-              }
-            : query.segment === "BT_WITHOUT_FIXATION"
-              ? {
-                  sourceAggregate: {
-                    is: {
-                      quality: "SOURCE_REPORTED",
-                      brokerTourVisited: true,
-                      fixationCount: 0,
-                    },
-                  },
-                }
-              : {
-                  id: {
-                    in: await this.annaBirthdayRecordIds(active.snapshot.id),
-                  },
-                }
-        : query.segment === "NOT_CALLED_CURRENT_MONTH"
-          ? {
-              activities: {
-                none: {
-                  type: "CALL",
-                  occurredAt: { gte: currentMonth.from, lte: currentMonth.to },
-                  verdict: "INCLUDED",
-                },
-              },
-            }
-          : query.segment === "NEW_BROKER"
-            ? {
-                AND: [this.annaNewStageFilter()],
-                activities: {
-                  none: {
-                    type: {
-                      in: ["BROKER_TOUR", "FIXATION", "MEETING", "DEAL"],
-                    },
-                    verdict: "INCLUDED",
-                  },
-                },
-              }
-            : query.segment === "BT_WITHOUT_FIXATION"
-              ? {
-                  activities: {
-                    some: { type: "BROKER_TOUR", verdict: "INCLUDED" },
-                    none: { type: "FIXATION", verdict: "INCLUDED" },
-                  },
-                }
-              : {
-                  id: {
-                    in: await this.annaBirthdayRecordIds(active.snapshot.id),
-                  },
-                };
-      where.AND = [...(where.AND || []), segmentFilter];
-    }
-    if (search) {
-      const normalizedPhone = normalizeLoyaltyContactPoint("PHONE", search);
-      const searchOr: any[] = [
-        { displayName: { contains: search, mode: "insensitive" } },
-        { city: { contains: search, mode: "insensitive" } },
-        { taxId: { contains: search } },
-        {
-          [relationName]: {
-            is: {
-              manualDisplayName: { contains: search, mode: "insensitive" },
-            },
-          },
-        },
-      ];
-      if (normalizedPhone)
-        searchOr.push({
-          contactPoints: {
-            some: { type: "PHONE", normalizedValue: normalizedPhone },
-          },
-        });
-      else
-        searchOr.push({
-          contactPoints: {
-            some: { normalizedValue: { contains: search.toLowerCase() } },
-          },
-        });
-      where.AND = [...(where.AND || []), { OR: searchOr }];
-    }
+    // Call predicates are evaluated after the batched workflow-attempt read
+    // model is attached. A DB-only source-activity predicate would otherwise
+    // drop a freshly completed workflow call before canonical filtering.
     const include = this.annaRecordInclude(
       active.snapshot.id,
       active.snapshot.ruleVersion,
       false,
     );
-    const [records, total] = await Promise.all([
-      this.prisma.loyaltySourceRecord.findMany({
-        where,
-        include,
-        orderBy: [{ displayName: "asc" }, { id: "asc" }],
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      this.prisma.loyaltySourceRecord.count({ where }),
-    ]);
+    if (Number(active.snapshot.activityCount) > 0) {
+      include.activities = {
+        where: {
+          archivedAt: null,
+          verdict: "INCLUDED",
+        },
+        select: {
+          type: true,
+          occurredAt: true,
+          amount: true,
+          metadata: true,
+        },
+      };
+    }
+    const records = await this.prisma.loyaltySourceRecord.findMany({
+      where,
+      include,
+    });
+    const manualRecords = await this.annaManualRecords(
+      active.dataset.id,
+      active.snapshot.id,
+      entityType,
+      filter,
+    );
+    const trustedActivityCoverage = this.trustedFullSnapshotActivityCoverage(
+      active.snapshot,
+    );
+    const activityObservedThrough =
+      trustedActivityCoverage?.observedThroughIso || null;
+    const allRecords = [...(records as any[]), ...manualRecords];
+    const workflowCalls = await this.workflowCallReadModels(
+      "anna",
+      entityType,
+      allRecords.map((record) => this.workflowTargetId(record, entityType)),
+    );
+    this.attachWorkflowCallReadModels(allRecords, entityType, workflowCalls);
+    const engagementEvents = await this.engagementReadModels(
+      "anna",
+      entityType,
+      allRecords.map((record) => this.workflowTargetId(record, entityType)),
+    );
+    this.attachEngagementReadModels(allRecords, entityType, engagementEvents);
+    const candidates = allRecords
+      .map((record) => ({
+        record,
+        item: record.__manualOverlay
+          ? this.mapAnnaManualRecord(record, false)
+          : this.mapAnnaRecord(record, false, activityObservedThrough),
+      }))
+      .filter(({ record, item }) =>
+        this.matchesAnnaRecord(record, item, entityType, filter, search),
+      );
+    this.sortLoyaltyCandidates(candidates, filter);
+    const total = candidates.length;
+    const pageCandidates = candidates.slice(
+      (page - 1) * pageSize,
+      page * pageSize,
+    );
+    const fullActivityCoverage = Boolean(trustedActivityCoverage);
+    const exactThrough = (period?: LoyaltyFilterPeriod) =>
+      Boolean(
+        trustedActivityCoverage &&
+        (!period ||
+          period.to.getTime() <=
+            trustedActivityCoverage.observedThrough.getTime()),
+      );
     return {
       base: "anna",
       entityType,
-      items: (records as any[]).map((record) =>
-        this.mapAnnaRecord(record, false),
-      ),
+      snapshotId: active.snapshot.id,
+      items: pageCandidates.map(({ item }) => item),
       page,
       pageSize,
       total,
       totalPages: Math.ceil(total / pageSize),
+      selectionCount: total,
+      filterHash: this.listFilterHash("anna", entityType, filter, search),
+      facets: this.loyaltyFacets(candidates.map(({ item }) => item)),
+      dataAvailability: {
+        exactActivities: fullActivityCoverage,
+        observedThrough: activityObservedThrough,
+        sourceReportedAggregates: this.snapshotHasSourceAggregates(
+          active.snapshot,
+        ),
+        callPeriod: exactThrough(filter.callPeriod)
+          ? "EXACT"
+          : "PARTIAL_DATE_OR_MONTH",
+        activityPeriod: exactThrough(filter.activityPeriod)
+          ? "EXACT"
+          : "SOURCE_REPORTED_MONTH_OR_LAST_DATE",
+        unknownValuesRemainNull: true,
+      },
+      ...(includeSelectionIds
+        ? { _selectionIds: candidates.map(({ item }) => item.id) }
+        : {}),
+    };
+  }
+
+  private listFilterHash(
+    base: BaseSlug,
+    entityType: EntityType,
+    filter: CanonicalLoyaltyFilter,
+    search?: string,
+  ) {
+    return loyaltyFilterHash({
+      version: 1,
+      base,
+      entityType,
+      filter: this.serializableFilter(filter),
+      // The sensitive value never leaves the POST body or enters audit logs.
+      // Only its one-way digest participates in deterministic selection state.
+      searchDigest: search ? sha256(lower(search)) : null,
+    });
+  }
+
+  /**
+   * Loads the workflow call queue as a separate read model. These rows are
+   * deliberately not projected as LoyaltyActivity or amoCRM/CallLog events:
+   * they remain auditable call-queue facts while participating in canonical
+   * call summaries and filters.
+   */
+  private async workflowCallReadModels(
+    base: BaseSlug,
+    entityType: EntityType,
+    targetIds: string[],
+  ): Promise<Map<string, LoyaltyWorkflowCallReadModel>> {
+    const result = new Map<string, LoyaltyWorkflowCallReadModel>();
+    const ids = uniqueSorted(targetIds);
+    const delegate = (this.prisma as any).loyaltyCallAttempt;
+    if (!ids.length || typeof delegate?.findMany !== "function") return result;
+    const targetField =
+      base === "anna"
+        ? entityType === "BROKER"
+          ? "annaPersonId"
+          : "annaOrganizationId"
+        : entityType === "BROKER"
+          ? "ourBrokerId"
+          : "ourAgencyId";
+    const rows = await delegate.findMany({
+      where: {
+        assignment: {
+          [targetField]: { in: ids },
+          campaign: {
+            base: base === "anna" ? "ANNA" : "OUR",
+            entityType,
+          },
+        },
+      },
+      select: {
+        id: true,
+        assignmentId: true,
+        operatorId: true,
+        result: true,
+        comment: true,
+        nextStep: true,
+        nextActionAt: true,
+        source: true,
+        correctsAttemptId: true,
+        correctionReason: true,
+        occurredAt: true,
+        createdAt: true,
+        operator: { select: { id: true, fullName: true } },
+        assignment: {
+          select: {
+            annaPersonId: true,
+            annaOrganizationId: true,
+            ourBrokerId: true,
+            ourAgencyId: true,
+            campaign: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    });
+    if (!Array.isArray(rows) || !rows.length) return result;
+    const requestedIds = new Set(ids);
+    const byTarget = new Map<string, any[]>();
+    for (const row of rows) {
+      const targetId = row?.assignment?.[targetField];
+      if (!targetId || !requestedIds.has(String(targetId))) continue;
+      const group = byTarget.get(String(targetId)) || [];
+      group.push(row);
+      byTarget.set(String(targetId), group);
+    }
+    for (const [targetId, attempts] of byTarget) {
+      const byId = new Map<string, any>(
+        attempts.map((attempt) => [String(attempt.id), attempt]),
+      );
+      const rootId = (attempt: any) => {
+        let current = attempt;
+        const seen = new Set<string>();
+        while (
+          current?.correctsAttemptId &&
+          byId.has(String(current.correctsAttemptId)) &&
+          !seen.has(String(current.correctsAttemptId))
+        ) {
+          seen.add(String(current.id));
+          current = byId.get(String(current.correctsAttemptId));
+        }
+        return String(current?.id || attempt.id);
+      };
+      const chains = new Map<string, any[]>();
+      for (const attempt of attempts) {
+        const key = rootId(attempt);
+        const chain = chains.get(key) || [];
+        chain.push(attempt);
+        chains.set(key, chain);
+      }
+      const effective: LoyaltyCallView[] = [];
+      const history: LoyaltyCallView[] = [];
+      for (const [rootAttemptId, chain] of chains) {
+        const ordered = [...chain].sort((left, right) =>
+          this.workflowAttemptSortKey(left).localeCompare(
+            this.workflowAttemptSortKey(right),
+          ),
+        );
+        const root = byId.get(rootAttemptId) || ordered[0];
+        const current = ordered[ordered.length - 1];
+        effective.push(
+          this.workflowCallView(
+            current,
+            root?.occurredAt || current?.occurredAt,
+            true,
+            current?.id === root?.id ? null : current?.occurredAt,
+          ),
+        );
+        for (const attempt of ordered) {
+          history.push({
+            ...this.workflowCallView(
+              attempt,
+              attempt?.occurredAt,
+              attempt?.id === current?.id,
+              attempt?.id === root?.id ? null : attempt?.occurredAt,
+            ),
+            superseded: attempt?.id !== current?.id,
+          });
+        }
+      }
+      effective.sort((left, right) =>
+        this.callSortKey(right).localeCompare(this.callSortKey(left)),
+      );
+      history.sort((left, right) =>
+        this.callSortKey(right).localeCompare(this.callSortKey(left)),
+      );
+      result.set(targetId, { effective, history });
+    }
+    return result;
+  }
+
+  private workflowAttemptSortKey(attempt: any): string {
+    const createdAt = this.isoDateTime(attempt?.createdAt) || "";
+    return `${createdAt}\u0000${String(attempt?.id || "")}`;
+  }
+
+  private isoDateTime(value: unknown): string | null {
+    if (!value) return null;
+    const parsed = value instanceof Date ? value : new Date(String(value));
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  }
+
+  private workflowCallView(
+    attempt: any,
+    effectiveOccurredAt: unknown,
+    effective: boolean,
+    correctedAt: unknown,
+  ): LoyaltyCallView {
+    const campaignId = String(attempt?.assignment?.campaign?.id || "") || null;
+    const campaignName =
+      String(attempt?.assignment?.campaign?.name || "") || null;
+    const employeeId =
+      String(attempt?.operator?.id || attempt?.operatorId || "") || null;
+    const employeeName = String(attempt?.operator?.fullName || "") || null;
+    const occurredAt = this.isoDateTime(effectiveOccurredAt);
+    const result = String(attempt?.result || "") || null;
+    const comment =
+      attempt?.comment === null || attempt?.comment === undefined
+        ? null
+        : String(attempt.comment);
+    return {
+      type: "CALL",
+      id: String(attempt?.id || "") || null,
+      assignmentId: String(attempt?.assignmentId || "") || null,
+      date: occurredAt,
+      occurredAt,
+      campaign: campaignName || campaignId,
+      campaignId,
+      campaignName,
+      employee: employeeName || employeeId,
+      employeeId,
+      employeeName,
+      result,
+      resultCode: result,
+      agreement: comment,
+      comment,
+      nextStep:
+        attempt?.nextStep === null || attempt?.nextStep === undefined
+          ? null
+          : String(attempt.nextStep),
+      nextActionAt: this.isoDateTime(attempt?.nextActionAt),
+      source: String(attempt?.source || "LOYALTY_CALL_QUEUE"),
+      correctsAttemptId: String(attempt?.correctsAttemptId || "") || null,
+      correctionReason:
+        attempt?.correctionReason === null ||
+        attempt?.correctionReason === undefined
+          ? null
+          : String(attempt.correctionReason),
+      isCorrection: Boolean(attempt?.correctsAttemptId),
+      effective,
+      superseded: !effective,
+      correctedAt: this.isoDateTime(correctedAt),
+    };
+  }
+
+  private workflowTargetId(record: any, entityType: EntityType): string {
+    return String(
+      entityType === "BROKER"
+        ? record?.personId || record?.person?.id || record?.id || ""
+        : record?.organizationId ||
+            record?.organization?.id ||
+            record?.id ||
+            "",
+    );
+  }
+
+  private attachWorkflowCallReadModels(
+    records: any[],
+    entityType: EntityType,
+    readModels: Map<string, LoyaltyWorkflowCallReadModel>,
+  ) {
+    for (const record of records) {
+      record.__workflowCalls = readModels.get(
+        this.workflowTargetId(record, entityType),
+      ) || {
+        effective: [],
+        history: [],
+      };
+    }
+  }
+
+  /** Engagement history is a workflow read model, never an amoCRM activity. */
+  private async engagementReadModels(
+    base: BaseSlug,
+    entityType: EntityType,
+    targetIds: string[],
+  ): Promise<Map<string, LoyaltyEngagementReadModel>> {
+    const result = new Map<string, LoyaltyEngagementReadModel>();
+    const ids = uniqueSorted(targetIds);
+    const delegate = (this.prisma as any).loyaltyEngagementEvent;
+    if (!ids.length || typeof delegate?.findMany !== "function") return result;
+    const targetField =
+      base === "anna"
+        ? entityType === "BROKER"
+          ? "annaPersonId"
+          : "annaOrganizationId"
+        : entityType === "BROKER"
+          ? "ourBrokerId"
+          : "ourAgencyId";
+    const rows = await delegate.findMany({
+      where: { [targetField]: { in: ids } },
+      select: {
+        id: true,
+        annaPersonId: true,
+        annaOrganizationId: true,
+        ourBrokerId: true,
+        ourAgencyId: true,
+        type: true,
+        occurredAt: true,
+        comment: true,
+        amount: true,
+        value: true,
+        validUntil: true,
+        attachmentUrl: true,
+        basisUrl: true,
+        createdById: true,
+        createdBy: { select: { id: true, fullName: true } },
+        correctsEventId: true,
+        correctionReason: true,
+        archivedAt: true,
+        createdAt: true,
+      },
+      orderBy: [{ occurredAt: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    });
+    if (!Array.isArray(rows) || !rows.length) return result;
+    const requestedIds = new Set(ids);
+    const byTarget = new Map<string, any[]>();
+    for (const row of rows) {
+      const targetId = String(row?.[targetField] || "");
+      if (!requestedIds.has(targetId)) continue;
+      const group = byTarget.get(targetId) || [];
+      group.push(row);
+      byTarget.set(targetId, group);
+    }
+    for (const [targetId, events] of byTarget) {
+      const byId = new Map<string, any>(
+        events.map((event) => [String(event.id), event]),
+      );
+      const rootId = (event: any) => {
+        let current = event;
+        const seen = new Set<string>();
+        while (
+          current?.correctsEventId &&
+          byId.has(String(current.correctsEventId)) &&
+          !seen.has(String(current.correctsEventId))
+        ) {
+          seen.add(String(current.id));
+          current = byId.get(String(current.correctsEventId));
+        }
+        return String(current?.id || event.id);
+      };
+      const chains = new Map<string, any[]>();
+      for (const event of events) {
+        const key = rootId(event);
+        const chain = chains.get(key) || [];
+        chain.push(event);
+        chains.set(key, chain);
+      }
+      const effective: LoyaltyEngagementView[] = [];
+      const history: LoyaltyEngagementView[] = [];
+      for (const chain of chains.values()) {
+        const ordered = [...chain].sort((left, right) =>
+          this.engagementSortKey(left).localeCompare(
+            this.engagementSortKey(right),
+          ),
+        );
+        const current = ordered[ordered.length - 1];
+        if (!current?.archivedAt) {
+          effective.push(this.engagementView(current, true));
+        }
+        for (const event of ordered) {
+          history.push(
+            this.engagementView(
+              event,
+              !current?.archivedAt && event.id === current.id,
+            ),
+          );
+        }
+      }
+      const sort = (
+        left: LoyaltyEngagementView,
+        right: LoyaltyEngagementView,
+      ) =>
+        String(right.occurredAt || "").localeCompare(
+          String(left.occurredAt || ""),
+        );
+      effective.sort(sort);
+      history.sort(sort);
+      result.set(targetId, { effective, history });
+    }
+    return result;
+  }
+
+  private engagementSortKey(event: any) {
+    return `${this.isoDateTime(event?.createdAt) || ""}\u0000${String(event?.id || "")}`;
+  }
+
+  private engagementView(
+    event: any,
+    effective: boolean,
+  ): LoyaltyEngagementView {
+    return {
+      id: String(event.id),
+      type: String(event.type),
+      occurredAt: this.isoDateTime(event.occurredAt),
+      comment:
+        event.comment === null || event.comment === undefined
+          ? null
+          : String(event.comment),
+      amount:
+        event.amount === null || event.amount === undefined
+          ? null
+          : String(event.amount),
+      value:
+        event.value === null || event.value === undefined
+          ? null
+          : String(event.value),
+      validUntil: this.isoDateTime(event.validUntil),
+      attachmentUrl: event.attachmentUrl || null,
+      basisUrl: event.basisUrl || null,
+      createdById:
+        String(event?.createdBy?.id || event.createdById || "") || null,
+      createdByName: String(event?.createdBy?.fullName || "") || null,
+      correctsEventId: String(event.correctsEventId || "") || null,
+      correctionReason:
+        event.correctionReason === null || event.correctionReason === undefined
+          ? null
+          : String(event.correctionReason),
+      archivedAt: this.isoDateTime(event.archivedAt),
+      effective,
+      superseded: !effective,
+    };
+  }
+
+  private attachEngagementReadModels(
+    records: any[],
+    entityType: EntityType,
+    readModels: Map<string, LoyaltyEngagementReadModel>,
+  ) {
+    for (const record of records) {
+      record.__workflowEvents = readModels.get(
+        this.workflowTargetId(record, entityType),
+      ) || {
+        effective: [],
+        history: [],
+      };
+    }
+  }
+
+  private applyEngagementSummary(item: any, record: any) {
+    const events: LoyaltyEngagementView[] = Array.isArray(
+      record?.__workflowEvents?.effective,
+    )
+      ? record.__workflowEvents.effective
+      : [];
+    item.engagementTypes = uniqueSorted(events.map((event) => event.type));
+    item.rewardPresent = events.some((event) => event.type === "AWARD");
+    item.specialTermsProposed = events.some(
+      (event) => event.type === "INDIVIDUAL_TERMS",
+    );
+    item.lastEngagementAt = events[0]?.occurredAt || null;
+    return events;
+  }
+
+  private callCampaignValues(call: LoyaltyCallView): string[] {
+    return uniqueSorted([call.campaignId, call.campaignName, call.campaign]);
+  }
+
+  private callAssigneeValues(call: LoyaltyCallView): string[] {
+    return uniqueSorted([call.employeeId, call.employeeName, call.employee]);
+  }
+
+  private applyCallSummary(
+    item: any,
+    entityType: EntityType,
+    calls: LoyaltyCallView[],
+  ) {
+    const latest = this.lastCall(calls);
+    item.lastCallAt = latest
+      ? latest.occurredAt || this.callSortKey(latest) || null
+      : null;
+    item.lastCallResult = latest
+      ? this.resultCodeForValue(entityType, latest.result)
+      : null;
+    item.lastCallCampaign = latest?.campaign || null;
+    item.lastCallCampaignId = latest?.campaignId || null;
+    item.lastCallCampaignName = latest?.campaignName || null;
+    item.lastCallOperator = latest?.employee || null;
+    item.lastCallOperatorId = latest?.employeeId || null;
+    item.lastCallComment = latest?.comment || latest?.agreement || null;
+    item.lastCallNextStep = latest?.nextStep || null;
+    item.lastCallNextActionAt = latest?.nextActionAt || null;
+    return latest;
+  }
+
+  private annaMetricValue(item: any, field: string): number | null {
+    const exact = finiteNumber(item.metrics?.[field]);
+    if (exact !== null) return exact;
+    return finiteNumber(item.sourceReportedMetrics?.[field]);
+  }
+
+  private annaCalls(
+    item: any,
+    record?: any,
+    includeWorkflow = true,
+  ): LoyaltyCallView[] {
+    const attributes = item.attributes || {};
+    const calls: LoyaltyCallView[] = [];
+    if (Array.isArray(record?.activities)) {
+      for (const activity of record.activities) {
+        if (activity?.type !== "CALL") continue;
+        const metadata =
+          activity.metadata && typeof activity.metadata === "object"
+            ? activity.metadata
+            : {};
+        calls.push({
+          date: dateOnly(activity.occurredAt),
+          campaign: hasText(metadata.campaignId)
+            ? String(metadata.campaignId)
+            : hasText(metadata.campaign)
+              ? String(metadata.campaign)
+              : hasText(metadata.campaignName)
+                ? String(metadata.campaignName)
+                : null,
+          employee: hasText(metadata.assigneeId)
+            ? String(metadata.assigneeId)
+            : hasText(metadata.employee)
+              ? String(metadata.employee)
+              : null,
+          result: hasText(metadata.resultCode)
+            ? String(metadata.resultCode)
+            : hasText(metadata.callResult)
+              ? String(metadata.callResult)
+              : hasText(metadata.result)
+                ? String(metadata.result)
+                : hasText(metadata.status)
+                  ? String(metadata.status)
+                  : null,
+          agreement: hasText(metadata.agreement)
+            ? String(metadata.agreement)
+            : hasText(metadata.comment)
+              ? String(metadata.comment)
+              : null,
+        });
+      }
+    }
+    if (Array.isArray(attributes.history)) {
+      for (const tuple of attributes.history) {
+        if (!Array.isArray(tuple)) continue;
+        calls.push({
+          campaign: hasText(tuple[0]) ? String(tuple[0]) : null,
+          result: hasText(tuple[2] ?? tuple[1])
+            ? String(tuple[2] ?? tuple[1])
+            : null,
+          period:
+            typeof tuple[3] === "string" && /^\d{4}-\d{2}$/.test(tuple[3])
+              ? tuple[3]
+              : null,
+          agreement: hasText(attributes.comment)
+            ? String(attributes.comment)
+            : null,
+        });
+      }
+    }
+    if (Array.isArray(attributes.calls)) {
+      for (const call of attributes.calls) {
+        if (!call || typeof call !== "object") continue;
+        calls.push({
+          date: dateOnly(call.date),
+          campaign: hasText(call.campaign) ? call.campaign : null,
+          employee: hasText(call.employee) ? call.employee : null,
+          result: hasText(call.result) ? call.result : null,
+          agreement: hasText(call.agreement) ? call.agreement : null,
+        });
+      }
+    }
+    if (Array.isArray(item.sourceReportedMetrics?.callBreakdown)) {
+      for (const call of item.sourceReportedMetrics.callBreakdown) {
+        if (!call || typeof call !== "object") continue;
+        const reportedCount = finiteNumber(call.count);
+        if (reportedCount !== null && reportedCount <= 0) continue;
+        calls.push({
+          date: dateOnly(call.date),
+          period:
+            typeof call.period === "string" && /^\d{4}-\d{2}$/.test(call.period)
+              ? call.period
+              : null,
+          campaign: hasText(call.campaignId)
+            ? String(call.campaignId)
+            : hasText(call.campaign)
+              ? String(call.campaign)
+              : hasText(call.campaignName)
+                ? String(call.campaignName)
+                : null,
+          employee: hasText(call.assigneeId)
+            ? String(call.assigneeId)
+            : hasText(call.employee)
+              ? String(call.employee)
+              : null,
+          result: hasText(call.result) ? call.result : null,
+          agreement: hasText(call.agreement) ? call.agreement : null,
+        });
+      }
+    }
+    if (includeWorkflow && Array.isArray(record?.__workflowCalls?.effective)) {
+      calls.push(...record.__workflowCalls.effective);
+    }
+    return calls.map((call) => ({ type: "CALL", ...call }));
+  }
+
+  private annaCallHistory(item: any, record?: any): LoyaltyCallView[] {
+    const sourceCalls = this.annaCalls(item, record, false);
+    const workflowHistory = Array.isArray(record?.__workflowCalls?.history)
+      ? record.__workflowCalls.history
+      : [];
+    return [...sourceCalls, ...workflowHistory].sort((left, right) =>
+      this.callSortKey(right).localeCompare(this.callSortKey(left)),
+    );
+  }
+
+  private callSortKey(call: LoyaltyCallView): string {
+    const exact = this.isoDateTime(call.occurredAt || call.date);
+    if (exact) return exact;
+    return (
+      dateOnly(call.date) ||
+      (call.period && /^\d{4}-\d{2}$/.test(call.period)
+        ? `${call.period}-31`
+        : "") ||
+      ""
+    );
+  }
+
+  private lastCall(calls: LoyaltyCallView[]): LoyaltyCallView | null {
+    return (
+      [...calls]
+        .filter((call) => this.callSortKey(call))
+        .sort((left, right) =>
+          this.callSortKey(right).localeCompare(this.callSortKey(left)),
+        )[0] || null
+    );
+  }
+
+  private calendarMonthBounds(month: string): {
+    from: string;
+    to: string;
+  } | null {
+    if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(month)) return null;
+    const [year, monthNumber] = month.split("-").map(Number);
+    const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+    return {
+      from: `${month}-01`,
+      to: `${month}-${String(lastDay).padStart(2, "0")}`,
+    };
+  }
+
+  private completeCalendarMonths(period: LoyaltyFilterPeriod): string[] | null {
+    const fromDate = period.fromIso.slice(0, 10);
+    const toDate = period.toIso.slice(0, 10);
+    const fromMonth = fromDate.slice(0, 7);
+    const toMonth = toDate.slice(0, 7);
+    const fromBounds = this.calendarMonthBounds(fromMonth);
+    const toBounds = this.calendarMonthBounds(toMonth);
+    if (
+      !fromBounds ||
+      !toBounds ||
+      fromDate !== fromBounds.from ||
+      toDate !== toBounds.to
+    ) {
+      return null;
+    }
+    const [fromYear, fromNumber] = fromMonth.split("-").map(Number);
+    const [toYear, toNumber] = toMonth.split("-").map(Number);
+    const first = fromYear * 12 + fromNumber - 1;
+    const last = toYear * 12 + toNumber - 1;
+    if (last < first || last - first > 60) return null;
+    return Array.from({ length: last - first + 1 }, (_, offset) => {
+      const index = first + offset;
+      return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}`;
+    });
+  }
+
+  private exactActivityObservedThrough(item: any): Date | null {
+    if (item?.metricSource?.kind !== "EXACT_ACTIVITIES") return null;
+    const value = new Date(item.metricSource.observedThrough || "");
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+
+  private exactActivityPeriodCovered(
+    item: any,
+    period: LoyaltyFilterPeriod,
+  ): boolean {
+    const observedThrough = this.exactActivityObservedThrough(item);
+    return Boolean(
+      observedThrough && period.to.getTime() <= observedThrough.getTime(),
+    );
+  }
+
+  private currentMonthThroughObserved(item: any): LoyaltyFilterPeriod | null {
+    const observedThrough = this.exactActivityObservedThrough(item);
+    if (!observedThrough) return null;
+    const now = new Date();
+    const range = moscowCurrentMonthRange(now);
+    const to = new Date(
+      Math.min(now.getTime(), observedThrough.getTime(), range.to.getTime()),
+    );
+    if (to.getTime() < range.from.getTime()) return null;
+    const parts = moscowDateParts(to);
+    const month = String(parts.month + 1).padStart(2, "0");
+    const day = String(Number(parts.dayMonth.slice(0, 2))).padStart(2, "0");
+    return {
+      from: range.from,
+      to,
+      fromIso: `${parts.year}-${month}-01`,
+      toIso: `${parts.year}-${month}-${day}`,
+    };
+  }
+
+  private isAnnaNotCalledCurrentMonth(record: any, item: any): boolean {
+    const period = this.currentMonthThroughObserved(item);
+    if (!period) return false;
+    const exactCallCount =
+      item.metricSource?.kind === "EXACT_ACTIVITIES"
+        ? this.annaMetricValue(item, "calls")
+        : null;
+    return (
+      this.callPresenceInPeriod(
+        this.annaCalls(item, record),
+        exactCallCount,
+        period,
+        this.exactActivityObservedThrough(item),
+      ) === false
+    );
+  }
+
+  private callInPeriod(
+    call: LoyaltyCallView,
+    period: LoyaltyFilterPeriod,
+  ): boolean | null {
+    const date = dateOnly(call.date);
+    if (date)
+      return (
+        date >= period.fromIso.slice(0, 10) && date <= period.toIso.slice(0, 10)
+      );
+    if (call.period && /^\d{4}-\d{2}$/.test(call.period)) {
+      const bounds = this.calendarMonthBounds(call.period);
+      if (!bounds) return null;
+      const from = period.fromIso.slice(0, 10);
+      const to = period.toIso.slice(0, 10);
+      if (to < bounds.from || from > bounds.to) return false;
+      return from <= bounds.from && to >= bounds.to ? true : null;
+    }
+    return null;
+  }
+
+  private callPresenceInPeriod(
+    calls: LoyaltyCallView[],
+    knownCallCount: number | null,
+    period: LoyaltyFilterPeriod,
+    observedThrough?: Date | null,
+  ): boolean | null {
+    const states = calls.map((call) => this.callInPeriod(call, period));
+    if (states.includes(true)) return true;
+    if (observedThrough && period.to.getTime() > observedThrough.getTime()) {
+      return null;
+    }
+    if (knownCallCount === 0) return false;
+    if (
+      knownCallCount !== null &&
+      states.length &&
+      states.every((state) => state !== null)
+    )
+      return false;
+    return null;
+  }
+
+  private annaDealsInPeriod(
+    record: any,
+    item: any,
+    period: LoyaltyFilterPeriod,
+  ): number | null {
+    if (item.metricSource?.kind === "EXACT_ACTIVITIES") {
+      if (!this.exactActivityPeriodCovered(item, period)) return null;
+      if (!Array.isArray(record.activities)) {
+        return this.annaMetricValue(item, "deals") === 0 ? 0 : null;
+      }
+      return record.activities.filter((activity: any) => {
+        const occurredAt = dateOnly(activity.occurredAt);
+        return (
+          activity.type === "DEAL" &&
+          occurredAt !== null &&
+          occurredAt >= period.fromIso.slice(0, 10) &&
+          occurredAt <= period.toIso.slice(0, 10)
+        );
+      }).length;
+    }
+    const byMonth = item.sourceReportedMetrics?.dealsByMonth;
+    if (byMonth && typeof byMonth === "object" && !Array.isArray(byMonth)) {
+      const months = this.completeCalendarMonths(period);
+      if (!months) return null;
+      let total = 0;
+      for (const month of months) {
+        if (!Object.prototype.hasOwnProperty.call(byMonth, month)) return null;
+        const count = finiteNumber(byMonth[month]);
+        if (count === null || count < 0) return null;
+        total += count;
+      }
+      return total;
+    }
+    const lifetimeDeals = finiteNumber(item.sourceReportedMetrics?.deals);
+    if (lifetimeDeals === null || lifetimeDeals < 0) return null;
+    if (lifetimeDeals === 0) return 0;
+    const lastDealAt = dateOnly(item.sourceReportedMetrics?.lastDealAt);
+    if (!lastDealAt) return null;
+    const from = period.fromIso.slice(0, 10);
+    const to = period.toIso.slice(0, 10);
+    // lastDealAt is the most recent lifetime deal. If it predates the period,
+    // no deal can exist inside it. If it is inside, we can prove presence but
+    // not the full period count, so expose the lower bound of one only.
+    if (lastDealAt < from) return 0;
+    if (lastDealAt <= to) return 1;
+    return null;
+  }
+
+  private annaActivityPresence(
+    record: any,
+    item: any,
+    type: string,
+    period?: LoyaltyFilterPeriod,
+  ): boolean | null {
+    if (
+      Array.isArray(record?.activities) &&
+      item.metricSource?.kind === "EXACT_ACTIVITIES"
+    ) {
+      const present = record.activities.some((activity: any) => {
+        if (activity.type !== type) return false;
+        if (!period) return true;
+        const occurredAt = dateOnly(activity.occurredAt);
+        return (
+          occurredAt !== null &&
+          occurredAt >= period.fromIso.slice(0, 10) &&
+          occurredAt <= period.toIso.slice(0, 10)
+        );
+      });
+      if (present) return true;
+      if (period && !this.exactActivityPeriodCovered(item, period)) return null;
+      return false;
+    }
+    if (type === "CALL" && period) {
+      const observedThrough = this.exactActivityObservedThrough(item);
+      return this.callPresenceInPeriod(
+        this.annaCalls(item, record),
+        item.metricSource?.kind === "EXACT_ACTIVITIES"
+          ? this.annaMetricValue(item, "calls")
+          : finiteNumber(item.sourceReportedMetrics?.calls),
+        period,
+        observedThrough,
+      );
+    }
+    if (type === "DEAL" && period) {
+      const count = this.annaDealsInPeriod(record, item, period);
+      return count === null ? null : count > 0;
+    }
+    const fields: Record<string, [string, string]> = {
+      FIXATION: ["fixations", "lastFixationAt"],
+      MEETING: ["meetings", "lastMeetingAt"],
+      DEAL: ["deals", "lastDealAt"],
+      BROKER_TOUR: ["brokerTours", "brokerTourAt"],
+      CALL: ["calls", "lastCallAt"],
+    };
+    const mapping = fields[type];
+    if (!mapping) return null;
+    const total = this.annaMetricValue(item, mapping[0]);
+    if (total === null) return null;
+    if (item.metricSource?.kind === "EXACT_ACTIVITIES") {
+      if (period && !this.exactActivityPeriodCovered(item, period)) return null;
+      if (total === 0) return false;
+      if (!period) return true;
+      return null;
+    }
+    if (!period) return total > 0 ? true : total === 0 ? false : null;
+    if (total === 0) return false;
+    if (total < 0) return null;
+    const last = dateOnly(item.sourceReportedMetrics?.[mapping[1]]);
+    if (!last) return null;
+    return last >= period.fromIso.slice(0, 10) &&
+      last <= period.toIso.slice(0, 10)
+      ? true
+      : null;
+  }
+
+  private unavailablePeriodMetrics(period?: LoyaltyFilterPeriod) {
+    return {
+      period: period ? { from: period.fromIso, to: period.toIso } : null,
+      availability: "UNAVAILABLE",
+      fixations: null,
+      meetings: null,
+      deals: null,
+      dealAmount: null,
+      lastFixationAt: null,
+      lastMeetingAt: null,
+      lastDealAt: null,
+    };
+  }
+
+  private annaPeriodMetrics(
+    record: any,
+    item: any,
+    period?: LoyaltyFilterPeriod,
+  ) {
+    if (
+      !period ||
+      item.metricSource?.kind !== "EXACT_ACTIVITIES" ||
+      !this.exactActivityPeriodCovered(item, period)
+    ) {
+      return this.unavailablePeriodMetrics(period);
+    }
+    if (!Array.isArray(record?.activities)) {
+      const fields = ["fixations", "meetings", "deals", "brokerTours", "calls"];
+      if (fields.every((field) => this.annaMetricValue(item, field) === 0)) {
+        return {
+          period: { from: period.fromIso, to: period.toIso },
+          availability: "EXACT",
+          fixations: 0,
+          meetings: 0,
+          deals: 0,
+          dealAmount: "0.00",
+          lastFixationAt: null,
+          lastMeetingAt: null,
+          lastDealAt: null,
+        };
+      }
+      return this.unavailablePeriodMetrics(period);
+    }
+    const rows = record.activities.filter((activity: any) => {
+      const occurredAt = dateOnly(activity.occurredAt);
+      return (
+        occurredAt !== null &&
+        occurredAt >= period.fromIso.slice(0, 10) &&
+        occurredAt <= period.toIso.slice(0, 10)
+      );
+    });
+    const forType = (type: string) =>
+      rows.filter((activity: any) => activity.type === type);
+    const lastDate = (type: string) => {
+      const values = forType(type)
+        .map((activity: any) => dateOnly(activity.occurredAt))
+        .filter(Boolean) as string[];
+      return values.sort().at(-1) || null;
+    };
+    const dealRows = forType("DEAL");
+    const dealAmount = centsToMoney(
+      dealRows.reduce(
+        (sum: bigint, activity: any) =>
+          sum + moneyToCents(String(activity.amount || "0")),
+        0n,
+      ),
+    );
+    return {
+      period: { from: period.fromIso, to: period.toIso },
+      availability: "EXACT",
+      fixations: forType("FIXATION").length,
+      meetings: forType("MEETING").length,
+      deals: dealRows.length,
+      dealAmount,
+      lastFixationAt: lastDate("FIXATION"),
+      lastMeetingAt: lastDate("MEETING"),
+      lastDealAt: lastDate("DEAL"),
+    };
+  }
+
+  private annaSpecializations(attributes: any): string[] {
+    const raw = Array.isArray(attributes?.specialization)
+      ? attributes.specialization
+      : hasText(attributes?.specialization)
+        ? String(attributes.specialization).split(/[;,\n]+/)
+        : [];
+    return uniqueSorted(
+      raw.flatMap((entry: unknown) => {
+        const value = String(entry || "").trim();
+        if (
+          [
+            "Бизнес-класс",
+            "Премиум",
+            "Элитная",
+            "Региональный брокер",
+          ].includes(value)
+        ) {
+          return ["Бизнес / премиум"];
+        }
+        if (value === "Вторичка бизнес+") return ["Вторичка"];
+        if (["Инвестиции", "Коммерция / офисы", "Коммерция"].includes(value)) {
+          return ["Коммерция — аренда", "Коммерция — продажа"];
+        }
+        return value ? [value] : [];
+      }),
+    );
+  }
+
+  private annaWorkFormat(attributes: any): string | null {
+    const role = String(attributes?.role || "").trim();
+    const sources = Array.isArray(attributes?.sources)
+      ? attributes.sources.map(String)
+      : [];
+    if (role === "Координатор" || sources.includes("Координаторы")) {
+      return "Координатор";
+    }
+    if (hasText(attributes?.workFormat)) return String(attributes.workFormat);
+    if (hasText(attributes?.company)) return "Агентство";
+    return role || hasText(attributes?.specialization)
+      ? "Частный брокер"
+      : null;
+  }
+
+  private annaStage(attributes: any, entityType: EntityType): string {
+    const raw = String(
+      entityType === "AGENCY"
+        ? attributes?.partnershipStatus || attributes?.stage || ""
+        : attributes?.stage || "",
+    ).trim();
+    const normalized = lower(raw).replace(/[\s_-]+/g, " ");
+    if (entityType === "BROKER") {
+      if (["vip", "repeat deals", "repeat deal"].includes(normalized)) {
+        return "Повторные сделки / VIP";
+      }
+      if (["bt", "broker tour", "was at bt"].includes(normalized)) {
+        return "Был на БТ";
+      }
+      if (["contact", "called"].includes(normalized)) return "Звонили";
+      if (["new", "new broker"].includes(normalized)) return "Новый";
+    }
+    return raw;
+  }
+
+  private annaBrokerTour(item: any, entityType: EntityType): boolean | null {
+    const attributes = item.attributes || {};
+    const reported = item.sourceReportedMetrics?.brokerTourVisited;
+    if (typeof reported === "boolean") return reported;
+    if (
+      truthyText(attributes.btAttended) ||
+      hasText(attributes.btDate) ||
+      ["Был на БТ", "БТ проведён"].includes(
+        this.annaStage(attributes, entityType),
+      )
+    ) {
+      return true;
+    }
+    const count = this.annaMetricValue(item, "brokerTours");
+    return count === null ? null : count > 0;
+  }
+
+  private annaProjectStatus(value: unknown): string | null {
+    if (typeof value === "boolean") return value ? "YES" : "NO";
+    const normalized = lower(value);
+    if (["да", "yes", "true", "размещены"].includes(normalized)) return "YES";
+    if (["нет", "no", "false", "не размещены"].includes(normalized)) {
+      return "NO";
+    }
+    if (["в процессе", "in progress", "in_progress"].includes(normalized)) {
+      return "IN_PROGRESS";
+    }
+    return null;
+  }
+
+  private annaStatusCodes(
+    item: any,
+    entityType: EntityType,
+    record?: any,
+  ): string[] {
+    const fixations = this.annaMetricValue(item, "fixations");
+    const meetings = this.annaMetricValue(item, "meetings");
+    const deals = this.annaMetricValue(item, "deals");
+    const bt = this.annaBrokerTour(item, entityType);
+    const calls = this.annaCalls(item, record);
+    const lastCall = this.lastCall(calls);
+    const lastActivity = this.annaDormancyLastActivity(item, record);
+    const inactiveDays = daysSinceDate(lastActivity);
+    const hadActivity =
+      [fixations, meetings, deals].some(
+        (value) => value !== null && value > 0,
+      ) ||
+      bt === true ||
+      Boolean(lastCall) ||
+      (this.annaMetricValue(item, "calls") || 0) > 0;
+    let primary: string | null;
+    if (hadActivity && inactiveDays !== null && inactiveDays > 90) {
+      primary = entityType === "BROKER" ? "DORMANT" : "DORMANT_PARTNER";
+    } else if (entityType === "BROKER") {
+      primary =
+        deals !== null && deals >= 3
+          ? "TOP_SELLER"
+          : deals !== null && deals >= 1
+            ? "SELLER"
+            : meetings !== null && meetings > 0
+              ? "OFFERING"
+              : fixations !== null && fixations > 0
+                ? "FIXATING"
+                : bt === true
+                  ? "BROKER_TOUR"
+                  : deals === 0 &&
+                      meetings === 0 &&
+                      fixations === 0 &&
+                      bt === false
+                    ? "NEW"
+                    : null;
+    } else {
+      const stage = this.annaStage(item.attributes || {}, entityType);
+      const lastResult = String(lastCall?.result || "");
+      primary =
+        deals !== null && deals >= 5
+          ? "VIP_PARTNER"
+          : deals !== null && deals >= 1
+            ? "SELLING_PARTNER"
+            : meetings !== null && meetings > 0
+              ? "ACTIVE_PARTNER"
+              : fixations !== null && fixations > 0
+                ? "FIXATING_PARTNER"
+                : bt === true
+                  ? "WARM_PARTNER"
+                  : [
+                        "Установлен контакт",
+                        "Назначена встреча",
+                        "Согласован БТ",
+                      ].includes(stage) ||
+                      [
+                        "Есть договорённости",
+                        "Договорились о сотрудничестве",
+                        "Перезвонить",
+                        "Отправить информацию",
+                      ].includes(lastResult)
+                    ? "STARTING_PARTNER"
+                    : deals === 0 &&
+                        meetings === 0 &&
+                        fixations === 0 &&
+                        bt === false
+                      ? "NEW_AGENCY"
+                      : null;
+    }
+    const result = primary ? [primary] : [];
+    if (entityType === "BROKER" && bt === true && primary !== "BROKER_TOUR") {
+      result.push("BROKER_TOUR");
+    }
+    return result;
+  }
+
+  private annaDataQualityCodes(item: any, entityType: EntityType): string[] {
+    const hasPhone = (item.contactPoints || []).some(
+      (point: any) =>
+        point.type === "PHONE" &&
+        normalizeLoyaltyContactPoint("PHONE", point.value),
+    );
+    const hasAmo = (item.externalIdentities || []).some(
+      (identity: any) => identity.system === "AMOCRM",
+    );
+    const quality = lower(item.attributes?.dataQuality);
+    const conflict =
+      /conflict|конфликт|дубл|несколько/.test(quality) ||
+      item.attributes?.membership === "ambiguous";
+    const nameComplete =
+      entityType === "AGENCY" ||
+      String(item.displayName || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length >= 2;
+    const full = hasPhone && hasAmo && nameComplete && !conflict;
+    return uniqueSorted([
+      full ? "FULL" : "NEEDS_COMPLETION",
+      !hasAmo || /не найден|not found/.test(quality)
+        ? "NOT_FOUND_IN_CRM"
+        : undefined,
+      conflict ? "CONFLICT" : undefined,
+    ]);
+  }
+
+  private annaLastActivity(item: any, record?: any): string | null {
+    const calls = this.annaCalls(item, record);
+    const values = [
+      this.callSortKey(this.lastCall(calls) || {}),
+      ...(Array.isArray(record?.activities)
+        ? record.activities.map((activity: any) => activity.occurredAt)
+        : []),
+      item.sourceReportedMetrics?.brokerTourAt,
+      item.sourceReportedMetrics?.lastFixationAt,
+      item.sourceReportedMetrics?.lastMeetingAt,
+      item.sourceReportedMetrics?.lastDealAt,
+      item.attributes?.lastAgencyMeetingDate,
+      item.attributes?.lastContractDate,
+      ...(Array.isArray(record?.__workflowEvents?.effective)
+        ? record.__workflowEvents.effective.map(
+            (event: LoyaltyEngagementView) => event.occurredAt,
+          )
+        : []),
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    return values.sort().at(-1) || null;
+  }
+
+  private annaDormancyLastActivity(item: any, record?: any): string | null {
+    const calls = this.annaCalls(item, record);
+    const values = [
+      this.callSortKey(this.lastCall(calls) || {}),
+      ...(Array.isArray(record?.activities)
+        ? record.activities.map((activity: any) => activity.occurredAt)
+        : []),
+      item.sourceReportedMetrics?.brokerTourAt,
+      item.sourceReportedMetrics?.lastFixationAt,
+      item.sourceReportedMetrics?.lastMeetingAt,
+      item.sourceReportedMetrics?.lastDealAt,
+      item.attributes?.lastAgencyMeetingDate,
+      item.attributes?.lastContractDate,
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    return values.sort().at(-1) || null;
+  }
+
+  private matchesAnnaRecord(
+    record: any,
+    item: any,
+    entityType: EntityType,
+    filter: CanonicalLoyaltyFilter,
+    search?: string,
+  ): boolean {
+    const attributes = item.attributes || {};
+    const calls = this.annaCalls(item, record);
+    const callCount = this.annaMetricValue(item, "calls");
+    const exactCallCount =
+      item.metricSource?.kind === "EXACT_ACTIVITIES" ? callCount : null;
+    const exactObservedThrough = this.exactActivityObservedThrough(item);
+    const fixations = this.annaMetricValue(item, "fixations");
+    const meetings = this.annaMetricValue(item, "meetings");
+    const deals = this.annaMetricValue(item, "deals");
+    const brokerTours = this.annaMetricValue(item, "brokerTours");
+    const bt = this.annaBrokerTour(item, entityType);
+    const assignee = String(attributes.assignee || "").trim();
+    const stage = this.annaStage(attributes, entityType);
+    const specializations = this.annaSpecializations(attributes);
+    const workFormat = this.annaWorkFormat(attributes);
+    const projectStatus = this.annaProjectStatus(attributes.projectsOnSite);
+    const statusCodes = this.annaStatusCodes(item, entityType, record);
+    const dataQualityCodes = this.annaDataQualityCodes(item, entityType);
+    const latestCall = this.lastCall(calls);
+    const callAssignees = uniqueSorted(
+      calls.flatMap((call) => this.callAssigneeValues(call)),
+    );
+    const assignees = uniqueSorted([
+      assignee,
+      attributes.assigneeId,
+      ...callAssignees,
+    ]);
+    item.computedStatuses = statusCodes;
+    item.dataQualityCodes = dataQualityCodes;
+    item.lastActivityAt = this.annaLastActivity(item, record);
+    item.periodMetrics = this.annaPeriodMetrics(
+      record,
+      item,
+      filter.activityPeriod,
+    );
+    item.lastCallAt = latestCall
+      ? latestCall.occurredAt || this.callSortKey(latestCall) || null
+      : null;
+    item.lastCallResult = latestCall
+      ? this.resultCodeForValue(entityType, latestCall.result)
+      : null;
+    item.lastCallCampaign = latestCall?.campaign || null;
+    item.lastCallCampaignId = latestCall?.campaignId || null;
+    item.lastCallCampaignName = latestCall?.campaignName || null;
+    item.lastCallOperator = latestCall?.employee || null;
+    item.lastCallOperatorId = latestCall?.employeeId || null;
+    item.lastCallComment = latestCall?.comment || latestCall?.agreement || null;
+    item.lastCallNextStep = latestCall?.nextStep || null;
+    item.lastCallNextActionAt = latestCall?.nextActionAt || null;
+    if (latestCall?.employee || latestCall?.employeeId) {
+      item.assignee = {
+        id: latestCall.employeeId || null,
+        name: latestCall.employeeName || latestCall.employee || null,
+      };
+    }
+    item.normalizedSpecializations = specializations;
+    item.normalizedWorkFormat = workFormat;
+    item.normalizedStage = stage;
+
+    if (filter.city && lower(item.city) !== lower(filter.city)) return false;
+    if (search) {
+      const normalizedPhone = normalizeLoyaltyContactPoint("PHONE", search);
+      const haystack = [
+        item.displayName,
+        item.city,
+        item.taxId,
+        attributes.company,
+        ...(Array.isArray(attributes.aliases) ? attributes.aliases : []),
+        ...(Array.isArray(attributes.companyAliases)
+          ? attributes.companyAliases
+          : []),
+        ...(item.agencies || []).map((agency: any) => agency.displayName),
+        ...(item.brokers || []).map((broker: any) => broker.displayName),
+        ...(attributes.agencyContacts || []).flatMap((contact: any) => [
+          contact?.name,
+          contact?.email,
+          contact?.phone,
+        ]),
+        ...(item.contactPoints || []).flatMap((point: any) => [
+          point.value,
+          point.maskedValue,
+        ]),
+      ]
+        .map(lower)
+        .join(" ");
+      const phoneMatch =
+        normalizedPhone &&
+        (item.contactPoints || []).some(
+          (point: any) =>
+            point.type === "PHONE" &&
+            normalizeLoyaltyContactPoint("PHONE", point.value) ===
+              normalizedPhone,
+        );
+      if (!phoneMatch && !haystack.includes(lower(search))) return false;
+    }
+    if (filter.activityType) {
+      if (
+        this.annaActivityPresence(
+          record,
+          item,
+          filter.activityType,
+          filter.activityPeriod,
+        ) !== true
+      )
+        return false;
+    }
+    if (entityType === "BROKER" && filter.segment) {
+      if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
+        if (!this.isAnnaNotCalledCurrentMonth(record, item)) return false;
+      }
+      if (
+        filter.segment === "NEW_BROKER" &&
+        (!statusCodes.includes("NEW") ||
+          !hasLoyaltyAcquisitionPhone(item.contactPoints || []))
+      )
+        return false;
+      if (
+        filter.segment === "BT_WITHOUT_FIXATION" &&
+        !(bt === true && fixations === 0)
+      )
+        return false;
+      if (
+        filter.segment === "BIRTHDAY_TODAY" &&
+        annaBirthday(attributes) !== moscowDateParts().dayMonth
+      )
+        return false;
+    }
+    if (filter.campaignIds.length) {
+      const aliases = this.campaignAliases(filter.campaignIds).map(lower);
+      const matchingCalls = filter.callPeriod
+        ? calls.filter(
+            (call) => this.callInPeriod(call, filter.callPeriod!) === true,
+          )
+        : calls;
+      if (
+        !matchingCalls.some((call) =>
+          this.callCampaignValues(call).some((value) =>
+            aliases.includes(lower(value)),
+          ),
+        )
+      )
+        return false;
+    }
+    if (filter.lastCallResults.length) {
+      const aliases = this.resultAliases(
+        entityType,
+        filter.lastCallResults,
+      ).map(lower);
+      const campaignAliases = this.campaignAliases(filter.campaignIds).map(
+        lower,
+      );
+      const eligibleCalls = calls.filter(
+        (call) =>
+          (!filter.callPeriod ||
+            this.callInPeriod(call, filter.callPeriod) === true) &&
+          (!campaignAliases.length ||
+            this.callCampaignValues(call).some((value) =>
+              campaignAliases.includes(lower(value)),
+            )),
+      );
+      const latest = this.lastCall(eligibleCalls);
+      if (!latest || !aliases.includes(lower(latest.result))) return false;
+    }
+    if (filter.called !== undefined) {
+      const presence = this.callPresenceInPeriod(
+        calls,
+        exactCallCount,
+        filter.callPeriod!,
+        exactObservedThrough,
+      );
+      if (presence === null || presence !== filter.called) return false;
+    }
+    if (
+      filter.assigneeIds.length &&
+      !filter.assigneeIds.some((value) => assignees.includes(value))
+    )
+      return false;
+    if (filter.unassigned === true && assignees.length) return false;
+    if (
+      filter.specializations.length &&
+      !filter.specializations.some((value) => specializations.includes(value))
+    )
+      return false;
+    if (filter.geography.length) {
+      const geography = explicitGeography([item.city, attributes.region]);
+      if (!geography || !filter.geography.includes(geography)) return false;
+    }
+    if (
+      filter.workFormats.length &&
+      !filter.workFormats.includes(String(workFormat || ""))
+    )
+      return false;
+    if (
+      filter.relationshipStages.length &&
+      !filter.relationshipStages.includes(stage)
+    )
+      return false;
+    if (
+      filter.brokerStatuses.length &&
+      !filter.brokerStatuses.some((value) => statusCodes.includes(value))
+    )
+      return false;
+    if (
+      filter.dataQuality.length &&
+      !filter.dataQuality.some((value) => dataQualityCodes.includes(value))
+    )
+      return false;
+    if (
+      filter.dealCount.min !== undefined &&
+      (deals === null || deals < filter.dealCount.min)
+    )
+      return false;
+    if (
+      filter.dealCount.max !== undefined &&
+      (deals === null || deals > filter.dealCount.max)
+    )
+      return false;
+    if (filter.dealsInPeriod !== undefined) {
+      const count = this.annaDealsInPeriod(
+        record,
+        item,
+        filter.activityPeriod!,
+      );
+      if (count === null || count > 0 !== filter.dealsInPeriod) return false;
+    }
+    if (filter.bt !== undefined && (bt === null || bt !== filter.bt))
+      return false;
+    if (
+      filter.meetings.min !== undefined &&
+      (meetings === null || meetings < filter.meetings.min)
+    )
+      return false;
+    if (
+      filter.meetings.max !== undefined &&
+      (meetings === null || meetings > filter.meetings.max)
+    )
+      return false;
+    if (
+      filter.partnershipStatuses.length &&
+      !filter.partnershipStatuses.includes(stage)
+    )
+      return false;
+    if (
+      filter.agencySizes.length &&
+      !filter.agencySizes.includes(String(attributes.agencySize || ""))
+    )
+      return false;
+    if (
+      filter.websitePresent !== undefined &&
+      hasText(attributes.website) !== filter.websitePresent
+    )
+      return false;
+    if (filter.projectsOnSite.length) {
+      if (!projectStatus || !filter.projectsOnSite.includes(projectStatus)) {
+        return false;
+      }
+    }
+    const workflowEvents: LoyaltyEngagementView[] = Array.isArray(
+      record?.__workflowEvents?.effective,
+    )
+      ? record.__workflowEvents.effective
+      : [];
+    const sourceHasIndividualTerms =
+      hasText(attributes.specialTerms) ||
+      ["Предложены", "Согласованы", "Действуют"].includes(
+        String(attributes.specialTermsStatus || ""),
+      );
+    const hasIndividualTerms =
+      sourceHasIndividualTerms ||
+      workflowEvents.some((event) => event.type === "INDIVIDUAL_TERMS");
+    const sourceSpecialTermsProposed =
+      String(attributes.specialTermsStatus || "") === "Предложены" ||
+      (Array.isArray(attributes.recognitions) &&
+        attributes.recognitions.some((recognition: any) =>
+          /индивидуальн.*услов|спец.*услов/i.test(
+            String(recognition?.type || recognition?.name || ""),
+          ),
+        ));
+    const specialTermsProposed =
+      sourceSpecialTermsProposed ||
+      workflowEvents.some((event) => event.type === "INDIVIDUAL_TERMS");
+    if (
+      filter.individualTerms !== undefined &&
+      hasIndividualTerms !== filter.individualTerms
+    )
+      return false;
+    if (
+      filter.specialTermsProposed !== undefined &&
+      specialTermsProposed !== filter.specialTermsProposed
+    )
+      return false;
+    const sourceHasReward =
+      Array.isArray(attributes.recognitions) &&
+      attributes.recognitions.length > 0;
+    const hasReward =
+      sourceHasReward || workflowEvents.some((event) => event.type === "AWARD");
+    if (
+      filter.rewardPresent !== undefined &&
+      hasReward !== filter.rewardPresent
+    )
+      return false;
+    if (filter.staleDays !== undefined) {
+      const days = daysSinceDate(item.lastActivityAt);
+      if (days === null || days < filter.staleDays) return false;
+    }
+    if (
+      !this.matchesColumnFilters(filter, {
+        hasPhone: (item.contactPoints || []).some(
+          (point: any) =>
+            point.type === "PHONE" &&
+            normalizeLoyaltyContactPoint("PHONE", point.value) !== null,
+        ),
+        statuses: statusCodes,
+        bt,
+        fixations,
+        meetings,
+        callPresence: filter.callPeriod
+          ? this.callPresenceInPeriod(
+              calls,
+              exactCallCount,
+              filter.callPeriod,
+              exactObservedThrough,
+            )
+          : null,
+        assignees,
+        deals,
+      })
+    )
+      return false;
+    if (
+      filter.scenario &&
+      !this.matchesScenario(filter.scenario, {
+        callPresence: filter.callPeriod
+          ? this.callPresenceInPeriod(
+              calls,
+              exactCallCount,
+              filter.callPeriod,
+              exactObservedThrough,
+            )
+          : null,
+        bt,
+        fixations,
+        meetings,
+        deals,
+        assignee: assignees[0] || "",
+        stage,
+        projectsOnSite: projectStatus,
+        hasIndividualTerms,
+      })
+    )
+      return false;
+    return true;
+  }
+
+  private matchesScenario(scenario: string, value: any): boolean {
+    if (scenario === "NOT_CALLED_IN_PERIOD")
+      return value.callPresence === false;
+    if (scenario === "CALLED_IN_PERIOD") return value.callPresence === true;
+    if (scenario === "BT_DROPPED")
+      return (
+        value.bt === true &&
+        value.fixations === 0 &&
+        value.meetings === 0 &&
+        value.deals === 0
+      );
+    if (scenario === "BT_FIXATION_NO_MEETING")
+      return value.bt === true && value.fixations > 0 && value.meetings === 0;
+    if (scenario === "BT_MEETING_NO_DEAL")
+      return value.bt === true && value.meetings > 0 && value.deals === 0;
+    if (scenario === "NEW_NO_BT")
+      return (
+        value.bt === false && ["Новый", "NEW_BROKER"].includes(value.stage)
+      );
+    if (scenario === "HAS_DEALS")
+      return value.deals !== null && value.deals > 0;
+    if (scenario === "UNASSIGNED") return !value.assignee;
+    if (scenario === "BT_VISITED") return value.bt === true;
+    if (scenario === "BT_NOT_VISITED") return value.bt === false;
+    if (scenario === "SITE_PLACED") return value.projectsOnSite === "YES";
+    if (scenario === "SITE_NOT_PLACED")
+      return ["NO", "IN_PROGRESS"].includes(value.projectsOnSite);
+    if (scenario === "INDIVIDUAL_TERMS")
+      return value.hasIndividualTerms === true;
+    if (scenario === "NO_INDIVIDUAL_TERMS")
+      return value.hasIndividualTerms === false;
+    if (scenario === "HAS_MEETINGS")
+      return value.meetings !== null && value.meetings > 0;
+    if (scenario === "NO_MEETINGS") return value.meetings === 0;
+    return false;
+  }
+
+  private matchesColumnFilters(
+    filter: CanonicalLoyaltyFilter,
+    value: {
+      hasPhone: boolean | null;
+      statuses: string[];
+      bt: boolean | null;
+      fixations: number | null;
+      meetings: number | null;
+      callPresence: boolean | null;
+      assignees: string[] | null;
+      deals: number | null;
+    },
+  ): boolean {
+    const columns = filter.columns;
+    if (columns.contact === "HAS_PHONE" && value.hasPhone !== true)
+      return false;
+    if (columns.contact === "NO_PHONE" && value.hasPhone !== false)
+      return false;
+    if (columns.statusStage && !value.statuses.includes(columns.statusStage))
+      return false;
+    if (columns.activity === "BT_VISITED" && value.bt !== true) return false;
+    if (columns.activity === "BT_NOT_VISITED" && value.bt !== false)
+      return false;
+    if (
+      columns.activity === "HAS_FIXATIONS" &&
+      !(value.fixations !== null && value.fixations > 0)
+    )
+      return false;
+    if (columns.activity === "NO_FIXATIONS" && value.fixations !== 0)
+      return false;
+    if (
+      columns.activity === "HAS_MEETINGS" &&
+      !(value.meetings !== null && value.meetings > 0)
+    )
+      return false;
+    if (columns.activity === "NO_MEETINGS" && value.meetings !== 0)
+      return false;
+    if (columns.calls === "CALLED_IN_PERIOD" && value.callPresence !== true)
+      return false;
+    if (
+      columns.calls === "NOT_CALLED_IN_PERIOD" &&
+      value.callPresence !== false
+    )
+      return false;
+    if (
+      columns.assignee === "UNASSIGNED" &&
+      (value.assignees === null || value.assignees.length > 0)
+    )
+      return false;
+    if (
+      columns.assignee &&
+      columns.assignee !== "UNASSIGNED" &&
+      (value.assignees === null || !value.assignees.includes(columns.assignee))
+    )
+      return false;
+    if (
+      columns.deals === "HAS_DEALS" &&
+      !(value.deals !== null && value.deals > 0)
+    )
+      return false;
+    if (columns.deals === "NO_DEALS" && value.deals !== 0) return false;
+    if (
+      columns.deals === "ONE_TO_TWO" &&
+      !(value.deals !== null && value.deals >= 1 && value.deals <= 2)
+    )
+      return false;
+    if (
+      columns.deals === "ONE_TO_FOUR" &&
+      !(value.deals !== null && value.deals >= 1 && value.deals <= 4)
+    )
+      return false;
+    if (
+      columns.deals === "THREE_PLUS" &&
+      !(value.deals !== null && value.deals >= 3)
+    )
+      return false;
+    if (
+      columns.deals === "FIVE_PLUS" &&
+      !(value.deals !== null && value.deals >= 5)
+    )
+      return false;
+    return true;
+  }
+
+  private sortLoyaltyCandidates(
+    candidates: any[],
+    filter: CanonicalLoyaltyFilter,
+  ) {
+    const activityMetric = (item: any, field: string) =>
+      filter.activityPeriod
+        ? finiteNumber(item.periodMetrics?.[field])
+        : finiteNumber(
+            item.metrics?.[field] ?? item.sourceReportedMetrics?.[field],
+          );
+    const value = (item: any): string | number | null => {
+      if (filter.sortBy === "name") return item.displayName || null;
+      if (filter.sortBy === "city") return item.city || null;
+      if (filter.sortBy === "lastCallAt")
+        return (
+          item.lastCallAt || item.sourceReportedMetrics?.lastCallAt || null
+        );
+      if (filter.sortBy === "updatedAt") return item.updatedAt || null;
+      if (filter.sortBy === "brokerCount")
+        return finiteNumber(
+          item.attributes?.brokerCount ?? item.metrics?.brokers,
+        );
+      if (filter.sortBy === "rating")
+        return finiteNumber(item.attributes?.rating);
+      if (filter.sortBy === "dealAmount")
+        return activityMetric(item, "dealAmount");
+      const key: Record<string, string> = {
+        fixations: "fixations",
+        meetings: "meetings",
+        deals: "deals",
+        brokerTours: "brokerTours",
+      };
+      const field = key[filter.sortBy];
+      return field ? activityMetric(item, field) : null;
+    };
+    candidates.sort((leftCandidate, rightCandidate) => {
+      const left = value(leftCandidate.item);
+      const right = value(rightCandidate.item);
+      if (left === null && right === null)
+        return String(leftCandidate.item.id).localeCompare(
+          String(rightCandidate.item.id),
+        );
+      if (left === null) return 1;
+      if (right === null) return -1;
+      const comparison =
+        typeof left === "number" && typeof right === "number"
+          ? left - right
+          : String(left).localeCompare(String(right), "ru", {
+              numeric: true,
+              sensitivity: "base",
+            });
+      return filter.sortOrder === "desc" ? -comparison : comparison;
+    });
+  }
+
+  private loyaltyFacets(items: any[]) {
+    const count = (values: Array<string | null | undefined>) => {
+      const result = new Map<string, number>();
+      for (const value of values) {
+        const normalized = String(value || "").trim();
+        if (!normalized) continue;
+        result.set(normalized, (result.get(normalized) || 0) + 1);
+      }
+      return [...result.entries()]
+        .sort(([left], [right]) => left.localeCompare(right, "ru"))
+        .slice(0, 200)
+        .map(([value, matches]) => ({ value, matches }));
+    };
+    return {
+      cities: count(items.map((item) => item.city)),
+      assignees: count(
+        items.map((item) => item.attributes?.assignee ?? item.assignee?.name),
+      ),
+      specializations: count(
+        items.flatMap((item) =>
+          Array.isArray(item.normalizedSpecializations)
+            ? item.normalizedSpecializations
+            : Array.isArray(item.attributes?.specialization)
+              ? item.attributes.specialization
+              : item.specialization
+                ? [item.specialization]
+                : [],
+        ),
+      ),
+      stages: count(
+        items.map(
+          (item) =>
+            item.normalizedStage ||
+            item.attributes?.partnershipStatus ||
+            item.attributes?.stage ||
+            item.funnelStage,
+        ),
+      ),
+      workFormats: count(
+        items.map(
+          (item) => item.normalizedWorkFormat || item.attributes?.workFormat,
+        ),
+      ),
+      statuses: count(items.flatMap((item) => item.computedStatuses || [])),
+      dataQuality: count(items.flatMap((item) => item.dataQualityCodes || [])),
+      agencySizes: count(items.map((item) => item.attributes?.agencySize)),
+      campaigns: count(items.map((item) => item.lastCallCampaign)),
+      lastCallResults: count(items.map((item) => item.lastCallResult)),
+      engagementTypes: count(
+        items.flatMap((item) => item.engagementTypes || []),
+      ),
     };
   }
 
@@ -3312,6 +6343,10 @@ export class LoyaltyBaseService {
     return {
       person: {
         include: {
+          contactOverrides: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+          },
           links: {
             where: { status: "CONFIRMED", revokedAt: null },
             orderBy: { createdAt: "desc" },
@@ -3321,10 +6356,18 @@ export class LoyaltyBaseService {
       },
       organization: {
         include: {
+          contactOverrides: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+          },
           links: {
             where: { status: "CONFIRMED", revokedAt: null },
             orderBy: { createdAt: "desc" },
             take: 1,
+          },
+          contactPeople: {
+            where: { archivedAt: null },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
           },
           personRoles: {
             where: { validTo: null, sourceRecord: { snapshotId } },
@@ -3363,9 +6406,256 @@ export class LoyaltyBaseService {
     };
   }
 
-  private mapAnnaRecord(record: any, detailed: boolean) {
+  private annaManualEntityInclude(): any {
+    const confirmedLinks = {
+      where: { status: "CONFIRMED", revokedAt: null },
+      orderBy: { createdAt: "desc" },
+      take: 1,
+    };
+    return {
+      person: {
+        include: {
+          links: confirmedLinks,
+          contactOverrides: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+          },
+        },
+      },
+      organization: {
+        include: {
+          links: confirmedLinks,
+          contactOverrides: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
+          },
+          contactPeople: {
+            where: { archivedAt: null },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          },
+        },
+      },
+    };
+  }
+
+  /**
+   * Manual contacts are an overlay, never rows in an immutable snapshot. A
+   * stable entity that has since appeared in the active import is intentionally
+   * omitted here: the authoritative source row wins without double counting.
+   */
+  private async annaManualRecords(
+    datasetId: string,
+    snapshotId: string,
+    entityType: EntityType,
+    filter: CanonicalLoyaltyFilter,
+  ): Promise<any[]> {
+    if (filter.hasAmo === true) return [];
+    const delegate = (this.prisma as any).loyaltyManualEntity;
+    if (!delegate?.findMany) return [];
+    const relationName = entityType === "BROKER" ? "person" : "organization";
+    const relationWhere: any = {
+      sourceRecords: { none: { snapshotId } },
+    };
+    const where: any = { datasetId, entityType };
+    if (filter.archived === "exclude") {
+      where.archivedAt = null;
+      relationWhere.archivedAt = null;
+    } else if (filter.archived === "only") {
+      where.OR = [
+        { archivedAt: { not: null } },
+        { [relationName]: { is: { archivedAt: { not: null } } } },
+      ];
+    }
+    where[relationName] = { is: relationWhere };
+    const overlays =
+      (await delegate.findMany({
+        where,
+        include: this.annaManualEntityInclude(),
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      })) || [];
+    return overlays.map((overlay: any) =>
+      this.manualOverlayAsAnnaRecord(overlay),
+    );
+  }
+
+  private manualOverlayAsAnnaRecord(overlay: any): any {
+    const contactPoints = Array.isArray(overlay.contactPoints)
+      ? overlay.contactPoints
+      : [];
+    const attributes =
+      overlay.attributes && typeof overlay.attributes === "object"
+        ? overlay.attributes
+        : {};
+    return {
+      __manualOverlay: true,
+      id: overlay.id,
+      entityType: overlay.entityType,
+      displayName: overlay.displayName,
+      city: overlay.city,
+      taxId: null,
+      attributes: {
+        ...attributes,
+        source: "MANUAL",
+        dataQuality: "NEEDS_COMPLETION",
+        manualOverlay: true,
+      },
+      sourceArchivedAt: overlay.archivedAt,
+      person: overlay.person,
+      organization: overlay.organization
+        ? { ...overlay.organization, personRoles: [] }
+        : null,
+      contactPoints,
+      externalIdentities: [],
+      metrics: [],
+      sourceAggregate: null,
+      organizationRoles: [],
+      activities: [],
+      fieldValues: [],
+      manualOverlayId: overlay.id,
+      manualVersion: overlay.version,
+      manualCreatedAt: overlay.createdAt,
+      manualUpdatedAt: overlay.updatedAt,
+    };
+  }
+
+  private mapAnnaManualRecord(record: any, detailed: boolean): any {
+    const item = this.mapAnnaRecord(record, detailed);
+    item.sourceRecordId = null;
+    item.manualOverlay = true;
+    item.manualOverlayId = record.manualOverlayId;
+    item.version = record.manualVersion;
+    item.updatedAt = record.manualUpdatedAt || item.updatedAt;
+    if (detailed) {
+      item.provenance = [
+        {
+          fieldName: "manualOverlay",
+          sourceSystem: "MANUAL",
+          observedAt: record.manualCreatedAt,
+          lockedByUser: true,
+        },
+      ];
+    }
+    return item;
+  }
+
+  private annaContactPoints(record: any, entity: any) {
+    const byValue = new Map<string, any>();
+    for (const point of [
+      ...(Array.isArray(record.contactPoints) ? record.contactPoints : []),
+      ...(Array.isArray(entity?.contactOverrides)
+        ? entity.contactOverrides
+        : []),
+    ]) {
+      const normalized =
+        point.normalizedValue || point.normalized || point.value || "";
+      const key = `${point.type || "OTHER"}:${normalized}`;
+      byValue.set(key, {
+        id: point.id,
+        type: point.type,
+        value: point.value,
+        normalizedValue: normalized,
+        maskedValue: maskContact(point.type, point.value),
+        label: point.label,
+        isPrimary: point.isPrimary,
+        ...(point.version
+          ? {
+              version: point.version,
+              source: "MANUAL_OVERRIDE",
+              archivedAt: point.archivedAt || null,
+            }
+          : { source: "SNAPSHOT" }),
+      });
+    }
+    return [...byValue.values()].sort(
+      (left, right) =>
+        Number(Boolean(right.isPrimary)) - Number(Boolean(left.isPrimary)) ||
+        String(left.type).localeCompare(String(right.type), "ru"),
+    );
+  }
+
+  private annaAgencyContactPeople(record: any, attributes: any) {
+    const normalizePoints = (value: unknown) => {
+      const raw = Array.isArray(value) ? value : [];
+      return raw
+        .filter((point) => point && typeof point === "object")
+        .map((point: any) => ({
+          type: String(point.type || "OTHER"),
+          value: point.value === undefined ? null : String(point.value),
+          label: point.label === undefined ? null : String(point.label),
+          isPrimary: Boolean(point.isPrimary),
+        }));
+    };
+    const source = Array.isArray(attributes?.agencyContacts)
+      ? attributes.agencyContacts.map((contact: any, index: number) => {
+          const points = normalizePoints(contact?.contactPoints);
+          if (hasText(contact?.phone)) {
+            points.push({
+              type: "PHONE",
+              value: String(contact.phone),
+              label: null,
+              isPrimary: !points.some((point) => point.type === "PHONE"),
+            });
+          }
+          if (hasText(contact?.email)) {
+            points.push({
+              type: "EMAIL",
+              value: String(contact.email),
+              label: null,
+              isPrimary: !points.some((point) => point.type === "EMAIL"),
+            });
+          }
+          return {
+            id: contact?.id ? String(contact.id) : `source-contact-${index}`,
+            displayName:
+              String(contact?.displayName || contact?.name || "").trim() ||
+              null,
+            role: String(contact?.role || "").trim() || null,
+            actualityStatus:
+              String(contact?.actualityStatus || "SOURCE_REPORTED") ||
+              "SOURCE_REPORTED",
+            contactPoints: points,
+            source: "SNAPSHOT_ATTRIBUTE",
+          };
+        })
+      : [];
+    const manual = Array.isArray(record?.organization?.contactPeople)
+      ? record.organization.contactPeople.map((contact: any) => ({
+          id: String(contact.id),
+          displayName: String(contact.displayName || "").trim() || null,
+          role: String(contact.role || "").trim() || null,
+          actualityStatus: String(contact.actualityStatus || "CURRENT"),
+          contactPoints: normalizePoints(contact.contactPoints),
+          source: "MANUAL_OVERLAY",
+          version: contact.version,
+          createdAt: contact.createdAt,
+          updatedAt: contact.updatedAt,
+        }))
+      : [];
+    const byIdentity = new Map<string, any>();
+    for (const contact of [...source, ...manual]) {
+      const normalizedContacts = contact.contactPoints
+        .map((point: any) =>
+          normalizeLoyaltyContactPoint(point.type, point.value || ""),
+        )
+        .filter(Boolean)
+        .sort()
+        .join("|");
+      const key = `${lower(contact.displayName)}:${normalizedContacts}`;
+      // Manual overlays intentionally win over imported source attributes.
+      if (!byIdentity.has(key) || contact.source === "MANUAL_OVERLAY") {
+        byIdentity.set(key, contact);
+      }
+    }
+    return [...byIdentity.values()];
+  }
+
+  private mapAnnaRecord(
+    record: any,
+    detailed: boolean,
+    activityObservedThrough: string | null = null,
+  ) {
     const entity = record.person || record.organization;
-    const metricView = this.annaMetricView(record);
+    const metricView = this.annaMetricView(record, activityObservedThrough);
     const result: any = {
       id: entity?.id,
       sourceRecordId: record.id,
@@ -3379,18 +6669,12 @@ export class LoyaltyBaseService {
       },
       updatedAt: entity?.updatedAt || null,
       archivedAt: entity?.archivedAt || record.sourceArchivedAt,
-      contactPoints: (record.contactPoints || []).map((point: any) => ({
-        id: point.id,
-        type: point.type,
-        value: point.value,
-        maskedValue: maskContact(point.type, point.value),
-        label: point.label,
-        isPrimary: point.isPrimary,
-      })),
+      contactPoints: this.annaContactPoints(record, entity),
       externalIdentities: record.externalIdentities || [],
       metrics: metricView.metrics,
       metricSource: metricView.source,
       sourceReportedMetrics: metricView.sourceReported,
+      periodMetrics: this.unavailablePeriodMetrics(),
       linkedOurs: entity?.links?.[0]
         ? {
             type: entity.links[0].targetType,
@@ -3421,8 +6705,29 @@ export class LoyaltyBaseService {
         validTo: role.validTo,
       })),
     };
+    const canonicalCalls = this.annaCalls(result, record);
+    this.applyCallSummary(result, record.entityType, canonicalCalls);
+    this.applyEngagementSummary(result, record);
     if (detailed) {
       result.activities = record.activities || [];
+      const fullCallHistory = this.annaCallHistory(result, record);
+      result.calls = fullCallHistory;
+      result.callHistory = fullCallHistory;
+      result.attributes = {
+        ...result.attributes,
+        calls: fullCallHistory,
+      };
+      const engagementHistory = Array.isArray(record?.__workflowEvents?.history)
+        ? record.__workflowEvents.history
+        : [];
+      result.engagementEvents = engagementHistory;
+      result.loyaltyHistory = engagementHistory;
+      if (record.entityType === "AGENCY") {
+        result.agencyContactPeople = this.annaAgencyContactPeople(
+          record,
+          result.attributes,
+        );
+      }
       result.provenance = (record.fieldValues || []).map((field: any) => ({
         id: field.id,
         fieldName: field.fieldName,
@@ -3436,11 +6741,18 @@ export class LoyaltyBaseService {
     return result;
   }
 
-  private annaMetricView(record: any) {
+  private annaMetricView(
+    record: any,
+    activityObservedThrough: string | null = null,
+  ) {
     const exact = record.metrics?.[0] || null;
     const aggregate = record.sourceAggregate || null;
     const exactEvidenceCount = Number(exact?.activityEvidenceCount || 0);
-    const exactAvailable = exactEvidenceCount > 0;
+    // A metric row is materialized for every imported record. Under a trusted
+    // full-snapshot attestation, a row with zero event evidence is therefore
+    // an exact zero rather than missing data. Conversely, one event in a
+    // partial import never makes the remaining metrics exact.
+    const exactAvailable = Boolean(exact && activityObservedThrough);
     const sourceReported = aggregate
       ? {
           fixations:
@@ -3510,6 +6822,7 @@ export class LoyaltyBaseService {
           available: true,
           exactness: "EXACT",
           activityEvidenceCount: exactEvidenceCount,
+          observedThrough: activityObservedThrough,
           periodKind: "SNAPSHOT_LIFETIME",
           periodFilterApplied: false,
         },
@@ -3541,6 +6854,1756 @@ export class LoyaltyBaseService {
   private async listOurs(
     entityType: EntityType,
     query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
+    search?: string,
+    includeSelectionIds = false,
+  ) {
+    return entityType === "BROKER"
+      ? this.listOurBrokers(query, filter, search, includeSelectionIds)
+      : this.listOurAgencies(query, filter, search, includeSelectionIds);
+  }
+
+  private async listOurBrokers(
+    query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
+    search?: string,
+    includeSelectionIds = false,
+  ) {
+    const page = query.page || 1;
+    const pageSize = query.pageSize || 30;
+    const where: any = { role: "BROKER" };
+    const and: any[] = [];
+    if (filter.archived === "exclude") where.mergedIntoId = null;
+    if (filter.archived === "only") where.mergedIntoId = { not: null };
+    if (filter.city) {
+      const city = lower(filter.city);
+      if (city === "москва" || city === "msk") where.region = "MSK";
+      else if (["санкт-петербург", "спб", "spb"].includes(city))
+        where.region = "SPB";
+      else if (city === "регион") where.isRegional = true;
+      else where.region = { equals: filter.city, mode: "insensitive" };
+    }
+    if (filter.hasAmo !== undefined)
+      where.amoContactId = filter.hasAmo ? { not: null } : null;
+    if (filter.activityType)
+      and.push(
+        this.ourBrokerActivityFilter(
+          filter.activityType,
+          filter.activityPeriod,
+        ),
+      );
+    if (filter.segment === "NEW_BROKER") {
+      and.push({
+        status: "ACTIVE",
+        funnelStage: "NEW_BROKER",
+        brokerTourVisited: false,
+        brokerTourDate: null,
+        clients: { none: { fixationStatus: "FIXED" } },
+        meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
+        deals: { none: this.ourConfirmedDealWhere() },
+        callLogs: { none: {} },
+        loyaltyAssignmentsAsTarget: { none: { attempts: { some: {} } } },
+        lastCallAt: null,
+      });
+    } else if (filter.segment === "BT_WITHOUT_FIXATION") {
+      and.push({
+        brokerTourVisited: true,
+        clients: { none: { fixationStatus: "FIXED" } },
+      });
+    } else if (filter.segment === "BIRTHDAY_TODAY") {
+      and.push({ id: { in: await this.ourBirthdayBrokerIds() } });
+    }
+    if (search) {
+      const normalizedPhone = normalizeLoyaltyContactPoint("PHONE", search);
+      and.push({
+        OR: [
+          { fullName: { contains: search, mode: "insensitive" } },
+          { email: { contains: search, mode: "insensitive" } },
+          {
+            brokerAgencies: {
+              some: {
+                agency: { name: { contains: search, mode: "insensitive" } },
+              },
+            },
+          },
+          ...(normalizedPhone
+            ? [
+                { phone: normalizedPhone },
+                { phones: { some: { phone: normalizedPhone } } },
+              ]
+            : []),
+        ],
+      });
+    }
+    // Campaign/called predicates are evaluated after workflow attempts and
+    // legacy call logs have been combined into one call read model.
+    if (filter.dealsInPeriod !== undefined) {
+      and.push({
+        deals: {
+          [filter.dealsInPeriod ? "some" : "none"]: this.ourConfirmedDealWhere(
+            filter.activityPeriod,
+          ),
+        },
+      });
+    }
+    if (and.length) where.AND = and;
+    const callLogWhere = {
+      ...(filter.callPeriod
+        ? {
+            createdAt: {
+              gte: filter.callPeriod.from,
+              lte: filter.callPeriod.to,
+            },
+          }
+        : {}),
+      ...(filter.campaignIds.length
+        ? { campaign: { in: this.campaignAliases(filter.campaignIds) } }
+        : {}),
+    };
+    const records = await this.prisma.broker.findMany({
+      where,
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        status: true,
+        funnelStage: true,
+        region: true,
+        isRegional: true,
+        isCoordinator: true,
+        specialization: true,
+        category: true,
+        amoContactId: true,
+        mergedIntoId: true,
+        brokerTourVisited: true,
+        brokerTourDate: true,
+        lastCallAt: true,
+        updatedAt: true,
+        assignedManagerId: true,
+        assignedManager: { select: { id: true, fullName: true } },
+        phones: true,
+        brokerAgencies: { include: { agency: true } },
+        callLogs: {
+          where: callLogWhere,
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: {
+            createdAt: true,
+            campaign: true,
+            result: true,
+            operatorId: true,
+            comment: true,
+            nextCallAt: true,
+          },
+        },
+        clients: {
+          where: { fixationStatus: "FIXED" },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { createdAt: true },
+        },
+        meetings: {
+          where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+          orderBy: { date: "desc" },
+          take: 1,
+          select: { date: true },
+        },
+        deals: {
+          where: this.ourConfirmedDealWhere(),
+          orderBy: { signedAt: "desc" },
+          take: 1,
+          select: { signedAt: true },
+        },
+        _count: {
+          select: {
+            clients: { where: { fixationStatus: "FIXED" } },
+            deals: { where: this.ourConfirmedDealWhere() },
+            meetings: {
+              where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+            },
+            callLogs: true,
+          },
+        },
+      },
+    });
+    const workflowCalls = await this.workflowCallReadModels(
+      "ours",
+      "BROKER",
+      (records as any[]).map((record) => String(record.id)),
+    );
+    this.attachWorkflowCallReadModels(
+      records as any[],
+      "BROKER",
+      workflowCalls,
+    );
+    const engagementEvents = await this.engagementReadModels(
+      "ours",
+      "BROKER",
+      (records as any[]).map((record) => String(record.id)),
+    );
+    this.attachEngagementReadModels(
+      records as any[],
+      "BROKER",
+      engagementEvents,
+    );
+    const periodMetrics = await this.ourBrokerPeriodMetrics(
+      (records as any[]).map((record) => String(record.id)),
+      filter.activityPeriod,
+    );
+    const candidates = (records as any[])
+      .map((record) => {
+        const item = this.mapOurBroker(record, null);
+        item.periodMetrics =
+          periodMetrics.get(String(record.id)) ||
+          this.unavailablePeriodMetrics(filter.activityPeriod);
+        return { record, item };
+      })
+      .filter(({ record, item }) =>
+        this.matchesOurBroker(record, item, filter),
+      );
+    await this.attachOurDealAmounts(
+      candidates,
+      "brokerId",
+      filter.sortBy === "dealAmount" && !filter.activityPeriod,
+    );
+    this.sortLoyaltyCandidates(candidates, filter);
+    const total = candidates.length;
+    const pageCandidates = candidates.slice(
+      (page - 1) * pageSize,
+      page * pageSize,
+    );
+    if (filter.sortBy !== "dealAmount" || Boolean(filter.activityPeriod)) {
+      await this.attachOurDealAmounts(pageCandidates, "brokerId", true);
+    }
+    return this.oursListEnvelope(
+      "BROKER",
+      query,
+      filter,
+      search,
+      candidates,
+      pageCandidates,
+      total,
+      {
+        callPeriod: "EXACT",
+        activityPeriod: filter.activityPeriod
+          ? "LOCAL_PRELIMINARY"
+          : "UNAVAILABLE",
+      },
+      includeSelectionIds,
+    );
+  }
+
+  /**
+   * Selected-period broker metrics are aggregated in bounded SQL batches.
+   * This avoids an N+1 query per broker and avoids loading every matching
+   * Client/Meeting/Deal row into application memory. A successful aggregate
+   * query makes an absent group a known zero; missing dates stay null.
+   */
+  private async ourBrokerPeriodMetrics(
+    brokerIds: string[],
+    period?: LoyaltyFilterPeriod,
+  ): Promise<Map<string, any>> {
+    const ids = uniqueSorted(brokerIds);
+    const result = new Map<string, any>();
+    if (!period) return result;
+
+    const empty = () => ({
+      period: { from: period.fromIso, to: period.toIso },
+      availability: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+      source: "LOCAL_OPERATIONAL_ROWS",
+      methodology:
+        "Batched per-broker aggregates over current local FIXED Client rows, confirmed/completed Meeting rows and qualifying confirmed DDU Deal rows in the selected period.",
+      fixations: 0,
+      meetings: 0,
+      deals: 0,
+      dealAmount: "0",
+      lastFixationAt: null,
+      lastMeetingAt: null,
+      lastDealAt: null,
+    });
+    for (const id of ids) result.set(id, empty());
+
+    for (
+      let offset = 0;
+      offset < ids.length;
+      offset += CANDIDATE_QUERY_BATCH_SIZE
+    ) {
+      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const [fixationGroups, meetingGroups, dealGroups] = await Promise.all([
+        (this.prisma.client as any).groupBy({
+          by: ["brokerId"],
+          where: {
+            brokerId: { in: batch },
+            fixationStatus: "FIXED",
+            createdAt: { gte: period.from, lte: period.to },
+          },
+          _count: { _all: true },
+          _max: { createdAt: true },
+        }),
+        (this.prisma.meeting as any).groupBy({
+          by: ["brokerId"],
+          where: {
+            brokerId: { in: batch },
+            status: { in: ["CONFIRMED", "COMPLETED"] },
+            date: { gte: period.from, lte: period.to },
+          },
+          _count: { _all: true },
+          _max: { date: true },
+        }),
+        (this.prisma.deal as any).groupBy({
+          by: ["brokerId"],
+          where: {
+            brokerId: { in: batch },
+            ...this.ourConfirmedDealWhere({ from: period.from, to: period.to }),
+          },
+          _count: { _all: true },
+          _sum: { amount: true },
+          _max: { signedAt: true },
+        }),
+      ]);
+
+      for (const group of fixationGroups as any[]) {
+        const target = result.get(String(group.brokerId));
+        if (!target) continue;
+        target.fixations = finiteNumber(
+          group._count?._all ?? group._count?.brokerId,
+        );
+        target.lastFixationAt = dateOnly(group._max?.createdAt);
+      }
+      for (const group of meetingGroups as any[]) {
+        const target = result.get(String(group.brokerId));
+        if (!target) continue;
+        target.meetings = finiteNumber(
+          group._count?._all ?? group._count?.brokerId,
+        );
+        target.lastMeetingAt = dateOnly(group._max?.date);
+      }
+      for (const group of dealGroups as any[]) {
+        const target = result.get(String(group.brokerId));
+        if (!target) continue;
+        target.deals = finiteNumber(
+          group._count?._all ?? group._count?.brokerId,
+        );
+        target.dealAmount =
+          group._sum?.amount === null || group._sum?.amount === undefined
+            ? null
+            : String(group._sum.amount);
+        target.lastDealAt = dateOnly(group._max?.signedAt);
+      }
+    }
+
+    return result;
+  }
+
+  private async listOurAgencies(
+    query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
+    search?: string,
+    includeSelectionIds = false,
+  ) {
+    const page = query.page || 1;
+    const pageSize = query.pageSize || 30;
+    const unavailableFields = uniqueSorted([
+      filter.agencySizes.length ? "agencySizes" : undefined,
+      filter.websitePresent !== undefined ? "websitePresent" : undefined,
+      filter.projectsOnSite.length ? "projectsOnSite" : undefined,
+      ["SITE_PLACED", "SITE_NOT_PLACED"].includes(filter.scenario || "")
+        ? "scenario.sitePlacement"
+        : undefined,
+    ]);
+    if (unavailableFields.length) {
+      throw new BadRequestException({
+        code: "LOYALTY_FILTER_UNAVAILABLE",
+        message:
+          "The selected filter has no authoritative field in the OUR agency model",
+        base: "ours",
+        entityType: "AGENCY",
+        fields: unavailableFields,
+        unknownValuesRemainNull: true,
+      });
+    }
+    const where: any = {};
+    if (filter.archived === "only" || filter.hasAmo !== undefined)
+      where.id = { in: [] };
+    const and: any[] = [];
+    if (filter.city)
+      and.push({
+        OR: [
+          { address: { contains: filter.city, mode: "insensitive" } },
+          { legalAddress: { contains: filter.city, mode: "insensitive" } },
+        ],
+      });
+    // Agency activity predicates are evaluated after loading the complete
+    // selected BrokerAgency relation rows. A direct Agency.deals predicate
+    // would incorrectly discard relation-derived local activity.
+    if (search)
+      and.push({
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { legalName: { contains: search, mode: "insensitive" } },
+          { inn: { contains: search } },
+          { phone: { contains: search } },
+          { email: { contains: search, mode: "insensitive" } },
+        ],
+      });
+    if (and.length) where.AND = and;
+    const records = await this.prisma.agency.findMany({
+      where,
+      include: this.ourAgencyReadInclude(),
+    });
+    const workflowCalls = await this.workflowCallReadModels(
+      "ours",
+      "AGENCY",
+      (records as any[]).map((record) => String(record.id)),
+    );
+    this.attachWorkflowCallReadModels(
+      records as any[],
+      "AGENCY",
+      workflowCalls,
+    );
+    const relatedBrokers = (records as any[]).flatMap((record) =>
+      Array.isArray(record?.brokerAgencies)
+        ? record.brokerAgencies
+            .map((relation: any) => relation?.broker)
+            .filter(Boolean)
+        : [],
+    );
+    const relatedBrokerCalls = await this.workflowCallReadModels(
+      "ours",
+      "BROKER",
+      relatedBrokers.map((broker: any) => String(broker.id)),
+    );
+    this.attachWorkflowCallReadModels(
+      relatedBrokers,
+      "BROKER",
+      relatedBrokerCalls,
+    );
+    const engagementEvents = await this.engagementReadModels(
+      "ours",
+      "AGENCY",
+      (records as any[]).map((record) => String(record.id)),
+    );
+    this.attachEngagementReadModels(
+      records as any[],
+      "AGENCY",
+      engagementEvents,
+    );
+    const candidates = (records as any[])
+      .map((record) => ({ record, item: this.mapOurAgency(record, null) }))
+      .filter(({ record, item }) =>
+        this.matchesOurAgency(record, item, filter),
+      );
+    this.sortLoyaltyCandidates(candidates, filter);
+    const total = candidates.length;
+    const pageCandidates = candidates.slice(
+      (page - 1) * pageSize,
+      page * pageSize,
+    );
+    return this.oursListEnvelope(
+      "AGENCY",
+      query,
+      filter,
+      search,
+      candidates,
+      pageCandidates,
+      total,
+      {
+        callPeriod: "LOCAL_PRELIMINARY_RELATION_ROWS",
+        activityPeriod: "LOCAL_PRELIMINARY_RELATION_ROWS",
+      },
+      includeSelectionIds,
+    );
+  }
+
+  private ourAgencyReadInclude(): any {
+    const confirmedDeals = this.ourConfirmedDealWhere();
+    return {
+      brokerAgencies: {
+        include: {
+          broker: {
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+              email: true,
+              lastCallAt: true,
+              brokerTourVisited: true,
+              brokerTourDate: true,
+              clients: {
+                where: { fixationStatus: "FIXED" },
+                select: {
+                  id: true,
+                  createdAt: true,
+                  fixationStatus: true,
+                  amoLeadId: true,
+                },
+              },
+              meetings: {
+                where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+                select: { id: true, date: true, status: true, type: true },
+              },
+              deals: {
+                where: confirmedDeals,
+                select: {
+                  id: true,
+                  signedAt: true,
+                  amount: true,
+                  agencyId: true,
+                  status: true,
+                  amoDealId: true,
+                },
+              },
+              callLogs: {
+                select: {
+                  id: true,
+                  createdAt: true,
+                  campaign: true,
+                  result: true,
+                  operatorId: true,
+                  comment: true,
+                  nextCallAt: true,
+                },
+              },
+            },
+          },
+        },
+      },
+      deals: {
+        where: confirmedDeals,
+        select: {
+          id: true,
+          signedAt: true,
+          amount: true,
+          agencyId: true,
+          status: true,
+          amoDealId: true,
+        },
+      },
+      _count: { select: { brokerAgencies: true } },
+    };
+  }
+
+  private async attachOurDealAmounts(
+    candidates: any[],
+    groupField: "brokerId" | "agencyId",
+    attach: boolean,
+  ) {
+    if (!attach || !candidates.length) return;
+    const ids = candidates.map(({ item }) => item.id);
+    const groups = await (this.prisma.deal as any).groupBy({
+      by: [groupField],
+      where: {
+        ...this.ourConfirmedDealWhere(),
+        [groupField]: { in: ids },
+      },
+      _sum: { amount: true },
+    });
+    const amounts = new Map<string, string>(
+      groups.map((group: any) => [
+        group[groupField],
+        String(group._sum?.amount || "0"),
+      ]),
+    );
+    for (const candidate of candidates) {
+      candidate.item.metrics.dealAmount = amounts.get(candidate.item.id) || "0";
+    }
+  }
+
+  private oursListEnvelope(
+    entityType: EntityType,
+    query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
+    search: string | undefined,
+    candidates: any[],
+    pageCandidates: any[],
+    total: number,
+    availability: { callPeriod: string; activityPeriod: string },
+    includeSelectionIds = false,
+  ) {
+    const page = query.page || 1;
+    const pageSize = query.pageSize || 30;
+    return {
+      base: "ours",
+      entityType,
+      snapshotId: null,
+      items: pageCandidates.map(({ item }) => item),
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+      selectionCount: total,
+      filterHash: this.listFilterHash("ours", entityType, filter, search),
+      facets: this.loyaltyFacets(candidates.map(({ item }) => item)),
+      dataAvailability: {
+        exactActivities: false,
+        localPreliminary: true,
+        exactness: "APPROXIMATE",
+        methodology:
+          entityType === "AGENCY"
+            ? "Current BrokerAgency relation rows, deduplicated by row ID; historical agency attribution is unavailable"
+            : "Current local broker-owned rows; definitions remain preliminary until source reconciliation",
+        sourceReportedAggregates: false,
+        ...availability,
+        unknownValuesRemainNull: true,
+        defaultVisibilityApplied:
+          entityType === "AGENCY" && !filter.includeLowSignal,
+        visibilityRule:
+          entityType === "AGENCY" && !filter.includeLowSignal
+            ? "Hide agencies with no normalized phone and known zero deals, unless a qualifying meeting occurred within the last three months"
+            : null,
+        unavailableFilters:
+          entityType === "AGENCY"
+            ? ["agencySizes", "websitePresent", "projectsOnSite"]
+            : [],
+      },
+      ...(includeSelectionIds
+        ? { _selectionIds: candidates.map(({ item }) => item.id) }
+        : {}),
+    };
+  }
+
+  private ourBrokerStatusCodes(record: any): string[] {
+    const fixations = Number(record._count?.clients || 0);
+    const meetings = Number(record._count?.meetings || 0);
+    const deals = Number(record._count?.deals || 0);
+    const bt = record.brokerTourVisited === true;
+    const lastCallAt =
+      this.callSortKey(this.lastCall(this.ourCalls(record)) || {}) ||
+      record.lastCallAt ||
+      null;
+    const lastDates = [
+      lastCallAt,
+      record.brokerTourDate,
+      record.clients?.[0]?.createdAt,
+      record.meetings?.[0]?.date,
+      record.deals?.[0]?.signedAt,
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    const inactiveDays = daysSinceDate(lastDates.sort().at(-1));
+    const hadActivity =
+      fixations > 0 || meetings > 0 || deals > 0 || bt || Boolean(lastCallAt);
+    const primary =
+      hadActivity && inactiveDays !== null && inactiveDays > 90
+        ? "DORMANT"
+        : deals >= 3
+          ? "TOP_SELLER"
+          : deals >= 1
+            ? "SELLER"
+            : meetings > 0
+              ? "OFFERING"
+              : fixations > 0
+                ? "FIXATING"
+                : bt
+                  ? "BROKER_TOUR"
+                  : "NEW";
+    return bt && primary !== "BROKER_TOUR"
+      ? [primary, "BROKER_TOUR"]
+      : [primary];
+  }
+
+  private ourBrokerRelationshipStage(record: any): string | null {
+    const deals = Number(record._count?.deals || 0);
+    const meetings = Number(record._count?.meetings || 0);
+    const fixations = Number(record._count?.clients || 0);
+    const raw = String(record.funnelStage || "");
+    if (deals >= 2) return "Повторные сделки / VIP";
+    if (deals > 0 || raw === "DEAL") return "Сделка";
+    if (meetings > 0 || raw === "MEETING") return "Встреча";
+    if (fixations > 0 || raw === "FIXATION") return "Фиксация";
+    if (record.brokerTourVisited === true || raw === "BROKER_TOUR")
+      return "Был на БТ";
+    const hasCall =
+      Boolean(record.lastCallAt) ||
+      this.ourCalls(record).length > 0 ||
+      Number(record._count?.callLogs ?? record._count?.calls ?? 0) > 0;
+    if (hasCall) return "Звонили";
+    return raw === "NEW_BROKER" ? "Новый" : null;
+  }
+
+  private ourDataQualityCodes(record: any): string[] {
+    const hasPhone = Boolean(
+      normalizeLoyaltyContactPoint("PHONE", record.phone || ""),
+    );
+    const hasAmo =
+      record.amoContactId !== null && record.amoContactId !== undefined;
+    const completeName =
+      String(record.fullName || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length >= 2;
+    const full = hasPhone && hasAmo && completeName;
+    return uniqueSorted([
+      full ? "FULL" : "NEEDS_COMPLETION",
+      !hasAmo ? "NOT_FOUND_IN_CRM" : undefined,
+    ]);
+  }
+
+  private ourCalls(record: any, includeWorkflow = true): LoyaltyCallView[] {
+    const legacy = Array.isArray(record?.callLogs)
+      ? record.callLogs.map((call: any): LoyaltyCallView => {
+          const occurredAt = this.isoDateTime(call.createdAt);
+          return {
+            type: "CALL",
+            id: String(call.id || "") || null,
+            date: occurredAt,
+            occurredAt,
+            campaign: call.campaign ? String(call.campaign) : null,
+            employee: call.operatorId ? String(call.operatorId) : null,
+            employeeId: call.operatorId ? String(call.operatorId) : null,
+            result: call.result ? String(call.result) : null,
+            resultCode: call.result ? String(call.result) : null,
+            agreement:
+              call.comment === null || call.comment === undefined
+                ? null
+                : String(call.comment),
+            comment:
+              call.comment === null || call.comment === undefined
+                ? null
+                : String(call.comment),
+            nextActionAt: this.isoDateTime(call.nextCallAt),
+            source: "LEGACY_CALL_LOG",
+            effective: true,
+            superseded: false,
+          };
+        })
+      : [];
+    const workflow =
+      includeWorkflow && Array.isArray(record?.__workflowCalls?.effective)
+        ? record.__workflowCalls.effective
+        : [];
+    return [...legacy, ...workflow];
+  }
+
+  private ourCallHistory(record: any): LoyaltyCallView[] {
+    const legacy = this.ourCalls(record, false);
+    const workflowHistory = Array.isArray(record?.__workflowCalls?.history)
+      ? record.__workflowCalls.history
+      : [];
+    return [...legacy, ...workflowHistory].sort((left, right) =>
+      this.callSortKey(right).localeCompare(this.callSortKey(left)),
+    );
+  }
+
+  private ourLastActivity(record: any): string | null {
+    const values = [
+      record.lastCallAt,
+      this.callSortKey(this.lastCall(this.ourCalls(record)) || {}),
+      record.brokerTourDate,
+      record.clients?.[0]?.createdAt,
+      record.meetings?.[0]?.date,
+      record.deals?.[0]?.signedAt,
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    return values.sort().at(-1) || null;
+  }
+
+  /**
+   * OUR agencies do not own fixation/meeting/call rows directly. The best
+   * available local projection is therefore the current BrokerAgency graph.
+   * It is deliberately labelled preliminary: membership is current-state,
+   * not a historically effective agency attribution.
+   */
+  private ourAgencyRelationMetrics(record: any) {
+    const relationsLoaded = Array.isArray(record?.brokerAgencies);
+    const relations = relationsLoaded ? record.brokerAgencies : [];
+    const brokers = relations
+      .map((relation: any) => relation?.broker)
+      .filter((broker: any) => broker && broker.id);
+    const uniqueById = (rows: any[]) => {
+      const result = new Map<string, any>();
+      for (const row of rows) {
+        const id = String(row?.id || "");
+        if (id && !result.has(id)) result.set(id, row);
+      }
+      return [...result.values()];
+    };
+    const relationRows = (field: string) =>
+      brokers.flatMap((broker: any) =>
+        Array.isArray(broker?.[field]) ? broker[field] : [],
+      );
+    const fieldKnown = (field: string) =>
+      relationsLoaded &&
+      brokers.every((broker: any) => Array.isArray(broker?.[field]));
+
+    const fixations = fieldKnown("clients")
+      ? uniqueById(relationRows("clients"))
+      : null;
+    const meetings = fieldKnown("meetings")
+      ? uniqueById(relationRows("meetings"))
+      : null;
+    const directDealsKnown = Array.isArray(record?.deals);
+    const relationDealsKnown = fieldKnown("deals");
+    const deals =
+      directDealsKnown && relationDealsKnown
+        ? uniqueById([...record.deals, ...relationRows("deals")])
+        : null;
+    const directCallsKnown = Array.isArray(record?.__workflowCalls?.effective);
+    const relationCallsKnown =
+      fieldKnown("callLogs") &&
+      brokers.every((broker: any) =>
+        Array.isArray(broker?.__workflowCalls?.effective),
+      );
+    const calls =
+      directCallsKnown && relationCallsKnown
+        ? (() => {
+            const result = new Map<string, LoyaltyCallView>();
+            for (const call of [
+              ...this.ourCalls(record),
+              ...brokers.flatMap((broker: any) => this.ourCalls(broker)),
+            ]) {
+              const id = String(call?.id || "");
+              const key = `${String(call?.source || "CALL")}:${id}`;
+              if (id && !result.has(key)) result.set(key, call);
+            }
+            return [...result.values()];
+          })()
+        : null;
+    const brokerToursKnown =
+      relationsLoaded &&
+      brokers.every(
+        (broker: any) =>
+          typeof broker?.brokerTourVisited === "boolean" &&
+          Object.prototype.hasOwnProperty.call(broker, "brokerTourDate"),
+      );
+    const brokerTours = brokerToursKnown
+      ? uniqueById(
+          brokers
+            .filter(
+              (broker: any) =>
+                broker.brokerTourVisited === true ||
+                Boolean(broker.brokerTourDate),
+            )
+            .map((broker: any) => ({
+              id: `BROKER_TOUR:${String(broker.id)}`,
+              occurredAt: broker.brokerTourDate || null,
+            })),
+        )
+      : null;
+    const dealAmount =
+      deals === null
+        ? null
+        : deals.every(
+              (deal: any) =>
+                deal?.amount !== null && deal?.amount !== undefined,
+            )
+          ? centsToMoney(
+              deals.reduce(
+                (sum: bigint, deal: any) =>
+                  sum + moneyToCents(String(deal.amount)),
+                0n,
+              ),
+            )
+          : null;
+    const lastDate = (rows: any[] | null, field: string) =>
+      rows === null
+        ? null
+        : (
+            rows
+              .map((row: any) => dateOnly(row?.[field]))
+              .filter(Boolean) as string[]
+          )
+            .sort()
+            .at(-1) || null;
+    const lastCallAt =
+      calls === null
+        ? null
+        : (
+            calls
+              .map((call: LoyaltyCallView) => this.callSortKey(call))
+              .filter(Boolean) as string[]
+          )
+            .sort()
+            .at(-1) || null;
+    const lastFixationAt = lastDate(fixations, "createdAt");
+    const lastMeetingAt = lastDate(meetings, "date");
+    const lastDealAt = lastDate(deals, "signedAt");
+    const lastBrokerTourAt = lastDate(brokerTours, "occurredAt");
+    const lastActivityAt =
+      (
+        [
+          lastFixationAt,
+          lastMeetingAt,
+          lastDealAt,
+          lastCallAt,
+          lastBrokerTourAt,
+        ].filter(Boolean) as string[]
+      )
+        .sort()
+        .at(-1) || null;
+    return {
+      relationsLoaded,
+      brokers: relationsLoaded ? uniqueById(brokers) : null,
+      fixations,
+      meetings,
+      deals,
+      calls,
+      brokerTours,
+      dealAmount,
+      lastFixationAt,
+      lastMeetingAt,
+      lastDealAt,
+      lastCallAt,
+      lastBrokerTourAt,
+      lastActivityAt,
+    };
+  }
+
+  private ourAgencyCallHistory(record: any): LoyaltyCallView[] {
+    const brokers = Array.isArray(record?.brokerAgencies)
+      ? record.brokerAgencies
+          .map((relation: any) => relation?.broker)
+          .filter(Boolean)
+      : [];
+    const rows = [
+      ...this.ourCallHistory(record),
+      ...brokers.flatMap((broker: any) => this.ourCallHistory(broker)),
+    ];
+    const byId = new Map<string, LoyaltyCallView>();
+    for (const row of rows) {
+      const id = String(row?.id || "");
+      const key = `${String(row?.source || "CALL")}:${id}`;
+      if (id && !byId.has(key)) byId.set(key, row);
+    }
+    return [...byId.values()].sort((left, right) =>
+      this.callSortKey(right).localeCompare(this.callSortKey(left)),
+    );
+  }
+
+  private ourAgencyStatusCodes(
+    relationMetrics: ReturnType<LoyaltyBaseService["ourAgencyRelationMetrics"]>,
+  ): string[] {
+    const brokers = relationMetrics.brokers?.length ?? null;
+    const fixations = relationMetrics.fixations?.length ?? null;
+    const meetings = relationMetrics.meetings?.length ?? null;
+    const deals = relationMetrics.deals?.length ?? null;
+    const calls = relationMetrics.calls?.length ?? null;
+    const brokerTours = relationMetrics.brokerTours?.length ?? null;
+    const values = [brokers, fixations, meetings, deals, calls, brokerTours];
+    const allKnown = values.every((value) => value !== null);
+    const hadActivity = values.some((value) => value !== null && value > 0);
+    const inactiveDays = daysSinceDate(relationMetrics.lastActivityAt);
+    const primary =
+      hadActivity && inactiveDays !== null && inactiveDays > 90
+        ? "DORMANT_PARTNER"
+        : deals !== null && deals >= 5
+          ? "VIP_PARTNER"
+          : deals !== null && deals >= 1
+            ? "SELLING_PARTNER"
+            : meetings !== null && meetings > 0
+              ? "ACTIVE_PARTNER"
+              : fixations !== null && fixations > 0
+                ? "FIXATING_PARTNER"
+                : brokerTours !== null && brokerTours > 0
+                  ? "WARM_PARTNER"
+                  : (calls !== null && calls > 0) ||
+                      (brokers !== null && brokers > 0)
+                    ? "STARTING_PARTNER"
+                    : allKnown && values.every((value) => value === 0)
+                      ? "NEW_AGENCY"
+                      : null;
+    return primary ? [primary] : [];
+  }
+
+  private ourAgencyPartnershipStage(statusCodes: string[]): string | null {
+    const primary = statusCodes[0];
+    if (primary === "VIP_PARTNER") return "VIP партнёр";
+    if (["SELLING_PARTNER", "DORMANT_PARTNER"].includes(primary))
+      return "Активный партнёр";
+    if (primary === "ACTIVE_PARTNER") return "Назначена встреча";
+    if (primary === "FIXATING_PARTNER") return "Активный партнёр";
+    if (primary === "WARM_PARTNER") return "БТ проведён";
+    if (primary === "STARTING_PARTNER") return "Установлен контакт";
+    if (primary === "NEW_AGENCY") return "Новое";
+    return null;
+  }
+
+  private ourAgencyPeriodMetrics(
+    relationMetrics: ReturnType<LoyaltyBaseService["ourAgencyRelationMetrics"]>,
+    period?: LoyaltyFilterPeriod,
+  ) {
+    if (!period) return this.unavailablePeriodMetrics(period);
+    const inPeriod = (row: any, field: string) => {
+      const value = dateOnly(row?.[field]);
+      return Boolean(
+        value &&
+        value >= period.fromIso.slice(0, 10) &&
+        value <= period.toIso.slice(0, 10),
+      );
+    };
+    const select = (rows: any[] | null, field: string) =>
+      rows === null ? null : rows.filter((row) => inPeriod(row, field));
+    const fixations = select(relationMetrics.fixations, "createdAt");
+    const meetings = select(relationMetrics.meetings, "date");
+    const deals = select(relationMetrics.deals, "signedAt");
+    const amount =
+      deals === null
+        ? null
+        : deals.every(
+              (deal: any) =>
+                deal?.amount !== null && deal?.amount !== undefined,
+            )
+          ? centsToMoney(
+              deals.reduce(
+                (sum: bigint, deal: any) =>
+                  sum + moneyToCents(String(deal.amount)),
+                0n,
+              ),
+            )
+          : null;
+    const latest = (rows: any[] | null, field: string) =>
+      rows === null
+        ? null
+        : (
+            rows
+              .map((row) => dateOnly(row?.[field]))
+              .filter(Boolean) as string[]
+          )
+            .sort()
+            .at(-1) || null;
+    return {
+      period: { from: period.fromIso, to: period.toIso },
+      availability: "LOCAL_PRELIMINARY",
+      exactness: "APPROXIMATE",
+      source: "CURRENT_BROKER_AGENCY_RELATIONS",
+      methodology:
+        "Current BrokerAgency memberships; qualifying local rows deduplicated by stable row ID. Membership history is unavailable, so agency attribution is approximate.",
+      fixations: fixations === null ? null : fixations.length,
+      meetings: meetings === null ? null : meetings.length,
+      deals: deals === null ? null : deals.length,
+      dealAmount: amount,
+      lastFixationAt: latest(fixations, "createdAt"),
+      lastMeetingAt: latest(meetings, "date"),
+      lastDealAt: latest(deals, "signedAt"),
+    };
+  }
+
+  private ourAgencyEvidence(
+    relationMetrics: ReturnType<LoyaltyBaseService["ourAgencyRelationMetrics"]>,
+  ) {
+    const limit = 200;
+    const categoriesKnown = [
+      relationMetrics.fixations,
+      relationMetrics.meetings,
+      relationMetrics.deals,
+      relationMetrics.calls,
+    ].every(Array.isArray);
+    const rows: any[] = [
+      ...(relationMetrics.fixations || []).map((row: any) => ({
+        id: `LOCAL_CLIENT:${String(row.id)}`,
+        sourceId: String(row.id),
+        type: "FIXATION",
+        date: this.isoDateTime(row.createdAt),
+        occurredAt: this.isoDateTime(row.createdAt),
+        status: row.fixationStatus ? String(row.fixationStatus) : null,
+        amoLeadId:
+          row.amoLeadId === null || row.amoLeadId === undefined
+            ? null
+            : String(row.amoLeadId),
+        amoDealId: null,
+        amount: null,
+        source: "LOCAL_CLIENT",
+        exactness: "APPROXIMATE",
+        provenance:
+          "Owned by a broker in the current BrokerAgency relation graph",
+      })),
+      ...(relationMetrics.meetings || []).map((row: any) => ({
+        id: `LOCAL_MEETING:${String(row.id)}`,
+        sourceId: String(row.id),
+        type: "MEETING",
+        date: this.isoDateTime(row.date),
+        occurredAt: this.isoDateTime(row.date),
+        status: row.status ? String(row.status) : null,
+        meetingType: row.type ? String(row.type) : null,
+        amoDealId: null,
+        amount: null,
+        source: "LOCAL_MEETING",
+        exactness: "APPROXIMATE",
+        provenance:
+          "Owned by a broker in the current BrokerAgency relation graph",
+      })),
+      ...(relationMetrics.deals || []).map((row: any) => ({
+        id: `LOCAL_DEAL:${String(row.id)}`,
+        sourceId: String(row.id),
+        type: "DEAL",
+        date: this.isoDateTime(row.signedAt),
+        occurredAt: this.isoDateTime(row.signedAt),
+        status: row.status ? String(row.status) : null,
+        amoDealId:
+          row.amoDealId === null || row.amoDealId === undefined
+            ? null
+            : String(row.amoDealId),
+        amount:
+          row.amount === null || row.amount === undefined
+            ? null
+            : String(row.amount),
+        source: "LOCAL_DEAL",
+        exactness: "APPROXIMATE",
+        provenance:
+          "Direct agency deal or deal owned by a broker in the current BrokerAgency relation graph",
+      })),
+      ...(relationMetrics.calls || []).map((row: LoyaltyCallView) => ({
+        id: `${String(row.source || "LOCAL_CALL")}:${String(row.id)}`,
+        sourceId: String(row.id),
+        type: "CALL",
+        date: row.occurredAt || row.date || null,
+        occurredAt: row.occurredAt || row.date || null,
+        status: row.resultCode || row.result || null,
+        result: row.result || null,
+        resultCode: row.resultCode || null,
+        campaignId: row.campaignId || null,
+        campaignName: row.campaignName || row.campaign || null,
+        amoDealId: null,
+        amount: null,
+        source: row.source || "LOCAL_CALL",
+        exactness: "APPROXIMATE",
+        provenance:
+          "Agency call or call of a broker in the current BrokerAgency relation graph",
+      })),
+    ].sort((left, right) =>
+      String(right.occurredAt || "").localeCompare(
+        String(left.occurredAt || ""),
+      ),
+    );
+    return {
+      items: rows.slice(0, limit),
+      count: categoriesKnown ? rows.length : null,
+      truncated: categoriesKnown ? rows.length > limit : null,
+      limit,
+      availability: categoriesKnown ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
+      exactness: categoriesKnown ? "APPROXIMATE" : "UNKNOWN",
+      methodology:
+        "PII-free local evidence rows; current BrokerAgency membership is used for approximate agency attribution",
+    };
+  }
+
+  private ourBrokerEvidence(item: any) {
+    const limit = 300;
+    const rows: any[] = [
+      ...(Array.isArray(item.clients) ? item.clients : []).map((row: any) => ({
+        id: `LOCAL_CLIENT:${String(row.id)}`,
+        sourceId: String(row.id),
+        type: "FIXATION",
+        date: this.isoDateTime(row.createdAt),
+        occurredAt: this.isoDateTime(row.createdAt),
+        status: row.fixationStatus ? String(row.fixationStatus) : null,
+        amoLeadId:
+          row.amoLeadId === null || row.amoLeadId === undefined
+            ? null
+            : String(row.amoLeadId),
+        amount: null,
+        source: "LOCAL_CLIENT",
+        exactness: "APPROXIMATE",
+        provenance: "Current local broker-owned fixation row",
+      })),
+      ...(Array.isArray(item.meetings) ? item.meetings : []).map(
+        (row: any) => ({
+          id: `LOCAL_MEETING:${String(row.id)}`,
+          sourceId: String(row.id),
+          type: "MEETING",
+          date: this.isoDateTime(row.date),
+          occurredAt: this.isoDateTime(row.date),
+          status: row.status ? String(row.status) : null,
+          meetingType: row.type ? String(row.type) : null,
+          amoLeadId:
+            row.client?.amoLeadId === null ||
+            row.client?.amoLeadId === undefined
+              ? null
+              : String(row.client.amoLeadId),
+          amount: null,
+          source: "LOCAL_MEETING",
+          exactness: "APPROXIMATE",
+          provenance: "Current local broker-owned meeting row",
+        }),
+      ),
+      ...(Array.isArray(item.deals) ? item.deals : []).map((row: any) => ({
+        id: `LOCAL_DEAL:${String(row.id)}`,
+        sourceId: String(row.id),
+        type: "DEAL",
+        date: this.isoDateTime(row.signedAt || row.createdAt),
+        occurredAt: this.isoDateTime(row.signedAt || row.createdAt),
+        status: row.status ? String(row.status) : null,
+        amoLeadId:
+          row.client?.amoLeadId === null || row.client?.amoLeadId === undefined
+            ? null
+            : String(row.client.amoLeadId),
+        amoDealId:
+          row.amoDealId === null || row.amoDealId === undefined
+            ? null
+            : String(row.amoDealId),
+        amount:
+          row.amount === null || row.amount === undefined
+            ? null
+            : String(row.amount),
+        source: "LOCAL_DEAL",
+        exactness: "APPROXIMATE",
+        provenance: "Current local broker-owned confirmed deal row",
+      })),
+    ].sort((left, right) =>
+      String(right.occurredAt || "").localeCompare(
+        String(left.occurredAt || ""),
+      ),
+    );
+    const counts = [
+      finiteNumber(item._count?.clients),
+      finiteNumber(item._count?.meetings),
+      finiteNumber(item._count?.deals),
+    ];
+    const known = counts.every((value) => value !== null);
+    const count = known
+      ? counts.reduce((sum, value) => sum + (value || 0), 0)
+      : null;
+    return {
+      items: rows.slice(0, limit),
+      count,
+      truncated: count === null ? null : count > limit,
+      limit,
+      availability: known ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
+      exactness: known ? "APPROXIMATE" : "UNKNOWN",
+      methodology:
+        "Current local Client, Meeting and confirmed Deal rows owned by this broker; this is preliminary cabinet evidence, not a full amoCRM audit.",
+    };
+  }
+
+  private resultCodeForValue(entityType: EntityType, value: unknown) {
+    const normalized = lower(value);
+    const dictionary =
+      entityType === "BROKER"
+        ? BROKER_CALL_RESULT_ALIASES
+        : AGENCY_CALL_RESULT_ALIASES;
+    return (
+      Object.entries(dictionary).find(
+        ([code, aliases]) =>
+          lower(code) === normalized ||
+          aliases.some((alias) => lower(alias) === normalized),
+      )?.[0] || null
+    );
+  }
+
+  private matchesOurBroker(
+    record: any,
+    item: any,
+    filter: CanonicalLoyaltyFilter,
+  ): boolean {
+    const lifetimeDeals = Number(record._count?.deals || 0);
+    const lifetimeMeetings = Number(record._count?.meetings || 0);
+    const lifetimeFixations = Number(record._count?.clients || 0);
+    const deals = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics?.deals)
+      : lifetimeDeals;
+    const meetings = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics?.meetings)
+      : lifetimeMeetings;
+    const fixations = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics?.fixations)
+      : lifetimeFixations;
+    const bt = record.brokerTourVisited === true;
+    const assigneeId = record.assignedManagerId || "";
+    const assigneeName = record.assignedManager?.fullName || "";
+    const calls = this.ourCalls(record);
+    const callAssignees = uniqueSorted(
+      calls.flatMap((call) => this.callAssigneeValues(call)),
+    );
+    const assignees = uniqueSorted([
+      assigneeId,
+      assigneeName,
+      ...callAssignees,
+    ]);
+    const statuses = this.ourBrokerStatusCodes(record);
+    const quality = this.ourDataQualityCodes(record);
+    item.computedStatuses = statuses;
+    item.dataQualityCodes = quality;
+    item.lastActivityAt = this.ourLastActivity(record);
+    item.assignee = record.assignedManager
+      ? { id: assigneeId, name: assigneeName }
+      : null;
+    const latestCall = this.applyCallSummary(item, "BROKER", calls);
+    if (!latestCall && record.lastCallAt) item.lastCallAt = record.lastCallAt;
+    if (latestCall?.employee || latestCall?.employeeId) {
+      item.assignee = {
+        id: latestCall.employeeId || null,
+        name: latestCall.employeeName || latestCall.employee || null,
+      };
+    }
+
+    if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
+      const period = moscowCurrentMonthFilterPeriod();
+      if (this.callPresenceInPeriod(calls, 0, period) !== false) return false;
+    }
+    if (
+      filter.segment === "NEW_BROKER" &&
+      (item.normalizedStage !== "Новый" ||
+        !hasLoyaltyAcquisitionPhone(item.contactPoints || []))
+    )
+      return false;
+    if (filter.campaignIds.length) {
+      const aliases = this.campaignAliases(filter.campaignIds).map(lower);
+      const eligible = filter.callPeriod
+        ? calls.filter(
+            (call) => this.callInPeriod(call, filter.callPeriod!) === true,
+          )
+        : calls;
+      if (
+        !eligible.some((call) =>
+          this.callCampaignValues(call).some((value) =>
+            aliases.includes(lower(value)),
+          ),
+        )
+      )
+        return false;
+    }
+
+    if (filter.lastCallResults.length) {
+      const resultAliases = this.resultAliases(
+        "BROKER",
+        filter.lastCallResults,
+      ).map(lower);
+      const campaignAliases = this.campaignAliases(filter.campaignIds).map(
+        lower,
+      );
+      const eligible = calls.filter(
+        (call) =>
+          (!filter.callPeriod ||
+            this.callInPeriod(call, filter.callPeriod) === true) &&
+          (!campaignAliases.length ||
+            this.callCampaignValues(call).some((value) =>
+              campaignAliases.includes(lower(value)),
+            )),
+      );
+      const latest = this.lastCall(eligible);
+      if (!latest || !resultAliases.includes(lower(latest.result)))
+        return false;
+    }
+    if (filter.called !== undefined) {
+      const presence = this.callPresenceInPeriod(calls, 0, filter.callPeriod!);
+      if (presence !== filter.called) return false;
+    }
+    if (
+      filter.assigneeIds.length &&
+      !filter.assigneeIds.some((value) => assignees.includes(value))
+    )
+      return false;
+    if (filter.unassigned === true && assignees.length) return false;
+    if (
+      filter.specializations.length &&
+      !filter.specializations.includes(String(record.specialization || ""))
+    )
+      return false;
+    if (filter.geography.length) {
+      const geography = explicitGeography(
+        [record.region, record.city],
+        record.isRegional,
+      );
+      if (!geography || !filter.geography.includes(geography)) return false;
+    }
+    if (filter.workFormats.length) {
+      const format = record.isCoordinator
+        ? "Координатор"
+        : record.brokerAgencies?.length
+          ? "Агентство"
+          : "Частный брокер";
+      if (!filter.workFormats.includes(format)) return false;
+    }
+    if (
+      filter.relationshipStages.length &&
+      !filter.relationshipStages.includes(String(item.normalizedStage || "")) &&
+      !filter.relationshipStages.includes(String(record.funnelStage || ""))
+    )
+      return false;
+    if (
+      filter.brokerStatuses.length &&
+      !filter.brokerStatuses.some((status) => statuses.includes(status))
+    )
+      return false;
+    if (
+      filter.dataQuality.length &&
+      !filter.dataQuality.some((code) => quality.includes(code))
+    )
+      return false;
+    if (
+      filter.dealCount.min !== undefined &&
+      (deals === null || deals < filter.dealCount.min)
+    )
+      return false;
+    if (
+      filter.dealCount.max !== undefined &&
+      (deals === null || deals > filter.dealCount.max)
+    )
+      return false;
+    if (filter.bt !== undefined && bt !== filter.bt) return false;
+    if (
+      filter.meetings.min !== undefined &&
+      (meetings === null || meetings < filter.meetings.min)
+    )
+      return false;
+    if (
+      filter.meetings.max !== undefined &&
+      (meetings === null || meetings > filter.meetings.max)
+    )
+      return false;
+    if (filter.staleDays !== undefined) {
+      const days = daysSinceDate(item.lastActivityAt);
+      if (days === null || days < filter.staleDays) return false;
+    }
+    const engagementEvents: LoyaltyEngagementView[] = Array.isArray(
+      record?.__workflowEvents?.effective,
+    )
+      ? record.__workflowEvents.effective
+      : [];
+    if (
+      filter.specialTermsProposed !== undefined &&
+      engagementEvents.some((event) => event.type === "INDIVIDUAL_TERMS") !==
+        filter.specialTermsProposed
+    )
+      return false;
+    if (
+      filter.rewardPresent !== undefined &&
+      engagementEvents.some((event) => event.type === "AWARD") !==
+        filter.rewardPresent
+    )
+      return false;
+    if (
+      !this.matchesColumnFilters(filter, {
+        hasPhone:
+          normalizeLoyaltyContactPoint("PHONE", record.phone || "") !== null ||
+          (record.phones || []).some(
+            (phone: any) =>
+              normalizeLoyaltyContactPoint("PHONE", phone.phone || "") !== null,
+          ),
+        statuses,
+        bt,
+        fixations,
+        meetings,
+        callPresence: filter.callPeriod
+          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
+          : null,
+        assignees,
+        deals,
+      })
+    )
+      return false;
+    if (
+      filter.scenario &&
+      !["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(filter.scenario) &&
+      !this.matchesScenario(filter.scenario, {
+        callPresence: null,
+        bt,
+        fixations,
+        meetings,
+        deals,
+        assignee: assigneeId,
+        stage: record.funnelStage,
+        projectsOnSite: null,
+        hasIndividualTerms: false,
+      })
+    )
+      return false;
+    if (
+      filter.scenario &&
+      ["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(filter.scenario) &&
+      !this.matchesScenario(filter.scenario, {
+        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod!),
+      })
+    )
+      return false;
+    // Agency-only dimensions have no canonical backing fields in Broker.
+    if (
+      filter.partnershipStatuses.length ||
+      filter.agencySizes.length ||
+      filter.websitePresent !== undefined ||
+      filter.projectsOnSite.length ||
+      filter.individualTerms !== undefined
+    )
+      return false;
+    return true;
+  }
+
+  private matchesOurAgency(
+    record: any,
+    item: any,
+    filter: CanonicalLoyaltyFilter,
+  ): boolean {
+    const relationMetrics = this.ourAgencyRelationMetrics(record);
+    const fixations = finiteNumber(item.metrics?.fixations);
+    const meetings = finiteNumber(item.metrics?.meetings);
+    const deals = finiteNumber(item.metrics?.deals);
+    const brokerTours =
+      relationMetrics.brokerTours === null
+        ? null
+        : relationMetrics.brokerTours.length;
+    const bt = brokerTours === null ? null : brokerTours > 0;
+    const calls = relationMetrics.calls || this.ourCalls(record);
+    const engagementEvents: LoyaltyEngagementView[] = Array.isArray(
+      record?.__workflowEvents?.effective,
+    )
+      ? record.__workflowEvents.effective
+      : [];
+    const assignees = uniqueSorted(
+      calls.flatMap((call) => this.callAssigneeValues(call)),
+    );
+    item.computedStatuses = this.ourAgencyStatusCodes(relationMetrics);
+    item.normalizedStage = this.ourAgencyPartnershipStage(
+      item.computedStatuses,
+    );
+    item.attributes = {
+      ...(item.attributes || {}),
+      partnershipStatus: item.normalizedStage,
+      partnershipStatusSource: item.normalizedStage
+        ? "LOCAL_PRELIMINARY_DERIVED"
+        : null,
+    };
+    item.dataQualityCodes = [];
+    item.periodMetrics = this.ourAgencyPeriodMetrics(
+      relationMetrics,
+      filter.activityPeriod,
+    );
+    const latestCall = this.applyCallSummary(item, "AGENCY", calls);
+    const agencyActivityDates = [
+      relationMetrics.lastActivityAt,
+      latestCall?.occurredAt ||
+        (latestCall ? this.callSortKey(latestCall) : null),
+      ...engagementEvents.map((event) => event.occurredAt),
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    item.lastActivityAt = agencyActivityDates.sort().at(-1) || null;
+    const hasPhone =
+      normalizeLoyaltyContactPoint("PHONE", record.phone || "") !== null;
+    const threeMonthsAgo = new Date();
+    threeMonthsAgo.setUTCMonth(threeMonthsAgo.getUTCMonth() - 3);
+    const hasRecentMeeting =
+      relationMetrics.meetings === null
+        ? null
+        : relationMetrics.meetings.some((meeting: any) => {
+            const value = new Date(meeting.date);
+            return (
+              Number.isFinite(value.getTime()) &&
+              value >= threeMonthsAgo &&
+              value <= new Date()
+            );
+          });
+    if (
+      !filter.includeLowSignal &&
+      !hasPhone &&
+      deals === 0 &&
+      hasRecentMeeting === false
+    ) {
+      return false;
+    }
+    if (latestCall?.employee || latestCall?.employeeId) {
+      item.assignee = {
+        id: latestCall.employeeId || null,
+        name: latestCall.employeeName || latestCall.employee || null,
+      };
+    }
+    if (
+      filter.dealCount.min !== undefined &&
+      (deals === null || deals < filter.dealCount.min)
+    )
+      return false;
+    if (
+      filter.dealCount.max !== undefined &&
+      (deals === null || deals > filter.dealCount.max)
+    )
+      return false;
+    if (filter.dealsInPeriod !== undefined) {
+      const periodDeals = finiteNumber(item.periodMetrics?.deals);
+      if (periodDeals === null || periodDeals > 0 !== filter.dealsInPeriod)
+        return false;
+    }
+    if (
+      filter.meetings.min !== undefined ||
+      filter.meetings.max !== undefined
+    ) {
+      const periodMeetings = filter.activityPeriod
+        ? finiteNumber(item.periodMetrics?.meetings)
+        : meetings;
+      if (
+        periodMeetings === null ||
+        (filter.meetings.min !== undefined &&
+          periodMeetings < filter.meetings.min) ||
+        (filter.meetings.max !== undefined &&
+          periodMeetings > filter.meetings.max)
+      )
+        return false;
+    }
+    if (filter.activityType) {
+      const periodValue =
+        filter.activityType === "FIXATION"
+          ? finiteNumber(item.periodMetrics?.fixations)
+          : filter.activityType === "MEETING"
+            ? finiteNumber(item.periodMetrics?.meetings)
+            : filter.activityType === "DEAL"
+              ? finiteNumber(item.periodMetrics?.deals)
+              : filter.activityType === "CALL"
+                ? filter.callPeriod
+                  ? this.callPresenceInPeriod(calls, 0, filter.callPeriod) ===
+                    true
+                    ? 1
+                    : 0
+                  : null
+                : null;
+      if (periodValue === null || periodValue <= 0) return false;
+    }
+    if (
+      filter.brokerStatuses.length &&
+      !filter.brokerStatuses.some((status) =>
+        item.computedStatuses.includes(status),
+      )
+    )
+      return false;
+    if (
+      filter.partnershipStatuses.length &&
+      (!item.normalizedStage ||
+        !filter.partnershipStatuses.includes(item.normalizedStage))
+    )
+      return false;
+    if (filter.bt !== undefined && (bt === null || bt !== filter.bt))
+      return false;
+    if (filter.scenario === "HAS_DEALS" && !(deals !== null && deals > 0))
+      return false;
+    if (filter.campaignIds.length) {
+      const campaignAliases = this.campaignAliases(filter.campaignIds).map(
+        lower,
+      );
+      const eligible = filter.callPeriod
+        ? calls.filter(
+            (call) => this.callInPeriod(call, filter.callPeriod!) === true,
+          )
+        : calls;
+      if (
+        !eligible.some((call) =>
+          this.callCampaignValues(call).some((value) =>
+            campaignAliases.includes(lower(value)),
+          ),
+        )
+      )
+        return false;
+    }
+    if (filter.lastCallResults.length) {
+      const resultAliases = this.resultAliases(
+        "AGENCY",
+        filter.lastCallResults,
+      ).map(lower);
+      const campaignAliases = this.campaignAliases(filter.campaignIds).map(
+        lower,
+      );
+      const eligible = calls.filter(
+        (call) =>
+          (!filter.callPeriod ||
+            this.callInPeriod(call, filter.callPeriod) === true) &&
+          (!campaignAliases.length ||
+            this.callCampaignValues(call).some((value) =>
+              campaignAliases.includes(lower(value)),
+            )),
+      );
+      const latest = this.lastCall(eligible);
+      if (!latest || !resultAliases.includes(lower(latest.result)))
+        return false;
+    }
+    if (filter.called !== undefined) {
+      const presence = this.callPresenceInPeriod(calls, 0, filter.callPeriod!);
+      if (presence !== filter.called) return false;
+    }
+    if (
+      filter.assigneeIds.length &&
+      !filter.assigneeIds.some((value) => assignees.includes(value))
+    )
+      return false;
+    if (filter.unassigned === true && assignees.length) return false;
+    if (filter.staleDays !== undefined) {
+      const days = daysSinceDate(item.lastActivityAt);
+      if (days === null || days < filter.staleDays) return false;
+    }
+    const hasIndividualTerms = engagementEvents.some(
+      (event) => event.type === "INDIVIDUAL_TERMS",
+    );
+    if (
+      filter.individualTerms !== undefined &&
+      hasIndividualTerms !== filter.individualTerms
+    )
+      return false;
+    if (
+      filter.specialTermsProposed !== undefined &&
+      hasIndividualTerms !== filter.specialTermsProposed
+    )
+      return false;
+    if (
+      filter.rewardPresent !== undefined &&
+      engagementEvents.some((event) => event.type === "AWARD") !==
+        filter.rewardPresent
+    )
+      return false;
+    if (
+      !this.matchesColumnFilters(filter, {
+        hasPhone: hasPhone,
+        statuses: item.computedStatuses,
+        bt,
+        fixations: filter.activityPeriod
+          ? finiteNumber(item.periodMetrics?.fixations)
+          : fixations,
+        meetings: filter.activityPeriod
+          ? finiteNumber(item.periodMetrics?.meetings)
+          : meetings,
+        callPresence: filter.callPeriod
+          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
+          : null,
+        assignees,
+        deals,
+      })
+    )
+      return false;
+    const unsupported =
+      (filter.scenario &&
+        ![
+          "HAS_DEALS",
+          "HAS_MEETINGS",
+          "NO_MEETINGS",
+          "BT_VISITED",
+          "BT_NOT_VISITED",
+          "INDIVIDUAL_TERMS",
+          "NO_INDIVIDUAL_TERMS",
+          "NOT_CALLED_IN_PERIOD",
+          "CALLED_IN_PERIOD",
+          "UNASSIGNED",
+        ].includes(filter.scenario)) ||
+      filter.specializations.length ||
+      filter.geography.length ||
+      filter.workFormats.length ||
+      filter.relationshipStages.length ||
+      filter.dataQuality.length ||
+      filter.agencySizes.length ||
+      filter.websitePresent !== undefined ||
+      filter.projectsOnSite.length;
+    if (unsupported) return false;
+    if (
+      filter.scenario &&
+      !this.matchesScenario(filter.scenario, {
+        callPresence: ["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(
+          filter.scenario,
+        )
+          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod!)
+          : null,
+        deals,
+        fixations,
+        meetings,
+        bt,
+        assignee: assignees[0] || "",
+        stage: item.normalizedStage,
+        hasIndividualTerms,
+      })
+    )
+      return false;
+    return true;
+  }
+
+  private async listOursLegacy(
+    entityType: EntityType,
+    query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
     search?: string,
   ) {
     const page = query.page || 1;
@@ -3730,17 +8793,40 @@ export class LoyaltyBaseService {
     };
   }
 
-  private ourBrokerActivityFilter(type: string): any {
+  private ourBrokerActivityFilter(
+    type: string,
+    period?: { from: Date; to: Date },
+  ): any {
+    const dateRange = period ? { gte: period.from, lte: period.to } : undefined;
     if (type === "FIXATION")
-      return { clients: { some: { fixationStatus: "FIXED" } } };
+      return {
+        clients: {
+          some: {
+            fixationStatus: "FIXED",
+            ...(dateRange ? { createdAt: dateRange } : {}),
+          },
+        },
+      };
     if (type === "MEETING")
       return {
-        meetings: { some: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
+        meetings: {
+          some: {
+            status: { in: ["CONFIRMED", "COMPLETED"] },
+            ...(dateRange ? { date: dateRange } : {}),
+          },
+        },
       };
     if (type === "DEAL")
-      return { deals: { some: this.ourConfirmedDealWhere() } };
-    if (type === "BROKER_TOUR") return { brokerTourVisited: true };
-    if (type === "CALL") return { calls: { some: {} } };
+      return { deals: { some: this.ourConfirmedDealWhere(period) } };
+    if (type === "BROKER_TOUR")
+      return {
+        brokerTourVisited: true,
+        ...(dateRange ? { brokerTourDate: dateRange } : {}),
+      };
+    if (type === "CALL")
+      return {
+        callLogs: { some: dateRange ? { createdAt: dateRange } : {} },
+      };
     return {};
   }
 
@@ -3776,12 +8862,24 @@ export class LoyaltyBaseService {
       .map((row) => row.id);
   }
 
-  private mapOurBroker(item: any, dealAmount: string | null = null) {
-    return {
+  private mapOurBroker(
+    item: any,
+    dealAmount: string | null = null,
+    detailed = false,
+  ) {
+    const result: any = {
       id: item.id,
       entityType: "BROKER",
       displayName: item.fullName,
       city: item.region,
+      region: item.region,
+      isRegional: item.isRegional ?? null,
+      isCoordinator: item.isCoordinator ?? null,
+      specialization: item.specialization || null,
+      funnelStage: item.funnelStage || null,
+      normalizedStage: this.ourBrokerRelationshipStage(item),
+      userStatus: item.status || null,
+      updatedAt: item.updatedAt || null,
       archivedAt: item.mergedIntoId ? true : null,
       contactPoints: [
         {
@@ -3825,21 +8923,116 @@ export class LoyaltyBaseService {
         fixations: item._count?.clients || 0,
         deals: item._count?.deals || 0,
         meetings: item._count?.meetings || 0,
-        calls: item._count?.calls || 0,
+        calls: item._count?.callLogs ?? item._count?.calls ?? 0,
         dealAmount,
       },
+      periodMetrics: this.unavailablePeriodMetrics(),
+      metricSource: {
+        kind: "LOCAL_PRELIMINARY",
+        label: "Current local broker-owned operational rows",
+        exactness: "APPROXIMATE",
+        ruleVersion: "ours-broker-local-preliminary-v1",
+        periodFilterApplied: false,
+        contributingRecords:
+          Number(item._count?.clients || 0) +
+          Number(item._count?.meetings || 0) +
+          Number(item._count?.deals || 0),
+        sourceVersions: ["LOCAL_DB:CURRENT"],
+      },
       category: item.category,
+      assignee: item.assignedManager
+        ? {
+            id: item.assignedManager.id,
+            name: item.assignedManager.fullName,
+          }
+        : null,
     };
+    const calls = this.ourCalls(item);
+    const latest = this.applyCallSummary(result, "BROKER", calls);
+    this.applyEngagementSummary(result, item);
+    if (!latest && item.lastCallAt) result.lastCallAt = item.lastCallAt;
+    if (latest?.employee || latest?.employeeId) {
+      result.assignee = {
+        id: latest.employeeId || null,
+        name: latest.employeeName || latest.employee || null,
+      };
+    }
+    if (detailed) {
+      const history = this.ourCallHistory(item);
+      const evidence = this.ourBrokerEvidence(item);
+      result.calls = history;
+      result.callHistory = history;
+      result.activities = evidence.items;
+      result.activityEvidence = evidence;
+      result.attributes = {
+        calls: history,
+        activityEvidence: {
+          count: evidence.count,
+          truncated: evidence.truncated,
+          limit: evidence.limit,
+          availability: evidence.availability,
+          exactness: evidence.exactness,
+          methodology: evidence.methodology,
+        },
+      };
+      const engagementHistory = Array.isArray(item?.__workflowEvents?.history)
+        ? item.__workflowEvents.history
+        : [];
+      result.engagementEvents = engagementHistory;
+      result.loyaltyHistory = engagementHistory;
+    }
+    return result;
   }
 
-  private mapOurAgency(item: any, dealAmount: string | null = null) {
-    return {
+  private mapOurAgency(
+    item: any,
+    dealAmount: string | null = null,
+    detailed = false,
+  ) {
+    const relationMetrics = this.ourAgencyRelationMetrics(item);
+    const relations = Array.isArray(item.brokerAgencies)
+      ? item.brokerAgencies
+      : null;
+    const relationByBrokerId = new Map<string, any>();
+    for (const relation of relations || []) {
+      const brokerId = String(relation?.broker?.id || "");
+      if (!brokerId) continue;
+      const current = relationByBrokerId.get(brokerId);
+      if (!current || relation?.isPrimary === true) {
+        relationByBrokerId.set(brokerId, relation);
+      }
+    }
+    const brokerCount =
+      relationMetrics.brokers !== null
+        ? relationMetrics.brokers.length
+        : finiteNumber(item._count?.brokerAgencies);
+    const contributingRecords = [
+      relationMetrics.fixations,
+      relationMetrics.meetings,
+      relationMetrics.deals,
+      relationMetrics.calls,
+      relationMetrics.brokerTours,
+    ].reduce((sum, rows) => sum + (Array.isArray(rows) ? rows.length : 0), 0);
+    const computedStatuses = this.ourAgencyStatusCodes(relationMetrics);
+    const normalizedStage = this.ourAgencyPartnershipStage(computedStatuses);
+    const result: any = {
       id: item.id,
       entityType: "AGENCY",
       displayName: item.name,
       legalName: item.legalName,
       taxId: item.inn,
       city: null,
+      computedStatuses,
+      normalizedStage,
+      attributes: {
+        partnershipStatus: normalizedStage,
+        partnershipStatusSource: normalizedStage
+          ? "LOCAL_PRELIMINARY_DERIVED"
+          : null,
+        agencySize: null,
+        website: null,
+        projectsOnSite: null,
+      },
       contactPoints: [
         ...(item.phone
           ? [
@@ -3862,9 +9055,9 @@ export class LoyaltyBaseService {
             ]
           : []),
       ],
-      ...(Array.isArray(item.brokerAgencies)
+      ...(relations
         ? {
-            brokers: item.brokerAgencies.map((relation: any) => ({
+            brokers: [...relationByBrokerId.values()].map((relation: any) => ({
               id: relation.broker.id,
               displayName: relation.broker.fullName,
               isPrimary: relation.isPrimary,
@@ -3898,10 +9091,358 @@ export class LoyaltyBaseService {
           }
         : {}),
       metrics: {
-        brokers: item._count?.brokerAgencies || 0,
-        deals: item._count?.deals || 0,
-        dealAmount,
+        brokers: brokerCount,
+        fixations:
+          relationMetrics.fixations === null
+            ? null
+            : relationMetrics.fixations.length,
+        meetings:
+          relationMetrics.meetings === null
+            ? null
+            : relationMetrics.meetings.length,
+        deals:
+          relationMetrics.deals === null ? null : relationMetrics.deals.length,
+        calls:
+          relationMetrics.calls === null ? null : relationMetrics.calls.length,
+        brokerTours:
+          relationMetrics.brokerTours === null
+            ? null
+            : relationMetrics.brokerTours.length,
+        dealAmount: relationMetrics.dealAmount ?? dealAmount,
       },
+      periodMetrics: this.unavailablePeriodMetrics(),
+      lastActivityAt: relationMetrics.lastActivityAt,
+      updatedAt: item.updatedAt || null,
+      metricSource: {
+        kind: "LOCAL_PRELIMINARY",
+        label: "Current local BrokerAgency relation rows",
+        exactness: "APPROXIMATE",
+        ruleVersion: "ours-agency-relations-v1",
+        periodFilterApplied: false,
+        contributingRecords,
+        sourceVersions: ["LOCAL_DB:CURRENT"],
+        methodology: {
+          brokers:
+            "Current BrokerAgency memberships, deduplicated by broker ID",
+          fixations:
+            "FIXED Client rows owned by currently related brokers, deduplicated by Client ID",
+          meetings:
+            "CONFIRMED/COMPLETED Meeting rows owned by currently related brokers, deduplicated by Meeting ID",
+          deals:
+            "Confirmed positive DDU Deal rows linked directly to the agency or owned by currently related brokers, deduplicated by Deal ID",
+          calls:
+            "Legacy CallLog and effective loyalty workflow attempts of the agency/currently related brokers, deduplicated by source and row ID",
+          brokerTours:
+            "BT flags/dates of brokers in the current BrokerAgency relation graph",
+          attribution:
+            "BrokerAgency membership is current-state; historical agency attribution is unavailable",
+        },
+      },
+    };
+    const calls = relationMetrics.calls || this.ourCalls(item);
+    const latest = this.applyCallSummary(result, "AGENCY", calls);
+    this.applyEngagementSummary(result, item);
+    const activityDates = [
+      result.lastActivityAt,
+      latest ? this.callSortKey(latest) : null,
+      ...(Array.isArray(item?.__workflowEvents?.effective)
+        ? item.__workflowEvents.effective.map(
+            (event: LoyaltyEngagementView) => event.occurredAt,
+          )
+        : []),
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    result.lastActivityAt = activityDates.sort().at(-1) || null;
+    if (latest?.employee || latest?.employeeId) {
+      result.assignee = {
+        id: latest.employeeId || null,
+        name: latest.employeeName || latest.employee || null,
+      };
+    }
+    if (detailed) {
+      const history = this.ourAgencyCallHistory(item);
+      const evidence = this.ourAgencyEvidence(relationMetrics);
+      result.calls = history;
+      result.callHistory = history;
+      result.activities = evidence.items;
+      result.activityEvidence = evidence;
+      result.attributes = {
+        ...result.attributes,
+        calls: history,
+        activityEvidence: {
+          count: evidence.count,
+          truncated: evidence.truncated,
+          limit: evidence.limit,
+          availability: evidence.availability,
+          exactness: evidence.exactness,
+          methodology: evidence.methodology,
+        },
+      };
+      const engagementHistory = Array.isArray(item?.__workflowEvents?.history)
+        ? item.__workflowEvents.history
+        : [];
+      result.engagementEvents = engagementHistory;
+      result.loyaltyHistory = engagementHistory;
+    }
+    return result;
+  }
+
+  async exportCsv(
+    baseInput: string,
+    entityType: EntityType,
+    dto: LoyaltyExportDto,
+    actorId?: string,
+  ) {
+    const query = Object.assign(
+      new LoyaltyListQueryDto(),
+      dto,
+      dto.filters || {},
+      { page: 1, pageSize: MAX_LOYALTY_EXPORT_ROWS },
+    );
+    const search = dto.search?.trim() || undefined;
+    const result: any = await this.list(
+      baseInput,
+      entityType,
+      query,
+      search,
+      dto.filter,
+    );
+    const items = (result.items || []).slice(0, MAX_LOYALTY_EXPORT_ROWS);
+    const truncated = Number(result.total || 0) > items.length;
+    if (truncated) {
+      throw new BadRequestException({
+        message:
+          "Export exceeds the synchronous safety limit; narrow the filter or use an asynchronous export job",
+        total: Number(result.total || 0),
+        maxRows: MAX_LOYALTY_EXPORT_ROWS,
+        filterHash: result.filterHash,
+      });
+    }
+    await (this.prisma as any).auditLog.create({
+      data: {
+        userId: actorId || null,
+        action: "LOYALTY_CSV_EXPORT",
+        entity: "LoyaltyBase",
+        entityId: `${result.base}:${entityType}`,
+        // Deliberately exclude search text, filters and row contents.
+        payload: {
+          base: result.base,
+          entityType,
+          rowCount: items.length,
+          truncated,
+          maxRows: MAX_LOYALTY_EXPORT_ROWS,
+          filterHash: result.filterHash,
+        },
+      },
+    });
+    const header = [
+      "База",
+      "Тип",
+      "Имя / название",
+      "Агентство",
+      "Телефоны (маска)",
+      "Email (маска)",
+      "Город",
+      "Связь с amoCRM",
+      "Роль",
+      "Специализация",
+      "Стадия",
+      "Статусы",
+      "Качество данных",
+      "Источник канонических метрик",
+      "Точность канонических метрик",
+      "Точные фиксации",
+      "Точные встречи",
+      "Точные сделки",
+      "Точная сумма сделок",
+      "Точный брокер-тур",
+      "Наша база: локальные фиксации (предварительно)",
+      "Наша база: локальные встречи (предварительно)",
+      "Наша база: локальные сделки (предварительно)",
+      "Наша база: локальная сумма сделок (предварительно)",
+      "Выбранный период: доступность",
+      "Выбранный период: с",
+      "Выбранный период: по",
+      "Выбранный период: фиксации",
+      "Выбранный период: встречи",
+      "Выбранный период: сделки",
+      "Выбранный период: сумма сделок",
+      "Выбранный период: последняя фиксация",
+      "Выбранный период: последняя встреча",
+      "Выбранный период: последняя сделка",
+      "Срез Анны: фиксации (не подтверждено)",
+      "Срез Анны: встречи (не подтверждено)",
+      "Срез Анны: сделки (не подтверждено)",
+      "Срез Анны: сумма сделок (не подтверждено)",
+      "Срез Анны: брокер-тур (не подтверждено)",
+      "Источник среза Анны",
+      "Точность среза Анны",
+      "Период среза Анны",
+      "Ответственный",
+      "Последняя активность",
+    ];
+    const rows = function* () {
+      yield Buffer.from("\uFEFF", "utf8");
+      yield Buffer.from(csvLine(header), "utf8");
+      for (const item of items) {
+        const exact = item.metrics || {};
+        const source = item.sourceReportedMetrics || {};
+        const selectedPeriod = item.periodMetrics || {};
+        const metricSource = item.metricSource || {};
+        const hasExactMetrics = metricSource.kind === "EXACT_ACTIVITIES";
+        const exactMetric = (field: string) =>
+          hasExactMetrics && exact[field] !== null && exact[field] !== undefined
+            ? exact[field]
+            : null;
+        const localMetric = (field: string) =>
+          result.base === "ours" &&
+          exact[field] !== null &&
+          exact[field] !== undefined
+            ? exact[field]
+            : null;
+        const sourceMetric = (field: string) =>
+          source[field] !== null && source[field] !== undefined
+            ? source[field]
+            : null;
+        const selectedPeriodAvailable =
+          selectedPeriod.availability &&
+          selectedPeriod.availability !== "UNAVAILABLE";
+        const selectedPeriodMetric = (field: string) =>
+          selectedPeriodAvailable &&
+          selectedPeriod[field] !== null &&
+          selectedPeriod[field] !== undefined
+            ? selectedPeriod[field]
+            : null;
+        const sourcePeriod = source.periodKind
+          ? [source.periodKind, source.periodFrom, source.periodTo]
+              .filter(Boolean)
+              .join(" ")
+          : null;
+        const phones = (item.contactPoints || [])
+          .filter((point: any) => point.type === "PHONE")
+          .map((point: any) => point.maskedValue)
+          .join("; ");
+        const emails = (item.contactPoints || [])
+          .filter((point: any) => point.type === "EMAIL")
+          .map((point: any) => point.maskedValue)
+          .join("; ");
+        const hasAmo = (item.externalIdentities || []).some(
+          (identity: any) => identity.system === "AMOCRM",
+        );
+        const amoState = hasAmo
+          ? "Есть"
+          : result.base === "ours" && entityType === "AGENCY"
+            ? "Нет данных"
+            : "Нет";
+        yield Buffer.from(
+          csvLine([
+            result.base,
+            entityType,
+            item.displayName,
+            (item.agencies || [])
+              .map((agency: any) => agency.displayName)
+              .filter(Boolean)
+              .join("; ") || item.attributes?.company,
+            phones,
+            emails,
+            item.city,
+            amoState,
+            item.attributes?.role,
+            Array.isArray(item.attributes?.specialization)
+              ? item.attributes.specialization.join("; ")
+              : item.attributes?.specialization || item.specialization,
+            item.attributes?.partnershipStatus ||
+              item.attributes?.stage ||
+              item.funnelStage,
+            (item.computedStatuses || []).join("; "),
+            (item.dataQualityCodes || []).join("; "),
+            metricSource.label || metricSource.kind || null,
+            metricSource.exactness ||
+              (hasExactMetrics ? "EXACT" : "UNAVAILABLE"),
+            exactMetric("fixations"),
+            exactMetric("meetings"),
+            exactMetric("deals"),
+            exactMetric("dealAmount"),
+            exactMetric("brokerTours") === null
+              ? null
+              : Number(exactMetric("brokerTours")) > 0,
+            localMetric("fixations"),
+            localMetric("meetings"),
+            localMetric("deals"),
+            localMetric("dealAmount"),
+            selectedPeriod.availability || "UNAVAILABLE",
+            selectedPeriod.period?.from || null,
+            selectedPeriod.period?.to || null,
+            selectedPeriodMetric("fixations"),
+            selectedPeriodMetric("meetings"),
+            selectedPeriodMetric("deals"),
+            selectedPeriodMetric("dealAmount"),
+            selectedPeriodMetric("lastFixationAt"),
+            selectedPeriodMetric("lastMeetingAt"),
+            selectedPeriodMetric("lastDealAt"),
+            sourceMetric("fixations"),
+            sourceMetric("meetings"),
+            sourceMetric("deals"),
+            sourceMetric("dealAmount"),
+            source.brokerTourVisited ??
+              (sourceMetric("brokerTours") === null
+                ? null
+                : Number(sourceMetric("brokerTours")) > 0),
+            source.sourceLabel || source.sourceVersion || null,
+            source.exactness || source.quality || null,
+            sourcePeriod,
+            item.assignee?.name || item.attributes?.assignee,
+            item.lastActivityAt,
+          ]),
+          "utf8",
+        );
+      }
+    };
+    return {
+      stream: Readable.from(rows()),
+      fileName: `${result.base}-${entityType.toLowerCase()}-loyalty.csv`,
+      rowCount: items.length,
+      truncated,
+      filterHash: result.filterHash,
+    };
+  }
+
+  async entityChanges(
+    entityType: EntityType,
+    id: string,
+    query: LoyaltyChangesQueryDto,
+  ) {
+    const page = query.page || 1;
+    const pageSize = query.pageSize || 30;
+    const where =
+      entityType === "BROKER" ? { personId: id } : { organizationId: id };
+    const [items, total] = await Promise.all([
+      (this.prisma as any).loyaltyEntityChange.findMany({
+        where,
+        select: {
+          id: true,
+          action: true,
+          changedFields: true,
+          beforeValues: true,
+          afterValues: true,
+          actorId: true,
+          createdAt: true,
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      (this.prisma as any).loyaltyEntityChange.count({ where }),
+    ]);
+    return {
+      entityType,
+      entityId: id,
+      items,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
     };
   }
 
@@ -3925,11 +9466,75 @@ export class LoyaltyBaseService {
           true,
         ),
       });
-      if (!record) throw new NotFoundException("Loyalty entity not found");
+      if (!record) {
+        const manualDelegate = (this.prisma as any).loyaltyManualEntity;
+        const manual = manualDelegate?.findFirst
+          ? await manualDelegate.findFirst({
+              where: {
+                datasetId: active.dataset.id,
+                entityType,
+                ...(entityType === "BROKER"
+                  ? { personId: id }
+                  : { organizationId: id }),
+              },
+              include: this.annaManualEntityInclude(),
+            })
+          : null;
+        if (!manual) throw new NotFoundException("Loyalty entity not found");
+        const manualRecord = this.manualOverlayAsAnnaRecord(manual);
+        const workflowCalls = await this.workflowCallReadModels(
+          "anna",
+          entityType,
+          [this.workflowTargetId(manualRecord, entityType)],
+        );
+        this.attachWorkflowCallReadModels(
+          [manualRecord],
+          entityType,
+          workflowCalls,
+        );
+        const engagementEvents = await this.engagementReadModels(
+          "anna",
+          entityType,
+          [this.workflowTargetId(manualRecord, entityType)],
+        );
+        this.attachEngagementReadModels(
+          [manualRecord],
+          entityType,
+          engagementEvents,
+        );
+        return {
+          base: "anna",
+          entityType,
+          item: this.mapAnnaManualRecord(manualRecord, true),
+        };
+      }
+      const workflowCalls = await this.workflowCallReadModels(
+        "anna",
+        entityType,
+        [this.workflowTargetId(record as any, entityType)],
+      );
+      this.attachWorkflowCallReadModels(
+        [record as any],
+        entityType,
+        workflowCalls,
+      );
+      const engagementEvents = await this.engagementReadModels(
+        "anna",
+        entityType,
+        [this.workflowTargetId(record as any, entityType)],
+      );
+      this.attachEngagementReadModels(
+        [record as any],
+        entityType,
+        engagementEvents,
+      );
+      const activityObservedThrough =
+        this.trustedFullSnapshotActivityCoverage(active.snapshot)
+          ?.observedThroughIso || null;
       return {
         base: "anna",
         entityType,
-        item: this.mapAnnaRecord(record as any, true),
+        item: this.mapAnnaRecord(record as any, true, activityObservedThrough),
       };
     }
     if (entityType === "BROKER") {
@@ -3938,6 +9543,56 @@ export class LoyaltyBaseService {
         include: {
           phones: true,
           brokerAgencies: { include: { agency: true } },
+          assignedManager: { select: { id: true, fullName: true } },
+          callLogs: {
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            select: {
+              id: true,
+              createdAt: true,
+              campaign: true,
+              result: true,
+              operatorId: true,
+              comment: true,
+              nextCallAt: true,
+            },
+          },
+          clients: {
+            where: { fixationStatus: "FIXED" },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            take: 200,
+            select: {
+              id: true,
+              createdAt: true,
+              fixationStatus: true,
+              amoLeadId: true,
+            },
+          },
+          meetings: {
+            where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+            orderBy: [{ date: "desc" }, { id: "desc" }],
+            take: 200,
+            select: {
+              id: true,
+              date: true,
+              status: true,
+              type: true,
+              client: { select: { amoLeadId: true } },
+            },
+          },
+          deals: {
+            where: this.ourConfirmedDealWhere(),
+            orderBy: [{ signedAt: "desc" }, { id: "desc" }],
+            take: 200,
+            select: {
+              id: true,
+              signedAt: true,
+              createdAt: true,
+              status: true,
+              amount: true,
+              amoDealId: true,
+              client: { select: { amoLeadId: true } },
+            },
+          },
           _count: {
             select: {
               clients: { where: { fixationStatus: "FIXED" } },
@@ -3955,39 +9610,72 @@ export class LoyaltyBaseService {
         where: { ...this.ourConfirmedDealWhere(), brokerId: id },
         _sum: { amount: true },
       });
+      const workflowCalls = await this.workflowCallReadModels(
+        "ours",
+        "BROKER",
+        [String(broker.id)],
+      );
+      this.attachWorkflowCallReadModels(
+        [broker as any],
+        "BROKER",
+        workflowCalls,
+      );
+      const engagementEvents = await this.engagementReadModels(
+        "ours",
+        "BROKER",
+        [String(broker.id)],
+      );
+      this.attachEngagementReadModels(
+        [broker as any],
+        "BROKER",
+        engagementEvents,
+      );
       return {
         base: "ours",
         entityType,
-        item: this.mapOurBroker(broker, String(dealAmount._sum.amount || "0")),
+        item: this.mapOurBroker(
+          broker,
+          String(dealAmount._sum.amount || "0"),
+          true,
+        ),
       };
     }
     const agency = await this.prisma.agency.findUnique({
       where: { id },
-      include: {
-        brokerAgencies: {
-          include: {
-            broker: {
-              select: { id: true, fullName: true, phone: true, email: true },
-            },
-          },
-        },
-        _count: {
-          select: {
-            brokerAgencies: true,
-            deals: { where: this.ourConfirmedDealWhere() },
-          },
-        },
-      },
+      include: this.ourAgencyReadInclude(),
     });
     if (!agency) throw new NotFoundException("Agency not found");
-    const dealAmount = await this.prisma.deal.aggregate({
-      where: { ...this.ourConfirmedDealWhere(), agencyId: id },
-      _sum: { amount: true },
-    });
+    const workflowCalls = await this.workflowCallReadModels("ours", "AGENCY", [
+      String(agency.id),
+    ]);
+    this.attachWorkflowCallReadModels([agency as any], "AGENCY", workflowCalls);
+    const relatedBrokers = Array.isArray((agency as any).brokerAgencies)
+      ? (agency as any).brokerAgencies
+          .map((relation: any) => relation?.broker)
+          .filter(Boolean)
+      : [];
+    const relatedBrokerCalls = await this.workflowCallReadModels(
+      "ours",
+      "BROKER",
+      relatedBrokers.map((broker: any) => String(broker.id)),
+    );
+    this.attachWorkflowCallReadModels(
+      relatedBrokers,
+      "BROKER",
+      relatedBrokerCalls,
+    );
+    const engagementEvents = await this.engagementReadModels("ours", "AGENCY", [
+      String(agency.id),
+    ]);
+    this.attachEngagementReadModels(
+      [agency as any],
+      "AGENCY",
+      engagementEvents,
+    );
     return {
       base: "ours",
       entityType,
-      item: this.mapOurAgency(agency, String(dealAmount._sum.amount || "0")),
+      item: this.mapOurAgency(agency, null, true),
     };
   }
 
@@ -4050,8 +9738,25 @@ export class LoyaltyBaseService {
           },
           include: { person: true, organization: true },
         });
-        if (!record) throw new NotFoundException("Loyalty entity not found");
-        const entity: any = record.person || record.organization;
+        const manualOverlay = record
+          ? null
+          : await tx.loyaltyManualEntity.findFirst({
+              where: {
+                datasetId: dataset.id,
+                entityType,
+                ...(entityType === "BROKER"
+                  ? { personId: id }
+                  : { organizationId: id }),
+              },
+              include: { person: true, organization: true },
+            });
+        if (!record && !manualOverlay)
+          throw new NotFoundException("Loyalty entity not found");
+        const entity: any =
+          record?.person ||
+          record?.organization ||
+          manualOverlay?.person ||
+          manualOverlay?.organization;
         const mutationAt = new Date();
         data.updatedAt = mutationAt;
         const action =
@@ -4082,20 +9787,134 @@ export class LoyaltyBaseService {
             ? new Date(data.archivedAt).toISOString()
             : null;
         }
-        const updateResult =
-          entityType === "BROKER"
-            ? await tx.loyaltyPerson.updateMany({
-                where: { id, updatedAt: expectedUpdatedAt },
-                data,
-              })
-            : await tx.loyaltyOrganization.updateMany({
-                where: { id, updatedAt: expectedUpdatedAt },
-                data,
+        let updateResult: { count: number };
+        if (manualOverlay) {
+          if (dto.archived === false && manualOverlay.archivedAt) {
+            const normalizedContacts = [
+              manualOverlay.phoneNormalized,
+              manualOverlay.emailNormalized,
+            ].filter(Boolean);
+            if (normalizedContacts.length) {
+              const activeConflict = await tx.loyaltyContactPoint.findFirst({
+                where: {
+                  sourceRecord: { snapshotId: dataset.activeSnapshotId },
+                  normalizedValue: { in: normalizedContacts },
+                },
+                select: { id: true },
               });
+              if (activeConflict) {
+                throw new ConflictException("LOYALTY_CONTACT_ALREADY_EXISTS");
+              }
+            }
+          }
+          const overlayData: any = {
+            updatedAt: mutationAt,
+            version: { increment: 1 },
+          };
+          if (dto.displayName !== undefined)
+            overlayData.displayName = data.manualDisplayName;
+          if (dto.city !== undefined) overlayData.city = data.manualCity;
+          if (dto.attributes !== undefined)
+            overlayData.attributes = sanitizedAttributes;
+          if (dto.archived !== undefined)
+            overlayData.archivedAt = data.archivedAt;
+          updateResult = await tx.loyaltyManualEntity.updateMany({
+            where: { id: manualOverlay.id, updatedAt: expectedUpdatedAt },
+            data: overlayData,
+          });
+          if (updateResult.count === 1) {
+            if (entityType === "BROKER") {
+              await tx.loyaltyPerson.update({ where: { id }, data });
+            } else {
+              await tx.loyaltyOrganization.update({ where: { id }, data });
+            }
+          }
+        } else {
+          updateResult =
+            entityType === "BROKER"
+              ? await tx.loyaltyPerson.updateMany({
+                  where: { id, updatedAt: expectedUpdatedAt },
+                  data,
+                })
+              : await tx.loyaltyOrganization.updateMany({
+                  where: { id, updatedAt: expectedUpdatedAt },
+                  data,
+                });
+        }
         if (updateResult.count !== 1) {
           throw new ConflictException(
             "Loyalty entity changed; reload it before retrying",
           );
+        }
+        if (action === "ARCHIVE") {
+          const ownerWhere =
+            entityType === "BROKER" ? { personId: id } : { organizationId: id };
+          const revokedLinks = await tx.loyaltyEntityLink.updateMany({
+            where: { ...ownerWhere, status: "CONFIRMED", revokedAt: null },
+            data: {
+              status: "REVOKED",
+              revokedAt: mutationAt,
+              revokedById: actorId || null,
+              version: { increment: 1 },
+            },
+          });
+          const assignmentWhere =
+            entityType === "BROKER"
+              ? { annaPersonId: id }
+              : { annaOrganizationId: id };
+          const cancelledAssignments =
+            await tx.loyaltyCallAssignment.updateMany({
+              where: {
+                ...assignmentWhere,
+                status: { in: ["PENDING", "IN_PROGRESS"] },
+              },
+              data: {
+                status: "CANCELLED",
+                cancelledAt: mutationAt,
+                version: { increment: 1 },
+              },
+            });
+          changedFields.push("activeLinks", "openCallAssignments");
+          beforeValues.activeLinks = Number(revokedLinks?.count || 0);
+          afterValues.activeLinks = 0;
+          beforeValues.openCallAssignments = Number(
+            cancelledAssignments?.count || 0,
+          );
+          afterValues.openCallAssignments = 0;
+        }
+        if (action === "RESTORE") {
+          const reopened = await tx.loyaltyReconciliationCase.updateMany({
+            where: {
+              snapshotId: dataset.activeSnapshotId,
+              status: "RESOLVED",
+              decision: "ARCHIVE",
+              ...(entityType === "BROKER"
+                ? { personId: id }
+                : { organizationId: id }),
+            },
+            data: {
+              status: "OPEN",
+              decision: null,
+              decisionReason: null,
+              decisionPayload: null,
+              resolvedById: null,
+              resolvedAt: null,
+              version: { increment: 1 },
+            },
+          });
+          if (Number(reopened?.count || 0) > 0) {
+            changedFields.push("reconciliationCases");
+            beforeValues.reconciliationCases = {
+              status: "RESOLVED",
+              decision: "ARCHIVE",
+              count: reopened.count,
+            };
+            afterValues.reconciliationCases = {
+              status: "OPEN",
+              decision: null,
+              count: reopened.count,
+            };
+          }
         }
         await tx.loyaltyEntityChange.create({
           data: {
@@ -4111,19 +9930,21 @@ export class LoyaltyBaseService {
         // Manual values belong to the stable entity. Replicate their provenance
         // to both the active and already-staged source records so a later publish
         // cannot expose an override whose evidence only exists in an old snapshot.
-        const provenanceRecords = await tx.loyaltySourceRecord.findMany({
-          where: {
-            entityType,
-            snapshot: {
-              datasetId: dataset.id,
-              status: { in: ["PUBLISHED", "STAGED"] },
-            },
-            ...(entityType === "BROKER"
-              ? { personId: id }
-              : { organizationId: id }),
-          },
-          select: { id: true },
-        });
+        const provenanceRecords = manualOverlay
+          ? []
+          : await tx.loyaltySourceRecord.findMany({
+              where: {
+                entityType,
+                snapshot: {
+                  datasetId: dataset.id,
+                  status: { in: ["PUBLISHED", "STAGED"] },
+                },
+                ...(entityType === "BROKER"
+                  ? { personId: id }
+                  : { organizationId: id }),
+              },
+              select: { id: true },
+            });
         const manualFields: any[] = [];
         for (const provenanceRecord of provenanceRecords) {
           if (dto.displayName !== undefined)
@@ -4393,6 +10214,10 @@ export class LoyaltyBaseService {
         version: item.version,
         status: item.status,
         decision: item.decision,
+        decisionReason: item.decisionReason || null,
+        decisionPayload: item.decisionPayload || null,
+        resolvedById: item.resolvedById || null,
+        resolvedAt: item.resolvedAt || null,
         matchCodes: item.matchCodes,
         score: String(item.score),
         anna: source
@@ -4542,45 +10367,16 @@ export class LoyaltyBaseService {
     };
   }
 
-  async unlinkActiveLink(dto: LoyaltyLinkUnlinkDto, actorId?: string) {
-    return this.prisma.$transaction(
-      async (tx: any) => {
-        const revokedAt = new Date();
-        const result = await tx.loyaltyEntityLink.updateMany({
-          where: {
-            id: dto.linkId,
-            version: dto.expectedVersion,
-            status: "CONFIRMED",
-            revokedAt: null,
-            OR: [
-              {
-                person: {
-                  is: { dataset: { is: { code: ANNA_DATASET_CODE } } },
-                },
-              },
-              {
-                organization: {
-                  is: { dataset: { is: { code: ANNA_DATASET_CODE } } },
-                },
-              },
-            ],
-          },
-          data: {
-            status: "REVOKED",
-            revokedAt,
-            revokedById: actorId || null,
-            version: { increment: 1 },
-          },
-        });
-        if (result.count !== 1) {
-          throw new ConflictException(
-            "Active link version changed or link is already revoked",
-          );
-        }
-        return tx.loyaltyEntityLink.findUnique({ where: { id: dto.linkId } });
-      },
-      { isolationLevel: "Serializable" as any },
-    );
+  async unlinkActiveLink(
+    _dto: LoyaltyLinkUnlinkDto,
+    _actorId?: string,
+  ): Promise<never> {
+    throw new GoneException({
+      statusCode: 410,
+      code: "LOYALTY_LEGACY_UNLINK_RETIRED",
+      message:
+        "Legacy orphan unlink is retired; use the case-bound reconciliation UNLINK decision",
+    });
   }
 
   // "Есть только у Анны" — записи активного снимка без единого кандидата
@@ -4751,12 +10547,75 @@ export class LoyaltyBaseService {
     }
     if (current.version !== dto.expectedVersion)
       throw new ConflictException("Reconciliation case version changed");
+    let fieldResolutions: Record<string, unknown> | null = null;
+    if (dto.fieldResolutions) {
+      const allowed = new Set(["displayName", "city", "attributes"]);
+      const unknown = Object.keys(dto.fieldResolutions).filter(
+        (key) => !allowed.has(key),
+      );
+      if (unknown.length) {
+        throw new BadRequestException(
+          `Unsupported field resolutions: ${unknown.join(", ")}`,
+        );
+      }
+      fieldResolutions = sanitizeJson(dto.fieldResolutions);
+    }
+    if (dto.decision === "SUPPLEMENT") {
+      if (!fieldResolutions || Object.keys(fieldResolutions).length === 0) {
+        throw new BadRequestException(
+          "SUPPLEMENT requires at least one field resolution",
+        );
+      }
+      for (const key of ["displayName", "city"] as const) {
+        if (fieldResolutions[key] !== undefined) {
+          const value = fieldResolutions[key];
+          const max = key === "displayName" ? 300 : 200;
+          if (
+            typeof value !== "string" ||
+            !value.trim() ||
+            value.trim().length > max
+          ) {
+            throw new BadRequestException(
+              `SUPPLEMENT ${key} must be a non-empty string up to ${max} characters`,
+            );
+          }
+          fieldResolutions[key] = value.trim();
+        }
+      }
+      if (
+        fieldResolutions.attributes !== undefined &&
+        (!fieldResolutions.attributes ||
+          typeof fieldResolutions.attributes !== "object" ||
+          Array.isArray(fieldResolutions.attributes))
+      ) {
+        throw new BadRequestException(
+          "SUPPLEMENT attributes must be an object",
+        );
+      }
+    }
+    const effectiveTargetId = dto.targetId || current.targetId;
     if (
       dto.decision === "UNLINK" &&
-      !(current.status === "RESOLVED" && current.decision === "LINK")
+      dto.targetId &&
+      dto.targetId !== current.targetId
     ) {
       throw new ConflictException(
-        "Only a resolved LINK decision can be unlinked",
+        "UNLINK targetId must match the target recorded on the case",
+      );
+    }
+    const decisionPayload = sanitizeJson({
+      targetId: effectiveTargetId,
+      fieldResolutions,
+    });
+    if (
+      dto.decision === "UNLINK" &&
+      !(
+        current.status === "RESOLVED" &&
+        ["LINK", "SUPPLEMENT"].includes(current.decision)
+      )
+    ) {
+      throw new ConflictException(
+        "Only a resolved link-bearing decision can be unlinked",
       );
     }
     if (dto.decision !== "UNLINK" && current.status !== "OPEN") {
@@ -4766,17 +10625,26 @@ export class LoyaltyBaseService {
       async (tx: any) => {
         const activeDataset = await tx.loyaltyDataset.findUnique({
           where: { code: ANNA_DATASET_CODE },
-          select: { activeSnapshotId: true },
+          select: { id: true, activeSnapshotId: true },
         });
-        if (activeDataset?.activeSnapshotId !== current.snapshotId) {
+        if (
+          !activeDataset ||
+          activeDataset.activeSnapshotId !== current.snapshotId
+        ) {
           throw new ConflictException(
             "Reconciliation case belongs to a stale snapshot",
           );
         }
-        if (dto.decision === "LINK") {
+        if (["LINK", "SUPPLEMENT"].includes(dto.decision)) {
+          await this.assertActiveAnnaOwner(
+            current,
+            activeDataset.id,
+            current.snapshotId,
+            tx,
+          );
           await this.assertOurTarget(
             current.targetType as EntityType,
-            current.targetId,
+            effectiveTargetId,
             tx,
           );
         }
@@ -4786,22 +10654,72 @@ export class LoyaltyBaseService {
             version: dto.expectedVersion,
             snapshotId: current.snapshotId,
             ...(dto.decision === "UNLINK"
-              ? { status: "RESOLVED", decision: "LINK" }
+              ? {
+                  status: "RESOLVED",
+                  decision: { in: ["LINK", "SUPPLEMENT"] },
+                }
               : { status: "OPEN" }),
           },
-          data: {
-            status: "RESOLVED",
-            decision: dto.decision,
-            version: { increment: 1 },
-            resolvedById: actorId || null,
-            resolvedAt: new Date(),
-          },
+          data:
+            dto.decision === "UNLINK"
+              ? {
+                  status: "OPEN",
+                  decision: null,
+                  decisionReason: null,
+                  decisionPayload: null,
+                  version: { increment: 1 },
+                  resolvedById: null,
+                  resolvedAt: null,
+                }
+              : {
+                  status: "RESOLVED",
+                  decision: dto.decision,
+                  decisionReason: dto.reason,
+                  decisionPayload,
+                  ...(dto.targetId &&
+                  ["LINK", "SUPPLEMENT"].includes(dto.decision)
+                    ? { targetId: effectiveTargetId }
+                    : {}),
+                  version: { increment: 1 },
+                  resolvedById: actorId || null,
+                  resolvedAt: new Date(),
+                },
         });
         if (locked.count !== 1)
           throw new ConflictException("Reconciliation case version changed");
         const ownerWhere = current.personId
           ? { personId: current.personId }
           : { organizationId: current.organizationId };
+        if (!current.personId && !current.organizationId) {
+          throw new ConflictException(
+            "Reconciliation case has no Anna audit owner",
+          );
+        }
+        await tx.loyaltyEntityChange.create({
+          data: {
+            ...ownerWhere,
+            action: "UPDATE",
+            changedFields: ["reconciliationDecision"],
+            beforeValues: {
+              caseId: current.id,
+              status: current.status,
+              decision: current.decision,
+              reason: current.decisionReason || null,
+              payload: current.decisionPayload || null,
+              version: current.version,
+            },
+            afterValues: {
+              caseId: current.id,
+              status: dto.decision === "UNLINK" ? "OPEN" : "RESOLVED",
+              decision: dto.decision === "UNLINK" ? null : dto.decision,
+              transition: dto.decision,
+              reason: dto.reason,
+              payload: dto.decision === "UNLINK" ? null : decisionPayload,
+              version: current.version + 1,
+            },
+            actorId: actorId || null,
+          },
+        });
         if (dto.decision === "UNLINK") {
           const revoked = await tx.loyaltyEntityLink.updateMany({
             where: {
@@ -4809,7 +10727,7 @@ export class LoyaltyBaseService {
               status: "CONFIRMED",
               revokedAt: null,
               targetType: current.targetType,
-              targetId: current.targetId,
+              targetId: effectiveTargetId,
             },
             data: {
               status: "REVOKED",
@@ -4821,7 +10739,81 @@ export class LoyaltyBaseService {
             throw new ConflictException("No active link to revoke");
           return;
         }
-        if (dto.decision !== "LINK") {
+        if (dto.decision === "ARCHIVE") {
+          const archivedAt = new Date();
+          const stableDelegate = current.personId
+            ? tx.loyaltyPerson
+            : tx.loyaltyOrganization;
+          const stableId = current.personId || current.organizationId;
+          if (!stableId) {
+            throw new ConflictException(
+              "Reconciliation case has no Anna entity",
+            );
+          }
+          const archived = await stableDelegate.updateMany({
+            where: { id: stableId, archivedAt: null },
+            data: { archivedAt },
+          });
+          if (archived.count !== 1) {
+            throw new ConflictException("Anna entity is already archived");
+          }
+          await tx.loyaltyManualEntity.updateMany({
+            where: ownerWhere,
+            data: {
+              archivedAt,
+              version: { increment: 1 },
+              updatedAt: archivedAt,
+            },
+          });
+          await tx.loyaltyEntityLink.updateMany({
+            where: { ...ownerWhere, status: "CONFIRMED", revokedAt: null },
+            data: {
+              status: "REVOKED",
+              revokedAt: archivedAt,
+              revokedById: actorId || null,
+            },
+          });
+          const assignmentWhere = current.personId
+            ? { annaPersonId: stableId }
+            : { annaOrganizationId: stableId };
+          const cancelledAssignments =
+            await tx.loyaltyCallAssignment.updateMany({
+              where: {
+                ...assignmentWhere,
+                status: { in: ["PENDING", "IN_PROGRESS"] },
+              },
+              data: {
+                status: "CANCELLED",
+                cancelledAt: archivedAt,
+                version: { increment: 1 },
+              },
+            });
+          await tx.loyaltyEntityChange.create({
+            data: {
+              ...ownerWhere,
+              action: "ARCHIVE",
+              changedFields: [
+                "archivedAt",
+                "reconciliationDecision",
+                "openCallAssignments",
+              ],
+              beforeValues: {
+                archivedAt: null,
+                openCallAssignments: Number(cancelledAssignments?.count || 0),
+              },
+              afterValues: {
+                archivedAt: archivedAt.toISOString(),
+                caseId: current.id,
+                reason: dto.reason,
+                openCallAssignments: 0,
+              },
+              actorId: actorId || null,
+              createdAt: archivedAt,
+            },
+          });
+          return;
+        }
+        if (!["LINK", "SUPPLEMENT"].includes(dto.decision)) {
           return;
         }
         const existingLink = await tx.loyaltyEntityLink.findFirst({
@@ -4830,12 +10822,96 @@ export class LoyaltyBaseService {
         if (existingLink) {
           if (
             existingLink.targetType !== current.targetType ||
-            existingLink.targetId !== current.targetId
+            existingLink.targetId !== effectiveTargetId
           ) {
             throw new ConflictException(
               "An active link already exists; unlink it before linking another target",
             );
           }
+        }
+        if (dto.decision === "SUPPLEMENT") {
+          const stableDelegate = current.personId
+            ? tx.loyaltyPerson
+            : tx.loyaltyOrganization;
+          const stableId = current.personId || current.organizationId;
+          if (!stableId) {
+            throw new ConflictException(
+              "Reconciliation case has no Anna entity",
+            );
+          }
+          const before = await stableDelegate.findUnique({
+            where: { id: stableId },
+            select: {
+              manualDisplayName: true,
+              manualCity: true,
+              manualAttributes: true,
+            },
+          });
+          if (!before) {
+            throw new ConflictException("Anna entity no longer exists");
+          }
+          const nextAttributes = fieldResolutions?.attributes
+            ? {
+                ...((before.manualAttributes as Record<string, unknown>) || {}),
+                ...(fieldResolutions.attributes as Record<string, unknown>),
+              }
+            : before.manualAttributes;
+          const stableData: Record<string, unknown> = {
+            ...(fieldResolutions?.displayName !== undefined
+              ? { manualDisplayName: fieldResolutions.displayName }
+              : {}),
+            ...(fieldResolutions?.city !== undefined
+              ? { manualCity: fieldResolutions.city }
+              : {}),
+            ...(fieldResolutions?.attributes !== undefined
+              ? { manualAttributes: nextAttributes }
+              : {}),
+          };
+          await stableDelegate.update({
+            where: { id: stableId },
+            data: stableData,
+          });
+          await tx.loyaltyManualEntity.updateMany({
+            where: ownerWhere,
+            data: {
+              ...(fieldResolutions?.displayName !== undefined
+                ? { displayName: fieldResolutions.displayName }
+                : {}),
+              ...(fieldResolutions?.city !== undefined
+                ? { city: fieldResolutions.city }
+                : {}),
+              ...(fieldResolutions?.attributes !== undefined
+                ? { attributes: nextAttributes }
+                : {}),
+              version: { increment: 1 },
+              updatedAt: new Date(),
+            },
+          });
+          await tx.loyaltyEntityChange.create({
+            data: {
+              ...ownerWhere,
+              action: "UPDATE",
+              changedFields: Object.keys(fieldResolutions || {}).map(
+                (key) => `reconciliation.${key}`,
+              ),
+              beforeValues: {
+                displayName: before.manualDisplayName,
+                city: before.manualCity,
+                attributes: before.manualAttributes,
+              },
+              afterValues: {
+                displayName:
+                  stableData.manualDisplayName ?? before.manualDisplayName,
+                city: stableData.manualCity ?? before.manualCity,
+                attributes: nextAttributes,
+                caseId: current.id,
+              },
+              actorId: actorId || null,
+              createdAt: new Date(),
+            },
+          });
+        }
+        if (existingLink) {
           // The stable association may have been created by the previous
           // snapshot's case. Resolving the current same-target case is
           // idempotent; a subsequent current-case UNLINK matches owner+target.
@@ -4845,10 +10921,14 @@ export class LoyaltyBaseService {
           data: {
             ...ownerWhere,
             targetType: current.targetType,
-            targetId: current.targetId,
+            targetId: effectiveTargetId,
             status: "CONFIRMED",
             reconciliationCaseId: current.id,
-            evidence: { matchCodes: current.matchCodes },
+            evidence: {
+              matchCodes: current.matchCodes,
+              decision: dto.decision,
+              fieldResolutions,
+            },
             ruleVersion: current.ruleVersion,
             createdById: actorId || null,
             decidedById: actorId || null,
@@ -4868,11 +10948,91 @@ export class LoyaltyBaseService {
     id: string,
     db: any = this.prisma,
   ) {
-    const exists =
-      type === "BROKER"
-        ? await db.broker.findUnique({ where: { id }, select: { id: true } })
-        : await db.agency.findUnique({ where: { id }, select: { id: true } });
-    if (!exists)
-      throw new ConflictException("Target OUR entity no longer exists");
+    if (type === "BROKER") {
+      const broker = await db.broker.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          role: true,
+          status: true,
+          source: true,
+          mergedIntoId: true,
+        },
+      });
+      if (
+        !broker ||
+        broker.role !== "BROKER" ||
+        broker.status === "BLOCKED" ||
+        broker.source === "CLOSED_AS_BROKER" ||
+        broker.mergedIntoId !== null
+      ) {
+        throw new ConflictException(
+          "Target OUR broker is no longer eligible for reconciliation",
+        );
+      }
+      return;
+    }
+    const agency = await db.agency.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!agency) {
+      throw new ConflictException("Target OUR agency no longer exists");
+    }
+  }
+
+  private async assertActiveAnnaOwner(
+    reconciliationCase: any,
+    datasetId: string,
+    snapshotId: string,
+    db: any,
+  ) {
+    const isBroker = reconciliationCase.targetType === "BROKER";
+    const ownerId = isBroker
+      ? reconciliationCase.personId
+      : reconciliationCase.organizationId;
+    if (
+      !ownerId ||
+      (isBroker && reconciliationCase.organizationId) ||
+      (!isBroker && reconciliationCase.personId)
+    ) {
+      throw new ConflictException(
+        "Reconciliation case has no valid Anna audit owner",
+      );
+    }
+    const ownerWhere = isBroker
+      ? {
+          personId: ownerId,
+          person: { is: { archivedAt: null } },
+        }
+      : {
+          organizationId: ownerId,
+          organization: { is: { archivedAt: null } },
+        };
+    const [sourceRecord, manualEntity] = await Promise.all([
+      db.loyaltySourceRecord.findFirst({
+        where: {
+          snapshotId,
+          entityType: reconciliationCase.targetType,
+          sourceArchivedAt: null,
+          ...ownerWhere,
+        },
+        select: { id: true },
+      }),
+      db.loyaltyManualEntity.findFirst({
+        where: {
+          datasetId,
+          entityType: reconciliationCase.targetType,
+          archivedAt: null,
+          ...ownerWhere,
+        },
+        select: { id: true },
+      }),
+    ]);
+    if (!sourceRecord && !manualEntity) {
+      throw new ConflictException(
+        "Anna source/manual entity is no longer active",
+      );
+    }
   }
 }

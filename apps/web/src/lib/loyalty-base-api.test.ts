@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AGENCY_CALL_RESULTS,
+  BROKER_CALL_RESULTS,
   getLoyaltyList,
   getActiveLoyaltyLinks,
   formatRubles,
+  hasLoyaltyActivityEvidence,
+  loyaltyLeaderMode,
+  loyaltyMetricsForDisplay,
   normalizeActiveLinks,
   normalizeImportResult,
   normalizeLoyaltyDetail,
@@ -15,6 +20,199 @@ import {
   stageAnnaImport,
   unlinkActiveLoyaltyLink,
 } from "./loyalty-base-api";
+import { emptyLoyaltyFilters, toCanonicalFilter } from "./loyalty-ui-model";
+import {
+  agencyContactPointsPatch,
+  agencyContactPersonRoleValue,
+  getLoyaltyCampaign,
+  getLoyaltyCampaigns,
+  exportLoyaltyCampaign,
+  localDateTimeInputToIso,
+  toLocalDateInput,
+  toLocalDateTimeInput,
+} from "./loyalty-workflow-api";
+
+test("keeps broker and agency call-result dictionaries separate and removes the obsolete reached field", () => {
+  const brokerCodes = new Set<string>(
+    BROKER_CALL_RESULTS.map(([code]) => code),
+  );
+  const agencyCodes = new Set<string>(
+    AGENCY_CALL_RESULTS.map(([code]) => code),
+  );
+
+  assert.equal(brokerCodes.has("NOT_A_BROKER"), true);
+  assert.equal(agencyCodes.has("NOT_A_BROKER"), false);
+  assert.equal(agencyCodes.has("COOPERATION_AGREED"), true);
+  assert.equal(brokerCodes.has("COOPERATION_AGREED"), false);
+  assert.equal(
+    [...BROKER_CALL_RESULTS, ...AGENCY_CALL_RESULTS].some(([, label]) =>
+      label.includes("Дозвонились"),
+    ),
+    false,
+  );
+});
+
+test("builds independent canonical filters for brokers and agencies", () => {
+  const broker = emptyLoyaltyFilters();
+  broker.specialization = "Вторичка";
+  broker.geography = "REGION";
+  broker.status = "TOP_SELLER";
+  broker.agencySize = "Крупное";
+  broker.activityFrom = "2026-04-01";
+  broker.activityTo = "2026-06-30";
+  broker.meetingsMin = "2";
+  broker.meetingsMax = "5";
+  const brokerFilter = toCanonicalFilter(broker, "brokers");
+  assert.deepEqual(brokerFilter.specializations, ["Вторичка"]);
+  assert.deepEqual(brokerFilter.geography, ["REGION"]);
+  assert.deepEqual(brokerFilter.brokerStatuses, ["TOP_SELLER"]);
+  assert.equal(brokerFilter.agencySizes, undefined);
+  assert.deepEqual(brokerFilter.activityPeriod, {
+    from: "2026-04-01",
+    to: "2026-06-30",
+  });
+  assert.deepEqual(brokerFilter.meetings, { min: 2, max: 5 });
+
+  const agency = emptyLoyaltyFilters();
+  agency.includeLowSignal = true;
+  agency.status = "VIP_PARTNER";
+  agency.agencySize = "Крупное";
+  agency.projectsOnSite = "IN_PROGRESS";
+  agency.specialTermsProposed = "true";
+  agency.dataQuality = "NEEDS_COMPLETION";
+  agency.specialization = "Вторичка";
+  const agencyFilter = toCanonicalFilter(agency, "agencies");
+  assert.deepEqual(agencyFilter.brokerStatuses, ["VIP_PARTNER"]);
+  assert.equal(agencyFilter.partnershipStatuses, undefined);
+  assert.deepEqual(agencyFilter.agencySizes, ["Крупное"]);
+  assert.deepEqual(agencyFilter.projectsOnSite, ["IN_PROGRESS"]);
+  assert.equal(agencyFilter.specialTermsProposed, true);
+  assert.deepEqual(agencyFilter.dataQuality, ["NEEDS_COMPLETION"]);
+  assert.equal(agencyFilter.specializations, undefined);
+  assert.equal(agencyFilter.includeLowSignal, true);
+});
+
+test("round-trips browser-local date and datetime controls without a timezone shift", () => {
+  const local = new Date(2026, 7, 24, 16, 25, 0, 0);
+  assert.equal(toLocalDateTimeInput(local), "2026-08-24T16:25");
+  assert.equal(toLocalDateInput(local), "2026-08-24");
+  assert.equal(
+    localDateTimeInputToIso("2026-08-24T16:25"),
+    local.toISOString(),
+  );
+});
+
+test("omits contactPoints entirely for a contact-person name-only edit", () => {
+  const exactPoints = [{ id: "point-1", type: "PHONE", value: "+79990000001" }];
+  const patch = agencyContactPointsPatch({
+    isNew: false,
+    initialPhones: "+79990000001",
+    initialEmails: "",
+    phones: "+79990000001",
+    emails: "",
+    contactPoints: exactPoints,
+  });
+  assert.deepEqual(patch, {});
+  assert.equal("contactPoints" in patch, false);
+});
+
+test("keeps an explicitly cleared contact-person role on update", () => {
+  assert.equal(agencyContactPersonRoleValue({ isNew: false, role: "   " }), "");
+  assert.equal(
+    agencyContactPersonRoleValue({ isNew: true, role: "   " }),
+    undefined,
+  );
+  assert.equal(
+    agencyContactPersonRoleValue({ isNew: false, role: "  Руководитель  " }),
+    "Руководитель",
+  );
+});
+
+test("treats exact activity mode as evidence without an optional count and requires rows for local preliminary mode", () => {
+  const source = (kind: string, contributingRecords: number | null) => ({
+    kind,
+    label: "",
+    quality: "",
+    exactness: kind === "EXACT_ACTIVITIES" ? "EXACT" : "APPROXIMATE",
+    ruleVersion: "v1",
+    periodFilterApplied: true,
+    contributingRecords,
+    sourceVersions: [],
+  });
+
+  assert.equal(
+    hasLoyaltyActivityEvidence(source("EXACT_ACTIVITIES", null)),
+    true,
+  );
+  assert.equal(
+    hasLoyaltyActivityEvidence(source("LOCAL_PRELIMINARY", 2)),
+    true,
+  );
+  assert.equal(
+    hasLoyaltyActivityEvidence(source("LOCAL_PRELIMINARY", 0)),
+    false,
+  );
+  assert.equal(hasLoyaltyActivityEvidence(source("UNAVAILABLE", 10)), false);
+});
+
+test("shows OUR local leaders as preliminary without weakening Anna exact-only leaders", () => {
+  assert.equal(
+    loyaltyLeaderMode("ours", "LOCAL_PRELIMINARY"),
+    "LOCAL_PRELIMINARY",
+  );
+  assert.equal(loyaltyLeaderMode("anna", "LOCAL_PRELIMINARY"), "UNAVAILABLE");
+  assert.equal(loyaltyLeaderMode("anna", "SOURCE_AGGREGATE"), "UNAVAILABLE");
+  assert.equal(loyaltyLeaderMode("anna", "EXACT_ACTIVITIES"), "EXACT");
+});
+
+test("uses selected-period table metrics without backfilling unknowns from lifetime", () => {
+  const record = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "period-table-metrics",
+        entityType: "BROKER",
+        metrics: {
+          fixations: 99,
+          meetings: 88,
+          deals: 77,
+          dealAmount: "7700",
+        },
+        metricSource: {
+          kind: "SOURCE_AGGREGATE",
+          exactness: "APPROXIMATE",
+        },
+        periodMetrics: {
+          availability: "LOCAL_PRELIMINARY",
+          fixations: 2,
+          meetings: null,
+          deals: 1,
+          dealAmount: null,
+        },
+      },
+    },
+    "brokers",
+  );
+  assert.deepEqual(loyaltyMetricsForDisplay(record), {
+    fixations: 2,
+    meetings: null,
+    deals: 1,
+    dealAmount: null,
+    selectedPeriod: true,
+    availability: "LOCAL_PRELIMINARY",
+    label: "За выбранный период · предварительно",
+  });
+
+  record.periodMetrics!.availability = "UNAVAILABLE";
+  assert.deepEqual(loyaltyMetricsForDisplay(record), {
+    fixations: 99,
+    meetings: 88,
+    deals: 77,
+    dealAmount: "7700",
+    selectedPeriod: false,
+    availability: "UNAVAILABLE",
+    label: "Точные метрики недоступны",
+  });
+});
 
 test("prefers exact leaders and only falls back to source leaders for an explicit rollup mode", () => {
   const exact = {
@@ -156,6 +354,15 @@ test("preserves unavailable Anna KPI values as null instead of a false zero", ()
   assert.equal(result.notCalledCurrentMonth, null);
   assert.equal(result.newBrokers, null);
   assert.equal(result.btWithoutFixation, null);
+
+  const omitted = normalizeLoyaltyOverview(
+    { base: "anna", brokers: { total: 6670 }, agencies: { total: 202 } },
+    "anna",
+  );
+  assert.equal(omitted.notCalledCurrentMonth, null);
+  assert.equal(omitted.newBrokers, null);
+  assert.equal(omitted.btWithoutFixation, null);
+  assert.equal(omitted.birthdaysToday, null);
 });
 
 test("normalizes ANNA list/detail fields returned by the service", () => {
@@ -276,7 +483,7 @@ test("normalizes ANNA list/detail fields returned by the service", () => {
   assert.equal(detail.history.length, 1);
 });
 
-test("shows source-reported row metrics without promoting them to exact events", () => {
+test("keeps source-reported row metrics separate from exact lifetime metrics", () => {
   const item = normalizeLoyaltyDetail(
     {
       item: {
@@ -329,9 +536,13 @@ test("shows source-reported row metrics without promoting them to exact events",
     "brokers",
   );
 
-  assert.equal(item.fixations, 6);
-  assert.equal(item.deals, 1);
+  assert.equal(item.fixations, null);
+  assert.equal(item.meetings, null);
+  assert.equal(item.deals, null);
+  assert.equal(item.dealAmount, null);
   assert.equal(item.metricSource?.kind, "UNAVAILABLE");
+  assert.equal(item.sourceReportedMetrics?.fixations, 6);
+  assert.equal(item.sourceReportedMetrics?.deals, 1);
   assert.equal(item.sourceReportedMetrics?.quality, "SOURCE_REPORTED");
   assert.equal(item.sourceReportedMetrics?.dealsByMonth["2026-07"], 1);
   assert.equal(item.lastActivityAt, "2026-08-13T00:00:00.000Z");
@@ -367,6 +578,124 @@ test("keeps Anna agency source contacts when the backend relation array is empty
   assert.equal(detail.contacts[0].name, "Контактное лицо");
 });
 
+test("uses merged agency contact people and preserves every phone and email", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "agency-merged-contacts",
+        entityType: "AGENCY",
+        displayName: "Агентство",
+        attributes: {
+          agencyContacts: [{ id: "stale", name: "Старое имя" }],
+        },
+        agencyContactPeople: [
+          {
+            id: "person-1",
+            displayName: "Актуальный контакт",
+            role: "Руководитель",
+            actualityStatus: "CURRENT",
+            contactPoints: [
+              {
+                id: "phone-1",
+                type: "PHONE",
+                value: "+70000000001",
+                isPrimary: true,
+              },
+              {
+                id: "phone-2",
+                type: "PHONE",
+                value: "+70000000002",
+                isPrimary: false,
+              },
+              {
+                id: "email-1",
+                type: "EMAIL",
+                value: "one@example.test",
+                isPrimary: true,
+              },
+              {
+                id: "email-2",
+                type: "EMAIL",
+                value: "two@example.test",
+                isPrimary: false,
+              },
+            ],
+          },
+        ],
+      },
+    },
+    "agencies",
+  );
+
+  assert.equal(detail.contacts.length, 1);
+  assert.equal(detail.contacts[0].name, "Актуальный контакт");
+  assert.equal(detail.contacts[0].status, "Актуален");
+  assert.deepEqual(
+    detail.contacts[0].contactPoints.map((point) => [point.type, point.value]),
+    [
+      ["PHONE", "+70000000001"],
+      ["PHONE", "+70000000002"],
+      ["EMAIL", "one@example.test"],
+      ["EMAIL", "two@example.test"],
+    ],
+  );
+});
+
+test("keeps period metrics separate from lifetime aggregates and preserves unavailable values", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "period-metrics",
+        entityType: "BROKER",
+        metrics: { deals: 11 },
+        sourceReportedMetrics: { deals: 17 },
+        periodMetrics: {
+          period: { from: "2026-08-01", to: "2026-08-31" },
+          availability: "UNAVAILABLE",
+          fixations: null,
+          meetings: null,
+          deals: null,
+          dealAmount: null,
+          lastFixationAt: null,
+          lastMeetingAt: null,
+          lastDealAt: null,
+        },
+      },
+    },
+    "brokers",
+  );
+
+  assert.equal(detail.deals, 11);
+  assert.equal(detail.sourceReportedMetrics?.deals, 17);
+  assert.equal(detail.periodMetrics?.availability, "UNAVAILABLE");
+  assert.equal(detail.periodMetrics?.deals, null);
+  assert.equal(detail.periodMetrics?.lastDealAt, "");
+});
+
+test("preserves local preliminary period metrics without relabelling them exact", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "agency-local-period",
+        entityType: "AGENCY",
+        periodMetrics: {
+          period: { from: "2026-08-01", to: "2026-08-31" },
+          availability: "LOCAL_PRELIMINARY",
+          fixations: 2,
+          meetings: 1,
+          deals: 1,
+          dealAmount: "12500000.50",
+        },
+      },
+    },
+    "agencies",
+  );
+
+  assert.equal(detail.periodMetrics?.availability, "LOCAL_PRELIMINARY");
+  assert.equal(detail.periodMetrics?.fixations, 2);
+  assert.equal(detail.periodMetrics?.dealAmount, "12500000.50");
+});
+
 test("preserves curated agency profile, calls, recognitions and explicit zero controls", () => {
   const detail = normalizeLoyaltyDetail(
     {
@@ -378,12 +707,23 @@ test("preserves curated agency profile, calls, recognitions and explicit zero co
           calls: [
             {
               id: "call-1",
+              type: "CALL",
+              assignmentId: "assignment-1",
               date: "2026-08-10",
               campaign: "Август",
+              campaignId: "campaign-1",
+              campaignName: "Август",
               employee: "Оператор",
+              employeeId: "operator-1",
+              employeeName: "Оператор",
               result: "Проинформирован",
               agreement: "Перезвонить",
               nextAt: "2026-08-20",
+              nextStep: "Отправить презентацию",
+              nextActionAt: "2026-08-20T10:00:00.000Z",
+              correctionReason: "Уточнён результат",
+              isCorrection: true,
+              effective: true,
             },
           ],
           recognitions: [
@@ -408,6 +748,11 @@ test("preserves curated agency profile, calls, recognitions and explicit zero co
           activeBrokers: 17,
           lastContractDate: "2026-07-15",
           partnershipStatus: "Партнёр",
+          legalName: "ООО Агентство Анны",
+          nextAgreement: "Согласовать встречу",
+          specialTerms: "Персональная комиссия",
+          specialTermsStatus: "Предложены",
+          specialTermsValidUntil: "2026-12-31",
           rating: 5,
           crmSource: "Срез Анны",
           paymentControl: 0,
@@ -431,6 +776,11 @@ test("preserves curated agency profile, calls, recognitions and explicit zero co
 
   assert.equal(detail.history.length, 1);
   assert.equal(detail.history[0].title, "Проинформирован");
+  assert.equal(detail.history[0].type, "CALL");
+  assert.equal(detail.history[0].assignmentId, "assignment-1");
+  assert.equal(detail.history[0].nextStep, "Отправить презентацию");
+  assert.equal(detail.history[0].nextActionAt, "2026-08-20T10:00:00.000Z");
+  assert.equal(detail.history[0].correctionReason, "Уточнён результат");
   assert.match(detail.history[0].description, /Кампания: Август/);
   assert.match(detail.history[0].description, /Сотрудник: Оператор/);
   assert.match(detail.history[0].description, /Договорённость: Перезвонить/);
@@ -439,6 +789,9 @@ test("preserves curated agency profile, calls, recognitions and explicit zero co
   assert.equal(detail.recognitions[0].hasAttachment, true);
   assert.equal(detail.annaDetails?.brokerCount, 42);
   assert.equal(detail.annaDetails?.activeBrokers, 17);
+  assert.equal(detail.annaDetails?.legalName, "ООО Агентство Анны");
+  assert.equal(detail.annaDetails?.nextAgreement, "Согласовать встречу");
+  assert.equal(detail.annaDetails?.specialTermsStatus, "Предложены");
   assert.equal(detail.annaDetails?.paymentControl, 0);
   assert.equal(detail.annaDetails?.verifiedDealIdsCount, 0);
   assert.equal(
@@ -456,10 +809,20 @@ test("keeps every useful part of legacy history tuples and broker contact/compan
         displayName: "Брокер Анны",
         attributes: {
           company: "Агентство из источника",
+          role: "Ведущий брокер",
+          geography: "REGION",
           history: [
             ["Итог обзвона", "сырой ответ", "Нормализовано", "2026-08"],
           ],
         },
+        agencies: [
+          {
+            id: "agency-1",
+            displayName: "Основное агентство",
+            role: "Ведущий брокер",
+            isPrimary: true,
+          },
+        ],
         contactPoints: [
           {
             id: "phone-1",
@@ -485,7 +848,15 @@ test("keeps every useful part of legacy history tuples and broker contact/compan
     "brokers",
   );
 
-  assert.equal(detail.company, "Агентство из источника");
+  assert.equal(detail.company, "Основное агентство");
+  assert.equal(detail.role, "Ведущий брокер");
+  assert.equal(detail.geography, "REGION");
+  assert.deepEqual(detail.agencies[0], {
+    id: "agency-1",
+    name: "Основное агентство",
+    role: "Ведущий брокер",
+    isPrimary: true,
+  });
   assert.equal(detail.contactPoints.length, 3);
   assert.equal(detail.contactPoints[1].label, "Дополнительный");
   assert.equal(detail.history[0].title, "Итог обзвона");
@@ -654,6 +1025,23 @@ test("maps agency broker relations into detail contacts", () => {
     role: "BROKER",
     phone: "+7***03",
     email: "s***@example.invalid",
+    status: "",
+    contactPoints: [
+      {
+        id: "",
+        type: "PHONE",
+        label: "",
+        value: "+7***03",
+        isPrimary: null,
+      },
+      {
+        id: "",
+        type: "EMAIL",
+        label: "",
+        value: "s***@example.invalid",
+        isPrimary: null,
+      },
+    ],
   });
   assert.equal(detail.fixations, null);
   assert.equal(detail.meetings, null);
@@ -880,6 +1268,11 @@ test("keeps sensitive search in a flat POST body and sends server-side publish c
       city: "Москва",
       hasAmo: "false",
       segment: "NEW_BROKER",
+      columns: {
+        contact: "HAS_PHONE",
+        calls: "NOT_CALLED_IN_PERIOD",
+        deals: "FIVE_PLUS",
+      },
     });
     await publishAnnaImport(
       "snapshot-opaque-1",
@@ -905,6 +1298,12 @@ test("keeps sensitive search in a flat POST body and sends server-side publish c
     city: "Москва",
     hasAmo: false,
     segment: "NEW_BROKER",
+    filter: {},
+    columns: {
+      contact: "HAS_PHONE",
+      calls: "NOT_CALLED_IN_PERIOD",
+      deals: "FIVE_PLUS",
+    },
   });
   assert.deepEqual(JSON.parse(String(calls[1].init?.body)), {
     expectedContentHash: "hash-1",
@@ -1015,4 +1414,112 @@ test("uses the active-links routes and optimistic-lock version contract", async 
     linkId: "link-opaque-2",
     expectedVersion: 4,
   });
+});
+
+test("normalizes campaign progress and its persisted recoverable selection", async () => {
+  const originalFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.endsWith("/campaign-1/export")) {
+      return new Response("\uFEFFcampaign export", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/csv",
+          "Content-Disposition": 'attachment; filename="campaign-1.csv"',
+        },
+      });
+    }
+    const body = url.includes("/campaign-1?")
+      ? {
+          id: "campaign-1",
+          name: "Повторный обзвон",
+          message: "Уточнить интерес",
+          base: "anna",
+          entityType: "brokers",
+          status: "DRAFT",
+          expectedCount: 2,
+          remainingCount: 1,
+          version: 3,
+          createdAt: "2026-08-24T10:00:00.000Z",
+          selection: {
+            mode: "IDS",
+            ids: ["11111111-1111-4111-8111-111111111111"],
+          },
+          assignments: [
+            {
+              id: "assignment-1",
+              status: "PENDING",
+              version: 1,
+              targetId: "11111111-1111-4111-8111-111111111111",
+              assignedTo: {
+                id: "22222222-2222-4222-8222-222222222222",
+                name: "Оператор",
+                role: "MANAGER",
+              },
+              lastResult: null,
+            },
+          ],
+          assignmentCounts: {
+            PENDING: 1,
+            IN_PROGRESS: 0,
+            COMPLETED: 1,
+            CANCELLED: 0,
+          },
+          assignmentPage: {
+            page: 1,
+            pageSize: 200,
+            total: 2,
+            totalPages: 1,
+          },
+        }
+      : [
+          {
+            id: "campaign-1",
+            name: "Повторный обзвон",
+            message: "Уточнить интерес",
+            base: "anna",
+            entityType: "brokers",
+            status: "DRAFT",
+            expectedCount: 2,
+            remainingCount: 1,
+            version: 3,
+            createdAt: "2026-08-24T10:00:00.000Z",
+          },
+        ];
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const campaigns = await getLoyaltyCampaigns({
+      base: "anna",
+      entityType: "brokers",
+    });
+    const detail = await getLoyaltyCampaign("campaign-1");
+    const exported = await exportLoyaltyCampaign("campaign-1");
+    assert.equal(campaigns[0].version, 3);
+    assert.equal(campaigns[0].remainingCount, 1);
+    assert.deepEqual(detail.selection, {
+      mode: "IDS",
+      ids: ["11111111-1111-4111-8111-111111111111"],
+    });
+    assert.equal(detail.assignments[0].assignedTo?.name, "Оператор");
+    assert.equal(detail.assignments[0].lastResult, "");
+    assert.equal(detail.assignmentCounts.COMPLETED, 1);
+    assert.equal(detail.assignmentPage.total, 2);
+    assert.equal(exported.filename, "campaign-1.csv");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.match(urls[0], /\/api\/loyalty-workflow\/campaigns\?/);
+  assert.equal(
+    urls[1],
+    "/api/loyalty-workflow/campaigns/campaign-1?page=1&limit=200",
+  );
+  assert.equal(urls[2], "/api/loyalty-workflow/campaigns/campaign-1/export");
 });

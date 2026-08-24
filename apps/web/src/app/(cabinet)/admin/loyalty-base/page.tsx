@@ -1,5 +1,5 @@
-import { LoyaltyBaseWorkspace } from '@/components/loyalty-base/LoyaltyBaseWorkspace';
+import { LoyaltyBaseWorkspaceV2 } from "@/components/loyalty-base/LoyaltyBaseWorkspaceV2";
 
 export default function LoyaltyBasePage() {
-  return <LoyaltyBaseWorkspace />;
+  return <LoyaltyBaseWorkspaceV2 />;
 }

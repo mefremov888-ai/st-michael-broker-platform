@@ -1,0 +1,2050 @@
+"use client";
+/* eslint-disable react-hooks/set-state-in-effect, @typescript-eslint/no-unused-expressions */
+
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { useRouter } from "next/navigation";
+import {
+  AlertCircle,
+  Building2,
+  Cake,
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  Download,
+  FileJson,
+  Info,
+  KeyRound,
+  ListChecks,
+  Loader2,
+  Megaphone,
+  ScanSearch,
+  Plus,
+  PhoneCall,
+  PhoneOff,
+  RefreshCcw,
+  ShieldCheck,
+  Sparkles,
+  Trophy,
+  UserPlus,
+  Users,
+  X,
+} from "lucide-react";
+import { useAuth } from "@/lib/auth";
+import {
+  downloadBlob,
+  exportLoyaltyList,
+  formatRubles,
+  getLoyaltyDetail,
+  getLoyaltyList,
+  getLoyaltyOverview,
+  hasLoyaltyActivityEvidence,
+  loyaltyLeaderMode,
+  loyaltyMetricsForDisplay,
+  type LoyaltyBaseKey,
+  type LoyaltyColumnFilters,
+  type LoyaltyEntityType,
+  type LoyaltyLeader,
+  type LoyaltyListResponse,
+  type LoyaltyOverview,
+  type LoyaltyRecord,
+  type LoyaltySegment,
+} from "@/lib/loyalty-base-api";
+import {
+  emptyLoyaltyFilters,
+  toCanonicalFilter,
+  type LoyaltyFilterFormState,
+} from "@/lib/loyalty-ui-model";
+import {
+  addLoyaltyContact,
+  getLoyaltyEffectivePermissions,
+  getLoyaltyCampaigns,
+  getLoyaltyOperators,
+  type LoyaltyEffectivePermissions,
+  type LoyaltyPermission,
+  type LoyaltyCampaign,
+  type LoyaltyOperator,
+} from "@/lib/loyalty-workflow-api";
+import { AnnaImportPanel } from "./AnnaImportPanel";
+import { LoyaltyCampaignDashboard } from "./LoyaltyCampaignDashboard";
+import { LoyaltyCampaignModal } from "./LoyaltyCampaignModal";
+import { LoyaltyFilterPanel } from "./LoyaltyFilterPanel";
+import { LoyaltyGrantsPanel } from "./LoyaltyGrantsPanel";
+import { LoyaltyQueuePanel } from "./LoyaltyQueuePanel";
+import { LoyaltyReconciliationV2 } from "./LoyaltyReconciliationV2";
+import { LoyaltyRecordDrawer } from "./LoyaltyRecordDetailV2";
+import { LoyaltySavedViews } from "./LoyaltySavedViews";
+import { LoyaltyStatusLegend } from "./LoyaltyStatusLegend";
+import { LoyaltySyncPanel } from "./LoyaltySyncPanel";
+
+type ContextKey = `${LoyaltyBaseKey}:${LoyaltyEntityType}`;
+type PeriodPreset = "month" | "quarter" | "custom";
+const baseLabels = { anna: "База Анны Скибицкой", ours: "Наша база" } as const;
+const entityLabels = { brokers: "Брокеры", agencies: "Агентства" } as const;
+const contextKey = (
+  base: LoyaltyBaseKey,
+  entity: LoyaltyEntityType,
+): ContextKey => `${base}:${entity}`;
+const contexts = (): Record<ContextKey, LoyaltyFilterFormState> => ({
+  "anna:brokers": emptyLoyaltyFilters(),
+  "anna:agencies": emptyLoyaltyFilters(),
+  "ours:brokers": emptyLoyaltyFilters(),
+  "ours:agencies": emptyLoyaltyFilters(),
+});
+const segments = (): Record<ContextKey, LoyaltySegment | ""> => ({
+  "anna:brokers": "",
+  "anna:agencies": "",
+  "ours:brokers": "",
+  "ours:agencies": "",
+});
+const columnContexts = (): Record<ContextKey, LoyaltyColumnFilters> => ({
+  "anna:brokers": {},
+  "anna:agencies": {},
+  "ours:brokers": {},
+  "ours:agencies": {},
+});
+const moscowParts = () => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Moscow",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const number = (type: string) =>
+    Number(parts.find((part) => part.type === type)?.value || 0);
+  return { year: number("year"), month: number("month") };
+};
+const iso = (year: number, month: number, day: number) =>
+  new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
+const periodRange = (preset: Exclude<PeriodPreset, "custom">) => {
+  const now = moscowParts();
+  const start =
+    preset === "quarter" ? Math.floor((now.month - 1) / 3) * 3 : now.month - 1;
+  const length = preset === "quarter" ? 3 : 1;
+  return {
+    from: iso(now.year, start, 1),
+    to: iso(now.year, start + length, 0),
+  };
+};
+const date = (text: string) => {
+  if (!text) return "Нет данных";
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime())
+    ? text
+    : parsed.toLocaleDateString("ru-RU");
+};
+const number = (value: number | null) =>
+  value === null ? "Нет данных" : value.toLocaleString("ru-RU");
+const money = (value: string | null) =>
+  formatRubles(value).replace("—", "Нет данных");
+
+function KpiCard({
+  title,
+  value,
+  detail,
+  formula,
+  period,
+  source,
+  exactness,
+  icon: Icon,
+  onClick,
+  loading,
+}: {
+  title: string;
+  value: ReactNode;
+  detail: string;
+  formula: string;
+  period: string;
+  source: string;
+  exactness: string;
+  icon: typeof Users;
+  onClick?: () => void;
+  loading: boolean;
+}) {
+  const tooltip = `Формула: ${formula}\nПериод: ${period}\nИсточник: ${source}\nТочность: ${exactness}`;
+  return (
+    <button
+      type="button"
+      disabled={loading}
+      onClick={onClick}
+      aria-label={`${title}. ${tooltip}`}
+      className="group relative flex min-h-36 flex-col rounded-xl border border-border bg-surface p-4 text-left transition hover:border-accent/50 hover:shadow-sm disabled:cursor-default"
+    >
+      <div className="flex w-full items-start justify-between gap-2">
+        <h3 className="text-sm text-text-muted">{title}</h3>
+        <span className="flex gap-1">
+          <Info className="h-4 w-4 text-text-muted" />
+          <span className="rounded-lg bg-accent/10 p-2 text-accent">
+            <Icon className="h-4 w-4" />
+          </span>
+        </span>
+      </div>
+      {loading ? (
+        <span className="mt-4 h-8 w-24 animate-pulse rounded bg-surface-secondary" />
+      ) : (
+        <strong className="mt-3 text-2xl leading-tight">{value}</strong>
+      )}
+      <small className="mt-auto pt-2 text-text-muted">{detail}</small>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute left-2 right-2 top-[calc(100%-0.5rem)] z-40 whitespace-pre-line rounded-lg bg-text p-3 text-xs font-normal leading-relaxed text-surface opacity-0 shadow-xl group-hover:visible group-hover:opacity-100 group-focus-visible:visible group-focus-visible:opacity-100"
+      >
+        {tooltip}
+      </span>
+    </button>
+  );
+}
+
+function Metric({
+  label,
+  children,
+  onClick,
+}: {
+  label: string;
+  children: ReactNode;
+  onClick?: () => void;
+}) {
+  if (onClick)
+    return (
+      <button
+        type="button"
+        className="rounded-xl border border-border p-3 text-left transition hover:border-accent/50 hover:bg-accent/5"
+        onClick={onClick}
+        aria-label={`${label}: открыть детализацию`}
+      >
+        <span className="block text-xs text-text-muted">{label}</span>
+        <span className="mt-1 block font-semibold break-words">{children}</span>
+      </button>
+    );
+  return (
+    <div className="rounded-xl border border-border p-3">
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd className="mt-1 font-semibold break-words">{children}</dd>
+    </div>
+  );
+}
+
+const availabilityLabels: Record<string, string> = {
+  localPreliminary: "Локальные предварительные данные",
+  exactness: "Точность",
+  defaultVisibilityApplied: "Базовое правило видимости",
+  visibilityRule: "Правило видимости",
+  unavailableFilters: "Фильтры без данных в Нашей базе",
+  methodology: "Методика",
+  exactActivities: "Событийные активности",
+  sourceReportedAggregates: "Агрегаты исходной таблицы",
+  callPeriod: "Период звонков",
+  activityPeriod: "Период встреч и сделок",
+  unknownValuesRemainNull: "Неизвестные значения",
+};
+
+const availabilityValue = (key: string, value: unknown) => {
+  if (key === "unknownValuesRemainNull")
+    return value === true
+      ? "показываются как «Нет данных»"
+      : "правило не подтверждено";
+  if (typeof value === "boolean") return value ? "доступны" : "недоступны";
+  const labels: Record<string, string> = {
+    LOCAL_PRELIMINARY: "локальные предварительные данные",
+    LOCAL_PRELIMINARY_RELATION_ROWS:
+      "предварительно по текущим связям брокеров и агентств",
+    LOCAL_PRELIMINARY_LEGACY_CALL_LOGS:
+      "предварительно по локальным логам звонков",
+    APPROXIMATE: "предварительная",
+    EXACT: "доступен по точным датам",
+    PARTIAL_DATE_OR_MONTH: "частично: точная дата или месяц",
+    SOURCE_REPORTED_MONTH_OR_LAST_DATE:
+      "месяц из источника или последняя известная дата",
+    UNAVAILABLE_FOR_AGENCY: "недоступен для агентств",
+    EXACT_DEALS_ONLY: "точны только подтверждённые сделки",
+    UNAVAILABLE: "недоступен",
+  };
+  return labels[String(value)] || String(value || "Нет данных");
+};
+
+function DataAvailabilityNotice({
+  values,
+}: {
+  values: Record<string, unknown>;
+}) {
+  const entries = Object.entries(values);
+  if (!entries.length) return null;
+  return (
+    <aside
+      className="mb-3 rounded-xl border border-border bg-surface-secondary p-3"
+      aria-label="Доступность данных"
+    >
+      <div className="flex items-start gap-2">
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+        <div>
+          <b className="text-sm">Доступность данных</b>
+          <p className="text-xs text-text-muted">
+            Это характеристика источника и периода, а не подтверждение наличия
+            событий. Нулевые значения не объявляются точными без событийного
+            основания.
+          </p>
+        </div>
+      </div>
+      <dl className="mt-2 flex flex-wrap gap-2">
+        {entries.map(([key, value]) => (
+          <div
+            className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs"
+            key={key}
+          >
+            <dt className="inline text-text-muted">
+              {availabilityLabels[key] || key}:{" "}
+            </dt>
+            <dd className="inline font-medium">
+              {availabilityValue(key, value)}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </aside>
+  );
+}
+
+const statusColor = (status: string) => {
+  const value = status.toUpperCase();
+  if (/TOP|VIP/.test(value)) return "bg-emerald-100 text-emerald-800";
+  if (/SELL|ПРОДАВ/.test(value)) return "bg-green-100 text-green-800";
+  if (/DORMANT|СПЯЩ/.test(value)) return "bg-red-100 text-red-800";
+  if (/OFFER|ПРЕДЛАГ/.test(value)) return "bg-orange-100 text-orange-800";
+  if (/FIX|ФИКС/.test(value)) return "bg-purple-100 text-purple-800";
+  if (/TOUR|БТ/.test(value)) return "bg-yellow-100 text-yellow-800";
+  return "bg-blue-100 text-blue-800";
+};
+
+const statusLabel = (status: string) =>
+  ({
+    TOP_SELLER: "Топ-продавец",
+    SELLER: "Продавец",
+    OFFERING: "Предлагающий",
+    FIXATING: "Фиксирующий",
+    BROKER_TOUR: "Был на брокер-туре",
+    DORMANT: "Спящий",
+    NEW: "Новый",
+    VIP_PARTNER: "VIP-партнёр",
+    SELLING_PARTNER: "Продающий партнёр",
+    ACTIVE_PARTNER: "Активный партнёр",
+    FIXATING_PARTNER: "Фиксирующий партнёр",
+    WARM_PARTNER: "Тёплый партнёр",
+    STARTING_PARTNER: "Начинающий партнёр",
+    DORMANT_PARTNER: "Спящий партнёр",
+    NEW_AGENCY: "Новое агентство",
+  })[status] || status;
+
+function LoyaltyTable({
+  data,
+  entityType,
+  selected,
+  onSelected,
+  allFilterSelected,
+  excluded,
+  onExcluded,
+  onOpen,
+  operators,
+  columnDraft,
+  onColumnDraft,
+  onApplyColumns,
+  onResetColumns,
+}: {
+  data: LoyaltyListResponse;
+  entityType: LoyaltyEntityType;
+  selected: Set<string>;
+  onSelected: (next: Set<string>) => void;
+  allFilterSelected: boolean;
+  excluded: Set<string>;
+  onExcluded: (next: Set<string>) => void;
+  onOpen: (id: string) => void;
+  operators: LoyaltyOperator[];
+  columnDraft: LoyaltyColumnFilters;
+  onColumnDraft: (next: LoyaltyColumnFilters) => void;
+  onApplyColumns: () => void;
+  onResetColumns: () => void;
+}) {
+  const isChecked = (id: string) =>
+    allFilterSelected ? !excluded.has(id) : selected.has(id);
+  const allPage =
+    data.items.length > 0 && data.items.every((item) => isChecked(item.id));
+  const toggleAll = () => {
+    if (allFilterSelected) {
+      const next = new Set(excluded);
+      data.items.forEach((item) => {
+        if (allPage) next.add(item.id);
+        else next.delete(item.id);
+      });
+      onExcluded(next);
+      return;
+    }
+    const next = new Set(selected);
+    data.items.forEach((item) => {
+      if (allPage) next.delete(item.id);
+      else next.add(item.id);
+    });
+    onSelected(next);
+  };
+  const setColumn = (key: keyof LoyaltyColumnFilters, value: string) =>
+    onColumnDraft({ ...columnDraft, [key]: value || undefined });
+  const selectClass = "input h-8 min-w-28 px-2 text-xs";
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[1160px] text-sm">
+        <thead>
+          <tr className="border-b border-border text-left text-text-muted">
+            <th className="pb-2 pr-2">
+              <input
+                type="checkbox"
+                checked={allPage}
+                onChange={toggleAll}
+                aria-label="Выбрать текущую страницу"
+              />
+            </th>
+            <th className="pb-2 pr-3">
+              {entityType === "brokers"
+                ? "Контакт / агентство"
+                : "Агентство / контакты"}
+            </th>
+            <th className="pb-2 pr-3">Статус / стадия</th>
+            <th className="pb-2 pr-3">Активность</th>
+            <th className="pb-2 pr-3">Прошлые обзвоны</th>
+            <th className="pb-2 pr-3">Ответственный</th>
+            <th className="pb-2 text-right">Сделки</th>
+          </tr>
+          <tr className="border-b border-border align-top">
+            <th />
+            <th className="pb-2 pr-3">
+              <select
+                className={selectClass}
+                aria-label="Фильтр контактов"
+                value={columnDraft.contact || ""}
+                onChange={(event) => setColumn("contact", event.target.value)}
+              >
+                <option value="">Все</option>
+                <option value="HAS_PHONE">Есть телефон</option>
+                <option value="NO_PHONE">Нет телефона</option>
+              </select>
+            </th>
+            <th className="pb-2 pr-3">
+              <select
+                className={selectClass}
+                aria-label="Фильтр статуса"
+                value={columnDraft.statusStage || ""}
+                onChange={(event) =>
+                  setColumn("statusStage", event.target.value)
+                }
+              >
+                <option value="">Все</option>
+                {data.facets.statuses.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.value} ({item.matches})
+                  </option>
+                ))}
+              </select>
+            </th>
+            <th className="pb-2 pr-3">
+              <select
+                className={selectClass}
+                aria-label="Фильтр активности"
+                value={columnDraft.activity || ""}
+                onChange={(event) => setColumn("activity", event.target.value)}
+              >
+                <option value="">Все</option>
+                <option value="BT_VISITED">Был на БТ</option>
+                <option value="BT_NOT_VISITED">Не был на БТ</option>
+                <option value="HAS_FIXATIONS">Есть фиксации</option>
+                <option value="NO_FIXATIONS">Нет фиксаций</option>
+                <option value="HAS_MEETINGS">Есть встречи</option>
+                <option value="NO_MEETINGS">Нет встреч</option>
+              </select>
+            </th>
+            <th className="pb-2 pr-3">
+              <select
+                className={selectClass}
+                aria-label="Фильтр звонков"
+                value={columnDraft.calls || ""}
+                onChange={(event) => setColumn("calls", event.target.value)}
+              >
+                <option value="">Все</option>
+                <option value="CALLED_IN_PERIOD">Звонили в периоде</option>
+                <option value="NOT_CALLED_IN_PERIOD">
+                  Не звонили в периоде
+                </option>
+              </select>
+            </th>
+            <th className="pb-2 pr-3">
+              <select
+                className={selectClass}
+                aria-label="Фильтр ответственного"
+                value={columnDraft.assignee || ""}
+                onChange={(event) => setColumn("assignee", event.target.value)}
+              >
+                <option value="">Все</option>
+                <option value="UNASSIGNED">Не назначен</option>
+                {operators.map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name}
+                  </option>
+                ))}
+                {data.facets.assignees
+                  .filter(
+                    (facet) =>
+                      !operators.some(
+                        (person) =>
+                          person.id === facet.value ||
+                          person.name === facet.value,
+                      ),
+                  )
+                  .map((facet) => (
+                    <option key={facet.value} value={facet.value}>
+                      {facet.value} ({facet.matches})
+                    </option>
+                  ))}
+              </select>
+            </th>
+            <th className="pb-2">
+              <select
+                className={selectClass}
+                aria-label="Фильтр сделок"
+                value={columnDraft.deals || ""}
+                onChange={(event) => setColumn("deals", event.target.value)}
+              >
+                <option value="">Все</option>
+                <option value="NO_DEALS">Нет сделок</option>
+                <option value="HAS_DEALS">Есть сделки</option>
+                <option value="ONE_TO_TWO">1–2</option>
+                <option value="ONE_TO_FOUR">1–4</option>
+                <option value="THREE_PLUS">3+</option>
+                <option value="FIVE_PLUS">5+</option>
+              </select>
+            </th>
+          </tr>
+          <tr className="border-b border-border">
+            <th />
+            <th colSpan={6} className="pb-2">
+              <div className="flex items-center gap-2">
+                <button
+                  className="btn btn-primary px-3 py-1 text-xs"
+                  type="button"
+                  onClick={onApplyColumns}
+                >
+                  Применить фильтры колонок
+                </button>
+                <button
+                  className="btn btn-secondary px-3 py-1 text-xs"
+                  type="button"
+                  onClick={onResetColumns}
+                >
+                  Сбросить
+                </button>
+                <span className="text-xs text-text-muted">
+                  Фильтры колонок выполняются на сервере и входят в выбор всех
+                  записей и экспорт.
+                </span>
+              </div>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.items.map((item) => {
+            const displayedMetrics = loyaltyMetricsForDisplay(item);
+            const sourceMetrics = item.sourceReportedMetrics;
+            const hasSourceMetrics = Boolean(
+              sourceMetrics &&
+              [
+                sourceMetrics.fixations,
+                sourceMetrics.meetings,
+                sourceMetrics.deals,
+                sourceMetrics.dealAmount,
+              ].some((value) => value !== null),
+            );
+            return (
+              <tr
+                key={item.id}
+                className="border-b border-border last:border-0 hover:bg-surface-secondary/70"
+              >
+                <td className="py-3 pr-2">
+                  <input
+                    type="checkbox"
+                    checked={isChecked(item.id)}
+                    onChange={() => {
+                      if (allFilterSelected) {
+                        const next = new Set(excluded);
+                        next.has(item.id)
+                          ? next.delete(item.id)
+                          : next.add(item.id);
+                        onExcluded(next);
+                        return;
+                      }
+                      const next = new Set(selected);
+                      next.has(item.id)
+                        ? next.delete(item.id)
+                        : next.add(item.id);
+                      onSelected(next);
+                    }}
+                    aria-label={`Выбрать ${item.name}`}
+                  />
+                </td>
+                <td className="py-3 pr-3">
+                  <button
+                    className="max-w-64 text-left hover:text-accent"
+                    onClick={() => onOpen(item.id)}
+                  >
+                    <b className="block truncate">{item.name}</b>
+                    <span className="block truncate text-xs text-text-muted">
+                      {item.company || item.phone || "Нет контактных данных"}
+                    </span>
+                  </button>
+                </td>
+                <td className="py-3 pr-3">
+                  <span
+                    className={`inline-block rounded-full px-2 py-1 text-xs ${statusColor(item.status)}`}
+                  >
+                    {item.status ? statusLabel(item.status) : "Нет данных"}
+                  </span>
+                  <span className="mt-1 block text-xs text-text-muted">
+                    {item.stage || "Нет данных"}
+                  </span>
+                </td>
+                <td className="py-3 pr-3">
+                  <span>
+                    {number(displayedMetrics.fixations)} фикс. ·{" "}
+                    {number(displayedMetrics.meetings)} встр.
+                  </span>
+                  <small className="block text-text-muted">
+                    {displayedMetrics.label}
+                  </small>
+                  {hasSourceMetrics && sourceMetrics && (
+                    <small className="mt-1 block text-warning">
+                      Срез источника · не подтверждено:{" "}
+                      {number(sourceMetrics.fixations)} фикс. ·{" "}
+                      {number(sourceMetrics.meetings)} встр.
+                    </small>
+                  )}
+                </td>
+                <td className="py-3 pr-3">
+                  {date(item.lastCallAt)}
+                  <small className="block text-text-muted">
+                    {item.lastCallResult || "Результат не указан"}
+                  </small>
+                </td>
+                <td className="py-3 pr-3">{item.assignee || "Не назначен"}</td>
+                <td className="py-3 text-right">
+                  <b>{number(displayedMetrics.deals)}</b>
+                  <small className="block whitespace-nowrap text-text-muted">
+                    {money(displayedMetrics.dealAmount)}
+                  </small>
+                  {hasSourceMetrics && sourceMetrics && (
+                    <small className="mt-1 block whitespace-nowrap text-warning">
+                      Срез · не подтверждено: {number(sourceMetrics.deals)} ·{" "}
+                      {money(sourceMetrics.dealAmount)}
+                    </small>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AddContactModal({
+  base,
+  entityType,
+  onClose,
+  onDone,
+}: {
+  base: LoyaltyBaseKey;
+  entityType: LoyaltyEntityType;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [form, setForm] = useState({
+    name: "",
+    phone: "",
+    email: "",
+    city: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const save = async () => {
+    if (!form.name.trim()) return setError("Укажите имя или название.");
+    setBusy(true);
+    try {
+      await addLoyaltyContact({
+        base,
+        entityType,
+        name: form.name.trim(),
+        phone: form.phone.trim() || undefined,
+        email: form.email.trim() || undefined,
+        city: form.city.trim() || undefined,
+      });
+      onDone();
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Не удалось добавить контакт",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-lg space-y-3 rounded-2xl bg-surface p-5">
+        <div className="flex justify-between">
+          <h2 className="text-lg font-semibold">
+            Добавить {entityType === "brokers" ? "брокера" : "агентство"}
+          </h2>
+          <button onClick={onClose}>
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+        {(["name", "phone", "email", "city"] as const).map((key) => (
+          <label className="block text-sm" key={key}>
+            {key === "name"
+              ? "Имя / название *"
+              : key === "phone"
+                ? "Телефон"
+                : key === "email"
+                  ? "Email"
+                  : "Город"}
+            <input
+              className="input mt-1"
+              value={form[key]}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  [key]: event.target.value,
+                }))
+              }
+            />
+          </label>
+        ))}
+        {error && (
+          <p className="rounded-lg bg-error/10 p-2 text-sm text-error">
+            {error}
+          </p>
+        )}
+        <button
+          className="btn btn-primary w-full"
+          disabled={busy}
+          onClick={() => void save()}
+        >
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}Добавить
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function LoyaltyBaseWorkspaceV2() {
+  const router = useRouter();
+  const { broker: me } = useAuth();
+  const [base, setBase] = useState<LoyaltyBaseKey>("anna");
+  const [entityType, setEntityType] = useState<LoyaltyEntityType>("brokers");
+  const key = contextKey(base, entityType);
+  const [drafts, setDrafts] = useState(contexts);
+  const [applied, setApplied] = useState(contexts);
+  const [segmentState, setSegmentState] = useState(segments);
+  const [columnDrafts, setColumnDrafts] = useState(columnContexts);
+  const [columnApplied, setColumnApplied] = useState(columnContexts);
+  const draft = drafts[key];
+  const filters = applied[key];
+  const segment = segmentState[key];
+  const columnDraft = columnDrafts[key];
+  const columns = columnApplied[key];
+  const [mode, setMode] = useState<"base" | "reconciliation">("base");
+  const [importOpen, setImportOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [grantsOpen, setGrantsOpen] = useState(false);
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>("month");
+  const [ratingRange, setRatingRange] = useState(periodRange("month"));
+  const [overview, setOverview] = useState<LoyaltyOverview | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [overviewError, setOverviewError] = useState("");
+  const [list, setList] = useState<LoyaltyListResponse | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState("");
+  const [page, setPage] = useState(1);
+  const [selected, setSelected] = useState(new Set<string>());
+  const [allFilterSelected, setAllFilterSelected] = useState(false);
+  const [excluded, setExcluded] = useState(new Set<string>());
+  const [operators, setOperators] = useState<LoyaltyOperator[]>([]);
+  const [campaigns, setCampaigns] = useState<LoyaltyCampaign[]>([]);
+  const [operatorsError, setOperatorsError] = useState("");
+  const [campaignsError, setCampaignsError] = useState("");
+  const [campaignOpen, setCampaignOpen] = useState(false);
+  const [campaignsOpen, setCampaignsOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [detailId, setDetailId] = useState("");
+  const [detail, setDetail] = useState<LoyaltyRecord | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const [effective, setEffective] =
+    useState<LoyaltyEffectivePermissions | null>(null);
+  const [permissionsLoading, setPermissionsLoading] = useState(true);
+  const [permissionsError, setPermissionsError] = useState("");
+  const overviewRequest = useRef(0);
+  const listRequest = useRef(0);
+  const pageSize = 30;
+  const currentUserId = me?.id;
+  const currentUserRole = me?.role;
+  const isAdmin = currentUserRole === "ADMIN";
+  const hasAccess = isAdmin || currentUserRole === "MANAGER";
+  const hasPermission = (permission: LoyaltyPermission) =>
+    Boolean(effective?.permissions.includes(permission));
+  const canReadAll = hasPermission("READ_ALL");
+  const canUseQueue =
+    hasPermission("READ_OWN_QUEUE") || hasPermission("CALL_EXECUTE");
+  const canAssign = hasPermission("CALL_ASSIGN");
+  const canExport = hasPermission("EXPORT");
+  const canEdit = hasPermission("ENTITY_EDIT");
+  const canImport = hasPermission("IMPORT");
+  const canReconcile = hasPermission("RECONCILE");
+  const canSync = hasPermission("ANALYTICS_SYNC");
+  const canManageReferences = hasPermission("REFERENCE_MANAGE");
+
+  useEffect(() => {
+    if (!currentUserId || !currentUserRole || !hasAccess) {
+      setPermissionsLoading(false);
+      setEffective(null);
+      return;
+    }
+    let active = true;
+    setPermissionsLoading(true);
+    setPermissionsError("");
+    getLoyaltyEffectivePermissions()
+      .then((value) => {
+        if (active) setEffective(value);
+      })
+      .catch((reason) => {
+        if (active) {
+          setEffective(null);
+          setPermissionsError(
+            reason instanceof Error
+              ? reason.message
+              : "Не удалось проверить права доступа",
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setPermissionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [currentUserId, currentUserRole, hasAccess]);
+  const setDraft = (next: LoyaltyFilterFormState) =>
+    setDrafts((current) => ({ ...current, [key]: next }));
+  const resetContext = useCallback(
+    (
+      nextBase: LoyaltyBaseKey,
+      nextEntity: LoyaltyEntityType,
+      includeLowSignal = false,
+    ) => {
+      const nextKey = contextKey(nextBase, nextEntity);
+      const empty = { ...emptyLoyaltyFilters(), includeLowSignal };
+      setDrafts((current) => ({ ...current, [nextKey]: empty }));
+      setApplied((current) => ({ ...current, [nextKey]: empty }));
+      setSegmentState((current) => ({ ...current, [nextKey]: "" }));
+      setColumnDrafts((current) => ({ ...current, [nextKey]: {} }));
+      setColumnApplied((current) => ({ ...current, [nextKey]: {} }));
+      setBase(nextBase);
+      setEntityType(nextEntity);
+      setPage(1);
+      setSelected(new Set());
+      setAllFilterSelected(false);
+      setExcluded(new Set());
+      setDetailId("");
+    },
+    [],
+  );
+  const loadOverview = useCallback(async () => {
+    if (!canReadAll) {
+      setOverviewLoading(false);
+      return;
+    }
+    const request = ++overviewRequest.current;
+    setOverviewLoading(true);
+    setOverviewError("");
+    try {
+      const next = await getLoyaltyOverview(base, ratingRange);
+      if (request === overviewRequest.current) setOverview(next);
+    } catch (reason) {
+      if (request === overviewRequest.current) {
+        setOverview(null);
+        setOverviewError(
+          reason instanceof Error ? reason.message : "Не удалось загрузить KPI",
+        );
+      }
+    } finally {
+      if (request === overviewRequest.current) setOverviewLoading(false);
+    }
+  }, [base, canReadAll, ratingRange]);
+  const loadList = useCallback(async () => {
+    if (!canReadAll) {
+      setListLoading(false);
+      return;
+    }
+    const request = ++listRequest.current;
+    setListLoading(true);
+    setListError("");
+    try {
+      const next = await getLoyaltyList(base, entityType, {
+        page,
+        pageSize,
+        search: filters.search,
+        city: filters.city || undefined,
+        hasAmo: filters.hasAmo,
+        archived: filters.archived,
+        segment,
+        sortBy: filters.sortBy,
+        sortOrder: filters.sortOrder,
+        filter: toCanonicalFilter(filters, entityType),
+        columns,
+      });
+      if (request === listRequest.current) setList(next);
+    } catch (reason) {
+      if (request === listRequest.current) {
+        setList(null);
+        setListError(
+          reason instanceof Error
+            ? reason.message
+            : "Не удалось загрузить список",
+        );
+      }
+    } finally {
+      if (request === listRequest.current) setListLoading(false);
+    }
+  }, [base, canReadAll, columns, entityType, filters, page, segment]);
+  useEffect(() => {
+    if (mode === "base") void loadOverview();
+  }, [loadOverview, mode]);
+  useEffect(() => {
+    if (mode === "base") void loadList();
+  }, [loadList, mode]);
+  useEffect(() => {
+    setSelected(new Set());
+    setAllFilterSelected(false);
+    setExcluded(new Set());
+  }, [columns, key, filters, segment]);
+  useEffect(() => {
+    if (!allFilterSelected) setSelected(new Set());
+  }, [allFilterSelected, page]);
+  const loadOperators = useCallback(async () => {
+    if (!canReadAll) {
+      setOperators([]);
+      setOperatorsError("");
+      return;
+    }
+    setOperatorsError("");
+    try {
+      setOperators(await getLoyaltyOperators());
+    } catch (reason) {
+      setOperators([]);
+      setOperatorsError(
+        reason instanceof Error
+          ? reason.message
+          : "Не удалось загрузить сотрудников для назначения",
+      );
+    }
+  }, [canReadAll]);
+  const loadCampaignCatalog = useCallback(async () => {
+    if (!canReadAll) {
+      setCampaigns([]);
+      setCampaignsError("");
+      return;
+    }
+    setCampaignsError("");
+    try {
+      setCampaigns(await getLoyaltyCampaigns({ base, entityType, limit: 200 }));
+    } catch (reason) {
+      setCampaigns([]);
+      setCampaignsError(
+        reason instanceof Error
+          ? reason.message
+          : "Не удалось загрузить кампании",
+      );
+    }
+  }, [base, canReadAll, entityType]);
+  useEffect(() => {
+    void loadOperators();
+  }, [loadOperators]);
+  useEffect(() => {
+    void loadCampaignCatalog();
+  }, [loadCampaignCatalog]);
+  useEffect(() => {
+    if (!detailId || !canReadAll) return;
+    let active = true;
+    setDetailLoading(true);
+    setDetailError("");
+    getLoyaltyDetail(base, entityType, detailId)
+      .then((record) => {
+        const row = list?.items.find((item) => item.id === detailId);
+        if (active)
+          setDetail({
+            ...record,
+            periodMetrics: row?.periodMetrics || record.periodMetrics,
+          });
+      })
+      .catch((reason) => {
+        if (active)
+          setDetailError(
+            reason instanceof Error
+              ? reason.message
+              : "Не удалось загрузить карточку",
+          );
+      })
+      .finally(() => {
+        if (active) setDetailLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [base, canReadAll, detailId, entityType, list]);
+  const applyFilters = () => {
+    setApplied((current) => ({ ...current, [key]: { ...draft } }));
+    setSegmentState((current) => ({ ...current, [key]: "" }));
+    setPage(1);
+  };
+  const applyColumnFilters = () => {
+    setColumnApplied((current) => ({ ...current, [key]: { ...columnDraft } }));
+    setPage(1);
+  };
+  const resetColumnFilters = () => {
+    setColumnDrafts((current) => ({ ...current, [key]: {} }));
+    setColumnApplied((current) => ({ ...current, [key]: {} }));
+    setPage(1);
+  };
+  const scrollToList = () =>
+    window.setTimeout(
+      () =>
+        document
+          .getElementById("loyalty-list")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+      0,
+    );
+  const applyBrokerPatch = (
+    patch: Partial<LoyaltyFilterFormState>,
+    nextSegment: LoyaltySegment | "" = "",
+  ) => {
+    const brokerKey = contextKey(base, "brokers");
+    const next = { ...emptyLoyaltyFilters(), ...patch };
+    setDrafts((current) => ({ ...current, [brokerKey]: next }));
+    setApplied((current) => ({ ...current, [brokerKey]: next }));
+    setSegmentState((current) => ({ ...current, [brokerKey]: nextSegment }));
+    setColumnDrafts((current) => ({ ...current, [brokerKey]: {} }));
+    setColumnApplied((current) => ({ ...current, [brokerKey]: {} }));
+    setEntityType("brokers");
+    setPage(1);
+    scrollToList();
+  };
+  const openPeriodRanking = (nextEntity: LoyaltyEntityType) => {
+    const nextKey = contextKey(base, nextEntity);
+    const next = {
+      ...emptyLoyaltyFilters(),
+      activityFrom: ratingRange.from,
+      activityTo: ratingRange.to,
+      dealsInPeriod: "true" as const,
+      sortBy: "deals" as const,
+      sortOrder: "desc" as const,
+    };
+    setDrafts((current) => ({ ...current, [nextKey]: next }));
+    setApplied((current) => ({ ...current, [nextKey]: next }));
+    setSegmentState((current) => ({ ...current, [nextKey]: "" }));
+    setColumnDrafts((current) => ({ ...current, [nextKey]: {} }));
+    setColumnApplied((current) => ({ ...current, [nextKey]: {} }));
+    setEntityType(nextEntity);
+    setPage(1);
+    scrollToList();
+  };
+  const openActivityDrilldown = (
+    metric: "fixations" | "meetings" | "deals" | "dealAmount",
+  ) => {
+    const next = {
+      ...emptyLoyaltyFilters(),
+      activityFrom: ratingRange.from,
+      activityTo: ratingRange.to,
+      meetings: metric === "meetings" ? ("true" as const) : ("" as const),
+      dealsInPeriod:
+        metric === "deals" || metric === "dealAmount"
+          ? ("true" as const)
+          : ("" as const),
+      sortBy:
+        metric === "dealAmount"
+          ? ("dealAmount" as const)
+          : metric === "meetings"
+            ? ("meetings" as const)
+            : metric === "deals"
+              ? ("deals" as const)
+              : ("updatedAt" as const),
+      sortOrder: "desc" as const,
+    };
+    const nextColumns: LoyaltyColumnFilters =
+      metric === "fixations" ? { activity: "HAS_FIXATIONS" } : {};
+    setDrafts((current) => ({ ...current, [key]: next }));
+    setApplied((current) => ({ ...current, [key]: next }));
+    setSegmentState((current) => ({ ...current, [key]: "" }));
+    setColumnDrafts((current) => ({ ...current, [key]: nextColumns }));
+    setColumnApplied((current) => ({ ...current, [key]: nextColumns }));
+    setPage(1);
+    scrollToList();
+  };
+  const metricSource = overview?.metricSource;
+  const sourceReported = overview?.sourceReportedSummary;
+  const source =
+    metricSource?.label ||
+    (overview?.snapshot
+      ? `${baseLabels[base]}, snapshot ${date(overview.snapshot.publishedAt)}`
+      : baseLabels[base]);
+  const hasActivityEvidence = hasLoyaltyActivityEvidence(metricSource);
+  const exactness = `${hasActivityEvidence ? metricSource?.exactness || "Не указана" : "Нет событий для подтверждения точности"}${metricSource?.periodFilterApplied === false ? "; период не применён" : ""}`;
+  const ratingLabel =
+    periodPreset === "month"
+      ? "текущий месяц"
+      : periodPreset === "quarter"
+        ? "текущий квартал"
+        : `${ratingRange.from} — ${ratingRange.to}`;
+  const exactLeaders =
+    metricSource?.kind === "EXACT_ACTIVITIES" && hasActivityEvidence;
+  const leaderMode = loyaltyLeaderMode(base, metricSource?.kind || "");
+  const preliminaryLeaders =
+    leaderMode === "LOCAL_PRELIMINARY" && hasActivityEvidence;
+  const visibleLeaders = exactLeaders || preliminaryLeaders;
+  const leader = (value: LoyaltyLeader | null) =>
+    visibleLeaders && value ? value.name : "Нет данных";
+  const leaderDetail = (value: LoyaltyLeader | null) =>
+    visibleLeaders && value
+      ? `${preliminaryLeaders ? "Предварительно по локальным данным · " : ""}${value.deals} сделок · ${money(value.dealAmount)}`
+      : "Нет подтверждённых сделок за период";
+  const kpis = [
+    {
+      methodKey: "brokers.notCalledCurrentMonth",
+      title: "Не звонили в текущем месяце",
+      value: number(overview?.notCalledCurrentMonth ?? null),
+      detail: "Активные брокеры без звонка",
+      formula:
+        "active = true AND call_event от 1-го числа по сегодня отсутствует",
+      period: "текущий месяц, Europe/Moscow",
+      icon: PhoneOff,
+      onClick: () => applyBrokerPatch({}, "NOT_CALLED_CURRENT_MONTH"),
+    },
+    {
+      methodKey: "brokers.newCount",
+      title: "Новые брокеры",
+      value: number(overview?.newBrokers ?? null),
+      detail: "Стадия «Новый», без достигнутой активности",
+      formula: "stage = Новый AND нет БТ, фиксаций, встреч и сделок",
+      period: "на дату последнего обновления",
+      icon: UserPlus,
+      onClick: () => applyBrokerPatch({}, "NEW_BROKER"),
+    },
+    {
+      methodKey: "brokers.btWithoutFixation",
+      title: "Посетил БТ и нет фиксации",
+      value: number(overview?.btWithoutFixation ?? null),
+      detail: "Только подтверждённый флаг/дата БТ",
+      formula: "bt_attended = true AND fixation_count = 0",
+      period: "на дату последнего обновления",
+      icon: Sparkles,
+      onClick: () => applyBrokerPatch({}, "BT_WITHOUT_FIXATION"),
+    },
+    {
+      methodKey: "brokers.birthdaysToday",
+      title: "Дни рождения сегодня",
+      value: number(overview?.birthdaysToday ?? null),
+      detail: "День и месяц по Europe/Moscow",
+      formula: "day(birthday) = day(today) AND month(birthday) = month(today)",
+      period: "сегодня, Europe/Moscow",
+      icon: Cake,
+      onClick: () => applyBrokerPatch({}, "BIRTHDAY_TODAY"),
+    },
+    {
+      methodKey: "brokers.top",
+      title: `${periodPreset === "month" ? "Топ-брокер месяца" : "Топ-брокер за период"}${preliminaryLeaders ? " · предварительно" : ""}`,
+      value: leader(overview?.topBroker || null),
+      detail: leaderDetail(overview?.topBroker || null),
+      formula:
+        "подтверждённые сделки ↓, сумма ДДУ ↓, дата договора ↓, стабильный ID",
+      period: ratingLabel,
+      icon: Trophy,
+      onClick:
+        visibleLeaders && overview?.topBroker?.id
+          ? () =>
+              router.push(
+                `/admin/loyalty-base/${base}/brokers/${encodeURIComponent(overview.topBroker!.id)}`,
+              )
+          : () => openPeriodRanking("brokers"),
+    },
+    {
+      methodKey: "agencies.top",
+      title: `${
+        periodPreset === "month"
+          ? "Топ-агентство месяца"
+          : "Топ-агентство за период"
+      }${preliminaryLeaders ? " · предварительно" : ""}`,
+      value: leader(overview?.topAgency || null),
+      detail: leaderDetail(overview?.topAgency || null),
+      formula:
+        "подтверждённые сделки ↓, сумма ДДУ ↓, дата договора ↓, стабильный ID",
+      period: ratingLabel,
+      icon: Building2,
+      onClick:
+        visibleLeaders && overview?.topAgency?.id
+          ? () =>
+              router.push(
+                `/admin/loyalty-base/${base}/agencies/${encodeURIComponent(overview.topAgency!.id)}`,
+              )
+          : () => openPeriodRanking("agencies"),
+    },
+  ];
+  const exportCsv = async () => {
+    setExporting(true);
+    setActionError("");
+    try {
+      const result = await exportLoyaltyList(base, entityType, {
+        search: filters.search,
+        city: filters.city || undefined,
+        hasAmo: filters.hasAmo === "" ? undefined : filters.hasAmo === "true",
+        archived: filters.archived,
+        segment: segment || undefined,
+        sortBy: filters.sortBy,
+        sortOrder: filters.sortOrder,
+        filter: toCanonicalFilter(filters, entityType),
+        columns,
+      });
+      downloadBlob(result.blob, result.filename);
+    } catch (reason) {
+      setActionError(
+        reason instanceof Error ? reason.message : "Не удалось выгрузить CSV",
+      );
+    } finally {
+      setExporting(false);
+    }
+  };
+  const savedFiltersWithoutSearch = Object.fromEntries(
+    Object.entries(filters).filter(([name]) => name !== "search"),
+  );
+  const savedViewSnapshot: Record<string, unknown> = {
+    archived: filters.archived,
+    sortBy: filters.sortBy,
+    sortOrder: filters.sortOrder,
+    filter: toCanonicalFilter(filters, entityType),
+    columns,
+    segment: segment || undefined,
+    ui: {
+      filters: savedFiltersWithoutSearch,
+      columns,
+      segment: segment || "",
+    },
+  };
+  const applySavedView = (snapshot: Record<string, unknown>) => {
+    const ui =
+      snapshot.ui &&
+      typeof snapshot.ui === "object" &&
+      !Array.isArray(snapshot.ui)
+        ? (snapshot.ui as Record<string, unknown>)
+        : {};
+    const savedFilters =
+      ui.filters && typeof ui.filters === "object" && !Array.isArray(ui.filters)
+        ? (ui.filters as Partial<LoyaltyFilterFormState>)
+        : (snapshot as Partial<LoyaltyFilterFormState>);
+    const nextFilters = { ...emptyLoyaltyFilters(), ...savedFilters };
+    const savedColumns =
+      ui.columns && typeof ui.columns === "object" && !Array.isArray(ui.columns)
+        ? (ui.columns as LoyaltyColumnFilters)
+        : snapshot.columns &&
+            typeof snapshot.columns === "object" &&
+            !Array.isArray(snapshot.columns)
+          ? (snapshot.columns as LoyaltyColumnFilters)
+          : {};
+    const savedSegment = String(ui.segment ?? snapshot.segment ?? "") as
+      | LoyaltySegment
+      | "";
+    setDrafts((current) => ({ ...current, [key]: nextFilters }));
+    setApplied((current) => ({ ...current, [key]: nextFilters }));
+    setColumnDrafts((current) => ({ ...current, [key]: savedColumns }));
+    setColumnApplied((current) => ({ ...current, [key]: savedColumns }));
+    setSegmentState((current) => ({ ...current, [key]: savedSegment }));
+    setPage(1);
+    setSelected(new Set());
+    setAllFilterSelected(false);
+    setExcluded(new Set());
+  };
+  if (me && !hasAccess)
+    return (
+      <div className="card">
+        Доступ к базе лояльности разрешён администраторам и менеджерам.
+      </div>
+    );
+  if (hasAccess && permissionsLoading)
+    return (
+      <div className="card flex items-center gap-2 py-12 text-text-muted">
+        <Loader2 className="h-5 w-5 animate-spin" /> Проверяем права доступа…
+      </div>
+    );
+  if (hasAccess && !canReadAll)
+    return (
+      <div className="space-y-4">
+        <div className="card">
+          <h1 className="text-xl font-bold">База лояльности</h1>
+          <p className="mt-2 text-sm text-text-muted">
+            Полный список недоступен для ваших текущих прав. Собственная очередь
+            звонков работает отдельно.
+          </p>
+          {permissionsError && (
+            <p className="mt-2 text-sm text-error">{permissionsError}</p>
+          )}
+          {canUseQueue && (
+            <button
+              className="btn btn-primary mt-4"
+              onClick={() => setQueueOpen(true)}
+            >
+              <PhoneCall className="h-4 w-4" /> Моя очередь
+            </button>
+          )}
+        </div>
+        {queueOpen && (
+          <LoyaltyQueuePanel
+            isAdmin={false}
+            canViewAllQueues={false}
+            currentUserId={me?.id || ""}
+            operators={[]}
+            onClose={() => setQueueOpen(false)}
+          />
+        )}
+      </div>
+    );
+  return (
+    <div className="space-y-5">
+      <header className="space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="flex items-center gap-2 text-2xl font-bold md:text-3xl">
+              <ShieldCheck className="h-7 w-7 text-accent" /> База лояльности
+            </h1>
+            <p className="mt-1 text-sm text-text-muted">
+              Базы Анны и кабинета независимы. Метрики и фильтры не смешиваются.
+            </p>
+          </div>
+          <div className="text-right text-sm">
+            <b>{me?.fullName || "Текущий сотрудник"}</b>
+            <p className="text-text-muted">
+              {me?.role === "ADMIN"
+                ? "Руководитель направления"
+                : "Сотрудник колл-центра"}
+            </p>
+            <p className="text-xs text-text-muted">
+              Обновлено:{" "}
+              {overview?.snapshot?.publishedAt
+                ? date(overview.snapshot.publishedAt)
+                : "Нет данных"}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {canUseQueue && (
+            <button
+              className="btn btn-secondary"
+              onClick={() => setQueueOpen(true)}
+            >
+              <PhoneCall className="h-4 w-4" /> Моя очередь
+            </button>
+          )}
+          <button
+            className="btn btn-secondary"
+            onClick={() => setCampaignsOpen(true)}
+          >
+            <Megaphone className="h-4 w-4" /> Кампании
+          </button>
+          <button
+            className="btn btn-secondary"
+            disabled={
+              !canAssign ||
+              (!selected.size &&
+                (!allFilterSelected ||
+                  !list ||
+                  list.selectionCount <= excluded.size))
+            }
+            onClick={() => setCampaignOpen(true)}
+            title={
+              !canAssign ? "Нет права назначать обзвон" : "Выберите контакты"
+            }
+          >
+            <ListChecks className="h-4 w-4" /> Сформировать список
+          </button>
+          {canExport && (
+            <button
+              className="btn btn-secondary"
+              onClick={() => void exportCsv()}
+              disabled={exporting}
+            >
+              {exporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}{" "}
+              Экспорт
+            </button>
+          )}
+          {canSync && mode === "base" && (
+            <button
+              className={`btn ${syncOpen ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setSyncOpen((current) => !current)}
+            >
+              <ScanSearch className="h-4 w-4" /> Проверка источников
+            </button>
+          )}
+          {isAdmin && canManageReferences && mode === "base" && (
+            <button
+              className={`btn ${grantsOpen ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setGrantsOpen((current) => !current)}
+            >
+              <KeyRound className="h-4 w-4" /> Права сотрудников
+            </button>
+          )}
+          <button
+            className="btn btn-secondary"
+            disabled={base !== "anna" || !canEdit}
+            onClick={() => setAddOpen(true)}
+            title={
+              base === "anna" && canEdit
+                ? "Добавить запись в ручное дополнение базы Анны"
+                : base === "anna"
+                  ? "Доступно руководителю"
+                  : "Добавление выполняется через штатную Админка — Брокеры/Агентства"
+            }
+          >
+            <Plus className="h-4 w-4" /> Добавить
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => resetContext(base, "brokers")}
+          >
+            Все брокеры
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => resetContext(base, "agencies", base === "ours")}
+            title="Показать все агентства, включая записи без телефона, сделок и недавних встреч"
+          >
+            Все агентства
+          </button>
+          {canReconcile && (
+            <button
+              className={`btn ${mode === "reconciliation" ? "btn-primary" : "btn-secondary"}`}
+              onClick={() =>
+                setMode((current) =>
+                  current === "base" ? "reconciliation" : "base",
+                )
+              }
+            >
+              <Database className="h-4 w-4" />{" "}
+              {mode === "base" ? "Сверка" : "Вернуться"}
+            </button>
+          )}
+          {canImport && base === "anna" && mode === "base" && (
+            <button
+              className={`btn ${importOpen ? "btn-primary" : "btn-secondary"}`}
+              onClick={() => setImportOpen((current) => !current)}
+            >
+              <FileJson className="h-4 w-4" /> JSON-импорт
+            </button>
+          )}
+        </div>
+      </header>
+      {actionError && (
+        <div className="rounded-lg bg-error/10 p-3 text-error">
+          {actionError}
+        </div>
+      )}
+      {(operatorsError || campaignsError) && (
+        <div className="rounded-lg bg-error/10 p-3 text-sm text-error">
+          {operatorsError || campaignsError}
+          <button
+            className="btn btn-secondary ml-3"
+            onClick={() => {
+              void loadOperators();
+              void loadCampaignCatalog();
+            }}
+          >
+            Повторить
+          </button>
+        </div>
+      )}
+      {mode === "base" && canReadAll && (
+        <LoyaltySavedViews
+          base={base}
+          entityType={entityType}
+          currentSnapshot={savedViewSnapshot}
+          currentUserId={me?.id || ""}
+          canManageShared={canManageReferences}
+          isAdmin={Boolean(isAdmin)}
+          onApply={applySavedView}
+        />
+      )}
+      {mode === "reconciliation" && canReconcile ? (
+        <LoyaltyReconciliationV2
+          canDecide={Boolean(isAdmin)}
+          canExport={canExport}
+        />
+      ) : (
+        <>
+          <nav className="grid gap-2 md:grid-cols-2">
+            {(["anna", "ours"] as const).map((item) => (
+              <button
+                key={item}
+                className={`rounded-xl border p-4 text-left ${base === item ? "border-accent bg-accent text-white" : "border-border bg-surface"}`}
+                onClick={() => {
+                  setBase(item);
+                  setPage(1);
+                }}
+              >
+                <b>{baseLabels[item]}</b>
+                <small
+                  className={`block ${base === item ? "text-white/75" : "text-text-muted"}`}
+                >
+                  {item === "anna"
+                    ? "Отдельный очищенный snapshot"
+                    : "Контакты текущего кабинета"}
+                </small>
+              </button>
+            ))}
+          </nav>
+          {importOpen && canImport && base === "anna" && (
+            <AnnaImportPanel
+              canPublish={Boolean(isAdmin)}
+              onPublished={() => {
+                void loadOverview();
+                void loadList();
+              }}
+            />
+          )}
+          {syncOpen && canSync && (
+            <LoyaltySyncPanel onClose={() => setSyncOpen(false)} />
+          )}
+          {grantsOpen && isAdmin && canManageReferences && (
+            <LoyaltyGrantsPanel onClose={() => setGrantsOpen(false)} />
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <nav className="inline-flex rounded-xl bg-surface-secondary p-1">
+              {(["brokers", "agencies"] as const).map((entity) => (
+                <button
+                  key={entity}
+                  className={`rounded-lg px-4 py-2 text-sm font-medium ${entityType === entity ? "bg-surface text-accent shadow-sm" : "text-text-muted"}`}
+                  onClick={() => {
+                    setEntityType(entity);
+                    setPage(1);
+                  }}
+                >
+                  {entityLabels[entity]}{" "}
+                  <span className="ml-1">
+                    {entity === "brokers"
+                      ? (overview?.brokersTotal ?? "—")
+                      : (overview?.agenciesTotal ?? "—")}
+                  </span>
+                </button>
+              ))}
+            </nav>
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-text-muted">Период рейтинга:</span>
+              {(["month", "quarter", "custom"] as const).map((preset) => (
+                <button
+                  key={preset}
+                  className={`rounded-lg border px-3 py-2 ${periodPreset === preset ? "border-accent bg-accent text-white" : "border-border"}`}
+                  onClick={() => {
+                    setPeriodPreset(preset);
+                    if (preset !== "custom")
+                      setRatingRange(periodRange(preset));
+                  }}
+                >
+                  {preset === "month"
+                    ? "Месяц"
+                    : preset === "quarter"
+                      ? "Квартал"
+                      : "Даты"}
+                </button>
+              ))}
+              {periodPreset === "custom" && (
+                <>
+                  <input
+                    className="input w-auto"
+                    type="date"
+                    value={ratingRange.from}
+                    max={ratingRange.to}
+                    onChange={(event) =>
+                      setRatingRange((current) => ({
+                        ...current,
+                        from: event.target.value,
+                      }))
+                    }
+                  />
+                  <input
+                    className="input w-auto"
+                    type="date"
+                    value={ratingRange.to}
+                    min={ratingRange.from}
+                    onChange={(event) =>
+                      setRatingRange((current) => ({
+                        ...current,
+                        to: event.target.value,
+                      }))
+                    }
+                  />
+                </>
+              )}
+            </div>
+          </div>
+          {overviewError && (
+            <div className="flex justify-between rounded-lg bg-error/10 p-3 text-error">
+              <span>
+                <AlertCircle className="mr-2 inline h-4 w-4" />
+                {overviewError}
+              </span>
+              <button onClick={() => void loadOverview()}>
+                <RefreshCcw className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+          <section
+            className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+            aria-label="Ровно шесть ключевых показателей"
+          >
+            {kpis.map((kpi) => {
+              const methodology = overview?.kpiMetadata[kpi.methodKey];
+              return (
+                <KpiCard
+                  key={kpi.title}
+                  {...kpi}
+                  formula={methodology?.formula || kpi.formula}
+                  source={methodology?.source || source}
+                  exactness={
+                    !hasActivityEvidence && /top/i.test(kpi.methodKey)
+                      ? "Нет событий для подтверждения точности"
+                      : methodology?.exactness || exactness
+                  }
+                  loading={overviewLoading}
+                />
+              );
+            })}
+          </section>
+          <section className="card">
+            <div className="flex flex-wrap justify-between gap-3">
+              <div>
+                <h2 className="font-semibold">
+                  Контрольные показатели активности
+                </h2>
+                <p className="text-xs text-text-muted">
+                  Не входят в шесть KPI. Нажмите число для детализации в
+                  карточках-основаниях.
+                </p>
+              </div>
+              <span className="rounded-full bg-accent/10 px-3 py-1 text-xs text-accent">
+                {exactness}
+              </span>
+            </div>
+            <dl className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <Metric
+                label="Фиксации"
+                onClick={() => openActivityDrilldown("fixations")}
+              >
+                {number(overview?.activities.fixations ?? null)}
+              </Metric>
+              <Metric
+                label="Встречи"
+                onClick={() => openActivityDrilldown("meetings")}
+              >
+                {number(overview?.activities.meetings ?? null)}
+              </Metric>
+              <Metric
+                label="Сделки"
+                onClick={() => openActivityDrilldown("deals")}
+              >
+                {number(overview?.activities.deals ?? null)}
+              </Metric>
+              <Metric
+                label="Сумма ДДУ"
+                onClick={() => openActivityDrilldown("dealAmount")}
+              >
+                {money(overview?.dealAmount ?? null)}
+              </Metric>
+            </dl>
+          </section>
+          {base === "anna" && sourceReported && (
+            <section className="card border-warning/40 bg-warning/5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="font-semibold">Срез Анны — НЕ ПОДТВЕРЖДЕНО</h2>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {sourceReported.label || "Агрегаты исходного файла"}. Эти
+                    числа показаны отдельно и не входят в шесть точных KPI.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="rounded-full bg-warning/15 px-3 py-1 text-warning">
+                    {sourceReported.confirmationStatus || "NOT_CONFIRMED"}
+                  </span>
+                  <span className="rounded-full bg-surface-secondary px-3 py-1">
+                    {sourceReported.periodFilterApplied === true
+                      ? "Период применён"
+                      : "Период не применён"}
+                  </span>
+                </div>
+              </div>
+              {sourceReported.warning && (
+                <p className="mt-3 rounded-lg bg-warning/10 p-3 text-xs text-warning">
+                  {sourceReported.warning}
+                </p>
+              )}
+              <div className="mt-3 grid gap-3 xl:grid-cols-2">
+                {(
+                  [
+                    ["Брокеры", sourceReported.brokers],
+                    ["Агентства", sourceReported.agencies],
+                  ] as const
+                ).map(([label, group]) => (
+                  <article
+                    className="rounded-xl border border-border bg-surface p-3"
+                    key={label}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="font-medium">{label}</h3>
+                      <span className="text-xs text-text-muted">
+                        записей: {group.records.toLocaleString("ru-RU")}
+                      </span>
+                    </div>
+                    <dl className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      <Metric
+                        label={`Фиксации · известно у ${group.fixationKnownRecords}`}
+                      >
+                        {number(group.fixations)}
+                      </Metric>
+                      <Metric
+                        label={`Встречи · известно у ${group.meetingKnownRecords}`}
+                      >
+                        {number(group.meetings)}
+                      </Metric>
+                      <Metric
+                        label={`Сделки · известно у ${group.dealKnownRecords}`}
+                      >
+                        {number(group.deals)}
+                      </Metric>
+                      <Metric
+                        label={`БТ · известно у ${group.brokerTourKnownRecords}`}
+                      >
+                        {number(group.brokerTours)}
+                      </Metric>
+                      <Metric
+                        label={`Звонки · известно у ${group.callKnownRecords}`}
+                      >
+                        {number(group.calls)}
+                      </Metric>
+                      <Metric
+                        label={`Сумма ДДУ · известно у ${group.dealAmountKnownRecords}`}
+                      >
+                        {money(group.dealAmount)}
+                      </Metric>
+                    </dl>
+                    {label === "Брокеры" && (
+                      <dl className="mt-2 grid gap-2 sm:grid-cols-3">
+                        <Metric
+                          label={`Не звонили · известно у ${sourceReported.brokers.notCalledKnownCount}`}
+                        >
+                          {number(sourceReported.brokers.notCalledCurrentMonth)}
+                        </Metric>
+                        <Metric label="Новые брокеры">
+                          {number(sourceReported.brokers.newCount)}
+                        </Metric>
+                        <Metric label="БТ без фиксации">
+                          {number(sourceReported.brokers.btWithoutFixation)}
+                        </Metric>
+                      </dl>
+                    )}
+                    <div className="mt-2 rounded-lg bg-surface-secondary p-3 text-sm">
+                      <span className="text-xs text-text-muted">
+                        Лидер исходного среза
+                      </span>
+                      <b className="mt-1 block">
+                        {group.top?.name || "Нет данных"}
+                      </b>
+                      {group.top && (
+                        <span className="text-xs text-text-muted">
+                          {group.top.deals.toLocaleString("ru-RU")} сделок ·{" "}
+                          {money(group.top.dealAmount)}
+                        </span>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <p className="mt-3 text-xs text-text-muted">
+                Точность: {sourceReported.exactness.join(", ") || "не указана"}.
+                Источники:{" "}
+                {sourceReported.sourceVersions.join(", ") || "не указаны"}.
+              </p>
+            </section>
+          )}
+          <LoyaltyStatusLegend
+            entityType={entityType}
+            facets={list?.facets || null}
+            active={filters.status}
+            sourceStatusesUnconfirmed={!hasActivityEvidence}
+            onSelect={(status) => {
+              const next = { ...draft, status };
+              setDraft(next);
+              setApplied((current) => ({ ...current, [key]: next }));
+              setSegmentState((current) => ({ ...current, [key]: "" }));
+              setPage(1);
+              scrollToList();
+            }}
+            onReset={() => resetContext(base, entityType)}
+          />
+          <LoyaltyFilterPanel
+            base={base}
+            entityType={entityType}
+            draft={draft}
+            onChange={setDraft}
+            onApply={applyFilters}
+            onReset={() => resetContext(base, entityType)}
+            campaigns={campaigns}
+            operators={operators}
+            facets={list?.facets || null}
+            loading={listLoading}
+          />
+          <section className="card scroll-mt-4" id="loyalty-list">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-semibold">
+                  {entityLabels[entityType]} · {baseLabels[base]}
+                </h2>
+                <p className="text-xs text-text-muted">
+                  {list
+                    ? `${list.total.toLocaleString("ru-RU")} записей`
+                    : "Количество уточняется"}
+                  {list?.filterHash
+                    ? ` · фильтр ${list.filterHash.slice(0, 8)}`
+                    : ""}
+                </p>
+              </div>
+              <button
+                className="btn btn-secondary"
+                disabled={listLoading}
+                onClick={() => void loadList()}
+              >
+                <RefreshCcw
+                  className={`h-4 w-4 ${listLoading ? "animate-spin" : ""}`}
+                />{" "}
+                Обновить
+              </button>
+            </div>
+            {list && (selected.size > 0 || allFilterSelected) && (
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-accent/10 p-3 text-sm">
+                <span>
+                  {allFilterSelected
+                    ? `Выбрано ${(list.selectionCount - excluded.size).toLocaleString("ru-RU")} записей по фильтру${excluded.size ? ` · исключено вручную: ${excluded.size}` : ""}`
+                    : `Выбрано на текущей странице: ${selected.size}`}
+                </span>
+                <div className="flex gap-2">
+                  {!allFilterSelected &&
+                    list.selectionCount > selected.size && (
+                      <button
+                        className="underline"
+                        onClick={() => {
+                          setAllFilterSelected(true);
+                          setSelected(new Set());
+                          setExcluded(new Set());
+                        }}
+                      >
+                        Выбрать всех по фильтру (
+                        {list.selectionCount.toLocaleString("ru-RU")})
+                      </button>
+                    )}
+                  <button
+                    className="underline"
+                    onClick={() => {
+                      setAllFilterSelected(false);
+                      setSelected(new Set());
+                      setExcluded(new Set());
+                    }}
+                  >
+                    Снять выбор
+                  </button>
+                </div>
+              </div>
+            )}
+            {list && <DataAvailabilityNotice values={list.dataAvailability} />}
+            {listError ? (
+              <div className="rounded-lg bg-error/10 p-4 text-error">
+                {listError}
+              </div>
+            ) : listLoading ? (
+              <div className="flex justify-center gap-2 py-16 text-text-muted">
+                <Loader2 className="h-5 w-5 animate-spin" /> Загружаем список…
+              </div>
+            ) : !list?.items.length ? (
+              <div className="py-16 text-center">
+                <Users className="mx-auto h-10 w-10 text-text-muted" />
+                <b className="mt-2 block">Записи не найдены</b>
+                <p className="text-sm text-text-muted">
+                  Проверьте применённые фильтры. Неизвестные значения не
+                  превращаются в нули.
+                </p>
+              </div>
+            ) : (
+              <LoyaltyTable
+                data={list}
+                entityType={entityType}
+                selected={selected}
+                onSelected={setSelected}
+                allFilterSelected={allFilterSelected}
+                excluded={excluded}
+                onExcluded={setExcluded}
+                onOpen={setDetailId}
+                operators={operators}
+                columnDraft={columnDraft}
+                onColumnDraft={(next) =>
+                  setColumnDrafts((current) => ({ ...current, [key]: next }))
+                }
+                onApplyColumns={applyColumnFilters}
+                onResetColumns={resetColumnFilters}
+              />
+            )}
+            {list && list.totalPages > 1 && (
+              <div className="mt-4 flex items-center justify-between border-t border-border pt-4">
+                <span className="text-sm text-text-muted">
+                  Страница {list.page} из {list.totalPages}
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn-secondary"
+                    disabled={page <= 1}
+                    onClick={() =>
+                      setPage((current) => Math.max(1, current - 1))
+                    }
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                  <button
+                    className="btn btn-secondary"
+                    disabled={page >= list.totalPages}
+                    onClick={() =>
+                      setPage((current) =>
+                        Math.min(list.totalPages, current + 1),
+                      )
+                    }
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+      {detailId && (
+        <LoyaltyRecordDrawer
+          record={detail}
+          base={base}
+          loading={detailLoading}
+          error={detailError}
+          onClose={() => {
+            setDetailId("");
+            setDetail(null);
+            setDetailError("");
+          }}
+        />
+      )}
+      {queueOpen && (
+        <LoyaltyQueuePanel
+          isAdmin={isAdmin}
+          canViewAllQueues={canReadAll}
+          currentUserId={me?.id || ""}
+          operators={operators}
+          onClose={() => setQueueOpen(false)}
+        />
+      )}
+      {campaignsOpen && (
+        <LoyaltyCampaignDashboard
+          base={base}
+          entityType={entityType}
+          canAssign={canAssign}
+          canExport={canExport}
+          operators={operators}
+          onClose={() => setCampaignsOpen(false)}
+          onChanged={() => {
+            void loadCampaignCatalog();
+            void loadList();
+          }}
+        />
+      )}
+      {campaignOpen && list && (
+        <LoyaltyCampaignModal
+          base={base}
+          entityType={entityType}
+          selection={
+            allFilterSelected
+              ? {
+                  mode: "FILTER",
+                  filterHash: list.filterHash,
+                  expectedCount: list.selectionCount - excluded.size,
+                  excludedIds: Array.from(excluded),
+                }
+              : { mode: "IDS", ids: Array.from(selected) }
+          }
+          selectedCount={
+            allFilterSelected
+              ? list.selectionCount - excluded.size
+              : selected.size
+          }
+          operators={operators}
+          filterSnapshot={{
+            search: filters.search,
+            city: filters.city || undefined,
+            hasAmo:
+              filters.hasAmo === "" ? undefined : filters.hasAmo === "true",
+            archived: filters.archived,
+            sortBy: filters.sortBy,
+            sortOrder: filters.sortOrder,
+            filter: toCanonicalFilter(filters, entityType),
+            columns,
+            segment: segment || undefined,
+          }}
+          filterHash={list.filterHash}
+          snapshotId={list.snapshotId}
+          onClose={() => setCampaignOpen(false)}
+          onDone={() => {
+            setCampaignOpen(false);
+            setSelected(new Set());
+            setAllFilterSelected(false);
+            setExcluded(new Set());
+            void loadCampaignCatalog();
+            void loadList();
+          }}
+        />
+      )}
+      {addOpen && base === "anna" && canEdit && (
+        <AddContactModal
+          base={base}
+          entityType={entityType}
+          onClose={() => setAddOpen(false)}
+          onDone={() => {
+            setAddOpen(false);
+            void loadList();
+          }}
+        />
+      )}
+    </div>
+  );
+}

@@ -1,9 +1,13 @@
-import { Project } from '@st-michael/shared';
+import { Project } from "@st-michael/shared";
 import {
-  AMO_LEAD_FIELDS, AMO_LEAD_ENUMS, AMO_CONTACT_FIELDS,
-  readinessLevelToEnumId, purchaseTimingToEnumId,
-  evaluateUniqueness, brokerLeadMarkerFields,
-} from './amo-crm.fields';
+  AMO_LEAD_FIELDS,
+  AMO_LEAD_ENUMS,
+  AMO_CONTACT_FIELDS,
+  readinessLevelToEnumId,
+  purchaseTimingToEnumId,
+  evaluateUniqueness,
+  brokerLeadMarkerFields,
+} from "./amo-crm.fields";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -12,13 +16,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // раньше позволяло двум прогонам крона параллельно слать один и тот же
 // лид (см. code-review PR #288).
 const AMO_REQUEST_TIMEOUT_MS = 15_000;
+const AMO_READONLY_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
-// "+79039606053" / "8 (903) 960-60-53" / "+7-903-960-60-53" → "9039606053".
-// amoCRM ?query=<substring> капризно реагирует на формат: поиск по «+79039606053»
-// не находит контакт сохранённый как «8 (903) 960-60-53», поэтому ищем по
+// Fictional redacted example: "+70000000000" / "8 (000) 000-00-00" /
+// "+7-000-000-00-00" → "0000000000". amoCRM ?query=<substring> капризно
+// реагирует на формат: E.164 может не найти тот же placeholder, сохранённый с
+// локальным префиксом, поэтому ищем по
 // 10 цифрам и постфильтруем по custom_fields_values.PHONE.
 const last10Digits = (phone: any): string =>
-  String(phone || '').replace(/\D/g, '').slice(-10);
+  String(phone || "")
+    .replace(/\D/g, "")
+    .slice(-10);
 
 export interface AmoContact {
   id: number;
@@ -84,6 +92,40 @@ export interface UpdateLeadDto {
   custom_fields_values?: any[];
 }
 
+export type AmoReadonlyResource = "contacts" | "companies" | "leads";
+
+export interface AmoReadonlyScanOptions {
+  limit?: number;
+  maxPages?: number;
+  with?: string;
+  pipelineIds?: number[];
+  updatedFrom?: number;
+}
+
+export interface AmoReadonlyScanResult<T = any> {
+  items: T[];
+  pagesRead: number;
+  complete: true;
+  readAt: string;
+}
+
+export interface AmoReadonlyPage<T = any> {
+  items: T[];
+  page: number;
+  limit: number;
+}
+
+export type AmoReadonlyPageConsumer<T = any> = (
+  page: AmoReadonlyPage<T>,
+) => Promise<void> | void;
+
+export interface AmoReadonlyPageScanResult {
+  itemsRead: number;
+  pagesRead: number;
+  complete: true;
+  readAt: string;
+}
+
 // 2026-06-05: модульный shared-state для access/refresh токенов amoCRM.
 // Все экземпляры AmoCrmAdapter читают из этого state-а, refresh обновляет
 // его + дёргает hook (для персистенса в БД). На старте API bootstrap
@@ -91,26 +133,113 @@ export interface UpdateLeadDto {
 // hook → setAmoTokenRefreshHook(). Если в БД пусто — fallback на env.
 type AmoTokens = { access: string; refresh: string };
 type AmoTokenRefreshHook = (tokens: AmoTokens) => Promise<void> | void;
-type AmoRequestOptions = { retryTransient?: boolean };
+type AmoRequestOptions = {
+  retryTransient?: boolean;
+  maxResponseBytes?: number;
+};
 
 let amoTokens: AmoTokens = {
-  access: process.env.AMO_ACCESS_TOKEN || '',
-  refresh: process.env.AMO_REFRESH_TOKEN || '',
+  access: process.env.AMO_ACCESS_TOKEN || "",
+  refresh: process.env.AMO_REFRESH_TOKEN || "",
 };
 let amoTokenRefreshHook: AmoTokenRefreshHook | null = null;
 let amoRefreshInFlight: Promise<boolean> | null = null; // дедуп параллельных refresh
 
 function safeAmoRequestPath(path: string): string {
   try {
-    const parsed = new URL(path, 'https://amo.invalid');
-    return parsed.pathname || '/';
+    const parsed = new URL(path, "https://amo.invalid");
+    return parsed.pathname || "/";
   } catch {
-    return String(path || '/').split('?')[0] || '/';
+    return String(path || "/").split("?")[0] || "/";
+  }
+}
+
+async function cancelAmoResponse(
+  response: Response,
+  controller: AbortController,
+): Promise<void> {
+  controller.abort();
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The abort may have already errored or locked the stream.
+  }
+}
+
+async function readAmoJsonBounded<T>(
+  response: Response,
+  maxResponseBytes: number,
+  controller: AbortController,
+): Promise<T> {
+  const rawLength = response.headers.get("content-length");
+  if (rawLength !== null) {
+    const contentLength = Number(rawLength);
+    if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
+      await cancelAmoResponse(response, controller);
+      throw new Error("AMO_READONLY_RESPONSE_INVALID");
+    }
+    if (contentLength > maxResponseBytes) {
+      await cancelAmoResponse(response, controller);
+      throw new Error("AMO_READONLY_RESPONSE_TOO_LARGE");
+    }
+  }
+
+  // Native fetch always exposes a ReadableStream for a non-204 response. Keep
+  // compatibility with existing lightweight test doubles, while production
+  // responses must pass through the pre-parse stream limit below.
+  if (response.body === undefined && typeof response.json === "function") {
+    const value = (await response.json()) as T;
+    if (Buffer.byteLength(JSON.stringify(value), "utf8") > maxResponseBytes) {
+      controller.abort();
+      throw new Error("AMO_READONLY_RESPONSE_TOO_LARGE");
+    }
+    return value;
+  }
+  if (!response.body) {
+    controller.abort();
+    throw new Error("AMO_READONLY_RESPONSE_INVALID");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxResponseBytes) {
+        controller.abort();
+        try {
+          await reader.cancel();
+        } catch {
+          // Abort may have already errored the reader.
+        }
+        throw new Error("AMO_READONLY_RESPONSE_TOO_LARGE");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(body),
+    ) as T;
+  } catch {
+    throw new Error("AMO_READONLY_RESPONSE_INVALID");
   }
 }
 
 export function setAmoTokens(access: string, refresh: string): void {
-  amoTokens = { access: access || '', refresh: refresh || '' };
+  amoTokens = { access: access || "", refresh: refresh || "" };
 }
 
 export function getAmoTokens(): AmoTokens {
@@ -126,8 +255,8 @@ export class AmoCrmAdapter {
   // валидный токен — используем AMO_API_DOMAIN/дефолт stmichael.amocrm.ru.
   // Не читать домен из JWT (см. 7750ec2), даже если он там есть.
   private get baseUrl(): string {
-    const subdomain = process.env.AMO_SUBDOMAIN || 'stmichael';
-    const domain = process.env.AMO_BASE_DOMAIN || 'amocrm.ru';
+    const subdomain = process.env.AMO_SUBDOMAIN || "stmichael";
+    const domain = process.env.AMO_BASE_DOMAIN || "amocrm.ru";
     return `https://${process.env.AMO_API_DOMAIN || `${subdomain}.${domain}`}/api/v4`;
   }
 
@@ -146,26 +275,31 @@ export class AmoCrmAdapter {
     amoRefreshInFlight = (async (): Promise<boolean> => {
       const refresh = amoTokens.refresh;
       if (!refresh) {
-        console.error('[amo-refresh] AMO_REFRESH_TOKEN не задан — refresh невозможен');
+        console.error(
+          "[amo-refresh] AMO_REFRESH_TOKEN не задан — refresh невозможен",
+        );
         return false;
       }
       const clientId = process.env.AMO_CLIENT_ID;
       const clientSecret = process.env.AMO_CLIENT_SECRET;
       if (!clientId || !clientSecret) {
-        console.error('[amo-refresh] AMO_CLIENT_ID / AMO_CLIENT_SECRET не заданы');
+        console.error(
+          "[amo-refresh] AMO_CLIENT_ID / AMO_CLIENT_SECRET не заданы",
+        );
         return false;
       }
-      const redirectUri = process.env.AMO_REDIRECT_URI || 'https://broker.stmichael.ru/';
-      const subdomain = process.env.AMO_SUBDOMAIN || 'stmichael';
+      const redirectUri =
+        process.env.AMO_REDIRECT_URI || "https://broker.stmichael.ru/";
+      const subdomain = process.env.AMO_SUBDOMAIN || "stmichael";
       const url = `https://${subdomain}.amocrm.ru/oauth2/access_token`;
       try {
         const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             client_id: clientId,
             client_secret: clientSecret,
-            grant_type: 'refresh_token',
+            grant_type: "refresh_token",
             refresh_token: refresh,
             redirect_uri: redirectUri,
           }),
@@ -177,10 +311,10 @@ export class AmoCrmAdapter {
           return false;
         }
         const data: any = await res.json();
-        const newAccess = String(data?.access_token || '');
-        const newRefresh = String(data?.refresh_token || '') || refresh;
+        const newAccess = String(data?.access_token || "");
+        const newRefresh = String(data?.refresh_token || "") || refresh;
         if (!newAccess) {
-          console.error('[amo-refresh] response missing access_token');
+          console.error("[amo-refresh] response missing access_token");
           return false;
         }
         amoTokens = { access: newAccess, refresh: newRefresh };
@@ -188,13 +322,16 @@ export class AmoCrmAdapter {
           try {
             await amoTokenRefreshHook(amoTokens);
           } catch (e: any) {
-            console.error('[amo-refresh] persist hook failed:', e?.message || e);
+            console.error(
+              "[amo-refresh] persist hook failed:",
+              e?.message || e,
+            );
           }
         }
-        console.log('[amo-refresh] OK, access_token обновлён');
+        console.log("[amo-refresh] OK, access_token обновлён");
         return true;
       } catch {
-        console.error('[amo-refresh] network exception');
+        console.error("[amo-refresh] network exception");
         return false;
       }
     })();
@@ -210,16 +347,29 @@ export class AmoCrmAdapter {
   // 429 (наблюдали 776 amoErrors на coverage-анализ).
   // 2026-06-05: на 401 пробуем refresh access_token через AMO_REFRESH_TOKEN
   // и retry один раз. При пустом access — тоже пробуем refresh.
-  private async request<T = any>(path: string, init: RequestInit = {}, options: AmoRequestOptions = {}, attempt = 1, didRefresh = false): Promise<T> {
+  private async request<T = any>(
+    path: string,
+    init: RequestInit = {},
+    options: AmoRequestOptions = {},
+    attempt = 1,
+    didRefresh = false,
+  ): Promise<T> {
+    if (
+      options.maxResponseBytes !== undefined &&
+      (!Number.isSafeInteger(options.maxResponseBytes) ||
+        options.maxResponseBytes <= 0)
+    ) {
+      throw new Error("AMO_READONLY_RESPONSE_LIMIT_INVALID");
+    }
     if (!this.token) {
       if (!didRefresh && amoTokens.refresh) {
         const ok = await this.refreshAccessToken();
         if (ok) return this.request<T>(path, init, options, attempt, true);
       }
-      throw new Error('AMO_ACCESS_TOKEN not configured');
+      throw new Error("AMO_ACCESS_TOKEN not configured");
     }
 
-    const url = path.startsWith('http') ? path : `${this.baseUrl}${path}`;
+    const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
     const safePath = safeAmoRequestPath(path);
     let res: Response;
     const controller = new AbortController();
@@ -231,53 +381,246 @@ export class AmoCrmAdapter {
         headers: {
           // 2026-05-27: «человеческий» User-Agent + Accept — без них
           // WAF возвращает 403. С браузерным UA проходит.
-          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept: 'application/json',
+          "User-Agent":
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "application/json",
           Authorization: `Bearer ${this.token}`,
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
           ...(init.headers || {}),
         },
       });
     } catch {
+      clearTimeout(timer);
       // Network-level (timeout, ECONNRESET) — ретраим до 3 раз.
       if (options.retryTransient !== false && attempt < 3) {
         await sleep(500 * attempt);
         return this.request<T>(path, init, options, attempt + 1, didRefresh);
       }
       throw new Error(`amoCRM network error ${safePath}`);
-    } finally {
-      clearTimeout(timer);
     }
 
-    if (res.status === 204) return null as T;
+    if (res.status === 204) {
+      clearTimeout(timer);
+      return null as T;
+    }
 
     // 2026-06-05: 401 → попытка refresh + одиночный retry. Если refresh уже
     // делали в этом цепочке — не повторяем, бросаем.
     if (res.status === 401 && !didRefresh) {
+      clearTimeout(timer);
       console.warn(`[amo] 401 на ${safePath}, пробуем refresh access_token`);
       const ok = await this.refreshAccessToken();
       if (ok) return this.request<T>(path, init, options, attempt, true);
     }
 
     // 429 (rate-limit) и 5xx — retry. Уважаем Retry-After если пришёл.
-    if (options.retryTransient !== false && (res.status === 429 || res.status >= 500) && attempt < 4) {
-      const retryAfter = Number(res.headers.get('Retry-After')) || 0;
-      const wait = retryAfter > 0 ? retryAfter * 1000 : 300 * Math.pow(2, attempt); // 300 / 600 / 1200ms
+    if (
+      options.retryTransient !== false &&
+      (res.status === 429 || res.status >= 500) &&
+      attempt < 4
+    ) {
+      clearTimeout(timer);
+      const retryAfter = Number(res.headers.get("Retry-After")) || 0;
+      const wait =
+        retryAfter > 0 ? retryAfter * 1000 : 300 * Math.pow(2, attempt); // 300 / 600 / 1200ms
       await sleep(wait);
       return this.request<T>(path, init, options, attempt + 1, didRefresh);
     }
 
     if (!res.ok) {
+      clearTimeout(timer);
       // Never surface the raw response body or query string: amo WAF replies
       // with HTML and contact searches include a phone number in the query.
       throw new Error(`amoCRM ${res.status} ${safePath}`);
     }
+    if (options.maxResponseBytes !== undefined) {
+      try {
+        const value = await readAmoJsonBounded<T>(
+          res,
+          options.maxResponseBytes,
+          controller,
+        );
+        clearTimeout(timer);
+        return value;
+      } catch (error) {
+        clearTimeout(timer);
+        const message = error instanceof Error ? error.message : "";
+        if (message.startsWith("AMO_READONLY_")) throw error;
+        if (options.retryTransient !== false && attempt < 3) {
+          await sleep(500 * attempt);
+          return this.request<T>(path, init, options, attempt + 1, didRefresh);
+        }
+        throw new Error(`amoCRM network error ${safePath}`);
+      }
+    }
+    // Preserve the historical generic adapter behavior: its body parsing is
+    // unchanged and only the readonly page consumer opts into the hard cap.
+    clearTimeout(timer);
     return res.json() as Promise<T>;
   }
 
   // === Account info ===
   async getAccount(): Promise<any> {
-    return this.request('/account');
+    return this.request("/account");
+  }
+
+  /**
+   * Exhaustive GET-only scanner used by the loyalty audit. It deliberately
+   * exposes no arbitrary path or HTTP method and fails closed on any page
+   * error or an exhausted safety bound. Callers can therefore distinguish a
+   * complete snapshot from a partial amoCRM response.
+   */
+  async scanReadonly<T = any>(
+    resource: AmoReadonlyResource,
+    options: AmoReadonlyScanOptions = {},
+  ): Promise<AmoReadonlyScanResult<T>> {
+    const items: T[] = [];
+    const result = await this.consumeReadonlyPages<T>(
+      resource,
+      ({ items: pageItems }) => {
+        items.push(...pageItems);
+      },
+      options,
+    );
+    return {
+      items,
+      pagesRead: result.pagesRead,
+      complete: true,
+      readAt: result.readAt,
+    };
+  }
+
+  /**
+   * Bounded-memory variant of scanReadonly. The callback receives exactly one
+   * validated page at a time. amoCRM is explicitly asked for id ASC ordering,
+   * and the adapter fails closed if IDs are missing, duplicated or not globally
+   * strictly increasing across page boundaries.
+   */
+  async consumeReadonlyPages<T = any>(
+    resource: AmoReadonlyResource,
+    consume: AmoReadonlyPageConsumer<T>,
+    options: AmoReadonlyScanOptions = {},
+  ): Promise<AmoReadonlyPageScanResult> {
+    if (!["contacts", "companies", "leads"].includes(resource)) {
+      throw new Error("AMO_READONLY_RESOURCE_INVALID");
+    }
+    if (typeof consume !== "function") {
+      throw new Error("AMO_READONLY_CONSUMER_INVALID");
+    }
+    const limit = options.limit ?? 250;
+    const maxPages = options.maxPages ?? 2_000;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 250) {
+      throw new Error("AMO_READONLY_LIMIT_INVALID");
+    }
+    if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 10_000) {
+      throw new Error("AMO_READONLY_MAX_PAGES_INVALID");
+    }
+    const allowedWith: Record<AmoReadonlyResource, Set<string>> = {
+      contacts: new Set([
+        "leads",
+        "companies",
+        "customers",
+        "catalog_elements",
+      ]),
+      companies: new Set([
+        "contacts",
+        "leads",
+        "customers",
+        "catalog_elements",
+      ]),
+      leads: new Set([
+        "contacts",
+        "companies",
+        "source_id",
+        "catalog_elements",
+      ]),
+    };
+    const withParts = String(options.with || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (withParts.some((value) => !allowedWith[resource].has(value))) {
+      throw new Error("AMO_READONLY_WITH_INVALID");
+    }
+    const pipelineIds = Array.from(new Set(options.pipelineIds || []));
+    if (
+      resource !== "leads" &&
+      (pipelineIds.length > 0 || options.updatedFrom !== undefined)
+    ) {
+      throw new Error("AMO_READONLY_FILTER_INVALID");
+    }
+    if (
+      pipelineIds.some(
+        (value) => !Number.isSafeInteger(value) || Number(value) <= 0,
+      )
+    ) {
+      throw new Error("AMO_READONLY_PIPELINE_INVALID");
+    }
+    if (
+      options.updatedFrom !== undefined &&
+      (!Number.isSafeInteger(options.updatedFrom) || options.updatedFrom < 0)
+    ) {
+      throw new Error("AMO_READONLY_UPDATED_FROM_INVALID");
+    }
+
+    let pagesRead = 0;
+    let itemsRead = 0;
+    let previousId = 0;
+    for (let page = 1; page <= maxPages; page += 1) {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        page: String(page),
+      });
+      params.set("order[id]", "asc");
+      if (withParts.length) params.set("with", withParts.join(","));
+      for (const pipelineId of pipelineIds) {
+        params.append("filter[pipeline_id][]", String(pipelineId));
+      }
+      if (options.updatedFrom !== undefined) {
+        params.set("filter[updated_at][from]", String(options.updatedFrom));
+      }
+      const data = await this.request<any>(
+        `/${resource}?${params.toString()}`,
+        {},
+        {
+          maxResponseBytes: AMO_READONLY_MAX_RESPONSE_BYTES,
+        },
+      );
+      const pageItems = data?._embedded?.[resource];
+      if (!Array.isArray(pageItems)) {
+        throw new Error("AMO_READONLY_PAGE_INVALID");
+      }
+      if (pageItems.length > limit) {
+        throw new Error("AMO_READONLY_PAGE_SIZE_INVALID");
+      }
+      pagesRead = page;
+      for (const item of pageItems) {
+        const id = Number((item as any)?.id);
+        if (!Number.isSafeInteger(id) || id <= 0) {
+          throw new Error("AMO_READONLY_INVALID_ID");
+        }
+        if (id === previousId) {
+          throw new Error("AMO_READONLY_DUPLICATE_ID");
+        }
+        if (id < previousId) {
+          throw new Error("AMO_READONLY_ORDER_INVALID");
+        }
+        previousId = id;
+      }
+      if (pageItems.length) {
+        await consume({ items: pageItems, page, limit });
+        itemsRead += pageItems.length;
+      }
+      if (pageItems.length < limit) {
+        return {
+          itemsRead,
+          pagesRead,
+          complete: true,
+          readAt: new Date().toISOString(),
+        };
+      }
+    }
+    throw new Error("AMO_READONLY_PAGE_BOUND_EXCEEDED");
   }
 
   // === Contacts ===
@@ -286,8 +629,8 @@ export class AmoCrmAdapter {
     // amoCRM ?query= ищет по подстроке и возвращает совпадения по имени/email/
     // комменту, а главное — не находит контакт сохранённый в другом формате
     // телефона. Из-за этого createFixationRequest лепил дубль контакта
-    // в amoCRM, хотя клиент там уже был (пример: +79039606053 был в amo
-    // как КЦ-контакт, новая фиксация создавала второй).
+    // в amoCRM, хотя клиент там уже был (redacted fictional example:
+    // +70000000000 был КЦ-контактом, новая фиксация создавала второй).
     const target = last10Digits(phone);
     if (target.length < 10) return null;
     const data = await this.request<any>(`/contacts?query=${target}&limit=50`);
@@ -295,7 +638,8 @@ export class AmoCrmAdapter {
     const matches = contacts.filter((c: any) => {
       const fields = c.custom_fields_values || [];
       const phoneField = fields.find(
-        (f: any) => f?.field_id === AMO_CONTACT_FIELDS.PHONE || f?.field_code === 'PHONE',
+        (f: any) =>
+          f?.field_id === AMO_CONTACT_FIELDS.PHONE || f?.field_code === "PHONE",
       );
       const vals = phoneField?.values || [];
       return vals.some((v: any) => last10Digits(v?.value) === target);
@@ -315,13 +659,18 @@ export class AmoCrmAdapter {
     const target = last10Digits(phone);
     if (target.length < 10) return null;
     try {
-      const data = await this.request<any>(`/contacts?query=${target}&limit=50`);
+      const data = await this.request<any>(
+        `/contacts?query=${target}&limit=50`,
+      );
       const contacts: any[] = data?._embedded?.contacts || [];
       const brokerCandidates = contacts.filter((c: any) => {
         const fields = c.custom_fields_values || [];
-        const brokerField = fields.find((f: any) => f.field_id === AMO_CONTACT_FIELDS.IS_BROKER);
+        const brokerField = fields.find(
+          (f: any) => f.field_id === AMO_CONTACT_FIELDS.IS_BROKER,
+        );
         const phoneField = fields.find(
-          (f: any) => f.field_id === AMO_CONTACT_FIELDS.PHONE || f.field_code === 'PHONE',
+          (f: any) =>
+            f.field_id === AMO_CONTACT_FIELDS.PHONE || f.field_code === "PHONE",
         );
         const hasExactPhone = (phoneField?.values || []).some(
           (v: any) => last10Digits(v?.value) === target,
@@ -331,7 +680,7 @@ export class AmoCrmAdapter {
       if (brokerCandidates.length === 0) return null;
       if (brokerCandidates.length === 1) return brokerCandidates[0];
       if (options.strict) {
-        const ids = brokerCandidates.map((c: any) => c.id).join(',');
+        const ids = brokerCandidates.map((c: any) => c.id).join(",");
         throw new Error(`AMBIGUOUS_BROKER_CONTACT ids=${ids}`);
       }
 
@@ -354,8 +703,11 @@ export class AmoCrmAdapter {
   }
 
   async getContact(id: number): Promise<AmoContact | null> {
-    try { return await this.request<AmoContact>(`/contacts/${id}?with=leads`); }
-    catch { return null; }
+    try {
+      return await this.request<AmoContact>(`/contacts/${id}?with=leads`);
+    } catch {
+      return null;
+    }
   }
 
   // КБ6 fix #44 (2026-05-25): bulk-получение контактов пачками до 250.
@@ -368,14 +720,16 @@ export class AmoCrmAdapter {
     const BATCH = 250;
     for (let i = 0; i < ids.length; i += BATCH) {
       const chunk = ids.slice(i, i + BATCH);
-      const q = chunk.map((id) => `filter[id][]=${id}`).join('&');
+      const q = chunk.map((id) => `filter[id][]=${id}`).join("&");
       try {
-        const data = await this.request<any>(`/contacts?${q}&with=leads&limit=${BATCH}`);
+        const data = await this.request<any>(
+          `/contacts?${q}&with=leads&limit=${BATCH}`,
+        );
         const list: AmoContact[] = data?._embedded?.contacts || [];
         for (const c of list) result.set(Number(c.id), c);
       } catch (e: any) {
         // Pacht прошёл с ошибкой — оставляем missing, не валим всю операцию.
-        console.error('[getContactsByIds] batch failed:', e?.message || e);
+        console.error("[getContactsByIds] batch failed:", e?.message || e);
       }
       // Лёгкая задержка между пачками чтобы не словить 429 на больших объёмах.
       if (i + BATCH < ids.length) await sleep(150);
@@ -384,16 +738,23 @@ export class AmoCrmAdapter {
   }
 
   async createContact(data: CreateContactDto): Promise<AmoContact> {
-    const result = await this.request<any>('/contacts', {
-      method: 'POST',
-      body: JSON.stringify([data]),
-    }, { retryTransient: false });
+    const result = await this.request<any>(
+      "/contacts",
+      {
+        method: "POST",
+        body: JSON.stringify([data]),
+      },
+      { retryTransient: false },
+    );
     return result?._embedded?.contacts?.[0];
   }
 
-  async updateContact(id: number, data: Partial<CreateContactDto>): Promise<void> {
+  async updateContact(
+    id: number,
+    data: Partial<CreateContactDto>,
+  ): Promise<void> {
     await this.request(`/contacts/${id}`, {
-      method: 'PATCH',
+      method: "PATCH",
       body: JSON.stringify(data),
     });
   }
@@ -403,8 +764,8 @@ export class AmoCrmAdapter {
   // звонок и т.д.) — пока не настроены полноценные custom_fields.
   async addNoteToLead(leadId: number, text: string): Promise<void> {
     await this.request(`/leads/${leadId}/notes`, {
-      method: 'POST',
-      body: JSON.stringify([{ note_type: 'common', params: { text } }]),
+      method: "POST",
+      body: JSON.stringify([{ note_type: "common", params: { text } }]),
     });
   }
 
@@ -415,13 +776,14 @@ export class AmoCrmAdapter {
   // completeTill: unix timestamp в секундах (когда задача должна быть выполнена)
   async createTask(data: {
     text: string;
-    entityType: 'leads' | 'contacts' | 'companies';
+    entityType: "leads" | "contacts" | "companies";
     entityId: number;
     completeTillSec?: number; // default: +24h
     taskTypeId?: number; // default: 1 (звонок)
     responsibleUserId?: number; // если знаем кому именно
   }): Promise<void> {
-    const completeTill = data.completeTillSec || Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+    const completeTill =
+      data.completeTillSec || Math.floor(Date.now() / 1000) + 24 * 60 * 60;
     const body: any = {
       text: data.text,
       complete_till: completeTill,
@@ -429,9 +791,10 @@ export class AmoCrmAdapter {
       entity_id: data.entityId,
       task_type_id: data.taskTypeId || 1,
     };
-    if (data.responsibleUserId) body.responsible_user_id = data.responsibleUserId;
-    await this.request('/tasks', {
-      method: 'POST',
+    if (data.responsibleUserId)
+      body.responsible_user_id = data.responsibleUserId;
+    await this.request("/tasks", {
+      method: "POST",
       body: JSON.stringify([body]),
     });
   }
@@ -445,7 +808,14 @@ export class AmoCrmAdapter {
     responsibleUserId: number,
     fromSec: number,
     toSec: number,
-  ): Promise<Array<{ id: number; text: string; completeTill: number; durationSec: number }>> {
+  ): Promise<
+    Array<{
+      id: number;
+      text: string;
+      completeTill: number;
+      durationSec: number;
+    }>
+  > {
     if (!responsibleUserId) return [];
     try {
       const params = [
@@ -454,7 +824,7 @@ export class AmoCrmAdapter {
         `filter[complete_till][from]=${fromSec}`,
         `filter[complete_till][to]=${toSec}`,
         `limit=250`,
-      ].join('&');
+      ].join("&");
       const data = await this.request<any>(`/tasks?${params}`);
       const items = data?._embedded?.tasks || [];
       // У задачи в amo нет «продолжительности» — есть только complete_till
@@ -468,7 +838,7 @@ export class AmoCrmAdapter {
         durationSec: 60 * 60,
       }));
     } catch (e: any) {
-      console.error('[getOpenTasksForUser] failed:', e?.message || e);
+      console.error("[getOpenTasksForUser] failed:", e?.message || e);
       return [];
     }
   }
@@ -476,15 +846,20 @@ export class AmoCrmAdapter {
   // 2026-06-10: список задач по entity (лиду / контакту). Используется
   // для диагностики «кто ответственный за задачу» — чтобы убедиться
   // что Морикит / наш код проставляет правильного человека.
-  async getTasksByEntity(entityType: 'leads' | 'contacts', entityId: number): Promise<Array<{
-    id: number;
-    text: string;
-    task_type_id: number;
-    responsible_user_id: number;
-    is_completed: boolean;
-    complete_till: number;
-    created_at: number;
-  }>> {
+  async getTasksByEntity(
+    entityType: "leads" | "contacts",
+    entityId: number,
+  ): Promise<
+    Array<{
+      id: number;
+      text: string;
+      task_type_id: number;
+      responsible_user_id: number;
+      is_completed: boolean;
+      complete_till: number;
+      created_at: number;
+    }>
+  > {
     try {
       const data = await this.request<any>(
         `/tasks?filter[entity_type]=${entityType}&filter[entity_id]=${entityId}&limit=50`,
@@ -500,7 +875,7 @@ export class AmoCrmAdapter {
         created_at: t.created_at,
       }));
     } catch (e: any) {
-      console.error('[getTasksByEntity] failed:', e?.message || e);
+      console.error("[getTasksByEntity] failed:", e?.message || e);
       return [];
     }
   }
@@ -537,12 +912,15 @@ export class AmoCrmAdapter {
       const initial = await this.getLead(leadId);
       initialResponsible = (initial as any)?.responsible_user_id;
     } catch (e: any) {
-      console.warn(`[sync-lead-responsible] lead=${leadId} initial getLead failed:`, e?.message || e);
+      console.warn(
+        `[sync-lead-responsible] lead=${leadId} initial getLead failed:`,
+        e?.message || e,
+      );
     }
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (intervalMs > 0) await sleep(intervalMs);
       try {
-        const tasks = await this.getTasksByEntity('leads', leadId);
+        const tasks = await this.getTasksByEntity("leads", leadId);
         if (!tasks.length) continue;
         const latest = tasks
           .filter((t) => !!t.responsible_user_id)
@@ -554,19 +932,27 @@ export class AmoCrmAdapter {
         // Защита от перетирания ручного выбора КЦ-менеджера: если responsible
         // на лиде УЖЕ изменился относительно начального — значит кто-то
         // вручную взял лид → не трогаем.
-        if (initialResponsible !== undefined && currentResponsible !== initialResponsible) {
+        if (
+          initialResponsible !== undefined &&
+          currentResponsible !== initialResponsible
+        ) {
           console.log(
             `[sync-lead-responsible] lead=${leadId} skip — responsible изменился вручную (${initialResponsible} → ${currentResponsible}), не перетираем`,
           );
           return false;
         }
-        await this.updateLead(leadId, { responsible_user_id: latest.responsible_user_id });
+        await this.updateLead(leadId, {
+          responsible_user_id: latest.responsible_user_id,
+        });
         console.log(
           `[sync-lead-responsible] lead=${leadId} updated: ${currentResponsible} → ${latest.responsible_user_id} (task ${latest.id}, attempt ${attempt})`,
         );
         return true;
       } catch (e: any) {
-        console.error(`[sync-lead-responsible] attempt ${attempt} failed:`, e?.message || e);
+        console.error(
+          `[sync-lead-responsible] attempt ${attempt} failed:`,
+          e?.message || e,
+        );
       }
     }
     console.warn(
@@ -577,15 +963,17 @@ export class AmoCrmAdapter {
 
   async addNoteToContact(contactId: number, text: string): Promise<void> {
     await this.request(`/contacts/${contactId}/notes`, {
-      method: 'POST',
-      body: JSON.stringify([{ note_type: 'common', params: { text } }]),
+      method: "POST",
+      body: JSON.stringify([{ note_type: "common", params: { text } }]),
     });
   }
 
   // === Companies ===
   async findCompanyByInn(inn: string): Promise<AmoCompany | null> {
     try {
-      const data = await this.request<any>(`/companies?query=${encodeURIComponent(inn)}`);
+      const data = await this.request<any>(
+        `/companies?query=${encodeURIComponent(inn)}`,
+      );
       const companies = data?._embedded?.companies || [];
       return companies[0] || null;
     } catch {
@@ -594,8 +982,8 @@ export class AmoCrmAdapter {
   }
 
   async createCompany(data: CreateCompanyDto): Promise<AmoCompany> {
-    const result = await this.request<any>('/companies', {
-      method: 'POST',
+    const result = await this.request<any>("/companies", {
+      method: "POST",
       body: JSON.stringify([data]),
     });
     return result?._embedded?.companies?.[0];
@@ -612,7 +1000,7 @@ export class AmoCrmAdapter {
   ): Promise<AmoCompany | null> {
     try {
       return await this.request<AmoCompany>(`/companies/${id}`, {
-        method: 'PATCH',
+        method: "PATCH",
         body: JSON.stringify(data),
       });
     } catch (e) {
@@ -620,17 +1008,27 @@ export class AmoCrmAdapter {
     }
   }
 
-  async linkContactToCompany(contactId: number, companyId: number): Promise<void> {
+  async linkContactToCompany(
+    contactId: number,
+    companyId: number,
+  ): Promise<void> {
     await this.request(`/contacts/${contactId}/link`, {
-      method: 'POST',
-      body: JSON.stringify([{ to_entity_id: companyId, to_entity_type: 'companies' }]),
+      method: "POST",
+      body: JSON.stringify([
+        { to_entity_id: companyId, to_entity_type: "companies" },
+      ]),
     });
   }
 
   // === Leads (deals) ===
   async getLead(id: number): Promise<AmoLead | null> {
-    try { return await this.request<AmoLead>(`/leads/${id}?with=contacts,companies`); }
-    catch { return null; }
+    try {
+      return await this.request<AmoLead>(
+        `/leads/${id}?with=contacts,companies`,
+      );
+    } catch {
+      return null;
+    }
   }
 
   async createLead(data: CreateLeadDto): Promise<AmoLead> {
@@ -644,16 +1042,20 @@ export class AmoCrmAdapter {
       if (contacts) payload._embedded.contacts = contacts;
       if (companies) payload._embedded.companies = companies;
     }
-    const result = await this.request<any>('/leads', {
-      method: 'POST',
-      body: JSON.stringify([payload]),
-    }, { retryTransient: false });
+    const result = await this.request<any>(
+      "/leads",
+      {
+        method: "POST",
+        body: JSON.stringify([payload]),
+      },
+      { retryTransient: false },
+    );
     return result?._embedded?.leads?.[0];
   }
 
   async updateLead(id: number, data: UpdateLeadDto): Promise<void> {
     await this.request(`/leads/${id}`, {
-      method: 'PATCH',
+      method: "PATCH",
       body: JSON.stringify(data),
     });
   }
@@ -665,11 +1067,11 @@ export class AmoCrmAdapter {
    */
   async linkContactToLead(leadId: number, contactId: number): Promise<void> {
     await this.request(`/leads/${leadId}/link`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify([
         {
           to_entity_id: contactId,
-          to_entity_type: 'contacts',
+          to_entity_type: "contacts",
         },
       ]),
     });
@@ -684,28 +1086,28 @@ export class AmoCrmAdapter {
    * Возвращает 'ALARM' → создавать Client с UNDER_REVIEW + задача для КЦ
    */
   async checkUniqueness(phone: string): Promise<{
-    rule: import('./amo-crm.fields').FixationRule;
-    verdict: 'UNIQUE' | 'ALARM'; // @deprecated: для совместимости со старым кодом
+    rule: import("./amo-crm.fields").FixationRule;
+    verdict: "UNIQUE" | "ALARM"; // @deprecated: для совместимости со старым кодом
     reason: string;
     contactId?: number;
     leads?: Array<{ id: number; pipeline_id: number; status_id: number }>;
-    triggerType?: 'DEFERRED_DEMAND' | 'NEW_REQUEST_NO_BROKER' | 'ACTIVE_SALES';
+    triggerType?: "DEFERRED_DEMAND" | "NEW_REQUEST_NO_BROKER" | "ACTIVE_SALES";
     triggerLeadId?: number;
   }> {
     const contact = await this.findContactByPhone(phone);
     if (!contact) {
       return {
-        rule: 'NO_CONFLICT',
-        verdict: 'UNIQUE',
-        reason: 'Контакт в amoCRM не найден',
+        rule: "NO_CONFLICT",
+        verdict: "UNIQUE",
+        reason: "Контакт в amoCRM не найден",
       };
     }
     const leads = await this.getLeadsByContact(contact.id);
     if (leads.length === 0) {
       return {
-        rule: 'NO_CONFLICT',
-        verdict: 'UNIQUE',
-        reason: 'У контакта нет лидов в amoCRM',
+        rule: "NO_CONFLICT",
+        verdict: "UNIQUE",
+        reason: "У контакта нет лидов в amoCRM",
         contactId: contact.id,
         leads: [],
       };
@@ -713,14 +1115,18 @@ export class AmoCrmAdapter {
     // Собрать все contactId из всех лидов одним батчем — экономим запросы.
     const allContactIds = new Set<number>();
     for (const lead of leads) {
-      const contactIds = ((lead as any)._embedded?.contacts || []).map((c: any) => c.id);
+      const contactIds = ((lead as any)._embedded?.contacts || []).map(
+        (c: any) => c.id,
+      );
       contactIds.forEach((id: number) => allContactIds.add(id));
     }
     const contactsMap = await this.getContactsByIds(Array.from(allContactIds));
 
     const isBroker = (c: any): boolean => {
       const fields = c?.custom_fields_values || [];
-      const brokerField = fields.find((f: any) => f?.field_id === AMO_CONTACT_FIELDS.IS_BROKER);
+      const brokerField = fields.find(
+        (f: any) => f?.field_id === AMO_CONTACT_FIELDS.IS_BROKER,
+      );
       return brokerField?.values?.[0]?.value === true;
     };
 
@@ -756,18 +1162,23 @@ export class AmoCrmAdapter {
   }
 
   async getLeadsByContact(contactId: number): Promise<AmoLead[]> {
-    const contact = await this.request<any>(`/contacts/${contactId}?with=leads`);
+    const contact = await this.request<any>(
+      `/contacts/${contactId}?with=leads`,
+    );
     const leadIds = (contact?._embedded?.leads || []).map((l: any) => l.id);
     if (leadIds.length === 0) return [];
     // A failed lookup must propagate. Treating a 401/403/timeout as "no leads"
     // makes uniqueness appear successful and can create a duplicate fixation.
     const data = await this.request<any>(
-      `/leads?filter[id][]=${leadIds.join('&filter[id][]=')}&with=contacts`,
+      `/leads?filter[id][]=${leadIds.join("&filter[id][]=")}&with=contacts`,
     );
     return data?._embedded?.leads || [];
   }
 
-  async getLeadsByPipeline(pipelineId: number, limit = 250): Promise<AmoLead[]> {
+  async getLeadsByPipeline(
+    pipelineId: number,
+    limit = 250,
+  ): Promise<AmoLead[]> {
     const allLeads: AmoLead[] = [];
     let page = 1;
     try {
@@ -786,7 +1197,10 @@ export class AmoCrmAdapter {
     return allLeads;
   }
 
-  async getLeadsByResponsibleUser(userId: number, limit = 250): Promise<AmoLead[]> {
+  async getLeadsByResponsibleUser(
+    userId: number,
+    limit = 250,
+  ): Promise<AmoLead[]> {
     const allLeads: AmoLead[] = [];
     let page = 1;
     try {
@@ -823,8 +1237,9 @@ export class AmoCrmAdapter {
           `limit=${limit}`,
           `page=${page}`,
         ];
-        if (createdFromSec) params.push(`filter[created_at][from]=${createdFromSec}`);
-        const data = await this.request<any>(`/leads?${params.join('&')}`);
+        if (createdFromSec)
+          params.push(`filter[created_at][from]=${createdFromSec}`);
+        const data = await this.request<any>(`/leads?${params.join("&")}`);
         const leads = data?._embedded?.leads || [];
         if (leads.length === 0) break;
         allLeads.push(...leads);
@@ -843,48 +1258,50 @@ export class AmoCrmAdapter {
 
   async getLeadStage(leadId: number): Promise<string> {
     const lead = await this.getLead(leadId);
-    return lead?.status_id ? String(lead.status_id) : '';
+    return lead?.status_id ? String(lead.status_id) : "";
   }
 
   // === Pipelines ===
   async getPipelines(): Promise<any[]> {
-    const data = await this.request<any>('/leads/pipelines');
+    const data = await this.request<any>("/leads/pipelines");
     return data?._embedded?.pipelines || [];
   }
 
   // === Custom fields ===
   async getContactCustomFields(): Promise<any[]> {
-    const data = await this.request<any>('/contacts/custom_fields');
+    const data = await this.request<any>("/contacts/custom_fields");
     return data?._embedded?.custom_fields || [];
   }
 
   async getCompanyCustomFields(): Promise<any[]> {
-    const data = await this.request<any>('/companies/custom_fields');
+    const data = await this.request<any>("/companies/custom_fields");
     return data?._embedded?.custom_fields || [];
   }
 
   // === Users ===
   async getUsers(): Promise<any[]> {
-    const data = await this.request<any>('/users');
+    const data = await this.request<any>("/users");
     return data?._embedded?.users || [];
   }
 
   async findUserByPhone(phone: string): Promise<any | null> {
     const users = await this.getUsers();
-    const cleanPhone = phone.replace(/\D/g, '');
-    return users.find((u: any) => {
-      const userPhone = String(u.phone || '').replace(/\D/g, '');
-      return userPhone && userPhone.endsWith(cleanPhone.slice(-10));
-    }) || null;
+    const cleanPhone = phone.replace(/\D/g, "");
+    return (
+      users.find((u: any) => {
+        const userPhone = String(u.phone || "").replace(/\D/g, "");
+        return userPhone && userPhone.endsWith(cleanPhone.slice(-10));
+      }) || null
+    );
   }
 
   // === Fixation request (create lead with broker info) ===
   async createFixationRequest(data: {
     clientPhone: string;
-    clientEmail?: string;        // правка 2026-05-15: записывается на контакт
+    clientEmail?: string; // правка 2026-05-15: записывается на контакт
     clientName: string;
-    clientRegion?: string;       // правка 2026-05-22: регион клиента (REGION=589265)
-    presentationSent?: boolean;  // правка 2026-05-22: «Отправлена презентация» на контакт клиента
+    clientRegion?: string; // правка 2026-05-22: регион клиента (REGION=589265)
+    presentationSent?: boolean; // правка 2026-05-22: «Отправлена презентация» на контакт клиента
     brokerPhone: string;
     brokerAmoContactId?: number; // правка 2026-05-22: привязка брокера-агента как 2-го контакта лида
     agencyName: string;
@@ -897,9 +1314,9 @@ export class AmoCrmAdapter {
     amount?: number;
     sqm?: number;
     // Новые поля 2026-05-22 — заполняются опционально из формы фиксации.
-    purchaseTiming?: string;     // «Планирует покупку»: от 1 до 3 месяцев, 3-6, и т.д.
-    readinessLevel?: string;     // «Готовность к сделке»: Холодный/Тёплый/Горячий
-    fromBroker?: boolean;        // «От брокера» radio (по умолчанию true для fixation request)
+    purchaseTiming?: string; // «Планирует покупку»: от 1 до 3 месяцев, 3-6, и т.д.
+    readinessLevel?: string; // «Готовность к сделке»: Холодный/Тёплый/Горячий
+    fromBroker?: boolean; // «От брокера» radio (по умолчанию true для fixation request)
     // 2026-06-03: если задан — не создаём новый лид, а прикрепляем брокера
     // к существующему. Логика «конкурирующие брокеры до акта осмотра»:
     // несколько брокеров одновременно могут быть условно-уникальными.
@@ -913,13 +1330,22 @@ export class AmoCrmAdapter {
   }): Promise<AmoLead> {
     // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
     const clientCustomFields: any[] = [
-      { field_code: 'PHONE', values: [{ value: data.clientPhone, enum_code: 'WORK' }] },
+      {
+        field_code: "PHONE",
+        values: [{ value: data.clientPhone, enum_code: "WORK" }],
+      },
     ];
     if (data.clientEmail) {
-      clientCustomFields.push({ field_code: 'EMAIL', values: [{ value: data.clientEmail, enum_code: 'WORK' }] });
+      clientCustomFields.push({
+        field_code: "EMAIL",
+        values: [{ value: data.clientEmail, enum_code: "WORK" }],
+      });
     }
     if (data.clientRegion) {
-      clientCustomFields.push({ field_id: 589265, values: [{ value: data.clientRegion }] });
+      clientCustomFields.push({
+        field_id: 589265,
+        values: [{ value: data.clientRegion }],
+      });
     }
     if (data.presentationSent) {
       clientCustomFields.push({ field_id: 835955, values: [{ value: true }] });
@@ -935,7 +1361,9 @@ export class AmoCrmAdapter {
       // Контакт существует — обновим переданные поля (email/region/presentation).
       // Без try/catch: если amo вернёт ошибку, мы не валим всю операцию.
       try {
-        await this.updateContact(contact.id, { custom_fields_values: clientCustomFields } as any);
+        await this.updateContact(contact.id, {
+          custom_fields_values: clientCustomFields,
+        } as any);
       } catch {}
     }
 
@@ -966,41 +1394,60 @@ export class AmoCrmAdapter {
       //   1025397 «Квартира»
       // Форма (apps/web/.../fixation/page.tsx) шлёт только 3 значения:
       // «Квартира», «Апартаменты», «Коммерческая» — мапим эти три.
-      'квартира': 1025397,
-      'апартаменты': 859233,
-      'апартамент': 859233,
-      'коммерческая': 889061,
-      'коммерческое помещение': 889061,
-      'кладовая': 981093,
-      'паркинг': 859235,
-      'машиноместо': 859235,
+      квартира: 1025397,
+      апартаменты: 859233,
+      апартамент: 859233,
+      коммерческая: 889061,
+      "коммерческое помещение": 889061,
+      кладовая: 981093,
+      паркинг: 859235,
+      машиноместо: 859235,
     };
     if (data.propertyType) {
-      const enumId = propertyTypeEnums[String(data.propertyType).toLowerCase().trim()];
-      if (enumId) customFields.push({ field_id: 587387, values: [{ enum_id: enumId }] });
+      const enumId =
+        propertyTypeEnums[String(data.propertyType).toLowerCase().trim()];
+      if (enumId)
+        customFields.push({ field_id: 587387, values: [{ enum_id: enumId }] });
     }
     const roomsCountEnums: Record<string, number> = {
       // ID получены через GET /leads/custom_fields/583447 (multiselect).
-      '1': 852923, '1к': 852923, 'однушка': 852923,
-      '2': 852925, '2к': 852925, 'двушка': 852925,
-      '3': 852927, '3к': 852927, 'трёшка': 852927, 'трешка': 852927,
-      'студия': 889059,
+      "1": 852923,
+      "1к": 852923,
+      однушка: 852923,
+      "2": 852925,
+      "2к": 852925,
+      двушка: 852925,
+      "3": 852927,
+      "3к": 852927,
+      трёшка: 852927,
+      трешка: 852927,
+      студия: 889059,
     };
     if (data.roomsCount) {
-      const enumId = roomsCountEnums[String(data.roomsCount).toLowerCase().trim()];
-      if (enumId) customFields.push({ field_id: 583447, values: [{ enum_id: enumId }] });
+      const enumId =
+        roomsCountEnums[String(data.roomsCount).toLowerCase().trim()];
+      if (enumId)
+        customFields.push({ field_id: 583447, values: [{ enum_id: enumId }] });
     }
-    if (data.amount && data.amount > 0) customFields.push({ field_id: 833045, values: [{ value: String(data.amount) }] });
-    if (data.sqm && data.sqm > 0) customFields.push({ field_id: 604555, values: [{ value: String(data.sqm) }] });
+    if (data.amount && data.amount > 0)
+      customFields.push({
+        field_id: 833045,
+        values: [{ value: String(data.amount) }],
+      });
+    if (data.sqm && data.sqm > 0)
+      customFields.push({
+        field_id: 604555,
+        values: [{ value: String(data.sqm) }],
+      });
     // Правка 2026-05-15: добавляем поля левого сайдбара лида автоматом.
     // 583155 «Цель покупки» — по умолчанию «Себе» (большинство случаев).
     // 839179 «Объект интереса» — из выбранного проекта.
-    customFields.push({ field_id: 583155, values: [{ value: 'Себе' }] });
+    customFields.push({ field_id: 583155, values: [{ value: "Себе" }] });
     const objectByProject: Record<string, string> = {
-      ZORGE9: 'Зорге 9',
-      SILVER_BOR: 'Берзарина 37',
+      ZORGE9: "Зорге 9",
+      SILVER_BOR: "Берзарина 37",
     };
-    const projectObj = objectByProject[String(data.project)] || 'Зорге 9';
+    const projectObj = objectByProject[String(data.project)] || "Зорге 9";
     customFields.push({ field_id: 839179, values: [{ value: projectObj }] });
 
     // Поля воронки КЦ (2026-05-22, ID получены через debug-endpoint):
@@ -1024,12 +1471,20 @@ export class AmoCrmAdapter {
     // — Готовность к сделке (select) — если оператор выбрал в форме
     if (data.readinessLevel) {
       const eid = readinessLevelToEnumId(data.readinessLevel);
-      if (eid) customFields.push({ field_id: AMO_LEAD_FIELDS.READINESS_LEVEL, values: [{ enum_id: eid }] });
+      if (eid)
+        customFields.push({
+          field_id: AMO_LEAD_FIELDS.READINESS_LEVEL,
+          values: [{ enum_id: eid }],
+        });
     }
     // — Планирует покупку в срок (select)
     if (data.purchaseTiming) {
       const eid = purchaseTimingToEnumId(data.purchaseTiming);
-      if (eid) customFields.push({ field_id: AMO_LEAD_FIELDS.PURCHASE_TIMING, values: [{ enum_id: eid }] });
+      if (eid)
+        customFields.push({
+          field_id: AMO_LEAD_FIELDS.PURCHASE_TIMING,
+          values: [{ enum_id: eid }],
+        });
     }
 
     // 2026-06-09 OFF: ранее тут подмешивали brokerLeadMarkerFields()
@@ -1052,7 +1507,8 @@ export class AmoCrmAdapter {
     // КБ3 в лиде виден второй контакт «Малыгина Елена Александровна» — агент).
     const leadContacts: Array<{ id: number }> = [];
     if (contact?.id) leadContacts.push({ id: contact.id });
-    if (data.brokerAmoContactId) leadContacts.push({ id: data.brokerAmoContactId });
+    if (data.brokerAmoContactId)
+      leadContacts.push({ id: data.brokerAmoContactId });
 
     // 2026-06-03: режим переиспользования существующего лида.
     // Когда у контакта уже есть активный лид в КЦ (Новое обращение /
@@ -1067,7 +1523,9 @@ export class AmoCrmAdapter {
     // AMO_DEFAULT_RESPONSIBLE_USER_ID можно задать только если Морикит
     // временно сломан и нужен аварийный fallback (например, на Юлю).
     const envFallback = process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
-    const defaultResponsibleUserId = envFallback ? Number(envFallback) : undefined;
+    const defaultResponsibleUserId = envFallback
+      ? Number(envFallback)
+      : undefined;
 
     let resultLead: AmoLead;
     if (data.reuseLeadId) {
@@ -1078,22 +1536,28 @@ export class AmoCrmAdapter {
           name: `Фиксация: ${data.clientName} (${data.project})`,
           contacts: leadContacts.length > 0 ? leadContacts : undefined,
           pipeline_id: 7600542,
-          ...(defaultResponsibleUserId ? { responsible_user_id: defaultResponsibleUserId } : {}),
+          ...(defaultResponsibleUserId
+            ? { responsible_user_id: defaultResponsibleUserId }
+            : {}),
           ...(data.amount && data.amount > 0 ? { price: data.amount } : {}),
         } as any);
       } else {
         // Прикрепляем нашего брокера к контактам существующего лида.
         // amo: чтобы добавить второй контакт — `contacts: [{id: A, is_main: ...}, {id: B}]`.
         if (data.brokerAmoContactId) {
-          const existingContactIds = ((existing as any)._embedded?.contacts || []).map((c: any) => c.id);
+          const existingContactIds = (
+            (existing as any)._embedded?.contacts || []
+          ).map((c: any) => c.id);
           if (!existingContactIds.includes(data.brokerAmoContactId)) {
             try {
               await this.request(`/leads/${data.reuseLeadId}/link`, {
-                method: 'POST',
-                body: JSON.stringify([{
-                  to_entity_id: data.brokerAmoContactId,
-                  to_entity_type: 'contacts',
-                }]),
+                method: "POST",
+                body: JSON.stringify([
+                  {
+                    to_entity_id: data.brokerAmoContactId,
+                    to_entity_type: "contacts",
+                  },
+                ]),
               });
             } catch (e) {
               // Не валим — main path всё равно lead уже есть.
@@ -1109,7 +1573,8 @@ export class AmoCrmAdapter {
         contacts: leadContacts.length > 0 ? leadContacts : undefined,
         pipeline_id: 7600542,
       };
-      if (defaultResponsibleUserId) leadData.responsible_user_id = defaultResponsibleUserId;
+      if (defaultResponsibleUserId)
+        leadData.responsible_user_id = defaultResponsibleUserId;
       if (data.amount && data.amount > 0) leadData.price = data.amount;
       resultLead = await this.createLead(leadData);
     }
@@ -1119,7 +1584,9 @@ export class AmoCrmAdapter {
     // быть данные другого брокера).
     if (!data.reuseLeadId && resultLead?.id && customFields.length > 0) {
       try {
-        await this.updateLead(resultLead.id, { custom_fields_values: customFields } as any);
+        await this.updateLead(resultLead.id, {
+          custom_fields_values: customFields,
+        } as any);
       } catch (e) {
         // Не валим всю операцию если PATCH упал — лид создан, контакт связан.
       }
@@ -1135,8 +1602,12 @@ export class AmoCrmAdapter {
     if (!data.reuseLeadId && resultLead?.id) {
       const markerFields = brokerLeadMarkerFields();
       try {
-        await this.updateLead(resultLead.id, { custom_fields_values: markerFields } as any);
-        console.log(`[createFixationRequest] utm-маркеры записаны на лид ${resultLead.id}`);
+        await this.updateLead(resultLead.id, {
+          custom_fields_values: markerFields,
+        } as any);
+        console.log(
+          `[createFixationRequest] utm-маркеры записаны на лид ${resultLead.id}`,
+        );
       } catch (e: any) {
         console.warn(
           `[createFixationRequest] utm-маркеры bulk-PATCH упал на лиде ${resultLead.id}: ${e?.message || e}. Пробую по одному...`,
@@ -1148,13 +1619,17 @@ export class AmoCrmAdapter {
         let failed = 0;
         for (const f of markerFields) {
           try {
-            await this.updateLead(resultLead.id, { custom_fields_values: [f] } as any);
+            await this.updateLead(resultLead.id, {
+              custom_fields_values: [f],
+            } as any);
             ok++;
           } catch {
             failed++;
           }
         }
-        console.log(`[createFixationRequest] utm-маркеры fallback: ok=${ok} failed=${failed}`);
+        console.log(
+          `[createFixationRequest] utm-маркеры fallback: ok=${ok} failed=${failed}`,
+        );
       }
     }
 
@@ -1164,13 +1639,23 @@ export class AmoCrmAdapter {
     // Менеджер КЦ должен видеть ВСЕ детали в ленте лида, не открывая
     // наш кабинет отдельно.
     if (resultLead?.id) {
-      const projectName = ({ ZORGE9: 'Зорге 9', SILVER_BOR: 'Берзарина 37' } as Record<string, string>)[String(data.project)] || String(data.project);
+      const projectName =
+        (
+          { ZORGE9: "Зорге 9", SILVER_BOR: "Берзарина 37" } as Record<
+            string,
+            string
+          >
+        )[String(data.project)] || String(data.project);
       const lines: string[] = [];
       if (data.reuseLeadId) {
         lines.push(`🟢 Аукция уникальности — новый брокер на этом клиенте`);
       } else if (data.previousLeadId) {
-        lines.push(`🔁 Повторная фиксация — клиент возвращается после закрытой сделки`);
-        lines.push(`Предыдущий лид: #${data.previousLeadId}${data.previousLeadInfo ? ` (${data.previousLeadInfo})` : ''}`);
+        lines.push(
+          `🔁 Повторная фиксация — клиент возвращается после закрытой сделки`,
+        );
+        lines.push(
+          `Предыдущий лид: #${data.previousLeadId}${data.previousLeadInfo ? ` (${data.previousLeadInfo})` : ""}`,
+        );
       } else {
         lines.push(`📝 Фиксация клиента от брокера`);
       }
@@ -1183,9 +1668,12 @@ export class AmoCrmAdapter {
       if (data.propertyType) lines.push(`Тип: ${data.propertyType}`);
       if (data.roomsCount) lines.push(`Комнат: ${data.roomsCount}`);
       if (data.sqm) lines.push(`Метраж: ${data.sqm} м²`);
-      if (data.amount) lines.push(`Бюджет: ${data.amount.toLocaleString('ru-RU')} ₽`);
-      if (data.purchaseTiming) lines.push(`Планирует покупку: ${data.purchaseTiming}`);
-      if (data.readinessLevel) lines.push(`Готовность к сделке: ${data.readinessLevel}`);
+      if (data.amount)
+        lines.push(`Бюджет: ${data.amount.toLocaleString("ru-RU")} ₽`);
+      if (data.purchaseTiming)
+        lines.push(`Планирует покупку: ${data.purchaseTiming}`);
+      if (data.readinessLevel)
+        lines.push(`Готовность к сделке: ${data.readinessLevel}`);
       lines.push(``);
       lines.push(`Брокер-агент: ${data.brokerPhone}`);
       lines.push(`Агентство: ${data.agencyName} (ИНН ${data.agencyInn})`);
@@ -1194,7 +1682,7 @@ export class AmoCrmAdapter {
         lines.push(`Комментарий брокера: ${data.comment}`);
       }
       try {
-        await this.addNoteToLead(resultLead.id, lines.join('\n'));
+        await this.addNoteToLead(resultLead.id, lines.join("\n"));
       } catch (e) {
         // Не валим — note вторичен, главное лид с полями.
       }
@@ -1229,14 +1717,24 @@ export class AmoCrmAdapter {
       // создаём новый (контакт уже настроен через syncBrokerProfileToAmo).
       contact = data.existingContactId
         ? { id: data.existingContactId }
-        : await this.findBrokerContactByPhone(data.brokerPhone, { strict: true });
+        : await this.findBrokerContactByPhone(data.brokerPhone, {
+            strict: true,
+          });
       if (!contact) {
         contact = await this.createContact({
           name: data.brokerName,
           custom_fields_values: [
-            { field_code: 'PHONE', values: [{ value: data.brokerPhone, enum_code: 'WORK' }] },
+            {
+              field_code: "PHONE",
+              values: [{ value: data.brokerPhone, enum_code: "WORK" }],
+            },
             ...(data.brokerEmail
-              ? [{ field_code: 'EMAIL' as const, values: [{ value: data.brokerEmail, enum_code: 'WORK' }] }]
+              ? [
+                  {
+                    field_code: "EMAIL" as const,
+                    values: [{ value: data.brokerEmail, enum_code: "WORK" }],
+                  },
+                ]
               : []),
             { field_id: 835415, values: [{ value: true }] }, // IS_BROKER
           ],
@@ -1248,8 +1746,9 @@ export class AmoCrmAdapter {
       // КЦ-менеджер их в своих фильтрах НЕ видел. Берём из env: сначала
       // AMO_BROKER_MEETINGS_MANAGER_ID (Ксения, уже настроена), иначе
       // AMO_DEFAULT_RESPONSIBLE_USER_ID. Если оба пусты — оставляем как было.
-      const brokerMgrEnv = process.env.AMO_BROKER_MEETINGS_MANAGER_ID
-        || process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
+      const brokerMgrEnv =
+        process.env.AMO_BROKER_MEETINGS_MANAGER_ID ||
+        process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
       const responsibleUserId = brokerMgrEnv ? Number(brokerMgrEnv) : undefined;
 
       // 2) Лид в пайплайне брокеров
@@ -1257,37 +1756,44 @@ export class AmoCrmAdapter {
         name: data.leadName || `Заявка с лендинга — ${data.brokerName}`,
         pipeline_id: 10787390, // BROKERS
         contacts: contact?.id ? [{ id: contact.id }] : undefined,
-        ...(responsibleUserId ? { responsible_user_id: responsibleUserId } : {}),
+        ...(responsibleUserId
+          ? { responsible_user_id: responsibleUserId }
+          : {}),
       } as any);
 
       // 3) Примечание и задача
       if (lead?.id) {
         const noteText = [
           `📥 Заявка с лендинга`,
-          `Источник: ${data.source === 'LANDING_BROKER_TOUR' ? 'Запись на брокер-тур' : 'Форма «Связаться с нами»'}`,
+          `Источник: ${data.source === "LANDING_BROKER_TOUR" ? "Запись на брокер-тур" : "Форма «Связаться с нами»"}`,
           `Имя: ${data.brokerName}`,
           `Телефон: ${data.brokerPhone}`,
           ...(data.brokerEmail ? [`Email: ${data.brokerEmail}`] : []),
           ...(data.note ? [``, `Сообщение: ${data.note}`] : []),
-        ].join('\n');
-        try { await this.addNoteToLead(lead.id, noteText); } catch {}
+        ].join("\n");
+        try {
+          await this.addNoteToLead(lead.id, noteText);
+        } catch {}
         try {
           await this.createTask({
             text: `Связаться с новым брокером ${data.brokerName} (${data.brokerPhone}) — заявка с лендинга`,
-            entityType: 'leads',
+            entityType: "leads",
             entityId: lead.id,
             taskTypeId: 1, // звонок
             completeTillSec: Math.floor(Date.now() / 1000) + 4 * 60 * 60, // 4 часа — новый лид срочно
             responsibleUserId,
           });
         } catch (e: any) {
-          console.error('[createBrokerLeadFromLanding] task failed:', e?.message || e);
+          console.error(
+            "[createBrokerLeadFromLanding] task failed:",
+            e?.message || e,
+          );
         }
       }
 
       return { contactId: contact?.id, leadId: lead?.id };
     } catch (e: any) {
-      console.error('[createBrokerLeadFromLanding] failed:', e?.message || e);
+      console.error("[createBrokerLeadFromLanding] failed:", e?.message || e);
       return contact?.id ? { contactId: contact.id } : null;
     }
   }
@@ -1295,11 +1801,14 @@ export class AmoCrmAdapter {
   // 2026-05-26: добавляет примечание о попытке повторной фиксации в
   // существующий amoCRM-лид. Используется когда другой брокер пробует
   // зафиксировать клиента который уже на уникальности.
-  async addRefixationAttemptNote(leadId: number, data: {
-    requestingBrokerName: string;
-    requestingBrokerPhone: string;
-    clientPhone: string;
-  }): Promise<void> {
+  async addRefixationAttemptNote(
+    leadId: number,
+    data: {
+      requestingBrokerName: string;
+      requestingBrokerPhone: string;
+      clientPhone: string;
+    },
+  ): Promise<void> {
     const text = [
       `⚠ Попытка повторной фиксации`,
       ``,
@@ -1307,7 +1816,7 @@ export class AmoCrmAdapter {
       `Брокер ${data.requestingBrokerName} (${data.requestingBrokerPhone}) пытался зафиксировать этого клиента сейчас.`,
       ``,
       `Менеджер уведомлён, заявка переведена в статус UNDER_REVIEW в нашей системе.`,
-    ].join('\n');
+    ].join("\n");
     // Note для истории + задача чтобы сотрудник КЦ её разобрал
     await this.addNoteToLead(leadId, text);
     try {
@@ -1323,7 +1832,7 @@ export class AmoCrmAdapter {
       }
       await this.createTask({
         text: `⚠ Разрешить конфликт: ${data.requestingBrokerName} (${data.requestingBrokerPhone}) пытался повторно зафиксировать клиента ${data.clientPhone}. Уточнить кому отдать.`,
-        entityType: 'leads',
+        entityType: "leads",
         entityId: leadId,
         taskTypeId: 1,
         completeTillSec: Math.floor(Date.now() / 1000) + 4 * 60 * 60, // 4 часа — конфликты разруливаем быстро

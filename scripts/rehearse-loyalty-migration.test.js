@@ -75,6 +75,23 @@ test("workflow removes its temporary trusted script even after failure", () => {
   assert.match(workflow, /trap 'rm -f -- "\$REHEARSAL_SCRIPT"' EXIT/);
   assert.match(
     workflow,
-    /git show FETCH_HEAD:scripts\/rehearse-loyalty-migration\.sh > "\$REHEARSAL_SCRIPT"/,
+    /git show "\$EXPECTED_REHEARSAL_SHA:scripts\/rehearse-loyalty-migration\.sh" > "\$REHEARSAL_SCRIPT"/,
+  );
+});
+
+test("workflow binds the rehearsal to canonical master at the dispatch SHA", () => {
+  assert.match(workflow, /EXPECTED_REHEARSAL_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /envs: DEPLOY_PATH,EXPECTED_REHEARSAL_SHA/);
+  assert.match(
+    workflow,
+    /TRUSTED_REHEARSAL_SHA=\$\(git rev-parse FETCH_HEAD\)/,
+  );
+  assert.match(
+    workflow,
+    /if \[ "\$TRUSTED_REHEARSAL_SHA" != "\$EXPECTED_REHEARSAL_SHA" \]; then/,
+  );
+  assert.match(
+    workflow,
+    /"\$REHEARSAL_SCRIPT" "\$DEPLOY_PATH" "\$EXPECTED_REHEARSAL_SHA"/,
   );
 });

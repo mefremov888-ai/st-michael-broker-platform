@@ -1,4 +1,8 @@
 import { UserRole } from "@st-michael/shared";
+import {
+  GUARDS_METADATA,
+  INTERCEPTORS_METADATA,
+} from "@nestjs/common/constants";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
 import { LoyaltyBaseController } from "./loyalty-base.controller";
@@ -7,17 +11,140 @@ import {
   LoyaltyImportDto,
   LoyaltyImportRecordDto,
   LoyaltyListQueryDto,
+  LoyaltyReconciliationDecisionDto,
+  LoyaltySearchDto,
 } from "./loyalty-base.dto";
+import { LoyaltyImportPermissionGuard } from "./loyalty-import-permission.guard";
 
 describe("LoyaltyBaseController RBAC", () => {
-  it.each(["reconciliation", "reconciliationSearch", "activeLinks"] as const)(
-    "restricts %s to ADMIN",
+  it.each([
+    "reconciliation",
+    "reconciliationSearch",
+    "activeLinks",
+    "exportBrokers",
+    "exportAgencies",
+    "brokerChanges",
+    "agencyChanges",
+    "dryRunImport",
+  ] as const)(
+    "lets ADMIN/MANAGER reach %s so grants can be enforced",
     (method) => {
       expect(
         Reflect.getMetadata("roles", LoyaltyBaseController.prototype[method]),
-      ).toEqual([UserRole.ADMIN]);
+      ).toEqual([UserRole.ADMIN, UserRole.MANAGER]);
     },
   );
+
+  it.each([
+    "stageImport",
+    "publishImport",
+    "unlinkActiveLink",
+    "decideReconciliation",
+  ] as const)("keeps destructive %s restricted to ADMIN", (method) => {
+    expect(
+      Reflect.getMetadata("roles", LoyaltyBaseController.prototype[method]),
+    ).toEqual([UserRole.ADMIN]);
+  });
+
+  it.each(["dryRunImport", "stageImport"] as const)(
+    "runs the IMPORT grant guard before the multipart interceptor for %s",
+    (method) => {
+      const guards =
+        Reflect.getMetadata(
+          GUARDS_METADATA,
+          LoyaltyBaseController.prototype[method],
+        ) || [];
+      const interceptors =
+        Reflect.getMetadata(
+          INTERCEPTORS_METADATA,
+          LoyaltyBaseController.prototype[method],
+        ) || [];
+
+      expect(guards).toContain(LoyaltyImportPermissionGuard);
+      expect(interceptors).toHaveLength(1);
+    },
+  );
+
+  it("keeps the dry-run handler permission check as defense in depth", async () => {
+    const loyalty: any = {
+      dryRunImport: jest.fn().mockResolvedValue({ ok: true }),
+    };
+    const permissions: any = {
+      require: jest.fn().mockResolvedValue(undefined),
+    };
+    const controller = new LoyaltyBaseController(loyalty, permissions);
+    jest
+      .spyOn(controller as any, "validatedImportDocument")
+      .mockResolvedValue({ sourceName: "validated.json" });
+    const user: any = { id: "manager-1", role: "MANAGER" };
+
+    await expect(controller.dryRunImport(undefined, {}, user)).resolves.toEqual(
+      { ok: true },
+    );
+    expect(permissions.require).toHaveBeenCalledWith(user, "IMPORT");
+    expect(loyalty.dryRunImport).toHaveBeenCalledWith({
+      sourceName: "validated.json",
+    });
+  });
+});
+
+describe("loyalty canonical filter validation", () => {
+  it("allows an empty POST-body search and requires campaign UUIDs", async () => {
+    const valid = plainToInstance(LoyaltySearchDto, {
+      search: "",
+      filter: {
+        campaignIds: ["11111111-1111-4111-8111-111111111111"],
+      },
+      columns: {
+        contact: "HAS_PHONE",
+        activity: "HAS_MEETINGS",
+        calls: "CALLED_IN_PERIOD",
+        deals: "THREE_PLUS",
+      },
+    });
+    // Calls-in-period is structurally valid here; the service enforces that
+    // callPeriod is present because it owns cross-field validation.
+    expect(await validate(valid)).toEqual([]);
+
+    const invalid = plainToInstance(LoyaltySearchDto, {
+      search: "",
+      filter: { campaignIds: ["Обзвон май"] },
+    });
+    expect(
+      (await validate(invalid)).some((error) => error.property === "filter"),
+    ).toBe(true);
+
+    const invalidColumn = plainToInstance(LoyaltySearchDto, {
+      search: "",
+      columns: { deals: "ABOUT_THREE" },
+    });
+    expect(
+      (await validate(invalidColumn)).some(
+        (error) => error.property === "columns",
+      ),
+    ).toBe(true);
+  });
+
+  it("requires an auditable reconciliation reason", async () => {
+    const invalid = plainToInstance(LoyaltyReconciliationDecisionDto, {
+      caseId: "case-1",
+      decision: "SUPPLEMENT",
+      expectedVersion: 1,
+      reason: "  ",
+    });
+    expect(
+      (await validate(invalid)).some((error) => error.property === "reason"),
+    ).toBe(true);
+
+    const valid = plainToInstance(LoyaltyReconciliationDecisionDto, {
+      caseId: "case-1",
+      decision: "ARCHIVE",
+      expectedVersion: 1,
+      reason: "Confirmed duplicate source record",
+      fieldResolutions: { city: "anna" },
+    });
+    expect(await validate(valid)).toEqual([]);
+  });
 });
 
 describe("loyalty import Decimal(18,2) validation", () => {
