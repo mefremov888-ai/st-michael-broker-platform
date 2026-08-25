@@ -2,8 +2,7 @@
 
 import { ChevronDown, Filter, RotateCcw } from "lucide-react";
 import {
-  AGENCY_CALL_RESULTS,
-  BROKER_CALL_RESULTS,
+  getLoyaltyCallResultOptions,
   type LoyaltyBaseKey,
   type LoyaltyEntityType,
   type LoyaltyFacets,
@@ -18,6 +17,7 @@ import type {
   LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
 import { loyaltyStatusLabel } from "@/lib/loyalty-status";
+import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 
 const BROKER_STAGES = [
   "Новый",
@@ -135,7 +135,7 @@ export function LoyaltyFilterPanel({
     value: LoyaltyFilterFormState[K],
   ) => onChange({ ...draft, [key]: value });
   const isBroker = entityType === "brokers";
-  const callResults = isBroker ? BROKER_CALL_RESULTS : AGENCY_CALL_RESULTS;
+  const callResults = getLoyaltyCallResultOptions(entityType);
   const scenarios = isBroker ? BROKER_SCENARIOS : AGENCY_SCENARIOS;
   const statusOptions = isBroker ? BROKER_STATUSES : AGENCY_PARTNERSHIP;
   const unavailableForOurAgency = base === "ours" && !isBroker;
@@ -269,12 +269,19 @@ export function LoyaltyFilterPanel({
               }
             >
               <option value="">Любой результат</option>
-              {callResults.map(([value, label]) => (
-                <option key={value} value={value}>
+              {callResults.map(({ code, label }) => (
+                <option key={code} value={code}>
                   {label}
                 </option>
               ))}
             </select>
+            {draft.lastCallResult && (
+              <LoyaltyCallResultBadge
+                result={draft.lastCallResult}
+                entityType={entityType}
+                className="mt-1"
+              />
+            )}
           </Field>
           <Field label="Сценарий">
             <select

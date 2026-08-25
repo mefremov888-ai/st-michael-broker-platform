@@ -24,27 +24,189 @@ export type LoyaltyCallResult =
   | "AGREEMENTS_EXIST"
   | "COOPERATION_AGREED";
 
-export const BROKER_CALL_RESULTS = [
-  ["INFORMED", "Проинформирован"],
-  ["DO_NOT_CALL", "Просил не звонить"],
-  ["NOT_INTERESTED", "Неинтересно"],
-  ["NO_ANSWER", "НДЗ"],
-  ["SEND_INFORMATION", "Просил отправить информацию"],
-  ["BROKER_TOUR_BOOKED", "Запись на БТ"],
-  ["BROKER_TOUR_DECLINED", "Отказ от БТ"],
-  ["INVALID_PHONE", "Некорректный номер"],
-  ["NOT_A_BROKER", "Уже не брокер"],
-] as const satisfies ReadonlyArray<readonly [LoyaltyCallResult, string]>;
+export type LoyaltyCallResultTone =
+  | "positive"
+  | "informational"
+  | "follow_up"
+  | "unreached"
+  | "negative"
+  | "invalid"
+  | "neutral";
 
-export const AGENCY_CALL_RESULTS = [
-  ["NO_ANSWER", "НДЗ"],
-  ["COOPERATION_DECLINED", "Отказ от сотрудничества"],
-  ["BROKER_TOUR_SCHEDULED", "Назначен БТ"],
-  ["CALLBACK", "Перезвонить"],
-  ["SEND_INFORMATION", "Отправить информацию"],
-  ["AGREEMENTS_EXIST", "Есть договорённости"],
-  ["COOPERATION_AGREED", "Договорились о сотрудничестве"],
-] as const satisfies ReadonlyArray<readonly [LoyaltyCallResult, string]>;
+export interface LoyaltyCallResultDefinition {
+  code: LoyaltyCallResult;
+  tone: Exclude<LoyaltyCallResultTone, "neutral">;
+  labels: Partial<Record<LoyaltyEntityType, string>>;
+}
+
+/**
+ * Single source of truth for API codes, context-specific labels and their
+ * visual meaning. A tone is semantic and stable; concrete Tailwind classes
+ * live in LoyaltyCallResultBadge as a statically enumerable map.
+ */
+export const LOYALTY_CALL_RESULT_CATALOG = {
+  INFORMED: {
+    code: "INFORMED",
+    tone: "informational",
+    labels: { brokers: "Проинформирован" },
+  },
+  DO_NOT_CALL: {
+    code: "DO_NOT_CALL",
+    tone: "negative",
+    labels: { brokers: "Просил не звонить" },
+  },
+  NOT_INTERESTED: {
+    code: "NOT_INTERESTED",
+    tone: "negative",
+    labels: { brokers: "Неинтересно" },
+  },
+  NO_ANSWER: {
+    code: "NO_ANSWER",
+    tone: "unreached",
+    labels: { brokers: "НДЗ", agencies: "НДЗ" },
+  },
+  SEND_INFORMATION: {
+    code: "SEND_INFORMATION",
+    tone: "follow_up",
+    labels: {
+      brokers: "Просил отправить информацию",
+      agencies: "Отправить информацию",
+    },
+  },
+  BROKER_TOUR_BOOKED: {
+    code: "BROKER_TOUR_BOOKED",
+    tone: "positive",
+    labels: { brokers: "Запись на БТ" },
+  },
+  BROKER_TOUR_DECLINED: {
+    code: "BROKER_TOUR_DECLINED",
+    tone: "negative",
+    labels: { brokers: "Отказ от БТ" },
+  },
+  INVALID_PHONE: {
+    code: "INVALID_PHONE",
+    tone: "invalid",
+    labels: { brokers: "Некорректный номер" },
+  },
+  NOT_A_BROKER: {
+    code: "NOT_A_BROKER",
+    tone: "invalid",
+    labels: { brokers: "Уже не брокер" },
+  },
+  COOPERATION_DECLINED: {
+    code: "COOPERATION_DECLINED",
+    tone: "negative",
+    labels: { agencies: "Отказ от сотрудничества" },
+  },
+  BROKER_TOUR_SCHEDULED: {
+    code: "BROKER_TOUR_SCHEDULED",
+    tone: "positive",
+    labels: { agencies: "Назначен БТ" },
+  },
+  CALLBACK: {
+    code: "CALLBACK",
+    tone: "follow_up",
+    labels: { agencies: "Перезвонить" },
+  },
+  AGREEMENTS_EXIST: {
+    code: "AGREEMENTS_EXIST",
+    tone: "positive",
+    labels: { agencies: "Есть договорённости" },
+  },
+  COOPERATION_AGREED: {
+    code: "COOPERATION_AGREED",
+    tone: "positive",
+    labels: { agencies: "Договорились о сотрудничестве" },
+  },
+} as const satisfies Record<LoyaltyCallResult, LoyaltyCallResultDefinition>;
+
+export interface LoyaltyCallResultOption {
+  code: LoyaltyCallResult;
+  label: string;
+  tone: LoyaltyCallResultTone;
+}
+
+const BROKER_CALL_RESULT_CODES = [
+  "INFORMED",
+  "DO_NOT_CALL",
+  "NOT_INTERESTED",
+  "NO_ANSWER",
+  "SEND_INFORMATION",
+  "BROKER_TOUR_BOOKED",
+  "BROKER_TOUR_DECLINED",
+  "INVALID_PHONE",
+  "NOT_A_BROKER",
+] as const satisfies ReadonlyArray<LoyaltyCallResult>;
+
+const AGENCY_CALL_RESULT_CODES = [
+  "NO_ANSWER",
+  "COOPERATION_DECLINED",
+  "BROKER_TOUR_SCHEDULED",
+  "CALLBACK",
+  "SEND_INFORMATION",
+  "AGREEMENTS_EXIST",
+  "COOPERATION_AGREED",
+] as const satisfies ReadonlyArray<LoyaltyCallResult>;
+
+function callResultOptions(
+  entityType: LoyaltyEntityType,
+  codes: ReadonlyArray<LoyaltyCallResult>,
+): ReadonlyArray<LoyaltyCallResultOption> {
+  return codes.map((code) => {
+    const definition: LoyaltyCallResultDefinition =
+      LOYALTY_CALL_RESULT_CATALOG[code];
+    return {
+      code,
+      label: definition.labels[entityType] || code,
+      tone: definition.tone,
+    };
+  });
+}
+
+export const BROKER_CALL_RESULT_OPTIONS = callResultOptions(
+  "brokers",
+  BROKER_CALL_RESULT_CODES,
+);
+export const AGENCY_CALL_RESULT_OPTIONS = callResultOptions(
+  "agencies",
+  AGENCY_CALL_RESULT_CODES,
+);
+
+// Tuple dictionaries remain exported for existing form/API callers.
+export const BROKER_CALL_RESULTS = BROKER_CALL_RESULT_OPTIONS.map(
+  ({ code, label }) => [code, label] as const,
+);
+export const AGENCY_CALL_RESULTS = AGENCY_CALL_RESULT_OPTIONS.map(
+  ({ code, label }) => [code, label] as const,
+);
+
+export function getLoyaltyCallResultOptions(
+  entityType: LoyaltyEntityType,
+): ReadonlyArray<LoyaltyCallResultOption> {
+  return entityType === "brokers"
+    ? BROKER_CALL_RESULT_OPTIONS
+    : AGENCY_CALL_RESULT_OPTIONS;
+}
+
+export interface LoyaltyCallResultPresentation {
+  code: string;
+  label: string;
+  tone: LoyaltyCallResultTone;
+  known: boolean;
+}
+
+export function getLoyaltyCallResultPresentation(
+  result: string | null | undefined,
+  entityType: LoyaltyEntityType,
+): LoyaltyCallResultPresentation | null {
+  if (!result) return null;
+  const option = getLoyaltyCallResultOptions(entityType).find(
+    ({ code }) => code === result,
+  );
+  return option
+    ? { ...option, known: true }
+    : { code: result, label: result, tone: "neutral", known: false };
+}
 
 export type LoyaltyCallScenario =
   | "NOT_CALLED_IN_PERIOD"

@@ -74,6 +74,7 @@ import {
   type LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
 import { AnnaImportPanel } from "./AnnaImportPanel";
+import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 import { LoyaltyCampaignDashboard } from "./LoyaltyCampaignDashboard";
 import { LoyaltyCampaignModal } from "./LoyaltyCampaignModal";
 import { LoyaltyFilterPanel } from "./LoyaltyFilterPanel";
@@ -640,9 +641,13 @@ function LoyaltyTable({
                 </td>
                 <td className="py-3 pr-3">
                   {date(item.lastCallAt)}
-                  <small className="block text-text-muted">
-                    {item.lastCallResult || "Результат не указан"}
-                  </small>
+                  <div className="mt-1">
+                    <LoyaltyCallResultBadge
+                      result={item.lastCallResult}
+                      entityType={item.entityType}
+                      emptyLabel="Результат не указан"
+                    />
+                  </div>
                 </td>
                 <td className="py-3 pr-3">{item.assignee || "Не назначен"}</td>
                 <td className="py-3 text-right">

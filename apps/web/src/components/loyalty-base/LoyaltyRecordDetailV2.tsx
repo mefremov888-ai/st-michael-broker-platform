@@ -25,9 +25,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
-  AGENCY_CALL_RESULTS,
-  BROKER_CALL_RESULTS,
   formatRubles,
+  getLoyaltyCallResultOptions,
   getAnnaLoyaltyChanges,
   updateAnnaLoyaltyRecord,
   type LoyaltyBaseKey,
@@ -71,6 +70,7 @@ import {
 } from "@/lib/loyalty-workflow-api";
 import { loyaltyStatusLabel } from "@/lib/loyalty-status";
 import { LoyaltyStatusBadges } from "./LoyaltyStatusBadges";
+import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 
 type Tab =
   | "summary"
@@ -140,16 +140,6 @@ function Metric({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function callResultLabel(record: LoyaltyRecord) {
-  if (!record.lastCallResult) return "Нет данных";
-  const catalog =
-    record.entityType === "brokers" ? BROKER_CALL_RESULTS : AGENCY_CALL_RESULTS;
-  return (
-    catalog.find(([code]) => code === record.lastCallResult)?.[1] ||
-    record.lastCallResult
-  );
-}
-
 function safeHttpUrl(value: string) {
   if (!value) return "";
   try {
@@ -199,7 +189,10 @@ function BrokerProfile({ record }: { record: LoyaltyRecord }) {
           {count(record.daysWithoutContact)}
         </Metric>
         <Metric label="Последний результат звонка">
-          {callResultLabel(record)}
+          <LoyaltyCallResultBadge
+            result={record.lastCallResult}
+            entityType={record.entityType}
+          />
         </Metric>
         <Metric label="Следующая задача">{text(record.nextTask)}</Metric>
         <Metric label="Срок следующей задачи">{date(record.nextTaskAt)}</Metric>
@@ -355,11 +348,13 @@ function ActivityMetrics({ record }: { record: LoyaltyRecord }) {
 function Timeline({
   items,
   empty,
+  entityType,
   onCorrect,
   canCorrect,
 }: {
   items: LoyaltyRecord["history"];
   empty: string;
+  entityType: LoyaltyRecord["entityType"];
   onCorrect?: (item: LoyaltyRecord["history"][number]) => void;
   canCorrect?: (item: LoyaltyRecord["history"][number]) => boolean;
 }) {
@@ -386,6 +381,13 @@ function Timeline({
             <p className="mt-1 whitespace-pre-wrap text-text-muted">
               {item.description}
             </p>
+          )}
+          {item.result && (
+            <LoyaltyCallResultBadge
+              result={item.result}
+              entityType={entityType}
+              className="mt-2"
+            />
           )}
           {(item.campaignName ||
             item.employeeName ||
@@ -442,9 +444,8 @@ function CallCorrectionModal({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const options =
-    entityType === "brokers" ? BROKER_CALL_RESULTS : AGENCY_CALL_RESULTS;
-  const initialResult = options.some(([code]) => code === call.result)
+  const options = getLoyaltyCallResultOptions(entityType);
+  const initialResult = options.some(({ code }) => code === call.result)
     ? (call.result as LoyaltyCallResult)
     : "";
   const [result, setResult] = useState<LoyaltyCallResult | "">(initialResult);
@@ -504,12 +505,19 @@ function CallCorrectionModal({
           }
         >
           <option value="">Выберите результат</option>
-          {options.map(([code, label]) => (
+          {options.map(({ code, label }) => (
             <option key={code} value={code}>
               {label}
             </option>
           ))}
         </select>
+        {result && (
+          <LoyaltyCallResultBadge
+            result={result}
+            entityType={entityType}
+            className="mt-1"
+          />
+        )}
       </label>
       <label className="block text-sm">
         Комментарий
@@ -2218,6 +2226,7 @@ function DetailBody({
           <h3 className="font-semibold">События и карточки-основания</h3>
           <Timeline
             items={activities}
+            entityType={record.entityType}
             empty="Подтверждённые event-level события пока не переданы. Агрегаты не выданы за точные события."
           />
         </div>
@@ -2226,13 +2235,19 @@ function DetailBody({
         <div className="space-y-3">
           <dl className="grid gap-2 sm:grid-cols-3">
             <Metric label="Последний звонок">{date(record.lastCallAt)}</Metric>
-            <Metric label="Результат">{callResultLabel(record)}</Metric>
+            <Metric label="Результат">
+              <LoyaltyCallResultBadge
+                result={record.lastCallResult}
+                entityType={record.entityType}
+              />
+            </Metric>
             <Metric label="Дней без контакта">
               {count(record.daysWithoutContact)}
             </Metric>
           </dl>
           <Timeline
             items={calls}
+            entityType={record.entityType}
             empty="История звонков пока не передана API."
             onCorrect={canExecuteCalls ? setEditCall : undefined}
             canCorrect={(item) =>
