@@ -763,9 +763,12 @@ test("keeps V2 table, detail, filter and legend on the shared multi-status contr
   assert.match(detail, /<LoyaltyStatusBadges record=\{record\} \/>/);
   assert.match(badges, /loyaltyRecordStatuses\(record\)/);
   assert.match(badges, /loyaltyStatusBadgeColor\(status\)/);
+  assert.match(badges, /data-loyalty-status=\{status\}/);
   assert.match(legend, /loyaltyStatusDotColor\(item\.value\)/);
   assert.match(legend, /loyaltyStatusLabel\(item\.value\)/);
   assert.match(filters, /loyaltyStatusLabel\(value\)/);
+  assert.match(filters, /<LoyaltyStatusBadge/);
+  assert.match(filters, /status=\{draft\.status\}/);
 });
 
 test("keeps source-reported row metrics separate from exact lifetime metrics", () => {

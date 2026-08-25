@@ -5,6 +5,32 @@ import {
   loyaltyStatusLabel,
 } from "@/lib/loyalty-status";
 
+export function LoyaltyStatusBadge({
+  status,
+  title,
+  className = "",
+}: {
+  status: string;
+  title?: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={[
+        "inline-block rounded-full px-2 py-1 text-xs",
+        loyaltyStatusBadgeColor(status),
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      title={title}
+      data-loyalty-status={status}
+    >
+      {loyaltyStatusLabel(status)}
+    </span>
+  );
+}
+
 export function LoyaltyStatusBadges({
   record,
   emptyLabel = "Нет данных",
@@ -20,13 +46,11 @@ export function LoyaltyStatusBadges({
   return (
     <span className="flex flex-wrap gap-1.5" aria-label="Статусы">
       {statuses.map((status, index) => (
-        <span
+        <LoyaltyStatusBadge
           key={status}
-          className={`inline-block rounded-full px-2 py-1 text-xs ${loyaltyStatusBadgeColor(status)}`}
+          status={status}
           title={index === 0 ? "Основной статус" : "Дополнительный статус"}
-        >
-          {loyaltyStatusLabel(status)}
-        </span>
+        />
       ))}
     </span>
   );

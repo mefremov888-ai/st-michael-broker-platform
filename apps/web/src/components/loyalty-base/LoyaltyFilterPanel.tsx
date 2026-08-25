@@ -18,6 +18,7 @@ import type {
 } from "@/lib/loyalty-workflow-api";
 import { loyaltyStatusLabel } from "@/lib/loyalty-status";
 import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
+import { LoyaltyStatusBadge } from "./LoyaltyStatusBadges";
 
 const BROKER_STAGES = [
   "Новый",
@@ -553,6 +554,17 @@ export function LoyaltyFilterPanel({
                 </option>
               ))}
             </select>
+            {draft.status && (
+              <LoyaltyStatusBadge
+                status={draft.status}
+                title={
+                  isBroker
+                    ? "Выбранный статус брокера"
+                    : "Выбранный уровень партнёрства"
+                }
+                className="mt-1"
+              />
+            )}
           </Field>
           <Field label="Был БТ">
             <TriSelect
