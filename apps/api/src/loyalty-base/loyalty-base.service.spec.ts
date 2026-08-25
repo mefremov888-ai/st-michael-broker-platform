@@ -2251,6 +2251,34 @@ describe("LoyaltyBaseService", () => {
       confirmationStatus: "NOT_CONFIRMED",
       periodFilterApplied: false,
     });
+    expect(
+      result.kpiMetadata["sourceReportedSummary.brokers.brokerTours"],
+    ).toMatchObject({
+      source: "SOURCE_AGGREGATE",
+      periodFilterApplied: false,
+      formula: expect.stringContaining("brokerTourCount"),
+    });
+    expect(
+      result.kpiMetadata["sourceReportedSummary.brokers.calls"],
+    ).toMatchObject({
+      source: "SOURCE_AGGREGATE",
+      periodFilterApplied: false,
+      formula: expect.stringContaining("callCount"),
+    });
+    expect(
+      result.kpiMetadata["sourceReportedSummary.agencies.brokerTours"],
+    ).toMatchObject({
+      source: "SOURCE_AGGREGATE",
+      periodFilterApplied: false,
+      formula: expect.stringContaining("brokerTourCount"),
+    });
+    expect(
+      result.kpiMetadata["sourceReportedSummary.agencies.calls"],
+    ).toMatchObject({
+      source: "SOURCE_AGGREGATE",
+      periodFilterApplied: false,
+      formula: expect.stringContaining("callCount"),
+    });
     const brokerOverviewSelect =
       prisma.loyaltySourceRecord.findMany.mock.calls[0][0].select;
     expect(brokerOverviewSelect.sourceAggregate.select).toMatchObject({

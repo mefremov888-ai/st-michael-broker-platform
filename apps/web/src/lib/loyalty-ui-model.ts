@@ -9,6 +9,43 @@ import type {
   LoyaltySortField,
 } from "./loyalty-base-api";
 
+export interface LoyaltyMetricExplanation {
+  formula: string;
+  period: string;
+  source: string;
+  exactness: string;
+  includedSemantics?: string;
+  excludedSemantics?: string;
+}
+
+export function formatLoyaltyMetricExplanation(
+  explanation: LoyaltyMetricExplanation,
+) {
+  return [
+    `Формула: ${explanation.formula}`,
+    `Период: ${explanation.period}`,
+    `Источник: ${explanation.source}`,
+    `Точность: ${explanation.exactness}`,
+    explanation.includedSemantics
+      ? `Включено: ${explanation.includedSemantics}`
+      : "",
+    explanation.excludedSemantics
+      ? `Не включено: ${explanation.excludedSemantics}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function loyaltyMetricPeriodLabel(
+  selectedPeriod: string,
+  periodFilterApplied: boolean | null | undefined,
+) {
+  return periodFilterApplied === false
+    ? "снимок / весь период источника; выбранный период не применяется"
+    : selectedPeriod;
+}
+
 export type TriState = "" | "true" | "false";
 
 export interface LoyaltyFilterFormState {

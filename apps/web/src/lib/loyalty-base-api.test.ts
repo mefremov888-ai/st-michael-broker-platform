@@ -20,7 +20,12 @@ import {
   stageAnnaImport,
   unlinkActiveLoyaltyLink,
 } from "./loyalty-base-api";
-import { emptyLoyaltyFilters, toCanonicalFilter } from "./loyalty-ui-model";
+import {
+  emptyLoyaltyFilters,
+  formatLoyaltyMetricExplanation,
+  loyaltyMetricPeriodLabel,
+  toCanonicalFilter,
+} from "./loyalty-ui-model";
 import {
   agencyContactPointsPatch,
   agencyContactPersonRoleValue,
@@ -49,6 +54,42 @@ test("keeps broker and agency call-result dictionaries separate and removes the 
       label.includes("Дозвонились"),
     ),
     false,
+  );
+});
+
+test("formats a complete hover explanation without hiding inclusion rules", () => {
+  assert.equal(
+    formatLoyaltyMetricExplanation({
+      formula: "COUNT(included DEAL events)",
+      period: "август 2026",
+      source: "SOURCE_AGGREGATE",
+      exactness: "SOURCE_DECLARED",
+      includedSemantics: "только известные значения",
+      excludedSemantics: "null не превращается в ноль",
+    }),
+    [
+      "Формула: COUNT(included DEAL events)",
+      "Период: август 2026",
+      "Источник: SOURCE_AGGREGATE",
+      "Точность: SOURCE_DECLARED",
+      "Включено: только известные значения",
+      "Не включено: null не превращается в ноль",
+    ].join("\n"),
+  );
+});
+
+test("marks snapshot metrics whose selected period is not applied", () => {
+  assert.equal(
+    loyaltyMetricPeriodLabel("текущий месяц", false),
+    "снимок / весь период источника; выбранный период не применяется",
+  );
+  assert.equal(
+    loyaltyMetricPeriodLabel("текущий месяц", true),
+    "текущий месяц",
+  );
+  assert.equal(
+    loyaltyMetricPeriodLabel("текущий месяц", null),
+    "текущий месяц",
   );
 });
 

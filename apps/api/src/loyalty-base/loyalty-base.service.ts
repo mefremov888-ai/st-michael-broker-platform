@@ -3727,6 +3727,16 @@ export class LoyaltyBaseService {
         formula:
           "SUM(source-reported dealCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
       },
+      "sourceReportedSummary.brokers.brokerTours": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported brokerTourCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+      },
+      "sourceReportedSummary.brokers.calls": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported callCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+      },
       "sourceReportedSummary.brokers.dealAmount": {
         ...sourceShared,
         formula:
@@ -3778,6 +3788,16 @@ export class LoyaltyBaseService {
         ...sourceShared,
         formula:
           "SUM(source-reported dealCount) for AGENCY rows with known values; snapshot/lifetime, requested period not applied",
+      },
+      "sourceReportedSummary.agencies.brokerTours": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported brokerTourCount) for AGENCY rows with known values; kept separate from broker rollups",
+      },
+      "sourceReportedSummary.agencies.calls": {
+        ...sourceShared,
+        formula:
+          "SUM(source-reported callCount) for AGENCY rows with known values; kept separate from broker rollups",
       },
       "sourceReportedSummary.agencies.dealAmount": {
         ...sourceShared,
