@@ -28,7 +28,6 @@ const FAILURE_CODE_BY_MESSAGE = new Map([
     "Lead contact relations were not embedded",
     "LEAD_CONTACT_RELATIONS_MISSING",
   ],
-  ["Invalid entity relations", "INVALID_ENTITY_RELATIONS"],
   ["Unsafe amoCRM path", "UNSAFE_AMO_PATH"],
   ["Unsafe amoCRM URL", "UNSAFE_AMO_URL"],
   ["amoCRM access token is missing", "AMO_ACCESS_TOKEN_MISSING"],
@@ -42,19 +41,13 @@ const FAILURE_CODE_BY_MESSAGE = new Map([
     "amoCRM pagination exceeded safety bound",
     "AMO_PAGINATION_SAFETY_BOUND_EXCEEDED",
   ],
-  [
-    "Malformed or incomplete amoCRM entity relations",
-    "INCOMPLETE_AMO_ENTITY_RELATIONS",
-  ],
-  ["Malformed amoCRM entity relation", "MALFORMED_AMO_ENTITY_RELATION"],
-  ["Duplicate amoCRM entity relation", "DUPLICATE_AMO_ENTITY_RELATION"],
   ["Unexpected amoCRM account", "UNEXPECTED_AMO_ACCOUNT"],
 ]);
 
 const FAILURE_PHASE = Object.freeze({
   ACCOUNT: "ACCOUNT",
   CONTACTS: "CONTACTS",
-  DEAL_RELATIONS: "DEAL_RELATIONS",
+  DEAL_AGGREGATION: "DEAL_AGGREGATION",
 });
 
 const FAILURE_PHASE_BY_PIPELINE = Object.freeze({
@@ -569,35 +562,6 @@ class DisjointSet {
   }
 }
 
-function entityRelationEvidence(candidate, relations, brokerContactIds) {
-  const leadTokens = [];
-  const clientContactIds = [];
-  for (const relation of relations) {
-    const entityId = positiveInteger(relation?.entity_id);
-    const targetId = positiveInteger(relation?.to_entity_id);
-    const entityType = String(relation?.entity_type ?? "").toLowerCase();
-    const targetType = String(relation?.to_entity_type ?? "").toLowerCase();
-    if (entityType === "leads" && entityId && entityId !== candidate.id) {
-      leadTokens.push(`lead:${entityId}`);
-    }
-    if (targetType === "leads" && targetId && targetId !== candidate.id) {
-      leadTokens.push(`lead:${targetId}`);
-    }
-    if (
-      targetType === "contacts" &&
-      targetId &&
-      !brokerContactIds.has(targetId) &&
-      relation?.metadata?.main_contact === true
-    ) {
-      clientContactIds.push(targetId);
-    }
-  }
-  return {
-    leadTokens: [...new Set(leadTokens)],
-    clientContactIds: [...new Set(clientContactIds)],
-  };
-}
-
 function singleValidAmountKey(values) {
   const valid = new Set(
     (values || [])
@@ -656,16 +620,12 @@ function groupAmount(group) {
   return { classification: "valid", cents: BigInt([...valid][0]) };
 }
 
-async function buildDealReport(
-  dealCandidates,
-  relationProvider,
-  brokerContactIds = new Set(),
-) {
+async function buildDealReport(dealCandidates) {
   const disjoint = new DisjointSet(dealCandidates.length);
   const tokenOwner = new Map();
-  let relationRowsScanned = 0;
+  const relationRowsScanned = 0;
   let candidatesWithEmbeddedClientContactRelation = 0;
-  let candidatesWithFetchedDedupEntityRelation = 0;
+  const candidatesWithFetchedDedupEntityRelation = 0;
   let candidatesWithCorroboratedClientDealKey = 0;
   let candidatesWithUncorroboratedClientRelationOnly = 0;
   let candidatesWithParentReference = 0;
@@ -681,25 +641,8 @@ async function buildDealReport(
     if (parentIds.length > 0) candidatesWithParentReference += 1;
     if (brokerCopyIds.length > 0) candidatesWithBrokerCopyReference += 1;
 
-    const relations = await relationProvider(candidate.id);
-    if (!Array.isArray(relations)) throw new Error("Invalid entity relations");
-    relationRowsScanned += relations.length;
-    const relationEvidence = entityRelationEvidence(
-      candidate,
-      relations,
-      brokerContactIds,
-    );
-    if (
-      relationEvidence.leadTokens.length > 0 ||
-      relationEvidence.clientContactIds.length > 0
-    ) {
-      candidatesWithFetchedDedupEntityRelation += 1;
-    }
     const allClientContactIds = [
-      ...new Set([
-        ...(candidate.dedupClientContactIds || []),
-        ...relationEvidence.clientContactIds,
-      ]),
+      ...new Set(candidate.dedupClientContactIds || []),
     ];
     const clientDealTokens = corroboratedClientDealTokens(
       candidate,
@@ -715,7 +658,6 @@ async function buildDealReport(
       `lead:${candidate.id}`,
       ...parentIds.map((id) => `lead:${id}`),
       ...brokerCopyIds.map((id) => `lead:${id}`),
-      ...relationEvidence.leadTokens,
       ...clientDealTokens,
     ];
     for (const token of new Set(tokens)) {
@@ -778,7 +720,7 @@ async function buildDealReport(
     dedupMethod: {
       explicitReferences: ["parent_reference", "broker_copy_reference"],
       entityRelation:
-        "shared main non-broker contact only when DDU amount and contract date also match",
+        "embedded main non-broker contact only when DDU amount and contract date also match",
       uncorroboratedSharedContactMerged: false,
     },
     dduAmount: {
@@ -809,15 +751,11 @@ function publicClientAggregate(aggregate) {
   };
 }
 
-async function finalizeReport(state, generatedAt, relationProvider) {
+async function finalizeReport(state, generatedAt) {
   const companyPayloadComplete =
     state.contacts.brokerContactsWithCompanyRelationPayload ===
     state.contacts.brokerContacts;
-  const deals = await buildDealReport(
-    state.dealCandidates,
-    relationProvider,
-    state.brokerContactIds,
-  );
+  const deals = await buildDealReport(state.dealCandidates);
   return {
     report: "live_amocrm_source_aggregate",
     schemaVersion: 1,
@@ -1032,36 +970,6 @@ async function paginate({
   throw new Error("amoCRM pagination exceeded safety bound");
 }
 
-async function fetchEntityLinks(request, leadId) {
-  const payload = await request(`/api/v4/leads/${leadId}/links`);
-  if (payload === null) return [];
-  const relations = payload?._embedded?.links;
-  if (!Array.isArray(relations) || payload?._links?.next) {
-    throw new Error("Malformed or incomplete amoCRM entity relations");
-  }
-  const seen = new Set();
-  for (const relation of relations) {
-    const sourceId = positiveInteger(relation?.entity_id);
-    const targetId = positiveInteger(relation?.to_entity_id);
-    const sourceType = String(relation?.entity_type ?? "");
-    const targetType = String(relation?.to_entity_type ?? "");
-    if (
-      !sourceId ||
-      !targetId ||
-      !/^[a-z_]+$/.test(sourceType) ||
-      !/^[a-z_]+$/.test(targetType)
-    ) {
-      throw new Error("Malformed amoCRM entity relation");
-    }
-    const key = [sourceType, sourceId, targetType, targetId].join(":");
-    if (seen.has(key)) {
-      throw new Error("Duplicate amoCRM entity relation");
-    }
-    seen.add(key);
-  }
-  return relations;
-}
-
 async function scanLiveAmo(request, onPhase = () => undefined) {
   onPhase(FAILURE_PHASE.ACCOUNT);
   const account = await request("/api/v4/account");
@@ -1099,10 +1007,11 @@ async function scanLiveAmo(request, onPhase = () => undefined) {
     });
   }
 
-  const relationProvider = (leadId) => fetchEntityLinks(request, leadId);
-
-  onPhase(FAILURE_PHASE.DEAL_RELATIONS);
-  return finalizeReport(state, new Date(), relationProvider);
+  // `with=contacts` is the documented complete source for each lead's linked
+  // contact IDs and main-contact flag. The entity-specific /links endpoint
+  // cannot link a lead to another lead, so it adds no dedup evidence here.
+  onPhase(FAILURE_PHASE.DEAL_AGGREGATION);
+  return finalizeReport(state, new Date());
 }
 
 async function main() {
@@ -1124,7 +1033,6 @@ module.exports = {
   createGetOnlyRequester,
   createState,
   fieldCoverage,
-  fetchEntityLinks,
   finalizeReport,
   hasStrictBrokerSource,
   ingestContact,
