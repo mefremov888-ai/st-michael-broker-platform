@@ -27,6 +27,9 @@ describe("loyalty production workflow safety", () => {
     ".github/workflows/retire-obsolete-production-rollback.yml",
   );
   const deployScript = readRepositoryFile("deploy-update.sh");
+  const rehearsalScript = readRepositoryFile(
+    "scripts/rehearse-loyalty-migration.sh",
+  );
   const apiDockerfile = readRepositoryFile("docker/Dockerfile.api");
   const apiBuildConfig = JSON.parse(
     readRepositoryFile("apps/api/tsconfig.build.json"),
@@ -449,6 +452,33 @@ describe("loyalty production workflow safety", () => {
     expect(deployScript.slice(envActivation)).not.toMatch(
       /(?:target|live|rollback)_compose|git log|\$\(/,
     );
+  });
+
+  it("waits for the exact isolated rehearsal database before restore", () => {
+    const temporaryDatabaseStart = rehearsalScript.indexOf(
+      "-e POSTGRES_DB=rehearsal",
+    );
+    const databaseReadiness = rehearsalScript.indexOf(
+      "psql -U postgres -d rehearsal -Atqc 'SELECT 1'",
+      temporaryDatabaseStart,
+    );
+    const finalServerReadiness = rehearsalScript.indexOf(
+      `'[ "$(cat /proc/1/comm)" = postgres ]'`,
+      temporaryDatabaseStart,
+    );
+    const restore = rehearsalScript.indexOf(
+      "pg_restore -U postgres -d rehearsal",
+      databaseReadiness,
+    );
+
+    expect(temporaryDatabaseStart).toBeGreaterThan(-1);
+    expect(finalServerReadiness).toBeGreaterThan(temporaryDatabaseStart);
+    expect(databaseReadiness).toBeGreaterThan(finalServerReadiness);
+    expect(restore).toBeGreaterThan(databaseReadiness);
+    expect(
+      rehearsalScript.slice(temporaryDatabaseStart, restore),
+    ).not.toContain("pg_isready -U postgres");
+    expect(rehearsalScript).toContain('docker rm -f -v "$REHEARSAL_ID"');
   });
 
   it("requires a fresh successful exact-SHA backup before manual deploy", () => {
