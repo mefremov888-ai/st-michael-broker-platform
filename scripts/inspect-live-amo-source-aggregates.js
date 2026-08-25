@@ -19,6 +19,69 @@ const MIN_REQUEST_INTERVAL_MS = 180;
 const MAX_CONTACT_PAGES = 2_000;
 const MAX_PIPELINE_PAGES = 1_000;
 
+const FAILURE_CODE_BY_MESSAGE = new Map([
+  ["Invalid contact record", "INVALID_CONTACT_RECORD"],
+  ["Invalid lead record", "INVALID_LEAD_RECORD"],
+  ["Lead escaped requested pipeline", "LEAD_PIPELINE_MISMATCH"],
+  ["Lead has invalid status", "INVALID_LEAD_STATUS"],
+  [
+    "Lead contact relations were not embedded",
+    "LEAD_CONTACT_RELATIONS_MISSING",
+  ],
+  ["Invalid entity relations", "INVALID_ENTITY_RELATIONS"],
+  ["Unsafe amoCRM path", "UNSAFE_AMO_PATH"],
+  ["Unsafe amoCRM URL", "UNSAFE_AMO_URL"],
+  ["amoCRM access token is missing", "AMO_ACCESS_TOKEN_MISSING"],
+  ["fetch is unavailable", "FETCH_UNAVAILABLE"],
+  ["amoCRM request failed", "AMO_REQUEST_FAILED"],
+  ["amoCRM request rejected", "AMO_REQUEST_REJECTED"],
+  ["amoCRM returned invalid JSON", "AMO_INVALID_JSON"],
+  ["Malformed amoCRM page", "MALFORMED_AMO_PAGE"],
+  ["amoCRM pagination loop detected", "AMO_PAGINATION_LOOP"],
+  [
+    "amoCRM pagination exceeded safety bound",
+    "AMO_PAGINATION_SAFETY_BOUND_EXCEEDED",
+  ],
+  [
+    "Malformed or incomplete amoCRM entity relations",
+    "INCOMPLETE_AMO_ENTITY_RELATIONS",
+  ],
+  ["Malformed amoCRM entity relation", "MALFORMED_AMO_ENTITY_RELATION"],
+  ["Duplicate amoCRM entity relation", "DUPLICATE_AMO_ENTITY_RELATION"],
+  ["Unexpected amoCRM account", "UNEXPECTED_AMO_ACCOUNT"],
+]);
+
+const FAILURE_PHASE = Object.freeze({
+  ACCOUNT: "ACCOUNT",
+  CONTACTS: "CONTACTS",
+  DEAL_RELATIONS: "DEAL_RELATIONS",
+});
+
+const FAILURE_PHASE_BY_PIPELINE = Object.freeze({
+  brokers: "PIPELINE_BROKERS",
+  call_center: "PIPELINE_CALL_CENTER",
+  sales_a: "PIPELINE_SALES_A",
+  sales_b: "PIPELINE_SALES_B",
+  sales_c: "PIPELINE_SALES_C",
+});
+
+let activeFailurePhase = FAILURE_PHASE.ACCOUNT;
+
+function classifyFailure(error) {
+  try {
+    if (
+      error === null ||
+      (typeof error !== "object" && typeof error !== "function") ||
+      typeof error.message !== "string"
+    ) {
+      return "UNKNOWN_FAILURE";
+    }
+    return FAILURE_CODE_BY_MESSAGE.get(error.message) || "UNKNOWN_FAILURE";
+  } catch {
+    return "UNKNOWN_FAILURE";
+  }
+}
+
 const CONTACT_FIELDS = Object.freeze({
   PHONE: 557903,
   IS_BROKER: 835415,
@@ -999,13 +1062,15 @@ async function fetchEntityLinks(request, leadId) {
   return relations;
 }
 
-async function scanLiveAmo(request) {
+async function scanLiveAmo(request, onPhase = () => undefined) {
+  onPhase(FAILURE_PHASE.ACCOUNT);
   const account = await request("/api/v4/account");
   if (positiveInteger(account?.id) !== EXPECTED_ACCOUNT_ID) {
     throw new Error("Unexpected amoCRM account");
   }
 
   const state = createState();
+  onPhase(FAILURE_PHASE.CONTACTS);
   await paginate({
     request,
     pathname: "/api/v4/contacts",
@@ -1019,6 +1084,7 @@ async function scanLiveAmo(request) {
   });
 
   for (const [pipelineLabel, pipelineId] of Object.entries(PIPELINES)) {
+    onPhase(FAILURE_PHASE_BY_PIPELINE[pipelineLabel]);
     await paginate({
       request,
       pathname: "/api/v4/leads",
@@ -1035,12 +1101,16 @@ async function scanLiveAmo(request) {
 
   const relationProvider = (leadId) => fetchEntityLinks(request, leadId);
 
+  onPhase(FAILURE_PHASE.DEAL_RELATIONS);
   return finalizeReport(state, new Date(), relationProvider);
 }
 
 async function main() {
+  activeFailurePhase = FAILURE_PHASE.ACCOUNT;
   const request = createGetOnlyRequester(process.env.AMO_ACCESS_TOKEN);
-  const report = await scanLiveAmo(request);
+  const report = await scanLiveAmo(request, (phase) => {
+    activeFailurePhase = phase;
+  });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
 
@@ -1050,6 +1120,7 @@ module.exports = {
   PIPELINES,
   buildDealReport,
   canonicalAmoUrl,
+  classifyFailure,
   createGetOnlyRequester,
   createState,
   fieldCoverage,
@@ -1062,13 +1133,14 @@ module.exports = {
   paginate,
   parseMoneyToCents,
   parseReferenceIds,
+  scanLiveAmo,
   validDateValue,
 };
 
 if (require.main === module) {
-  main().catch(() => {
+  main().catch((error) => {
     process.stderr.write(
-      "PII-safe live amoCRM aggregate report failed; dependency details suppressed.\n",
+      `failure_phase=${activeFailurePhase}\nfailure_code=${classifyFailure(error)}\n`,
     );
     process.exitCode = 1;
   });
