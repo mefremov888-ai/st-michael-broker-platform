@@ -28,6 +28,139 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     values: [{ value, ...(enumId ? { enum_id: enumId } : {}) }],
   });
 
+  it("emits only allowlisted PII-safe failure codes", async () => {
+    const expectedCodesByMessage = new Map([
+      ["Invalid contact record", "INVALID_CONTACT_RECORD"],
+      ["Invalid lead record", "INVALID_LEAD_RECORD"],
+      ["Lead escaped requested pipeline", "LEAD_PIPELINE_MISMATCH"],
+      ["Lead has invalid status", "INVALID_LEAD_STATUS"],
+      [
+        "Lead contact relations were not embedded",
+        "LEAD_CONTACT_RELATIONS_MISSING",
+      ],
+      ["Invalid entity relations", "INVALID_ENTITY_RELATIONS"],
+      ["Unsafe amoCRM path", "UNSAFE_AMO_PATH"],
+      ["Unsafe amoCRM URL", "UNSAFE_AMO_URL"],
+      ["amoCRM access token is missing", "AMO_ACCESS_TOKEN_MISSING"],
+      ["fetch is unavailable", "FETCH_UNAVAILABLE"],
+      ["amoCRM request failed", "AMO_REQUEST_FAILED"],
+      ["amoCRM request rejected", "AMO_REQUEST_REJECTED"],
+      ["amoCRM returned invalid JSON", "AMO_INVALID_JSON"],
+      ["Malformed amoCRM page", "MALFORMED_AMO_PAGE"],
+      ["amoCRM pagination loop detected", "AMO_PAGINATION_LOOP"],
+      [
+        "amoCRM pagination exceeded safety bound",
+        "AMO_PAGINATION_SAFETY_BOUND_EXCEEDED",
+      ],
+      [
+        "Malformed or incomplete amoCRM entity relations",
+        "INCOMPLETE_AMO_ENTITY_RELATIONS",
+      ],
+      ["Malformed amoCRM entity relation", "MALFORMED_AMO_ENTITY_RELATION"],
+      ["Duplicate amoCRM entity relation", "DUPLICATE_AMO_ENTITY_RELATION"],
+      ["Unexpected amoCRM account", "UNEXPECTED_AMO_ACCOUNT"],
+    ]);
+    const fixedMessages = [...script.matchAll(/new Error\("([^"]+)"\)/g)].map(
+      (match) => match[1],
+    );
+    expect(new Set(fixedMessages)).toEqual(
+      new Set(expectedCodesByMessage.keys()),
+    );
+    for (const [message, code] of expectedCodesByMessage) {
+      expect(inspector.classifyFailure(new Error(message))).toBe(code);
+    }
+
+    const sensitiveMessage =
+      "Bearer secret-token for broker@example.test at +7 999 123-45-67; response=https://sensitive.invalid/leads/123";
+    const unknownLine = `failure_code=${inspector.classifyFailure(
+      new Error(sensitiveMessage),
+    )}\n`;
+    expect(unknownLine).toBe("failure_code=UNKNOWN_FAILURE\n");
+    expect(unknownLine).not.toContain(sensitiveMessage);
+    expect(inspector.classifyFailure("amoCRM request failed")).toBe(
+      "UNKNOWN_FAILURE",
+    );
+    expect(
+      inspector.classifyFailure(
+        new Proxy(new Error("Unsafe amoCRM URL"), {
+          get() {
+            throw new Error(sensitiveMessage);
+          },
+        }),
+      ),
+    ).toBe("UNKNOWN_FAILURE");
+
+    const cli = spawnSync(process.execPath, [scriptPath], {
+      encoding: "utf8",
+      env: { ...process.env, AMO_ACCESS_TOKEN: "" },
+    });
+    expect(cli.status).toBe(1);
+    expect(cli.stdout).toBe("");
+    expect(cli.stderr).toBe(
+      "failure_phase=ACCOUNT\nfailure_code=AMO_ACCESS_TOKEN_MISSING\n",
+    );
+    for (const rawFragment of [
+      "secret-token",
+      "broker@example.test",
+      "+7 999 123-45-67",
+      "https://sensitive.invalid",
+    ]) {
+      expect(cli.stderr).not.toContain(rawFragment);
+    }
+
+    const phases: string[] = [];
+    await expect(
+      inspector.scanLiveAmo(
+        async (pathname: string, query: Record<string, unknown> = {}) => {
+          if (pathname === "/api/v4/account") return { id: 28552900 };
+          if (pathname.endsWith("/links")) {
+            throw new Error("amoCRM request failed");
+          }
+          if (pathname === "/api/v4/contacts") {
+            return {
+              _embedded: {
+                contacts: [
+                  {
+                    id: 91001,
+                    custom_fields_values: [field(835415, true)],
+                    _embedded: { companies: [] },
+                  },
+                ],
+              },
+              _links: {},
+            };
+          }
+          const leads =
+            query["filter[pipeline_id][]"] === 7600546
+              ? [
+                  {
+                    id: 93001,
+                    pipeline_id: 7600546,
+                    status_id: 62907378,
+                    custom_fields_values: [field(665195, "Да", 985337)],
+                    _embedded: {
+                      contacts: [{ id: 92001, is_main: true }, { id: 91001 }],
+                    },
+                  },
+                ]
+              : [];
+          return { _embedded: { leads }, _links: {} };
+        },
+        (phase: string) => phases.push(phase),
+      ),
+    ).rejects.toThrow("amoCRM request failed");
+    expect(phases).toEqual([
+      "ACCOUNT",
+      "CONTACTS",
+      "PIPELINE_BROKERS",
+      "PIPELINE_CALL_CENTER",
+      "PIPELINE_SALES_A",
+      "PIPELINE_SALES_B",
+      "PIPELINE_SALES_C",
+      "DEAL_RELATIONS",
+    ]);
+  });
+
   it("keeps all Russian markers as valid UTF-8 without mojibake", () => {
     expect(script).toContain('const BROKER_SOURCE_TEXT = "Заявка от брокера"');
     expect(script).toContain("₽");
