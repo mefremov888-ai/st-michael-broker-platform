@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
+import { parse } from "yaml";
 
 describe("loyalty production workflow safety", () => {
   const repositoryRoot = resolve(__dirname, "../../../..");
@@ -636,16 +637,17 @@ describe("loyalty production workflow safety", () => {
       retirementJobStart,
       retirementStepsStart,
     );
-    const jobsBody = rollbackRetirementWorkflow.slice(
-      rollbackRetirementWorkflow.indexOf("\njobs:") + 1,
+    const parsedWorkflow = parse(rollbackRetirementWorkflow) as {
+      jobs?: Record<string, { steps?: Array<Record<string, unknown>> }>;
+    };
+    const parsedJobs = parsedWorkflow.jobs ?? {};
+    const jobNames = Object.keys(parsedJobs);
+    const parsedSteps = Object.values(parsedJobs).flatMap(
+      (job) => job.steps ?? [],
     );
-    const jobNames = [
-      ...jobsBody.matchAll(
-        /^  ((?:"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z][A-Za-z0-9_-]*)):(?:\s.*)?$/gm,
-      ),
-    ].map((match) => match[1].replace(/^(?:"([^"]+)"|'([^']+)')$/, "$1$2"));
-    const stepMarkers = rollbackRetirementWorkflow.match(/^      -\s+/gm) || [];
-    const runKeys = rollbackRetirementWorkflow.match(/^        run:/gm) || [];
+    const parsedRunSteps = parsedSteps.filter((step) =>
+      Object.prototype.hasOwnProperty.call(step, "run"),
+    );
     const literalRunBlocks =
       rollbackRetirementWorkflow.match(/^        run: \|$/gm) || [];
     const sshCalls = rollbackRetirementWorkflow.match(/\bssh\s+/g) || [];
@@ -668,7 +670,7 @@ describe("loyalty production workflow safety", () => {
       "for required_tool in awk df docker flock git grep id readlink sha256sum sort stat tr wc; do";
     const approvedSshInvocation = [
       '          ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \\',
-      "            \"${SSH_USER}@${SSH_HOST}\" \"bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_ROLLBACK_INVENTORY_SHA256' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'\" <<'REMOTE'",
+      "            \"${SSH_USER}@${SSH_HOST}\" \"bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_TARGET_API_REPO_DIGEST' '$EXPECTED_TARGET_WEB_REPO_DIGEST' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_ROLLBACK_INVENTORY_SHA256' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'\" <<'REMOTE'",
     ].join("\n");
     const imageRemovalLines = remoteBody
       .split(/\r?\n/)
@@ -739,8 +741,8 @@ describe("loyalty production workflow safety", () => {
 
     expect(rollbackRetirementWorkflow).toContain("workflow_dispatch:");
     expect(jobNames).toEqual(["retire"]);
-    expect(stepMarkers).toHaveLength(1);
-    expect(runKeys).toHaveLength(1);
+    expect(parsedSteps).toHaveLength(1);
+    expect(parsedRunSteps).toHaveLength(1);
     expect(literalRunBlocks).toHaveLength(1);
     expect(rollbackRetirementWorkflow).toContain(
       "      - name: Verify host and remove exact obsolete rollback tags",
@@ -767,6 +769,8 @@ describe("loyalty production workflow safety", () => {
     for (const input of [
       "expected_target_api_image_id",
       "expected_target_web_image_id",
+      "expected_target_api_repo_digest",
+      "expected_target_web_repo_digest",
       "expected_release_record_sha256",
       "expected_rollback_override_sha256",
       "expected_rollback_inventory_sha256",
@@ -782,6 +786,9 @@ describe("loyalty production workflow safety", () => {
     );
     expect(rollbackRetirementWorkflow).toContain(
       '[[ "$EXPECTED_TARGET_API_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]',
+    );
+    expect(rollbackRetirementWorkflow).toContain(
+      '[[ "$EXPECTED_TARGET_API_REPO_DIGEST" = "none" || "$EXPECTED_TARGET_API_REPO_DIGEST" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]]',
     );
     expect(rollbackRetirementWorkflow).toContain(
       '[[ "$EXPECTED_ROLLBACK_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]',
@@ -869,9 +876,29 @@ describe("loyalty production workflow safety", () => {
     );
     expect(remoteBody).toContain("repo_tags=$(docker image inspect");
     expect(remoteBody).toContain("repo_digests=$(docker image inspect");
+    expect(remoteBody).toContain("validated_repo_digest_for_tag()");
     expect(remoteBody).toContain(
-      'test "$repo_digests" = "null" -o "$repo_digests" = "[]"',
+      "grep -Eq '^\\[\"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}\"\\]$'",
     );
+    expect(remoteBody).toContain(
+      "repo_digest=${repo_digests:2:${#repo_digests}-4}",
+    );
+    expect(remoteBody).toContain(
+      'test "$(image_id_for_tag "$repo_digest")" = "$(image_id_for_tag "$tag")"',
+    );
+    expect(remoteBody).toContain(
+      'target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG")',
+    );
+    expect(remoteBody).toContain(
+      'target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")',
+    );
+    expect(remoteBody).toContain(
+      "target_api_repo_digest=$expected_target_api_repo_digest",
+    );
+    expect(remoteBody).toContain(
+      "target_web_repo_digest=$expected_target_web_repo_digest",
+    );
+    expect(remoteBody).toContain("null|\"[]\") printf 'none\\n'");
     expect(remoteBody).toContain("container_ids=$(docker ps -aq --no-trunc)");
     expect(remoteBody).not.toContain("< <(docker ps -aq --no-trunc)");
 
@@ -957,6 +984,12 @@ describe("loyalty production workflow safety", () => {
       'test "$expected_target_web_image_id" = "$target_web_id"',
     );
     expect(remoteBody).toContain(
+      'test "$expected_target_api_repo_digest" = "$target_api_repo_digest"',
+    );
+    expect(remoteBody).toContain(
+      'test "$expected_target_web_repo_digest" = "$target_web_repo_digest"',
+    );
+    expect(remoteBody).toContain(
       'test "$expected_release_record_sha256" = "$release_record_sha_before"',
     );
     expect(remoteBody).toContain(
@@ -965,8 +998,18 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain(
       'test "$expected_rollback_inventory_sha256" = "$rollback_inventory_sha256"',
     );
+    expect(remoteBody).toContain("target_api_repo_digest=%s");
+    expect(remoteBody).toContain("target_web_repo_digest=%s");
+    expect(remoteBody).toContain("retained_%s_api_repo_digest=%s");
+    expect(remoteBody).toContain("retained_%s_web_repo_digest=%s");
 
     expect(imageRemovalLines).toEqual(approvedImageRemovals);
+    expect(remoteBody).not.toContain(
+      'docker image rm --no-prune -- "$TARGET_API_TAG" "$target_api_repo_digest"',
+    );
+    expect(remoteBody).not.toContain(
+      'docker image rm --no-prune -- "$TARGET_WEB_TAG" "$target_web_repo_digest"',
+    );
     expect(dockerCommandLines).toEqual(approvedDockerCommandLines);
     expect(remoteBody).not.toContain("--force");
     expect(exactEvidenceValidation).toBeGreaterThan(-1);

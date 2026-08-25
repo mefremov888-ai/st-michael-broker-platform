@@ -30,6 +30,14 @@ on:
         description: Full sha256 web image ID printed by the latest inspect run
         required: false
         type: string
+      expected_target_api_repo_digest:
+        description: API repo digest or literal none printed by the latest inspect run
+        required: false
+        type: string
+      expected_target_web_repo_digest:
+        description: Web repo digest or literal none printed by the latest inspect run
+        required: false
+        type: string
       expected_release_record_sha256:
         description: Release-record SHA-256 printed by the latest inspect run
         required: false
@@ -67,6 +75,8 @@ jobs:
           CONFIRM_RETIREMENT: ${{ inputs.confirm_retirement }}
           EXPECTED_TARGET_API_IMAGE_ID: ${{ inputs.expected_target_api_image_id }}
           EXPECTED_TARGET_WEB_IMAGE_ID: ${{ inputs.expected_target_web_image_id }}
+          EXPECTED_TARGET_API_REPO_DIGEST: ${{ inputs.expected_target_api_repo_digest }}
+          EXPECTED_TARGET_WEB_REPO_DIGEST: ${{ inputs.expected_target_web_repo_digest }}
           EXPECTED_RELEASE_RECORD_SHA256: ${{ inputs.expected_release_record_sha256 }}
           EXPECTED_ROLLBACK_OVERRIDE_SHA256: ${{ inputs.expected_rollback_override_sha256 }}
           EXPECTED_ROLLBACK_INVENTORY_SHA256: ${{ inputs.expected_rollback_inventory_sha256 }}
@@ -89,6 +99,8 @@ jobs:
               test "$CONFIRM_RETIREMENT" = "false" || { echo "Inspect mode must not carry retirement confirmation"; exit 1; }
               test -z "$EXPECTED_TARGET_API_IMAGE_ID" \
                 -a -z "$EXPECTED_TARGET_WEB_IMAGE_ID" \
+                -a -z "$EXPECTED_TARGET_API_REPO_DIGEST" \
+                -a -z "$EXPECTED_TARGET_WEB_REPO_DIGEST" \
                 -a -z "$EXPECTED_RELEASE_RECORD_SHA256" \
                 -a -z "$EXPECTED_ROLLBACK_OVERRIDE_SHA256" \
                 -a -z "$EXPECTED_ROLLBACK_INVENTORY_SHA256" \
@@ -98,6 +110,8 @@ jobs:
               test "$CONFIRM_RETIREMENT" = "true" || { echo "Explicit rollback retirement confirmation is required"; exit 1; }
               [[ "$EXPECTED_TARGET_API_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Expected API image ID is missing or invalid"; exit 1; }
               [[ "$EXPECTED_TARGET_WEB_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Expected web image ID is missing or invalid"; exit 1; }
+              [[ "$EXPECTED_TARGET_API_REPO_DIGEST" = "none" || "$EXPECTED_TARGET_API_REPO_DIGEST" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected API repo digest is missing or invalid"; exit 1; }
+              [[ "$EXPECTED_TARGET_WEB_REPO_DIGEST" = "none" || "$EXPECTED_TARGET_WEB_REPO_DIGEST" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected web repo digest is missing or invalid"; exit 1; }
               [[ "$EXPECTED_RELEASE_RECORD_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected release-record SHA-256 is missing or invalid"; exit 1; }
               [[ "$EXPECTED_ROLLBACK_OVERRIDE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected rollback-override SHA-256 is missing or invalid"; exit 1; }
               [[ "$EXPECTED_ROLLBACK_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected rollback inventory SHA-256 is missing or invalid"; exit 1; }
@@ -128,7 +142,7 @@ jobs:
           test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
 
           ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
-            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_ROLLBACK_INVENTORY_SHA256' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'" <<'REMOTE'
+            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_TARGET_API_REPO_DIGEST' '$EXPECTED_TARGET_WEB_REPO_DIGEST' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_ROLLBACK_INVENTORY_SHA256' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'" <<'REMOTE'
           set -euo pipefail
           export LC_ALL=C
           MIN_AVAILABLE_BYTES=8589934592
@@ -155,11 +169,13 @@ jobs:
           confirm_retirement=$4
           expected_target_api_image_id=$5
           expected_target_web_image_id=$6
-          expected_release_record_sha256=$7
-          expected_rollback_override_sha256=$8
-          expected_rollback_inventory_sha256=$9
-          production_pg_system_identifier=${10}
-          production_min_broker_rows=${11}
+          expected_target_api_repo_digest=$7
+          expected_target_web_repo_digest=$8
+          expected_release_record_sha256=$9
+          expected_rollback_override_sha256=${10}
+          expected_rollback_inventory_sha256=${11}
+          production_pg_system_identifier=${12}
+          production_min_broker_rows=${13}
 
           for required_tool in awk df docker flock git grep id readlink sha256sum sort stat tr wc; do
             command -v "$required_tool" >/dev/null || { echo "Required retirement tool is missing"; exit 1; }
@@ -171,6 +187,12 @@ jobs:
           [[ "$expected_retirement_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Workflow SHA is invalid on the production host"; exit 1; }
           case "$operation" in inspect|retire) ;; *) echo "Unsupported rollback retirement operation on the production host"; exit 1;; esac
           case "$confirm_retirement" in true|false) ;; *) echo "Retirement confirmation is invalid on the production host"; exit 1;; esac
+          if [ "$operation" = "inspect" ]; then
+            test -z "$expected_target_api_repo_digest" -a -z "$expected_target_web_repo_digest" || { echo "Inspect mode must not carry repo-digest evidence on the production host"; exit 1; }
+          else
+            [[ "$expected_target_api_repo_digest" = "none" || "$expected_target_api_repo_digest" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected API repo digest is invalid on the production host"; exit 1; }
+            [[ "$expected_target_web_repo_digest" = "none" || "$expected_target_web_repo_digest" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected web repo digest is invalid on the production host"; exit 1; }
+          fi
           [[ "$production_pg_system_identifier" =~ ^[0-9]+$ ]] || { echo "Production database identity is invalid on the production host"; exit 1; }
           [[ "$production_min_broker_rows" =~ ^[1-9][0-9]*$ ]] || { echo "Production broker-row floor is invalid on the production host"; exit 1; }
 
@@ -197,14 +219,25 @@ jobs:
             [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Rollback image ID is invalid"; exit 1; }
             printf '%s\n' "$image_id"
           }
-          assert_tag_is_singleton() {
+          validated_repo_digest_for_tag() {
             local tag=$1
             local repo_tags
             local repo_digests
+            local repo_digest
             repo_tags=$(docker image inspect --format '{{json .RepoTags}}' "$tag")
             test "$repo_tags" = "[\"$tag\"]" || { echo "Rollback image has an unexpected additional tag"; exit 1; }
             repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' "$tag")
-            test "$repo_digests" = "null" -o "$repo_digests" = "[]" || { echo "Rollback image has an unexpected digest reference"; exit 1; }
+            case "$repo_digests" in
+              null|"[]") printf 'none\n' ;;
+              *)
+                printf '%s\n' "$repo_digests" | grep -Eq '^\["[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}"\]$' \
+                  || { echo "Rollback image has an unexpected digest reference"; exit 1; }
+                repo_digest=${repo_digests:2:${#repo_digests}-4}
+                test "$(image_id_for_tag "$repo_digest")" = "$(image_id_for_tag "$tag")" \
+                  || { echo "Rollback digest does not resolve to the inspected image"; exit 1; }
+                printf '%s\n' "$repo_digest"
+                ;;
+            esac
           }
           assert_no_container_uses_image() {
             local target_image_id=$1
@@ -359,17 +392,23 @@ jobs:
           test "$target_api_id" != "$target_web_id" || { echo "Rollback API and web unexpectedly resolve to the same image"; exit 1; }
           if [ "$target_api_present" = "true" ]; then
             test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "API rollback tag disagrees with its release record"; exit 1; }
-            assert_tag_is_singleton "$TARGET_API_TAG"
+            target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG")
+          else
+            target_api_repo_digest=$expected_target_api_repo_digest
           fi
           if [ "$target_web_present" = "true" ]; then
             test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Web rollback tag disagrees with its release record"; exit 1; }
-            assert_tag_is_singleton "$TARGET_WEB_TAG"
+            target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")
+          else
+            target_web_repo_digest=$expected_target_web_repo_digest
           fi
           assert_no_container_uses_image "$target_api_id"
           assert_no_container_uses_image "$target_web_id"
 
           newer_api_ids=()
           newer_web_ids=()
+          newer_api_repo_digests=()
+          newer_web_repo_digests=()
           newer_record_hashes=()
           newer_override_hashes=()
           newer_records=()
@@ -390,12 +429,14 @@ jobs:
             [[ "$newer_web_id" == "sha256:${NEWER_WEB_PREFIXES[$newer_index]}"* ]] || { echo "A retained web rollback does not match the prior read-only audit"; exit 1; }
             test "$(record_value previous_api_image "$newer_record")" = "$newer_api_id" || { echo "A retained API rollback disagrees with its release record"; exit 1; }
             test "$(record_value previous_web_image "$newer_record")" = "$newer_web_id" || { echo "A retained web rollback disagrees with its release record"; exit 1; }
-            assert_tag_is_singleton "$newer_api_tag"
-            assert_tag_is_singleton "$newer_web_tag"
+            newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag")
+            newer_web_repo_digest=$(validated_repo_digest_for_tag "$newer_web_tag")
             test "$newer_api_id" != "$target_api_id" -a "$newer_api_id" != "$target_web_id" || { echo "A retained API rollback resolves to a retirement image"; exit 1; }
             test "$newer_web_id" != "$target_api_id" -a "$newer_web_id" != "$target_web_id" || { echo "A retained web rollback resolves to a retirement image"; exit 1; }
             newer_api_ids+=("$newer_api_id")
             newer_web_ids+=("$newer_web_id")
+            newer_api_repo_digests+=("$newer_api_repo_digest")
+            newer_web_repo_digests+=("$newer_web_repo_digest")
             newer_record_hashes+=("$(sha256sum -- "$newer_record" | awk '{print $1}')")
             newer_override_hashes+=("$(sha256sum -- "$newer_override" | awk '{print $1}')")
             newer_records+=("$newer_record")
@@ -403,12 +444,15 @@ jobs:
           done
 
           rollback_inventory_payload=$(
-            printf 'target_api=%s\ntarget_web=%s\ntarget_record=%s\ntarget_override=%s\n' \
-              "$target_api_id" "$target_web_id" "$release_record_sha_before" "$rollback_override_sha_before"
+            printf 'target_api=%s\ntarget_api_repo_digest=%s\ntarget_web=%s\ntarget_web_repo_digest=%s\ntarget_record=%s\ntarget_override=%s\n' \
+              "$target_api_id" "$target_api_repo_digest" "$target_web_id" "$target_web_repo_digest" \
+              "$release_record_sha_before" "$rollback_override_sha_before"
             for newer_index in "${!NEWER_TIMESTAMPS[@]}"; do
-              printf 'retained_%s_api=%s\nretained_%s_web=%s\nretained_%s_record=%s\nretained_%s_override=%s\n' \
+              printf 'retained_%s_api=%s\nretained_%s_api_repo_digest=%s\nretained_%s_web=%s\nretained_%s_web_repo_digest=%s\nretained_%s_record=%s\nretained_%s_override=%s\n' \
                 "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_api_ids[$newer_index]}" \
+                "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_api_repo_digests[$newer_index]}" \
                 "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_web_ids[$newer_index]}" \
+                "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_web_repo_digests[$newer_index]}" \
                 "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_record_hashes[$newer_index]}" \
                 "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_override_hashes[$newer_index]}"
             done
@@ -418,6 +462,8 @@ jobs:
           if [ "$operation" = "retire" ]; then
             test "$expected_target_api_image_id" = "$target_api_id" || { echo "Expected API image ID does not match the inspected rollback"; exit 1; }
             test "$expected_target_web_image_id" = "$target_web_id" || { echo "Expected web image ID does not match the inspected rollback"; exit 1; }
+            test "$expected_target_api_repo_digest" = "$target_api_repo_digest" || { echo "Expected API repo digest does not match the inspected rollback"; exit 1; }
+            test "$expected_target_web_repo_digest" = "$target_web_repo_digest" || { echo "Expected web repo digest does not match the inspected rollback"; exit 1; }
             test "$expected_release_record_sha256" = "$release_record_sha_before" || { echo "Expected release-record SHA-256 does not match"; exit 1; }
             test "$expected_rollback_override_sha256" = "$rollback_override_sha_before" || { echo "Expected rollback-override SHA-256 does not match"; exit 1; }
             test "$expected_rollback_inventory_sha256" = "$rollback_inventory_sha256" || { echo "Expected rollback inventory SHA-256 does not match"; exit 1; }
@@ -445,7 +491,9 @@ jobs:
 
           if [ "$operation" = "inspect" ]; then
             printf 'target_api_image_id=%s\n' "$target_api_id"
+            printf 'target_api_repo_digest=%s\n' "$target_api_repo_digest"
             printf 'target_web_image_id=%s\n' "$target_web_id"
+            printf 'target_web_repo_digest=%s\n' "$target_web_repo_digest"
             printf 'release_record_sha256=%s\n' "$release_record_sha_before"
             printf 'rollback_override_sha256=%s\n' "$rollback_override_sha_before"
             printf 'rollback_inventory_sha256=%s\n' "$rollback_inventory_sha256"
@@ -487,8 +535,8 @@ jobs:
             tag_is_present "$rollback_tags_after" "$newer_web_tag" || { echo "A retained web rollback tag disappeared"; exit 1; }
             test "$(image_id_for_tag "$newer_api_tag")" = "${newer_api_ids[$newer_index]}" || { echo "A retained API rollback image ID changed"; exit 1; }
             test "$(image_id_for_tag "$newer_web_tag")" = "${newer_web_ids[$newer_index]}" || { echo "A retained web rollback image ID changed"; exit 1; }
-            assert_tag_is_singleton "$newer_api_tag"
-            assert_tag_is_singleton "$newer_web_tag"
+            test "$(validated_repo_digest_for_tag "$newer_api_tag")" = "${newer_api_repo_digests[$newer_index]}" || { echo "A retained API rollback digest reference changed"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$newer_web_tag")" = "${newer_web_repo_digests[$newer_index]}" || { echo "A retained web rollback digest reference changed"; exit 1; }
             assert_private_regular_file "${newer_records[$newer_index]}" "$deploy_uid"
             assert_private_regular_file "${newer_overrides[$newer_index]}" "$deploy_uid"
             test "$(sha256sum -- "${newer_records[$newer_index]}" | awk '{print $1}')" = "${newer_record_hashes[$newer_index]}" || { echo "A retained release record changed"; exit 1; }
