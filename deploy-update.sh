@@ -19,7 +19,7 @@ else
 fi
 DEPLOY_ROOT=$(pwd -P)
 
-for REQUIRED_TOOL in git docker curl df flock sha256sum awk grep sed tar mktemp rm cp readlink sudo; do
+for REQUIRED_TOOL in git docker curl df flock sha256sum awk grep sed tar mktemp rm mv cp readlink sudo; do
     if ! command -v "$REQUIRED_TOOL" >/dev/null 2>&1; then
         echo "Required deployment tool is missing: $REQUIRED_TOOL"
         exit 1
@@ -70,11 +70,8 @@ export COMPOSE_DOCKER_CLI_BUILD=1
 
 echo "==> Рабочая директория: $(pwd)"
 
-PREVIOUS_DEPLOY_SHA=$(git rev-parse HEAD)
-export PREVIOUS_DEPLOY_SHA
-
-COMPOSE_CMD="docker compose"
-echo "==> Используем: $COMPOSE_CMD"
+PREVIOUS_DEPLOY_SHA=""
+echo "==> Используем Docker Compose v2 with explicit live/target environments"
 
 # Bind every Compose command (including the clean-context build below) to the
 # existing production project. This prevents a different working-directory
@@ -153,6 +150,30 @@ fi
 umask 077
 chmod 600 "$SERVER_ENV_FILE"
 
+live_compose() {
+    docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+        --env-file "$SERVER_ENV_FILE" "$@"
+}
+
+target_compose() {
+    if [ -z "${ENV_STAGING_FILE:-}" ] || [ ! -f "$ENV_STAGING_FILE" ]; then
+        echo "    ✗ Verified target environment is unavailable." >&2
+        return 1
+    fi
+    docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+        --env-file "$ENV_STAGING_FILE" "$@"
+}
+
+rollback_compose() {
+    if ! printf '%s' "$PREVIOUS_DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+        echo "    ✗ Previous running API SHA is unavailable for rollback." >&2
+        return 1
+    fi
+    GIT_SHA="$PREVIOUS_DEPLOY_SHA" docker compose \
+        --project-name "$COMPOSE_PROJECT_NAME" \
+        --env-file "$SERVER_ENV_FILE" "$@"
+}
+
 for REQUIRED_VAR in POSTGRES_PASSWORD JWT_SECRET; do
     REQUIRED_VALUE=$(awk -F= -v key="$REQUIRED_VAR" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$SERVER_ENV_FILE")
     case "$REQUIRED_VALUE" in
@@ -216,7 +237,13 @@ for VAR_NAME in \
     if [ -n "$VAR_VALUE" ]; then
         update_env_value "$VAR_NAME" "$VAR_VALUE"
     fi
+    # The workflow exports these values for the trusted script. Compose gives
+    # process variables precedence over --env-file, so remove each one after
+    # it has been copied into the verified staging file. This is what keeps a
+    # later rollback bound to the still-live server environment.
+    unset "$VAR_NAME"
 done
+unset VAR_NAME VAR_VALUE
 # 2026-08-20: пишем реально задеплоенный SHA в .env, читается через
 # GET /api/health (см. health.controller.ts) — способ проверить, что сервер
 # на самом деле обновился, а не просто "workflow прошёл зелёным".
@@ -270,9 +297,9 @@ verify_prisma_baseline() {
         exit 1
     fi
 
-    ACTUAL_DATABASE=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    ACTUAL_DATABASE=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT current_database()")
-    ACTUAL_SYSTEM_IDENTIFIER=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    ACTUAL_SYSTEM_IDENTIFIER=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT system_identifier FROM pg_control_system()")
     if [ "$ACTUAL_DATABASE" != "broker_platform" ] \
         || [ "$ACTUAL_SYSTEM_IDENTIFIER" != "$PRODUCTION_PG_SYSTEM_IDENTIFIER" ]; then
@@ -282,9 +309,9 @@ verify_prisma_baseline() {
         exit 1
     fi
 
-    LEGACY_SCHEMA_EXISTS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    LEGACY_SCHEMA_EXISTS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT to_regclass('public.brokers') IS NOT NULL")
-    MIGRATION_HISTORY_EXISTS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    MIGRATION_HISTORY_EXISTS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT to_regclass('public._prisma_migrations') IS NOT NULL")
 
     # This workflow is production-update only. A missing brokers table means a
@@ -294,7 +321,7 @@ verify_prisma_baseline() {
         exit 1
     fi
 
-    BROKER_ROWS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    BROKER_ROWS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT COUNT(*) FROM public.brokers")
     if ! printf '%s' "$BROKER_ROWS" | grep -Eq '^[0-9]+$' \
         || [ "$BROKER_ROWS" -lt "$PRODUCTION_MIN_BROKER_ROWS" ]; then
@@ -308,14 +335,14 @@ verify_prisma_baseline() {
         exit 1
     fi
 
-    UNFINISHED_MIGRATIONS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    UNFINISHED_MIGRATIONS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT COUNT(*) FROM public.\"_prisma_migrations\" WHERE finished_at IS NULL AND rolled_back_at IS NULL")
     if [ "$UNFINISHED_MIGRATIONS" -ne 0 ]; then
         echo "    ✗ Deployment blocked before container replacement: unfinished Prisma migration rows: $UNFINISHED_MIGRATIONS."
         exit 1
     fi
 
-    BASELINE_APPLIED=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    BASELINE_APPLIED=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT EXISTS (SELECT 1 FROM public.\"_prisma_migrations\" WHERE migration_name = '0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL)")
     if [ "$BASELINE_APPLIED" != "t" ]; then
         echo "    ✗ Deployment blocked before container replacement: 0_legacy_baseline is not recorded as applied."
@@ -324,7 +351,7 @@ verify_prisma_baseline() {
     fi
 
     EXPECTED_BASELINE_CHECKSUM=$(sha256sum packages/database/prisma/migrations/0_legacy_baseline/migration.sql | awk '{print $1}')
-    STORED_BASELINE_CHECKSUM=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc \
+    STORED_BASELINE_CHECKSUM=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
         "SELECT checksum FROM public.\"_prisma_migrations\" WHERE migration_name = '0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1")
     if [ "$STORED_BASELINE_CHECKSUM" != "$EXPECTED_BASELINE_CHECKSUM" ]; then
         echo "    ✗ Deployment blocked before container replacement: baseline checksum does not match the reviewed SQL."
@@ -355,6 +382,13 @@ if ! docker exec st-michael-api wget -qO- http://localhost:4000/api/health 2>/de
     echo "    ✗ Existing production API is not healthy enough to serve as a rollback target."
     exit 1
 fi
+PREVIOUS_DEPLOY_SHA=$(docker inspect \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' st-michael-api 2>/dev/null \
+    | awk -F= '$1 == "GIT_SHA" { sub(/^[^=]*=/, ""); print; exit }')
+if ! printf '%s' "$PREVIOUS_DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "    ✗ Running production API has no valid deployed SHA; refusing an unauditable rollback target."
+    exit 1
+fi
 if ! curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
     https://broker.stmichael.ru/ > /dev/null; then
     echo "    ✗ Existing external site is unavailable; use the incident runbook, not normal deployment."
@@ -362,9 +396,6 @@ if ! curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
 fi
 verify_production_compose_override
 verify_prisma_baseline
-mv "$ENV_STAGING_FILE" "$SERVER_ENV_FILE"
-ENV_STAGING_FILE=""
-chmod 600 "$SERVER_ENV_FILE"
 echo "    ✓ Existing database identity, baseline and Redis preflight passed"
 
 # Image builds need predictable headroom and must never attempt implicit cleanup.
@@ -427,54 +458,30 @@ require_deploy_disk_headroom "Docker root" "$DOCKER_ROOT"
 # 2) Rebuild images while the current containers continue serving traffic.
 echo ""
 echo "==> [2/5] Rebuild образов..."
-ROLLBACK_DIR=/var/backups/stmichael/releases
-sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ROLLBACK_DIR"
-RELEASE_TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-ROLLBACK_RECORD="$ROLLBACK_DIR/release-$RELEASE_TIMESTAMP.txt"
-ROLLBACK_OVERRIDE="$ROLLBACK_DIR/rollback-$RELEASE_TIMESTAMP.yml"
-ROLLBACK_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
-ROLLBACK_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
-PREVIOUS_API_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-api 2>/dev/null || true)
-PREVIOUS_WEB_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-web 2>/dev/null || true)
-PREVIOUS_NGINX_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-nginx 2>/dev/null || true)
-for PREVIOUS_IMAGE in "$PREVIOUS_API_IMAGE" "$PREVIOUS_WEB_IMAGE" "$PREVIOUS_NGINX_IMAGE"; do
-    if ! printf '%s' "$PREVIOUS_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
-        echo "    ✗ Cannot capture a valid previous application image for fast rollback."
-        exit 1
-    fi
-done
-docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
-docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
-{
-    echo "previous_commit=${PREVIOUS_DEPLOY_SHA:-unknown}"
-    echo "target_commit=$EXPECTED_DEPLOY_SHA"
-    echo "previous_api_image=$PREVIOUS_API_IMAGE"
-    echo "previous_web_image=$PREVIOUS_WEB_IMAGE"
-    echo "previous_nginx_image=$PREVIOUS_NGINX_IMAGE"
-} > "$ROLLBACK_RECORD"
-chmod 600 "$ROLLBACK_RECORD"
-{
-    echo "services:"
-    echo "  api:"
-    echo "    image: \"$ROLLBACK_API_TAG\""
-    echo '    entrypoint: ["/bin/sh", "-c", "exec node apps/api/dist/main.js"]'
-    echo "  web:"
-    echo "    image: \"$ROLLBACK_WEB_TAG\""
-} > "$ROLLBACK_OVERRIDE"
-chmod 600 "$ROLLBACK_OVERRIDE"
-echo "    rollback metadata: $ROLLBACK_RECORD"
-echo "    rollback override: $ROLLBACK_OVERRIDE"
+compose_for_scope() {
+    local scope="$1"
+    shift
+    case "$scope" in
+        target) target_compose "$@" ;;
+        rollback) rollback_compose "$@" ;;
+        *)
+            echo "    ✗ Unknown Compose environment scope: $scope" >&2
+            return 1
+            ;;
+    esac
+}
 
 reload_nginx_upstreams() {
+    local scope="$1"
     # nginx resolves static upstream hostnames when it loads the configuration.
     # Recreated api/web containers can receive new Docker IPs, so a graceful
     # reload is required after both rollout and rollback. Existing workers keep
     # serving traffic if validation or reload fails.
-    if ! $COMPOSE_CMD exec -T nginx nginx -t; then
+    if ! compose_for_scope "$scope" exec -T nginx nginx -t; then
         echo "    ✗ nginx configuration validation failed."
         return 1
     fi
-    if ! $COMPOSE_CMD exec -T nginx nginx -s reload; then
+    if ! compose_for_scope "$scope" exec -T nginx nginx -s reload; then
         echo "    ✗ nginx graceful reload failed."
         return 1
     fi
@@ -513,7 +520,7 @@ previous_api_schema_is_compatible() {
     fi
     echo "    Previous API image lacks SUPPLEMENT/ARCHIVE; verifying that neither value has been written."
 
-    if ! loyalty_schema_state=$($COMPOSE_CMD exec -T postgres \
+    if ! loyalty_schema_state=$(rollback_compose exec -T postgres \
         psql -U postgres -d broker_platform -Atqc \
         "SELECT CASE
            WHEN to_regclass('public.loyalty_reconciliation_cases') IS NULL THEN 'absent'
@@ -543,7 +550,7 @@ previous_api_schema_is_compatible() {
     # it first and verify the fixed production container is actually quiesced;
     # only then can the following COUNT authoritatively fence old-image
     # rollback. A failed stop/verification must never fall through to old up.
-    if ! $COMPOSE_CMD stop -t 30 api; then
+    if ! rollback_compose stop -t 30 api; then
         echo "    ✗ Could not quiesce the current API before the rollback compatibility check."
         return 1
     fi
@@ -556,7 +563,7 @@ previous_api_schema_is_compatible() {
         return 1
     fi
 
-    if ! incompatible_decision_rows=$($COMPOSE_CMD exec -T postgres \
+    if ! incompatible_decision_rows=$(rollback_compose exec -T postgres \
         psql -U postgres -d broker_platform -Atqc \
         "SELECT COUNT(*)
          FROM public.loyalty_reconciliation_cases
@@ -582,17 +589,17 @@ rollback_application() {
         echo "    ✗ Incompatible previous API rollback blocked before container replacement."
         return 1
     fi
-    if ! $COMPOSE_CMD -f docker-compose.yml -f "$ROLLBACK_OVERRIDE" up -d \
+    if ! rollback_compose -f docker-compose.yml -f "$ROLLBACK_OVERRIDE" up -d \
         --no-deps --no-build --pull never --force-recreate api web; then
         echo "    ✗ Fast rollback command failed; page the production operator immediately."
         return 1
     fi
-    if ! reload_nginx_upstreams; then
+    if ! reload_nginx_upstreams rollback; then
         echo "    ✗ Previous images started, but nginx could not refresh their Docker addresses."
         return 1
     fi
     for i in {1..30}; do
-        if $COMPOSE_CMD exec -T api wget -qO- http://localhost:4000/api/health 2>/dev/null \
+        if rollback_compose exec -T api wget -qO- http://localhost:4000/api/health 2>/dev/null \
             | grep -q '"status":"ok"'; then
             if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
                 https://broker.stmichael.ru/ > /dev/null; then
@@ -609,7 +616,7 @@ rollback_application() {
 fail_after_rollout() {
     local reason="$1"
     echo "    ✗ $reason"
-    $COMPOSE_CMD logs --tail=120 api web 2>/dev/null || true
+    target_compose logs --tail=120 api web 2>/dev/null || true
     rollback_application || true
     exit 1
 }
@@ -619,12 +626,50 @@ fail_after_rollout() {
 # кода (run 28107132638, 28179889464). После того как кеш слоя npm install
 # прогрелся — оба билда становятся CACHED и параллелизм безопасен,
 # но последовательная сборка работает в любом случае.
-docker compose --project-name "$COMPOSE_PROJECT_NAME" \
-    --project-directory "$RELEASE_CONTEXT" --env-file "$SERVER_ENV_FILE" \
+target_compose --project-directory "$RELEASE_CONTEXT" \
     -f "$RELEASE_CONTEXT/docker-compose.yml" build api
-docker compose --project-name "$COMPOSE_PROJECT_NAME" \
-    --project-directory "$RELEASE_CONTEXT" --env-file "$SERVER_ENV_FILE" \
+target_compose --project-directory "$RELEASE_CONTEXT" \
     -f "$RELEASE_CONTEXT/docker-compose.yml" build web
+
+# Only successful builds earn a rollback record. A compilation failure leaves
+# the running containers, live .env, rollback tags and release history untouched.
+ROLLBACK_DIR=/var/backups/stmichael/releases
+sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ROLLBACK_DIR"
+RELEASE_TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+ROLLBACK_RECORD="$ROLLBACK_DIR/release-$RELEASE_TIMESTAMP.txt"
+ROLLBACK_OVERRIDE="$ROLLBACK_DIR/rollback-$RELEASE_TIMESTAMP.yml"
+ROLLBACK_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
+ROLLBACK_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
+PREVIOUS_API_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-api 2>/dev/null || true)
+PREVIOUS_WEB_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-web 2>/dev/null || true)
+PREVIOUS_NGINX_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-nginx 2>/dev/null || true)
+for PREVIOUS_IMAGE in "$PREVIOUS_API_IMAGE" "$PREVIOUS_WEB_IMAGE" "$PREVIOUS_NGINX_IMAGE"; do
+    if ! printf '%s' "$PREVIOUS_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        echo "    ✗ Cannot capture a valid previous application image for fast rollback."
+        exit 1
+    fi
+done
+docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
+docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
+{
+    echo "previous_commit=$PREVIOUS_DEPLOY_SHA"
+    echo "target_commit=$EXPECTED_DEPLOY_SHA"
+    echo "previous_api_image=$PREVIOUS_API_IMAGE"
+    echo "previous_web_image=$PREVIOUS_WEB_IMAGE"
+    echo "previous_nginx_image=$PREVIOUS_NGINX_IMAGE"
+} > "$ROLLBACK_RECORD"
+chmod 600 "$ROLLBACK_RECORD"
+{
+    echo "services:"
+    echo "  api:"
+    echo "    image: \"$ROLLBACK_API_TAG\""
+    echo '    entrypoint: ["/bin/sh", "-c", "exec node apps/api/dist/main.js"]'
+    echo "  web:"
+    echo "    image: \"$ROLLBACK_WEB_TAG\""
+} > "$ROLLBACK_OVERRIDE"
+chmod 600 "$ROLLBACK_OVERRIDE"
+echo "    rollback metadata: $ROLLBACK_RECORD"
+echo "    rollback override: $ROLLBACK_OVERRIDE"
 
 # 3) Apply migrations with the NEW image before replacing the healthy API.
 # Prisma Migrate was introduced after the legacy production database already
@@ -633,7 +678,7 @@ docker compose --project-name "$COMPOSE_PROJECT_NAME" \
 echo ""
 echo "==> [3/5] Preflight baseline и Prisma migrations..."
 verify_production_compose_override
-$COMPOSE_CMD run --rm --no-deps --entrypoint npx api prisma migrate deploy \
+target_compose run --rm --no-deps --entrypoint npx api prisma migrate deploy \
     --schema=/app/packages/database/prisma/schema.prisma
 echo "    ✓ Миграции применены до замены API"
 
@@ -642,7 +687,7 @@ echo "    ✓ Миграции применены до замены API"
 # restarts need a separate maintenance window and must not cause surprise
 # downtime during an application release.
 verify_production_compose_override
-if ! $COMPOSE_CMD up -d --no-deps api web; then
+if ! target_compose up -d --no-deps api web; then
     fail_after_rollout "Application container replacement failed."
 fi
 
@@ -651,7 +696,7 @@ echo ""
 echo "==> [4/5] Ждём готовности API..."
 API_READY=0
 for i in {1..30}; do
-    if $COMPOSE_CMD exec -T api wget -qO- http://localhost:4000/api/health/ready 2>/dev/null \
+    if target_compose exec -T api wget -qO- http://localhost:4000/api/health/ready 2>/dev/null \
         | grep -q '"status":"ok"'; then
         echo "    API, PostgreSQL и Redis готовы"
         API_READY=1
@@ -662,15 +707,15 @@ done
 if [ "$API_READY" -ne 1 ]; then
     fail_after_rollout "Readiness не пройден: проверить API, PostgreSQL, Redis и обязательные миграции."
 fi
-if ! reload_nginx_upstreams; then
+if ! reload_nginx_upstreams target; then
     fail_after_rollout "nginx could not expose the ready API/web upstream addresses."
 fi
 
 echo "    Проверяю обязательные контейнеры..."
-RUNNING_SERVICES=$($COMPOSE_CMD ps --status running --services)
+RUNNING_SERVICES=$(target_compose ps --status running --services)
 for SERVICE in postgres redis api web nginx; do
     if ! printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$SERVICE"; then
-        $COMPOSE_CMD ps || true
+        target_compose ps || true
         fail_after_rollout "Контейнер $SERVICE не работает после rollout."
     fi
 done
@@ -703,7 +748,7 @@ echo "    ✓ web, nginx and external HTTPS are available"
 # custom CHECK constraints, partial indexes and deferred triggers live in SQL migrations.
 echo ""
 echo "==> [5/5] Проверка миграций и обновление CMS-контента..."
-if ! $COMPOSE_CMD exec -T api npx prisma migrate status \
+if ! target_compose exec -T api npx prisma migrate status \
     --schema=/app/packages/database/prisma/schema.prisma; then
     fail_after_rollout "New API reports an invalid Prisma migration state."
 fi
@@ -714,9 +759,9 @@ echo "    ✓ Все Prisma migrations применены"
 # (sites без записи), а в этом случае мы и так полагаемся на
 # cms.seedDefaults() при старте API. Запуск отдельным скриптом убран.
 # Для ручной перезаписи запустить вручную:
-#   $COMPOSE_CMD exec api node /app/scripts/refresh-cms-content.js          # safe: skip existing
-#   $COMPOSE_CMD exec api node -e 'process.env.FORCE=1' /app/scripts/refresh-cms-content.js  # force
-# или: $COMPOSE_CMD exec -e FORCE=1 api node /app/scripts/refresh-cms-content.js
+#   docker compose exec api node /app/scripts/refresh-cms-content.js          # safe: skip existing
+#   docker compose exec api node -e 'process.env.FORCE=1' /app/scripts/refresh-cms-content.js  # force
+# или: docker compose exec -e FORCE=1 api node /app/scripts/refresh-cms-content.js
 echo "    (refresh-cms-content пропущен — правки админа сохраняются между деплоями)"
 
 # Data seeds and amoCRM inspection are intentionally not part of application
@@ -727,9 +772,21 @@ echo "    (business seeds and amoCRM inspection skipped by design)"
 # Status check
 echo ""
 echo "==> Состояние контейнеров:"
-$COMPOSE_CMD ps
+if ! target_compose ps; then
+    fail_after_rollout "Could not verify the final target Compose state."
+fi
+
+# The exact environment is activated only after both builds, migrations,
+# internal/external readiness and the final Compose state have succeeded. The
+# staging file is on the same filesystem, so mv is atomic. No fallible command
+# follows activation: a red workflow can no longer leave an unverified .env
+# claiming a release that never became healthy.
+if ! mv -- "$ENV_STAGING_FILE" "$SERVER_ENV_FILE"; then
+    fail_after_rollout "Could not atomically activate the verified release environment."
+fi
+ENV_STAGING_FILE=""
 
 echo ""
 echo "✓ Деплой завершён успешно"
 echo "  Сайт: https://72.56.241.199/"
-echo "  Свежий коммит: $(git log --oneline -1)"
+echo "  Развёрнутый SHA: $EXPECTED_DEPLOY_SHA"

@@ -27,6 +27,19 @@ describe("loyalty production workflow safety", () => {
     ".github/workflows/retire-obsolete-production-rollback.yml",
   );
   const deployScript = readRepositoryFile("deploy-update.sh");
+  const apiDockerfile = readRepositoryFile("docker/Dockerfile.api");
+  const apiBuildConfig = JSON.parse(
+    readRepositoryFile("apps/api/tsconfig.build.json"),
+  ) as {
+    compilerOptions?: Record<string, unknown>;
+    exclude?: string[];
+  };
+  const loyaltySyncService = readRepositoryFile(
+    "apps/api/src/loyalty-sync/loyalty-sync.service.ts",
+  );
+  const loyaltySyncServiceSpec = readRepositoryFile(
+    "apps/api/src/loyalty-sync/loyalty-sync.service.spec.ts",
+  );
   const migrationReadme = readRepositoryFile(
     "packages/database/prisma/migrations/README.md",
   );
@@ -250,7 +263,7 @@ describe("loyalty production workflow safety", () => {
       rollbackFunction,
     );
     const quiesceCurrentApi = deployScript.indexOf(
-      "$COMPOSE_CMD stop -t 30 api",
+      "rollback_compose stop -t 30 api",
       compatibilityFunction,
     );
     const verifyCurrentApiStopped = deployScript.indexOf(
@@ -262,7 +275,7 @@ describe("loyalty production workflow safety", () => {
       compatibilityFunction,
     );
     const rollbackReplacement = deployScript.indexOf(
-      'if ! $COMPOSE_CMD -f docker-compose.yml -f "$ROLLBACK_OVERRIDE" up -d',
+      'if ! rollback_compose -f docker-compose.yml -f "$ROLLBACK_OVERRIDE" up -d',
       rollbackFunction,
     );
 
@@ -311,14 +324,14 @@ describe("loyalty production workflow safety", () => {
     );
     const firstImageBuild = deployScript.indexOf("build api");
     const rollout = deployScript.indexOf(
-      "if ! $COMPOSE_CMD up -d --no-deps api web; then",
+      "if ! target_compose up -d --no-deps api web; then",
     );
     const readinessDecision = deployScript.indexOf(
       'if [ "$API_READY" -ne 1 ]; then',
       rollout,
     );
     const nginxExposure = deployScript.indexOf(
-      "if ! reload_nginx_upstreams; then",
+      "if ! reload_nginx_upstreams target; then",
       rollout,
     );
 
@@ -341,6 +354,101 @@ describe("loyalty production workflow safety", () => {
     );
     expect(readinessDecision).toBeGreaterThan(rollout);
     expect(nginxExposure).toBeGreaterThan(readinessDecision);
+  });
+
+  it("keeps the production API typecheck inside its one-GiB heap budget", () => {
+    const narrowSheetsImport = "googleapis/build/src/apis/sheets";
+
+    expect(loyaltySyncService).toContain(narrowSheetsImport);
+    expect(loyaltySyncServiceSpec).toContain(narrowSheetsImport);
+    expect(loyaltySyncService).not.toMatch(/from ["']googleapis["']/);
+    expect(loyaltySyncServiceSpec).not.toMatch(/from ["']googleapis["']/);
+    expect(apiDockerfile).toContain(
+      "NODE_OPTIONS=--max-old-space-size=1024 npm run build --workspace=apps/api",
+    );
+    expect(apiDockerfile).not.toContain("--max-old-space-size=2048");
+    expect(apiDockerfile).not.toMatch(/^\s*ENV\s+NODE_OPTIONS=/m);
+    expect(apiBuildConfig.exclude).toEqual(
+      expect.arrayContaining(["node_modules", "test", "dist", "**/*.spec.ts"]),
+    );
+    expect(apiBuildConfig.compilerOptions).toMatchObject({
+      declaration: false,
+      incremental: false,
+      sourceMap: false,
+    });
+    expect(apiBuildConfig.compilerOptions?.noCheck).not.toBe(true);
+  });
+
+  it("keeps the live environment untouched until the verified rollout succeeds", () => {
+    const liveCompose = deployScript.indexOf("live_compose() {");
+    const targetCompose = deployScript.indexOf("target_compose() {");
+    const rollbackCompose = deployScript.indexOf("rollback_compose() {");
+    const envForwardingLoop = deployScript.indexOf("for VAR_NAME in \\");
+    const envForwardingEnd = deployScript.indexOf(
+      "unset VAR_NAME VAR_VALUE",
+      envForwardingLoop,
+    );
+    const previousShaCapture = deployScript.indexOf(
+      "PREVIOUS_DEPLOY_SHA=$(docker inspect",
+    );
+    const apiBuild = deployScript.indexOf("build api");
+    const webBuild = deployScript.indexOf("build web");
+    const rollbackMetadata = deployScript.indexOf(
+      "ROLLBACK_DIR=/var/backups/stmichael/releases",
+    );
+    const migrateDeploy = deployScript.indexOf("prisma migrate deploy");
+    const rollout = deployScript.indexOf(
+      "target_compose up -d --no-deps api web",
+    );
+    const externalReadiness = deployScript.indexOf(
+      "https://broker.stmichael.ru/api/health/ready",
+      rollout,
+    );
+    const migrateStatus = deployScript.indexOf(
+      "prisma migrate status",
+      rollout,
+    );
+    const finalComposeState = deployScript.indexOf(
+      "if ! target_compose ps; then",
+      migrateStatus,
+    );
+    const envActivation = deployScript.indexOf(
+      'mv -- "$ENV_STAGING_FILE" "$SERVER_ENV_FILE"',
+    );
+    const rollbackFunction = deployScript.indexOf("rollback_application() {");
+    const failFunction = deployScript.indexOf("fail_after_rollout() {");
+    const rollbackBody = deployScript.slice(rollbackFunction, failFunction);
+
+    expect(deployScript.slice(liveCompose, targetCompose)).toContain(
+      '--env-file "$SERVER_ENV_FILE"',
+    );
+    expect(deployScript.slice(targetCompose, rollbackCompose)).toContain(
+      '--env-file "$ENV_STAGING_FILE"',
+    );
+    expect(deployScript.slice(rollbackCompose, envForwardingLoop)).toContain(
+      'GIT_SHA="$PREVIOUS_DEPLOY_SHA" docker compose',
+    );
+    expect(deployScript.slice(envForwardingLoop, envForwardingEnd)).toContain(
+      'unset "$VAR_NAME"',
+    );
+    expect(previousShaCapture).toBeGreaterThan(envForwardingEnd);
+    expect(apiBuild).toBeGreaterThan(previousShaCapture);
+    expect(webBuild).toBeGreaterThan(apiBuild);
+    expect(rollbackMetadata).toBeGreaterThan(webBuild);
+    expect(migrateDeploy).toBeGreaterThan(rollbackMetadata);
+    expect(rollout).toBeGreaterThan(migrateDeploy);
+    expect(externalReadiness).toBeGreaterThan(rollout);
+    expect(migrateStatus).toBeGreaterThan(externalReadiness);
+    expect(finalComposeState).toBeGreaterThan(migrateStatus);
+    expect(envActivation).toBeGreaterThan(finalComposeState);
+    expect(
+      deployScript.match(/mv -- "\$ENV_STAGING_FILE" "\$SERVER_ENV_FILE"/g),
+    ).toHaveLength(1);
+    expect(rollbackBody).toContain("rollback_compose");
+    expect(rollbackBody).not.toContain("target_compose");
+    expect(deployScript.slice(envActivation)).not.toMatch(
+      /(?:target|live|rollback)_compose|git log|\$\(/,
+    );
   });
 
   it("requires a fresh successful exact-SHA backup before manual deploy", () => {

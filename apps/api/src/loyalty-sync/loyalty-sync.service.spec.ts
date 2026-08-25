@@ -9,7 +9,7 @@ import { AmoCrmAdapter, setAmoTokens } from "@st-michael/integrations";
 import { UserRole } from "@st-michael/shared";
 import { plainToInstance } from "class-transformer";
 import { validate } from "class-validator";
-import { google } from "googleapis";
+import * as googleSheetsApi from "googleapis/build/src/apis/sheets";
 import { LoyaltySyncController } from "./loyalty-sync.controller";
 import {
   AmoLoyaltyDryRunDto,
@@ -478,7 +478,7 @@ describe("LoyaltySyncService", () => {
         : { data: { values: [] } };
     });
     const batchGet = jest.fn();
-    const sheetsSpy = jest.spyOn(google, "sheets").mockReturnValue({
+    const sheetsSpy = jest.spyOn(googleSheetsApi, "sheets").mockReturnValue({
       spreadsheets: {
         get: metadataGet,
         values: { get: valuesGet, batchGet },
@@ -538,7 +538,7 @@ describe("LoyaltySyncService", () => {
     const previousCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = validGoogleCredentials;
     const readLayout = async (values: unknown[][]) => {
-      const sheetsSpy = jest.spyOn(google, "sheets").mockReturnValue({
+      const sheetsSpy = jest.spyOn(googleSheetsApi, "sheets").mockReturnValue({
         spreadsheets: {
           get: jest.fn().mockResolvedValue({
             data: {
@@ -586,7 +586,7 @@ describe("LoyaltySyncService", () => {
     const previousCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = validGoogleCredentials;
     const valuesGet = jest.fn();
-    const sheetsSpy = jest.spyOn(google, "sheets").mockReturnValue({
+    const sheetsSpy = jest.spyOn(googleSheetsApi, "sheets").mockReturnValue({
       spreadsheets: {
         get: jest.fn().mockResolvedValue({
           data: {
@@ -621,7 +621,7 @@ describe("LoyaltySyncService", () => {
     const previousCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     process.env.GOOGLE_SERVICE_ACCOUNT_JSON = validGoogleCredentials;
     const valuesGet = jest.fn();
-    const sheetsSpy = jest.spyOn(google, "sheets").mockReturnValue({
+    const sheetsSpy = jest.spyOn(googleSheetsApi, "sheets").mockReturnValue({
       spreadsheets: {
         get: jest.fn().mockResolvedValue({
           data: {
