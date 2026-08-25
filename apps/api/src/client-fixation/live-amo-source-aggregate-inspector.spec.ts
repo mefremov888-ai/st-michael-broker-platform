@@ -38,7 +38,6 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
         "Lead contact relations were not embedded",
         "LEAD_CONTACT_RELATIONS_MISSING",
       ],
-      ["Invalid entity relations", "INVALID_ENTITY_RELATIONS"],
       ["Unsafe amoCRM path", "UNSAFE_AMO_PATH"],
       ["Unsafe amoCRM URL", "UNSAFE_AMO_URL"],
       ["amoCRM access token is missing", "AMO_ACCESS_TOKEN_MISSING"],
@@ -52,12 +51,6 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
         "amoCRM pagination exceeded safety bound",
         "AMO_PAGINATION_SAFETY_BOUND_EXCEEDED",
       ],
-      [
-        "Malformed or incomplete amoCRM entity relations",
-        "INCOMPLETE_AMO_ENTITY_RELATIONS",
-      ],
-      ["Malformed amoCRM entity relation", "MALFORMED_AMO_ENTITY_RELATION"],
-      ["Duplicate amoCRM entity relation", "DUPLICATE_AMO_ENTITY_RELATION"],
       ["Unexpected amoCRM account", "UNEXPECTED_AMO_ACCOUNT"],
     ]);
     const fixedMessages = [...script.matchAll(/new Error\("([^"]+)"\)/g)].map(
@@ -109,13 +102,12 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     }
 
     const phases: string[] = [];
+    const requestedPaths: string[] = [];
     await expect(
       inspector.scanLiveAmo(
         async (pathname: string, query: Record<string, unknown> = {}) => {
+          requestedPaths.push(pathname);
           if (pathname === "/api/v4/account") return { id: 28552900 };
-          if (pathname.endsWith("/links")) {
-            throw new Error("amoCRM request failed");
-          }
           if (pathname === "/api/v4/contacts") {
             return {
               _embedded: {
@@ -148,7 +140,13 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
         },
         (phase: string) => phases.push(phase),
       ),
-    ).rejects.toThrow("amoCRM request failed");
+    ).resolves.toMatchObject({
+      safety: { source: "live_amocrm_api", httpMethods: ["GET"] },
+      deals: { dedupEvidenceCoverage: { entityRelationRowsScanned: 0 } },
+    });
+    expect(requestedPaths.some((pathname) => pathname.endsWith("/links"))).toBe(
+      false,
+    );
     expect(phases).toEqual([
       "ACCOUNT",
       "CONTACTS",
@@ -157,7 +155,7 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
       "PIPELINE_SALES_A",
       "PIPELINE_SALES_B",
       "PIPELINE_SALES_C",
-      "DEAL_RELATIONS",
+      "DEAL_AGGREGATION",
     ]);
   });
 
@@ -325,7 +323,6 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     const report = await inspector.finalizeReport(
       state,
       new Date("2026-08-25T20:00:00.000Z"),
-      async () => [],
     );
     expect(report.clientPipelines.all.strictSourceAndBrokerLinked).toBe(5);
     expect(report.deals.rawQualifyingLeadRows).toBe(1);
@@ -336,22 +333,18 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     });
   });
 
-  it("uses client entity relations for dedup only with matching deal evidence", async () => {
+  it("uses embedded main-client relations for dedup only with matching deal evidence", async () => {
     const base = {
       parentReferenceIds: [],
       brokerCopyReferenceIds: [],
       contractDateValues: ["2026-08-20"],
       dedupClientContactIds: [95001],
     };
-    const report = await inspector.buildDealReport(
-      [
-        { ...base, id: 94001, dduAmountValues: ["1000000"] },
-        { ...base, id: 94002, dduAmountValues: ["1 000 000,00"] },
-        { ...base, id: 94003, dduAmountValues: ["2000000"] },
-      ],
-      async () => [],
-      new Set(),
-    );
+    const report = await inspector.buildDealReport([
+      { ...base, id: 94001, dduAmountValues: ["1000000"] },
+      { ...base, id: 94002, dduAmountValues: ["1 000 000,00"] },
+      { ...base, id: 94003, dduAmountValues: ["2000000"] },
+    ]);
     expect(report.rawQualifyingLeadRows).toBe(3);
     expect(report.deduplicatedDealGroups).toBe(2);
     expect(report.duplicateLeadRowsCollapsed).toBe(1);
@@ -473,23 +466,9 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
       _embedded: contacts(11005),
     });
 
-    const relationProvider = async (leadId: number) => {
-      if (leadId === 20002 || leadId === 20003) {
-        return [
-          {
-            entity_type: "leads",
-            entity_id: leadId,
-            to_entity_type: "leads",
-            to_entity_id: 77777,
-          },
-        ];
-      }
-      return [];
-    };
     const report = await inspector.finalizeReport(
       state,
       new Date("2026-08-25T20:00:00.000Z"),
-      relationProvider,
     );
 
     expect(report.contacts).toEqual({
@@ -550,8 +529,8 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
         candidatesWithParentReference: 2,
         candidatesWithBrokerCopyReference: 1,
         candidatesWithEmbeddedClientContactRelation: 3,
-        candidatesWithFetchedDedupEntityRelation: 2,
-        entityRelationRowsScanned: 2,
+        candidatesWithFetchedDedupEntityRelation: 0,
+        entityRelationRowsScanned: 0,
       },
       dduAmount: {
         rawQualifyingLeadCoverage: { valid: 3, missing: 0, invalid: 0 },
@@ -595,7 +574,6 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
       "20002",
       "30001",
       "40001",
-      "77777",
     ]) {
       expect(serialized).not.toContain(sensitive);
     }
