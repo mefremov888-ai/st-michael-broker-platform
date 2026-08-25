@@ -202,11 +202,12 @@ test("uses the shared accessible call-result badge on every V2 result surface", 
   assert.match(badge, /data-call-result-tone=\{tone\}/);
   assert.doesNotMatch(badge, /(?:bg|text|border)-\$\{/);
   for (const className of [
-    "border-success/30 bg-success/10 text-success",
-    "border-accent/30 bg-accent/10 text-accent",
-    "border-warning/30 bg-warning/10 text-warning",
-    "border-error/30 bg-error/10 text-error",
-    "border-border bg-surface-secondary text-text-muted",
+    "border-emerald-300 bg-emerald-50 text-emerald-900",
+    "border-blue-300 bg-blue-50 text-blue-900",
+    "border-amber-300 bg-amber-50 text-amber-950",
+    "border-slate-300 bg-slate-100 text-slate-800",
+    "border-red-300 bg-red-50 text-red-900",
+    "border-orange-300 bg-orange-50 text-orange-900",
   ]) {
     assert.match(badge, new RegExp(className.replace(/\//g, "\\/")));
   }

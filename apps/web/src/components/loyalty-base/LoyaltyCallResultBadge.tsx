@@ -16,38 +16,38 @@ interface ToneStyle {
  */
 export const LOYALTY_CALL_RESULT_TONE_STYLES = {
   positive: {
-    badge: "border-success/30 bg-success/10 text-success",
-    dot: "bg-success",
+    badge: "border-emerald-300 bg-emerald-50 text-emerald-900",
+    dot: "bg-emerald-600",
     accessibleMeaning: "положительный результат",
   },
   informational: {
-    badge: "border-accent/30 bg-accent/10 text-accent",
-    dot: "bg-accent",
+    badge: "border-blue-300 bg-blue-50 text-blue-900",
+    dot: "bg-blue-600",
     accessibleMeaning: "контакт состоялся",
   },
   follow_up: {
-    badge: "border-warning/30 bg-warning/10 text-warning",
-    dot: "bg-warning",
+    badge: "border-amber-300 bg-amber-50 text-amber-950",
+    dot: "bg-amber-600",
     accessibleMeaning: "требуется продолжение",
   },
   unreached: {
-    badge: "border-border bg-surface-secondary text-text-muted",
-    dot: "bg-text-muted",
+    badge: "border-slate-300 bg-slate-100 text-slate-800",
+    dot: "bg-slate-600",
     accessibleMeaning: "связаться не удалось",
   },
   negative: {
-    badge: "border-error/30 bg-error/10 text-error",
-    dot: "bg-error",
+    badge: "border-red-300 bg-red-50 text-red-900",
+    dot: "bg-red-600",
     accessibleMeaning: "отрицательный результат",
   },
   invalid: {
-    badge: "border-warning/30 bg-warning/10 text-warning",
-    dot: "bg-warning",
+    badge: "border-orange-300 bg-orange-50 text-orange-900",
+    dot: "bg-orange-600",
     accessibleMeaning: "контактные данные недействительны",
   },
   neutral: {
-    badge: "border-border bg-surface-secondary text-text-muted",
-    dot: "bg-text-muted",
+    badge: "border-slate-300 bg-slate-100 text-slate-800",
+    dot: "bg-slate-600",
     accessibleMeaning: "результат без известной категории",
   },
 } as const satisfies Record<LoyaltyCallResultTone, ToneStyle>;
