@@ -4,8 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, Loader2, Phone, RefreshCcw, X } from "lucide-react";
 import {
-  AGENCY_CALL_RESULTS,
-  BROKER_CALL_RESULTS,
+  getLoyaltyCallResultOptions,
   type LoyaltyCallResult,
 } from "@/lib/loyalty-base-api";
 import {
@@ -15,6 +14,7 @@ import {
   type LoyaltyOperator,
   type LoyaltyQueueItem,
 } from "@/lib/loyalty-workflow-api";
+import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 
 type Draft = {
   result: LoyaltyCallResult | "";
@@ -236,10 +236,9 @@ export function LoyaltyQueuePanel({
               const readOnly = Boolean(
                 assigneeId && !isAdmin && assigneeId !== currentUserId,
               );
-              const resultOptions =
-                row.entityType === "brokers"
-                  ? BROKER_CALL_RESULTS
-                  : AGENCY_CALL_RESULTS;
+              const resultOptions = getLoyaltyCallResultOptions(
+                row.entityType,
+              );
               return (
                 <article key={row.id} className="card space-y-3">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -293,12 +292,19 @@ export function LoyaltyQueuePanel({
                         }
                       >
                         <option value="">Выберите результат</option>
-                        {resultOptions.map(([code, label]) => (
+                        {resultOptions.map(({ code, label }) => (
                           <option key={code} value={code}>
                             {label}
                           </option>
                         ))}
                       </select>
+                      {value.result && (
+                        <LoyaltyCallResultBadge
+                          result={value.result}
+                          entityType={row.entityType}
+                          className="mt-1"
+                        />
+                      )}
                     </label>
                     <label className="text-xs text-text-muted md:col-span-1 xl:col-span-2">
                       Комментарий / договорённость

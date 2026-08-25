@@ -6,110 +6,80 @@ import type {
   LoyaltyBrokerStatus,
   LoyaltyFacets,
 } from "@/lib/loyalty-base-api";
+import {
+  loyaltyStatusDotColor,
+  loyaltyStatusLabel,
+} from "@/lib/loyalty-status";
 
 const brokerLegend: ReadonlyArray<{
   value: LoyaltyBrokerStatus;
-  title: string;
   rule: string;
-  color: string;
 }> = [
   {
     value: "TOP_SELLER",
-    title: "Топ-продавец",
     rule: "3 и более подтверждённых сделок",
-    color: "bg-emerald-500",
   },
   {
     value: "SELLER",
-    title: "Продавец",
     rule: "1–2 подтверждённые сделки",
-    color: "bg-green-600",
   },
   {
     value: "OFFERING",
-    title: "Предлагающий",
     rule: "Сделок нет, есть встреча",
-    color: "bg-orange-500",
   },
   {
     value: "FIXATING",
-    title: "Фиксирующий",
     rule: "Встреч нет, есть фиксация",
-    color: "bg-purple-500",
   },
   {
     value: "BROKER_TOUR",
-    title: "Был на брокер-туре",
     rule: "БТ подтверждён полем или датой amoCRM",
-    color: "bg-yellow-400",
   },
   {
     value: "DORMANT",
-    title: "Спящий",
     rule: "Раньше был активен, более 90 дней без активности",
-    color: "bg-red-400",
   },
   {
     value: "NEW",
-    title: "Новый",
     rule: "Не достиг БТ и нет подтверждённой активности",
-    color: "bg-blue-500",
   },
 ];
 
 const agencyLegend: ReadonlyArray<{
   value: LoyaltyAgencyStatus;
-  title: string;
   rule: string;
-  color: string;
 }> = [
   {
     value: "VIP_PARTNER",
-    title: "VIP-партнёр",
     rule: "5 и более подтверждённых сделок",
-    color: "bg-emerald-500",
   },
   {
     value: "SELLING_PARTNER",
-    title: "Продающий партнёр",
     rule: "1–4 подтверждённые сделки",
-    color: "bg-green-600",
   },
   {
     value: "ACTIVE_PARTNER",
-    title: "Активный партнёр",
     rule: "Сделок нет, есть встречи",
-    color: "bg-orange-500",
   },
   {
     value: "FIXATING_PARTNER",
-    title: "Фиксирующий партнёр",
     rule: "Есть фиксации, встреч нет",
-    color: "bg-purple-500",
   },
   {
     value: "WARM_PARTNER",
-    title: "Тёплый партнёр",
     rule: "Был БТ, фиксаций нет",
-    color: "bg-yellow-400",
   },
   {
     value: "STARTING_PARTNER",
-    title: "Начинающий партнёр",
     rule: "Идут переговоры о сотрудничестве",
-    color: "bg-blue-500",
   },
   {
     value: "DORMANT_PARTNER",
-    title: "Спящий партнёр",
     rule: "Более 90 дней нет активности",
-    color: "bg-red-400",
   },
   {
     value: "NEW_AGENCY",
-    title: "Новое агентство",
     rule: "Работа ещё не началась",
-    color: "bg-slate-400",
   },
 ];
 
@@ -161,8 +131,10 @@ export function LoyaltyStatusLegend({
           >
             <span className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-2 font-semibold text-sm">
-                <span className={`h-3 w-3 rounded-full ${item.color}`} />{" "}
-                {item.title}
+                <span
+                  className={`h-3 w-3 rounded-full ${loyaltyStatusDotColor(item.value)}`}
+                />{" "}
+                {loyaltyStatusLabel(item.value)}
               </span>
               <b>
                 {count(item.value) === null ? "Нет данных" : count(item.value)}

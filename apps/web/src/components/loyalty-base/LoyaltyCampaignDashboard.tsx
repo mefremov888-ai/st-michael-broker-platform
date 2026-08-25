@@ -28,6 +28,7 @@ import {
   type LoyaltyCampaignDetail,
   type LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
+import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 
 const statusLabels: Record<LoyaltyCampaign["status"], string> = {
   DRAFT: "Черновик",
@@ -481,7 +482,13 @@ export function LoyaltyCampaignDashboard({
                           <td className="p-3">
                             {assignmentLabels[item.status] || item.status}
                           </td>
-                          <td className="p-3">{item.lastResult || "—"}</td>
+                          <td className="p-3">
+                            <LoyaltyCallResultBadge
+                              result={item.lastResult}
+                              entityType={detail.entityType}
+                              emptyLabel="Результат не указан"
+                            />
+                          </td>
                           <td className="p-3">
                             {displayDate(item.lastAttemptAt)}
                           </td>

@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  AGENCY_CALL_RESULT_OPTIONS,
   AGENCY_CALL_RESULTS,
+  BROKER_CALL_RESULT_OPTIONS,
   BROKER_CALL_RESULTS,
+  LOYALTY_CALL_RESULT_CATALOG,
+  getLoyaltyCallResultPresentation,
   getLoyaltyList,
   getActiveLoyaltyLinks,
   formatRubles,
@@ -26,6 +31,12 @@ import {
   loyaltyMetricPeriodLabel,
   toCanonicalFilter,
 } from "./loyalty-ui-model";
+import {
+  loyaltyRecordStatuses,
+  loyaltyStatusBadgeColor,
+  loyaltyStatusDotColor,
+  loyaltyStatusLabel,
+} from "./loyalty-status";
 import {
   agencyContactPointsPatch,
   agencyContactPersonRoleValue,
@@ -54,6 +65,159 @@ test("keeps broker and agency call-result dictionaries separate and removes the 
       label.includes("Дозвонились"),
     ),
     false,
+  );
+});
+
+test("keeps call-result API codes and context labels backward compatible", () => {
+  assert.deepEqual(BROKER_CALL_RESULTS, [
+    ["INFORMED", "Проинформирован"],
+    ["DO_NOT_CALL", "Просил не звонить"],
+    ["NOT_INTERESTED", "Неинтересно"],
+    ["NO_ANSWER", "НДЗ"],
+    ["SEND_INFORMATION", "Просил отправить информацию"],
+    ["BROKER_TOUR_BOOKED", "Запись на БТ"],
+    ["BROKER_TOUR_DECLINED", "Отказ от БТ"],
+    ["INVALID_PHONE", "Некорректный номер"],
+    ["NOT_A_BROKER", "Уже не брокер"],
+  ]);
+  assert.deepEqual(AGENCY_CALL_RESULTS, [
+    ["NO_ANSWER", "НДЗ"],
+    ["COOPERATION_DECLINED", "Отказ от сотрудничества"],
+    ["BROKER_TOUR_SCHEDULED", "Назначен БТ"],
+    ["CALLBACK", "Перезвонить"],
+    ["SEND_INFORMATION", "Отправить информацию"],
+    ["AGREEMENTS_EXIST", "Есть договорённости"],
+    ["COOPERATION_AGREED", "Договорились о сотрудничестве"],
+  ]);
+});
+
+test("defines one complete typed catalog with stable call-result tones", () => {
+  const expectedTones = {
+    INFORMED: "informational",
+    DO_NOT_CALL: "negative",
+    NOT_INTERESTED: "negative",
+    NO_ANSWER: "unreached",
+    SEND_INFORMATION: "follow_up",
+    BROKER_TOUR_BOOKED: "positive",
+    BROKER_TOUR_DECLINED: "negative",
+    INVALID_PHONE: "invalid",
+    NOT_A_BROKER: "invalid",
+    COOPERATION_DECLINED: "negative",
+    BROKER_TOUR_SCHEDULED: "positive",
+    CALLBACK: "follow_up",
+    AGREEMENTS_EXIST: "positive",
+    COOPERATION_AGREED: "positive",
+  } as const;
+
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(LOYALTY_CALL_RESULT_CATALOG).map(([code, value]) => [
+        code,
+        value.tone,
+      ]),
+    ),
+    expectedTones,
+  );
+  assert.deepEqual(
+    [...BROKER_CALL_RESULT_OPTIONS, ...AGENCY_CALL_RESULT_OPTIONS]
+      .filter(
+        (option, index, all) =>
+          all.findIndex(({ code }) => code === option.code) === index,
+      )
+      .map(({ code }) => code)
+      .sort(),
+    Object.keys(LOYALTY_CALL_RESULT_CATALOG).sort(),
+  );
+  for (const [code, definition] of Object.entries(
+    LOYALTY_CALL_RESULT_CATALOG,
+  )) {
+    assert.equal(definition.code, code);
+    assert.ok(Object.keys(definition.labels).length > 0);
+  }
+});
+
+test("resolves context labels and fails visibly neutral for unknown or cross-context codes", () => {
+  assert.deepEqual(
+    getLoyaltyCallResultPresentation("SEND_INFORMATION", "brokers"),
+    {
+      code: "SEND_INFORMATION",
+      label: "Просил отправить информацию",
+      tone: "follow_up",
+      known: true,
+    },
+  );
+  assert.deepEqual(
+    getLoyaltyCallResultPresentation("SEND_INFORMATION", "agencies"),
+    {
+      code: "SEND_INFORMATION",
+      label: "Отправить информацию",
+      tone: "follow_up",
+      known: true,
+    },
+  );
+  assert.deepEqual(
+    getLoyaltyCallResultPresentation("NOT_A_BROKER", "agencies"),
+    {
+      code: "NOT_A_BROKER",
+      label: "NOT_A_BROKER",
+      tone: "neutral",
+      known: false,
+    },
+  );
+  assert.deepEqual(
+    getLoyaltyCallResultPresentation("LEGACY_UNKNOWN", "brokers"),
+    {
+      code: "LEGACY_UNKNOWN",
+      label: "LEGACY_UNKNOWN",
+      tone: "neutral",
+      known: false,
+    },
+  );
+  assert.equal(getLoyaltyCallResultPresentation("", "brokers"), null);
+});
+
+test("uses the shared accessible call-result badge on every V2 result surface", () => {
+  const source = (relativePath: string) =>
+    readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  const badge = source(
+    "../components/loyalty-base/LoyaltyCallResultBadge.tsx",
+  );
+  const consumers = [
+    "../components/loyalty-base/LoyaltyFilterPanel.tsx",
+    "../components/loyalty-base/LoyaltyQueuePanel.tsx",
+    "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
+    "../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx",
+    "../components/loyalty-base/LoyaltyCampaignDashboard.tsx",
+  ];
+
+  for (const relativePath of consumers) {
+    assert.match(source(relativePath), /LoyaltyCallResultBadge/);
+  }
+  assert.match(
+    source("../components/loyalty-base/LoyaltyRecordDetailV2.tsx"),
+    /result=\{item\.result\}/,
+  );
+  assert.match(badge, /aria-label=\{`Результат звонка:/);
+  assert.match(badge, /aria-hidden="true"/);
+  assert.match(badge, /data-call-result-tone=\{tone\}/);
+  assert.doesNotMatch(badge, /(?:bg|text|border)-\$\{/);
+  for (const className of [
+    "border-emerald-300 bg-emerald-50 text-emerald-900",
+    "border-blue-300 bg-blue-50 text-blue-900",
+    "border-amber-300 bg-amber-50 text-amber-950",
+    "border-slate-300 bg-slate-100 text-slate-800",
+    "border-red-300 bg-red-50 text-red-900",
+    "border-orange-300 bg-orange-50 text-orange-900",
+  ]) {
+    assert.match(badge, new RegExp(className.replace(/\//g, "\\/")));
+  }
+  assert.doesNotMatch(
+    source("../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx"),
+    /item\.lastCallResult\s*\|\|/,
+  );
+  assert.doesNotMatch(
+    source("../components/loyalty-base/LoyaltyCampaignDashboard.tsx"),
+    /item\.lastResult\s*\|\|/,
   );
 });
 
@@ -522,6 +686,90 @@ test("normalizes ANNA list/detail fields returned by the service", () => {
   );
   assert.equal(detail.name, "Тестовый брокер");
   assert.equal(detail.history.length, 1);
+});
+
+test("retains, deduplicates and displays every backend computed status in order", () => {
+  const record = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "multi-status-broker",
+        entityType: "BROKER",
+        displayName: "Брокер с БТ",
+        status: "LEGACY_STATUS_MUST_NOT_REPLACE_COMPUTED",
+        computedStatuses: [
+          "SELLER",
+          "BROKER_TOUR",
+          "SELLER",
+          "  FUTURE_BACKEND_STATUS  ",
+          "",
+        ],
+      },
+    },
+    "brokers",
+  );
+
+  assert.equal(record.status, "SELLER");
+  assert.deepEqual(record.computedStatuses, [
+    "SELLER",
+    "BROKER_TOUR",
+    "FUTURE_BACKEND_STATUS",
+  ]);
+  assert.deepEqual(loyaltyRecordStatuses(record), [
+    "SELLER",
+    "BROKER_TOUR",
+    "FUTURE_BACKEND_STATUS",
+  ]);
+  assert.equal(loyaltyStatusLabel("BROKER_TOUR"), "Был на БТ");
+  assert.equal(
+    loyaltyStatusBadgeColor("BROKER_TOUR"),
+    "bg-yellow-100 text-yellow-800",
+  );
+  assert.equal(loyaltyStatusDotColor("BROKER_TOUR"), "bg-yellow-400");
+});
+
+test("falls back to the legacy scalar status when computedStatuses is absent", () => {
+  const record = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "legacy-status-broker",
+        entityType: "BROKER",
+        displayName: "Старая запись",
+        attributes: { status: "LEGACY_ACTIVE" },
+      },
+    },
+    "brokers",
+  );
+
+  assert.equal(record.status, "LEGACY_ACTIVE");
+  assert.deepEqual(record.computedStatuses, ["LEGACY_ACTIVE"]);
+  assert.deepEqual(loyaltyRecordStatuses(record), ["LEGACY_ACTIVE"]);
+});
+
+test("keeps V2 table, detail, filter and legend on the shared multi-status contract", () => {
+  const source = (relativePath: string) =>
+    readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  const table = source(
+    "../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx",
+  );
+  const detail = source(
+    "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
+  );
+  const badges = source(
+    "../components/loyalty-base/LoyaltyStatusBadges.tsx",
+  );
+  const legend = source("../components/loyalty-base/LoyaltyStatusLegend.tsx");
+  const filters = source("../components/loyalty-base/LoyaltyFilterPanel.tsx");
+
+  assert.match(table, /<LoyaltyStatusBadges record=\{item\} \/>/);
+  assert.match(detail, /<LoyaltyStatusBadges record=\{record\} \/>/);
+  assert.match(badges, /loyaltyRecordStatuses\(record\)/);
+  assert.match(badges, /loyaltyStatusBadgeColor\(status\)/);
+  assert.match(badges, /data-loyalty-status=\{status\}/);
+  assert.match(legend, /loyaltyStatusDotColor\(item\.value\)/);
+  assert.match(legend, /loyaltyStatusLabel\(item\.value\)/);
+  assert.match(filters, /loyaltyStatusLabel\(value\)/);
+  assert.match(filters, /<LoyaltyStatusBadge/);
+  assert.match(filters, /status=\{draft\.status\}/);
 });
 
 test("keeps source-reported row metrics separate from exact lifetime metrics", () => {

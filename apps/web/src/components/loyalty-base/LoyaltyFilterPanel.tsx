@@ -2,8 +2,7 @@
 
 import { ChevronDown, Filter, RotateCcw } from "lucide-react";
 import {
-  AGENCY_CALL_RESULTS,
-  BROKER_CALL_RESULTS,
+  getLoyaltyCallResultOptions,
   type LoyaltyBaseKey,
   type LoyaltyEntityType,
   type LoyaltyFacets,
@@ -17,6 +16,9 @@ import type {
   LoyaltyCampaign,
   LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
+import { loyaltyStatusLabel } from "@/lib/loyalty-status";
+import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
+import { LoyaltyStatusBadge } from "./LoyaltyStatusBadges";
 
 const BROKER_STAGES = [
   "Новый",
@@ -30,24 +32,24 @@ const BROKER_STAGES = [
 ] as const;
 
 const AGENCY_PARTNERSHIP = [
-  ["VIP_PARTNER", "VIP-партнёр"],
-  ["SELLING_PARTNER", "Продающий партнёр"],
-  ["ACTIVE_PARTNER", "Активный партнёр"],
-  ["FIXATING_PARTNER", "Фиксирующий партнёр"],
-  ["WARM_PARTNER", "Тёплый партнёр"],
-  ["STARTING_PARTNER", "Начинающий партнёр"],
-  ["DORMANT_PARTNER", "Спящий партнёр"],
-  ["NEW_AGENCY", "Новое агентство"],
+  "VIP_PARTNER",
+  "SELLING_PARTNER",
+  "ACTIVE_PARTNER",
+  "FIXATING_PARTNER",
+  "WARM_PARTNER",
+  "STARTING_PARTNER",
+  "DORMANT_PARTNER",
+  "NEW_AGENCY",
 ] as const;
 
 const BROKER_STATUSES = [
-  ["TOP_SELLER", "Топ-продавец"],
-  ["SELLER", "Продавец"],
-  ["OFFERING", "Предлагающий"],
-  ["FIXATING", "Фиксирующий"],
-  ["BROKER_TOUR", "Был на брокер-туре"],
-  ["DORMANT", "Спящий"],
-  ["NEW", "Новый"],
+  "TOP_SELLER",
+  "SELLER",
+  "OFFERING",
+  "FIXATING",
+  "BROKER_TOUR",
+  "DORMANT",
+  "NEW",
 ] as const;
 
 const QUALITY = [
@@ -134,7 +136,7 @@ export function LoyaltyFilterPanel({
     value: LoyaltyFilterFormState[K],
   ) => onChange({ ...draft, [key]: value });
   const isBroker = entityType === "brokers";
-  const callResults = isBroker ? BROKER_CALL_RESULTS : AGENCY_CALL_RESULTS;
+  const callResults = getLoyaltyCallResultOptions(entityType);
   const scenarios = isBroker ? BROKER_SCENARIOS : AGENCY_SCENARIOS;
   const statusOptions = isBroker ? BROKER_STATUSES : AGENCY_PARTNERSHIP;
   const unavailableForOurAgency = base === "ours" && !isBroker;
@@ -268,12 +270,19 @@ export function LoyaltyFilterPanel({
               }
             >
               <option value="">Любой результат</option>
-              {callResults.map(([value, label]) => (
-                <option key={value} value={value}>
+              {callResults.map(({ code, label }) => (
+                <option key={code} value={code}>
                   {label}
                 </option>
               ))}
             </select>
+            {draft.lastCallResult && (
+              <LoyaltyCallResultBadge
+                result={draft.lastCallResult}
+                entityType={entityType}
+                className="mt-1"
+              />
+            )}
           </Field>
           <Field label="Сценарий">
             <select
@@ -539,12 +548,23 @@ export function LoyaltyFilterPanel({
               }
             >
               <option value="">Все</option>
-              {statusOptions.map(([value, label]) => (
+              {statusOptions.map((value) => (
                 <option key={value} value={value}>
-                  {label}
+                  {loyaltyStatusLabel(value)}
                 </option>
               ))}
             </select>
+            {draft.status && (
+              <LoyaltyStatusBadge
+                status={draft.status}
+                title={
+                  isBroker
+                    ? "Выбранный статус брокера"
+                    : "Выбранный уровень партнёрства"
+                }
+                className="mt-1"
+              />
+            )}
           </Field>
           <Field label="Был БТ">
             <TriSelect
