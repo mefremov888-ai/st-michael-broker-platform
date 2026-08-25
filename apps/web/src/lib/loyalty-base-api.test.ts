@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   AGENCY_CALL_RESULTS,
@@ -26,6 +27,12 @@ import {
   loyaltyMetricPeriodLabel,
   toCanonicalFilter,
 } from "./loyalty-ui-model";
+import {
+  loyaltyRecordStatuses,
+  loyaltyStatusBadgeColor,
+  loyaltyStatusDotColor,
+  loyaltyStatusLabel,
+} from "./loyalty-status";
 import {
   agencyContactPointsPatch,
   agencyContactPersonRoleValue,
@@ -522,6 +529,87 @@ test("normalizes ANNA list/detail fields returned by the service", () => {
   );
   assert.equal(detail.name, "Тестовый брокер");
   assert.equal(detail.history.length, 1);
+});
+
+test("retains, deduplicates and displays every backend computed status in order", () => {
+  const record = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "multi-status-broker",
+        entityType: "BROKER",
+        displayName: "Брокер с БТ",
+        status: "LEGACY_STATUS_MUST_NOT_REPLACE_COMPUTED",
+        computedStatuses: [
+          "SELLER",
+          "BROKER_TOUR",
+          "SELLER",
+          "  FUTURE_BACKEND_STATUS  ",
+          "",
+        ],
+      },
+    },
+    "brokers",
+  );
+
+  assert.equal(record.status, "SELLER");
+  assert.deepEqual(record.computedStatuses, [
+    "SELLER",
+    "BROKER_TOUR",
+    "FUTURE_BACKEND_STATUS",
+  ]);
+  assert.deepEqual(loyaltyRecordStatuses(record), [
+    "SELLER",
+    "BROKER_TOUR",
+    "FUTURE_BACKEND_STATUS",
+  ]);
+  assert.equal(loyaltyStatusLabel("BROKER_TOUR"), "Был на БТ");
+  assert.equal(
+    loyaltyStatusBadgeColor("BROKER_TOUR"),
+    "bg-yellow-100 text-yellow-800",
+  );
+  assert.equal(loyaltyStatusDotColor("BROKER_TOUR"), "bg-yellow-400");
+});
+
+test("falls back to the legacy scalar status when computedStatuses is absent", () => {
+  const record = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "legacy-status-broker",
+        entityType: "BROKER",
+        displayName: "Старая запись",
+        attributes: { status: "LEGACY_ACTIVE" },
+      },
+    },
+    "brokers",
+  );
+
+  assert.equal(record.status, "LEGACY_ACTIVE");
+  assert.deepEqual(record.computedStatuses, ["LEGACY_ACTIVE"]);
+  assert.deepEqual(loyaltyRecordStatuses(record), ["LEGACY_ACTIVE"]);
+});
+
+test("keeps V2 table, detail, filter and legend on the shared multi-status contract", () => {
+  const source = (relativePath: string) =>
+    readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  const table = source(
+    "../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx",
+  );
+  const detail = source(
+    "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
+  );
+  const badges = source(
+    "../components/loyalty-base/LoyaltyStatusBadges.tsx",
+  );
+  const legend = source("../components/loyalty-base/LoyaltyStatusLegend.tsx");
+  const filters = source("../components/loyalty-base/LoyaltyFilterPanel.tsx");
+
+  assert.match(table, /<LoyaltyStatusBadges record=\{item\} \/>/);
+  assert.match(detail, /<LoyaltyStatusBadges record=\{record\} \/>/);
+  assert.match(badges, /loyaltyRecordStatuses\(record\)/);
+  assert.match(badges, /loyaltyStatusBadgeColor\(status\)/);
+  assert.match(legend, /loyaltyStatusDotColor\(item\.value\)/);
+  assert.match(legend, /loyaltyStatusLabel\(item\.value\)/);
+  assert.match(filters, /loyaltyStatusLabel\(value\)/);
 });
 
 test("keeps source-reported row metrics separate from exact lifetime metrics", () => {

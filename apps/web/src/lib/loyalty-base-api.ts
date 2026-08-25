@@ -83,6 +83,16 @@ export type LoyaltyAgencyStatus =
   | "DORMANT_PARTNER"
   | "NEW_AGENCY";
 
+/**
+ * Status codes are supplied by the loyalty backend. The named variants keep
+ * the current contract discoverable while the open string member lets the
+ * frontend retain a newer backend code instead of silently dropping it.
+ */
+export type LoyaltyComputedStatus =
+  | LoyaltyBrokerStatus
+  | LoyaltyAgencyStatus
+  | (string & Record<never, never>);
+
 export type LoyaltyDataQuality =
   | "FULL"
   | "NEEDS_COMPLETION"
@@ -324,6 +334,7 @@ export interface LoyaltyRecord {
   city: string;
   geography: string;
   role: string;
+  computedStatuses: LoyaltyComputedStatus[];
   status: string;
   stage: string;
   assignee: string;
@@ -775,6 +786,16 @@ const stringArray = (value: unknown): string[] => {
         .map((item) => item.trim())
         .filter(Boolean)
     : [];
+};
+
+const uniqueTrimmedStrings = (value: unknown): string[] => {
+  const seen = new Set<string>();
+  return stringArray(value).flatMap((item) => {
+    const normalized = item.trim();
+    if (!normalized || seen.has(normalized)) return [];
+    seen.add(normalized);
+    return [normalized];
+  });
 };
 
 const latestDateValue = (...values: unknown[]): string => {
@@ -1432,6 +1453,35 @@ export function normalizeLoyaltyRecord(
   const hasAnnaDetails = Object.values(annaDetails).some(
     (detailValue) => detailValue !== null && detailValue !== "",
   );
+  const legacyStatus = stringValue(
+    pick(
+      item,
+      "computedStatus",
+      "loyaltyStatus",
+      "partnershipLevel",
+      "status",
+      "category",
+    ),
+    stringValue(
+      pick(
+        attributes,
+        "computedStatus",
+        "loyaltyStatus",
+        "partnershipLevel",
+        "status",
+        "category",
+      ),
+      "",
+    ),
+  ).trim();
+  const backendComputedStatuses = uniqueTrimmedStrings(item.computedStatuses);
+  const computedStatuses = (
+    backendComputedStatuses.length
+      ? backendComputedStatuses
+      : legacyStatus
+        ? [legacyStatus]
+        : []
+  ) as LoyaltyComputedStatus[];
 
   return {
     id: stringValue(pick(item, "id", "externalId", "contactId", "uuid")),
@@ -1491,29 +1541,8 @@ export function normalizeLoyaltyRecord(
         booleanValue(item.isCoordinator) === true ? "Координатор" : "",
       ),
     ),
-    status:
-      stringArray(item.computedStatuses)[0] ||
-      stringValue(
-        pick(
-          item,
-          "computedStatus",
-          "loyaltyStatus",
-          "partnershipLevel",
-          "status",
-          "category",
-        ),
-        stringValue(
-          pick(
-            attributes,
-            "computedStatus",
-            "loyaltyStatus",
-            "partnershipLevel",
-            "status",
-            "category",
-          ),
-          "",
-        ),
-      ),
+    computedStatuses,
+    status: computedStatuses[0] || legacyStatus,
     stage: stringValue(
       pick(
         item,

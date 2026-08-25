@@ -83,6 +83,7 @@ import { LoyaltyReconciliationV2 } from "./LoyaltyReconciliationV2";
 import { LoyaltyRecordDrawer } from "./LoyaltyRecordDetailV2";
 import { LoyaltySavedViews } from "./LoyaltySavedViews";
 import { LoyaltyStatusLegend } from "./LoyaltyStatusLegend";
+import { LoyaltyStatusBadges } from "./LoyaltyStatusBadges";
 import { LoyaltySyncPanel } from "./LoyaltySyncPanel";
 
 type ContextKey = `${LoyaltyBaseKey}:${LoyaltyEntityType}`;
@@ -353,36 +354,6 @@ function DataAvailabilityNotice({
   );
 }
 
-const statusColor = (status: string) => {
-  const value = status.toUpperCase();
-  if (/TOP|VIP/.test(value)) return "bg-emerald-100 text-emerald-800";
-  if (/SELL|ПРОДАВ/.test(value)) return "bg-green-100 text-green-800";
-  if (/DORMANT|СПЯЩ/.test(value)) return "bg-red-100 text-red-800";
-  if (/OFFER|ПРЕДЛАГ/.test(value)) return "bg-orange-100 text-orange-800";
-  if (/FIX|ФИКС/.test(value)) return "bg-purple-100 text-purple-800";
-  if (/TOUR|БТ/.test(value)) return "bg-yellow-100 text-yellow-800";
-  return "bg-blue-100 text-blue-800";
-};
-
-const statusLabel = (status: string) =>
-  ({
-    TOP_SELLER: "Топ-продавец",
-    SELLER: "Продавец",
-    OFFERING: "Предлагающий",
-    FIXATING: "Фиксирующий",
-    BROKER_TOUR: "Был на брокер-туре",
-    DORMANT: "Спящий",
-    NEW: "Новый",
-    VIP_PARTNER: "VIP-партнёр",
-    SELLING_PARTNER: "Продающий партнёр",
-    ACTIVE_PARTNER: "Активный партнёр",
-    FIXATING_PARTNER: "Фиксирующий партнёр",
-    WARM_PARTNER: "Тёплый партнёр",
-    STARTING_PARTNER: "Начинающий партнёр",
-    DORMANT_PARTNER: "Спящий партнёр",
-    NEW_AGENCY: "Новое агентство",
-  })[status] || status;
-
 function LoyaltyTable({
   data,
   entityType,
@@ -646,11 +617,7 @@ function LoyaltyTable({
                   </button>
                 </td>
                 <td className="py-3 pr-3">
-                  <span
-                    className={`inline-block rounded-full px-2 py-1 text-xs ${statusColor(item.status)}`}
-                  >
-                    {item.status ? statusLabel(item.status) : "Нет данных"}
-                  </span>
+                  <LoyaltyStatusBadges record={item} />
                   <span className="mt-1 block text-xs text-text-muted">
                     {item.stage || "Нет данных"}
                   </span>

@@ -17,6 +17,7 @@ import type {
   LoyaltyCampaign,
   LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
+import { loyaltyStatusLabel } from "@/lib/loyalty-status";
 
 const BROKER_STAGES = [
   "Новый",
@@ -30,24 +31,24 @@ const BROKER_STAGES = [
 ] as const;
 
 const AGENCY_PARTNERSHIP = [
-  ["VIP_PARTNER", "VIP-партнёр"],
-  ["SELLING_PARTNER", "Продающий партнёр"],
-  ["ACTIVE_PARTNER", "Активный партнёр"],
-  ["FIXATING_PARTNER", "Фиксирующий партнёр"],
-  ["WARM_PARTNER", "Тёплый партнёр"],
-  ["STARTING_PARTNER", "Начинающий партнёр"],
-  ["DORMANT_PARTNER", "Спящий партнёр"],
-  ["NEW_AGENCY", "Новое агентство"],
+  "VIP_PARTNER",
+  "SELLING_PARTNER",
+  "ACTIVE_PARTNER",
+  "FIXATING_PARTNER",
+  "WARM_PARTNER",
+  "STARTING_PARTNER",
+  "DORMANT_PARTNER",
+  "NEW_AGENCY",
 ] as const;
 
 const BROKER_STATUSES = [
-  ["TOP_SELLER", "Топ-продавец"],
-  ["SELLER", "Продавец"],
-  ["OFFERING", "Предлагающий"],
-  ["FIXATING", "Фиксирующий"],
-  ["BROKER_TOUR", "Был на брокер-туре"],
-  ["DORMANT", "Спящий"],
-  ["NEW", "Новый"],
+  "TOP_SELLER",
+  "SELLER",
+  "OFFERING",
+  "FIXATING",
+  "BROKER_TOUR",
+  "DORMANT",
+  "NEW",
 ] as const;
 
 const QUALITY = [
@@ -539,9 +540,9 @@ export function LoyaltyFilterPanel({
               }
             >
               <option value="">Все</option>
-              {statusOptions.map(([value, label]) => (
+              {statusOptions.map((value) => (
                 <option key={value} value={value}>
-                  {label}
+                  {loyaltyStatusLabel(value)}
                 </option>
               ))}
             </select>

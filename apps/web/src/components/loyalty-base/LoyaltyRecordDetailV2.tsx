@@ -69,6 +69,8 @@ import {
   type LoyaltyOperator,
   type LoyaltyTask,
 } from "@/lib/loyalty-workflow-api";
+import { loyaltyStatusLabel } from "@/lib/loyalty-status";
+import { LoyaltyStatusBadges } from "./LoyaltyStatusBadges";
 
 type Tab =
   | "summary"
@@ -100,24 +102,6 @@ const date = (text: string) => {
 const count = (number: number | null) =>
   number === null ? "Нет данных" : number.toLocaleString("ru-RU");
 const text = (value: string) => value || "Нет данных";
-const statusLabel = (value: string) =>
-  ({
-    TOP_SELLER: "Топ-продавец",
-    SELLER: "Продавец",
-    OFFERING: "Предлагающий",
-    FIXATING: "Фиксирующий",
-    BROKER_TOUR: "Был на брокер-туре",
-    DORMANT: "Спящий",
-    NEW: "Новый",
-    VIP_PARTNER: "VIP-партнёр",
-    SELLING_PARTNER: "Продающий партнёр",
-    ACTIVE_PARTNER: "Активный партнёр",
-    FIXATING_PARTNER: "Фиксирующий партнёр",
-    WARM_PARTNER: "Тёплый партнёр",
-    STARTING_PARTNER: "Начинающий партнёр",
-    DORMANT_PARTNER: "Спящий партнёр",
-    NEW_AGENCY: "Новое агентство",
-  })[value] || value;
 const stageLabel = (value: string) =>
   ({
     NEW_BROKER: "Новый",
@@ -300,7 +284,7 @@ function AgencyProfile({ record }: { record: LoyaltyRecord }) {
         {date(details?.specialTermsValidUntil || "")}
       </Metric>
       <Metric label="Уровень партнёрства">
-        {text(statusLabel(details?.partnershipStatus || record.status))}
+        {text(loyaltyStatusLabel(details?.partnershipStatus || record.status))}
       </Metric>
     </dl>
   );
@@ -1876,7 +1860,7 @@ function DetailBody({
         <div className="space-y-4">
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Metric label="Статус / уровень">
-              {text(statusLabel(record.status))}
+              <LoyaltyStatusBadges record={record} />
             </Metric>
             <Metric label="Стадия отношений">
               {text(stageLabel(record.stage))}
