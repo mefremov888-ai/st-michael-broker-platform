@@ -4,27 +4,86 @@ import {
 } from "./client-fixation-safety.service";
 
 class FakeRedis {
-  readonly values = new Map<string, string>();
+  readonly values = new Map<
+    string,
+    { value: string; expiresAt: number | null }
+  >();
   fail = false;
+  now = 0;
+  renewCalls = 0;
+  denyRenewal = false;
+
+  advance(milliseconds: number) {
+    this.now += milliseconds;
+    for (const key of this.values.keys()) this.purgeExpired(key);
+  }
+
+  private purgeExpired(key: string) {
+    const entry = this.values.get(key);
+    if (entry && entry.expiresAt !== null && entry.expiresAt <= this.now) {
+      this.values.delete(key);
+    }
+  }
 
   async get(key: string) {
     if (this.fail) throw new Error("Redis unavailable");
-    return this.values.get(key) ?? null;
+    this.purgeExpired(key);
+    return this.values.get(key)?.value ?? null;
   }
 
   async set(key: string, value: string, ...args: unknown[]) {
     if (this.fail) throw new Error("Redis unavailable");
+    this.purgeExpired(key);
     const nx = args.includes("NX");
     const xx = args.includes("XX");
     if (nx && this.values.has(key)) return null;
     if (xx && !this.values.has(key)) return null;
-    this.values.set(key, value);
+    const pxIndex = args.indexOf("PX");
+    const ttl = pxIndex === -1 ? null : Number(args[pxIndex + 1]);
+    this.values.set(key, {
+      value,
+      expiresAt: ttl === null ? null : this.now + ttl,
+    });
     return "OK";
   }
 
   async del(key: string) {
     if (this.fail) throw new Error("Redis unavailable");
+    this.purgeExpired(key);
     return this.values.delete(key) ? 1 : 0;
+  }
+
+  async eval(script: string, _keyCount: number, key: string, ...args: string[]) {
+    if (this.fail) throw new Error("Redis unavailable");
+    this.purgeExpired(key);
+    const current = this.values.get(key);
+    if (!current) return 0;
+
+    let parsed: { owner?: string };
+    try {
+      parsed = JSON.parse(current.value) as { owner?: string };
+    } catch {
+      return 0;
+    }
+    if (parsed.owner !== args[0]) return 0;
+
+    if (script.includes("client-fixation:compare-owner-set")) {
+      this.values.set(key, {
+        value: args[1],
+        expiresAt: this.now + Number(args[2]),
+      });
+      return 1;
+    }
+    if (script.includes("client-fixation:compare-owner-delete")) {
+      return this.values.delete(key) ? 1 : 0;
+    }
+    if (script.includes("client-fixation:compare-owner-renew")) {
+      this.renewCalls += 1;
+      if (this.denyRenewal) return 0;
+      current.expiresAt = this.now + Number(args[1]);
+      return 1;
+    }
+    throw new Error("Unknown Lua script");
   }
 }
 
@@ -178,6 +237,113 @@ describe("ClientFixationSafetyService", () => {
       },
     );
     expect(amoCreateLead).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an expired owner overwrite or delete replacement semantic and replay leases", async () => {
+    const { redis, service } = createService();
+    const firstResult = deferred<{ id: number }>();
+    const secondResult = deferred<{ id: number }>();
+    const firstEntered = deferred<void>();
+    const secondEntered = deferred<void>();
+    const request = {
+      actorId: "broker-1",
+      payload,
+      idempotencyKey: "b5066154-6973-4730-bc62-d3df0dc85925",
+    };
+    const fingerprint = clientFixationFingerprint(payload);
+    const semanticKey = `client-fixation:semantic:broker-1:${fingerprint}`;
+    const replayKey =
+      "client-fixation:idempotency:broker-1:b5066154-6973-4730-bc62-d3df0dc85925";
+
+    const first = service.execute(request, () => {
+      firstEntered.resolve();
+      return firstResult.promise;
+    });
+    await firstEntered.promise;
+    const firstOwner = JSON.parse((await redis.get(semanticKey))!).owner;
+
+    redis.advance(10 * 60_000 + 1);
+    const second = service.execute(request, () => {
+      secondEntered.resolve();
+      return secondResult.promise;
+    });
+    await secondEntered.promise;
+    const secondOwner = JSON.parse((await redis.get(semanticKey))!).owner;
+    expect(secondOwner).not.toBe(firstOwner);
+
+    await (service as any).releaseOwned(redis, semanticKey, firstOwner);
+    await (service as any).releaseOwned(redis, replayKey, firstOwner);
+    expect(JSON.parse((await redis.get(semanticKey))!).owner).toBe(secondOwner);
+    expect(JSON.parse((await redis.get(replayKey))!).owner).toBe(secondOwner);
+
+    firstResult.resolve({ id: 32310587 });
+    await expect(first).rejects.toMatchObject({ status: 409 });
+    expect(JSON.parse((await redis.get(semanticKey))!).owner).toBe(secondOwner);
+    expect(JSON.parse((await redis.get(replayKey))!).owner).toBe(secondOwner);
+
+    secondResult.resolve({ id: 32310589 });
+    await expect(second).resolves.toEqual({ id: 32310589 });
+    expect(JSON.parse((await redis.get(semanticKey))!).status).toBe(
+      "completed",
+    );
+    expect(JSON.parse((await redis.get(replayKey))!).status).toBe(
+      "completed",
+    );
+  });
+
+  it("renews both owned leases until the external mutation settles", async () => {
+    jest.useFakeTimers();
+    try {
+      const { redis, service } = createService();
+      const releaseAmo = deferred<{ id: number }>();
+      const enteredAmo = deferred<void>();
+      const operation = service.execute(
+        {
+          actorId: "broker-1",
+          payload,
+          idempotencyKey: "b5066154-6973-4730-bc62-d3df0dc85925",
+        },
+        () => {
+          enteredAmo.resolve();
+          return releaseAmo.promise;
+        },
+      );
+      await enteredAmo.promise;
+
+      await jest.advanceTimersByTimeAsync(30_000);
+      expect(redis.renewCalls).toBe(2);
+
+      releaseAmo.resolve({ id: 32310587 });
+      await expect(operation).resolves.toEqual({ id: 32310587 });
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("fails closed when renewal reports that lease ownership was lost", async () => {
+    jest.useFakeTimers();
+    try {
+      const { redis, service } = createService();
+      const releaseAmo = deferred<{ id: number }>();
+      const enteredAmo = deferred<void>();
+      const operation = service.execute(
+        { actorId: "broker-1", payload },
+        () => {
+          enteredAmo.resolve();
+          return releaseAmo.promise;
+        },
+      );
+      await enteredAmo.promise;
+      redis.denyRenewal = true;
+
+      await jest.advanceTimersByTimeAsync(30_000);
+      releaseAmo.resolve({ id: 32310587 });
+
+      await expect(operation).rejects.toMatchObject({ status: 409 });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it("fails closed before amoCRM when Redis is unavailable", async () => {

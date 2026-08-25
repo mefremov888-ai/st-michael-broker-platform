@@ -1,5 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { AdminService } from './admin.service';
+import { AMO_CREATE_RECONCILIATION_REQUIRED_MARKER } from '../common/amo-sync-retry';
 
 describe('AdminService.retryAmoSync', () => {
   function createService(client: any, updateCount = 1) {
@@ -33,6 +34,7 @@ describe('AdminService.retryAmoSync', () => {
         id: client.id,
         amoLeadId: null,
         amoSyncStatus: 'FAILED',
+        amoSyncError: client.amoSyncError,
       },
       data: {
         amoSyncStatus: 'PENDING',
@@ -71,6 +73,27 @@ describe('AdminService.retryAmoSync', () => {
 
     await expect(service.retryAmoSync(client.id)).rejects.toBeInstanceOf(
       ConflictException,
+    );
+    expect(prisma.client.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    `${AMO_CREATE_RECONCILIATION_REQUIRED_MARKER}AMO_NETWORK_ERROR`,
+    'AMO_NETWORK_ERROR',
+    'AMO_TEMPORARY_UNAVAILABLE',
+    'AMO_INVALID_RESPONSE',
+    'AMO_SYNC_FAILED',
+  ])('refuses to clear an unproven create failure: %s', async (amoSyncError) => {
+    const client = {
+      id: 'client-ambiguous-create',
+      amoLeadId: null,
+      amoSyncStatus: 'FAILED',
+      amoSyncError,
+    };
+    const { service, prisma } = createService(client);
+
+    await expect(service.retryAmoSync(client.id)).rejects.toThrow(
+      'сначала найдите возможный лид в amoCRM и привяжите его идентификатор',
     );
     expect(prisma.client.updateMany).not.toHaveBeenCalled();
   });

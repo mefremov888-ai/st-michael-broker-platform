@@ -1,7 +1,11 @@
 import {
+  AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
   AMO_UNIQUENESS_RECHECK_MARKER,
+  isSafeAmoCreateRetry,
+  markAmoCreateFailure,
   publicAmoSyncError,
   requeueAmoAuthDeadLetters,
+  requiresAmoCreateReconciliation,
   sanitizeAmoSyncError,
 } from './amo-sync-retry';
 
@@ -33,6 +37,31 @@ describe('amo sync retry safety', () => {
     expect(publicAmoSyncError('AMO_TEMPORARY_UNAVAILABLE')).toBe(
       'amoCRM временно недоступна.',
     );
+  });
+
+  it.each([
+    new Error('fetch failed after timeout'),
+    new Error('amoCRM 503 unavailable'),
+    new Error('amoCRM did not return a lead id'),
+    new Error('unexpected adapter failure'),
+  ])('marks an ambiguous create response for manual reconciliation', (error) => {
+    const stored = markAmoCreateFailure(error);
+
+    expect(stored.startsWith(AMO_CREATE_RECONCILIATION_REQUIRED_MARKER)).toBe(true);
+    expect(requiresAmoCreateReconciliation(stored)).toBe(true);
+    expect(isSafeAmoCreateRetry(stored)).toBe(false);
+    expect(publicAmoSyncError(stored)).toBe(
+      'Ответ amoCRM неоднозначен. Автоповтор заблокирован до ручной сверки.',
+    );
+  });
+
+  it.each([
+    ['amoCRM 401 Unauthorized', 'AMO_AUTH_401'],
+    ['amoCRM 403 Forbidden', 'AMO_FORBIDDEN_403'],
+    ['amoCRM 429 rate limit', 'AMO_RATE_LIMIT_429'],
+  ])('keeps a definite rejected create eligible for the existing retry policy', (raw, code) => {
+    expect(markAmoCreateFailure(new Error(raw))).toBe(code);
+    expect(isSafeAmoCreateRetry(code)).toBe(true);
   });
 
   it('requeues only exhausted auth failures with no recorded amo lead', async () => {

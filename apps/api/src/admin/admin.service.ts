@@ -44,6 +44,7 @@ import { MangoCallSafetyService } from '../common/mango-call-safety.service';
 import type { BrokerCallResultCode } from './admin-mango.dto';
 import {
   AMO_UNIQUENESS_RECHECK_MARKER,
+  isSafeAmoCreateRetry,
   publicAmoSyncError,
   requeueAmoAuthDeadLetters,
 } from '../common/amo-sync-retry';
@@ -1952,6 +1953,21 @@ export class AdminService {
     if (client.amoSyncStatus === 'SYNCED') {
       return { ok: true, queued: false, message: 'Заявка уже синхронизирована' };
     }
+    const existingError = String(client.amoSyncError || '');
+    const preserveUniquenessMarker = existingError.startsWith(
+      AMO_UNIQUENESS_RECHECK_MARKER,
+    );
+    const failureToClassify = existingError
+      || (client.amoSyncStatus === 'FAILED' ? 'AMO_SYNC_FAILED' : '');
+    if (
+      !preserveUniquenessMarker
+      && failureToClassify
+      && !isSafeAmoCreateRetry(failureToClassify)
+    ) {
+      throw new ConflictException(
+        'Ответ amoCRM неоднозначен: сначала найдите возможный лид в amoCRM и привяжите его идентификатор; повтор создания заблокирован',
+      );
+    }
     if (client.amoSyncStatus === 'PENDING') {
       return { ok: true, queued: false, message: 'Заявка уже находится в очереди' };
     }
@@ -1961,14 +1977,12 @@ export class AdminService {
       );
     }
 
-    const preserveUniquenessMarker = String(client.amoSyncError || '').startsWith(
-      AMO_UNIQUENESS_RECHECK_MARKER,
-    );
     const updated = await this.prisma.client.updateMany({
       where: {
         id: clientId,
         amoLeadId: null,
         amoSyncStatus: 'FAILED',
+        amoSyncError: client.amoSyncError,
       },
       data: {
         amoSyncStatus: 'PENDING',

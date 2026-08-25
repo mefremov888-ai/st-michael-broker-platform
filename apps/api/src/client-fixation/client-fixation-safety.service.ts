@@ -6,14 +6,44 @@ import {
 } from "@nestjs/common";
 import { InjectQueue } from "@nestjs/bull";
 import type { Queue } from "bull";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 const PROCESSING_TTL_MS = 10 * 60_000;
 const COMPLETED_TTL_MS = 5 * 60_000;
+const LEASE_RENEW_INTERVAL_MS = 30_000;
+
+const COMPARE_OWNER_SET_SCRIPT = [
+  "-- client-fixation:compare-owner-set",
+  "local raw = redis.call('GET', KEYS[1])",
+  "if not raw then return 0 end",
+  "local ok, current = pcall(cjson.decode, raw)",
+  "if not ok or current.owner ~= ARGV[1] then return 0 end",
+  "redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])",
+  "return 1",
+].join("\n");
+
+const COMPARE_OWNER_DELETE_SCRIPT = [
+  "-- client-fixation:compare-owner-delete",
+  "local raw = redis.call('GET', KEYS[1])",
+  "if not raw then return 0 end",
+  "local ok, current = pcall(cjson.decode, raw)",
+  "if not ok or current.owner ~= ARGV[1] then return 0 end",
+  "return redis.call('DEL', KEYS[1])",
+].join("\n");
+
+const COMPARE_OWNER_RENEW_SCRIPT = [
+  "-- client-fixation:compare-owner-renew",
+  "local raw = redis.call('GET', KEYS[1])",
+  "if not raw then return 0 end",
+  "local ok, current = pcall(cjson.decode, raw)",
+  "if not ok or current.owner ~= ARGV[1] then return 0 end",
+  "return redis.call('PEXPIRE', KEYS[1], ARGV[2])",
+].join("\n");
 
 type StoredFixation<T = unknown> = {
   fingerprint: string;
   status: "processing" | "completed" | "uncertain";
+  owner?: string;
   result?: T;
 };
 
@@ -84,9 +114,11 @@ export class ClientFixationSafetyService {
     const replayKey = idempotencyKey
       ? `client-fixation:idempotency:${request.actorId}:${idempotencyKey}`
       : null;
+    const owner = randomUUID();
     const processing = this.serialize({
       fingerprint,
       status: "processing",
+      owner,
     } satisfies StoredFixation);
     let ownsReplay = false;
     let ownsSemantic = false;
@@ -125,6 +157,7 @@ export class ClientFixationSafetyService {
             await this.cacheCompleted(
               redis,
               replayKey,
+              owner,
               fingerprint,
               stored.result,
             );
@@ -132,7 +165,7 @@ export class ClientFixationSafetyService {
           return stored.result as T;
         }
         if (replayKey && ownsReplay) {
-          await this.safeDelete(redis, replayKey);
+          await this.releaseOwned(redis, replayKey, owner);
           ownsReplay = false;
         }
         throw this.processingConflict(stored.status);
@@ -154,6 +187,7 @@ export class ClientFixationSafetyService {
               await this.cacheCompleted(
                 redis,
                 replayKey,
+                owner,
                 fingerprint,
                 stored.result,
               );
@@ -161,7 +195,7 @@ export class ClientFixationSafetyService {
             return stored.result as T;
           }
           if (replayKey && ownsReplay) {
-            await this.safeDelete(redis, replayKey);
+            await this.releaseOwned(redis, replayKey, owner);
             ownsReplay = false;
           }
           throw this.processingConflict(stored.status);
@@ -172,28 +206,62 @@ export class ClientFixationSafetyService {
       }
       ownsSemantic = true;
     } catch (error) {
-      if (ownsSemantic) await this.safeDelete(redis, semanticKey);
-      if (ownsReplay) await this.safeDelete(redis, replayKey!);
+      if (ownsSemantic) await this.releaseOwned(redis, semanticKey, owner);
+      if (ownsReplay) await this.releaseOwned(redis, replayKey!, owner);
       if (error instanceof ConflictException) throw error;
       throw new ServiceUnavailableException(
         "Защита от повторной фиксации временно недоступна",
       );
     }
 
+    const lease = this.startLeaseRenewal(
+      redis,
+      replayKey ? [semanticKey, replayKey] : [semanticKey],
+      owner,
+    );
     try {
       const result = await action();
-      await this.cacheCompleted(redis, semanticKey, fingerprint, result);
+      await lease.stop();
+      if (lease.hasLostOwnership()) {
+        throw new ConflictException(
+          "Защита фиксации потеряла владение запросом; результат требует сверки, повтор заблокирован",
+        );
+      }
+      const semanticCached = await this.cacheCompleted(
+        redis,
+        semanticKey,
+        owner,
+        fingerprint,
+        result,
+      );
+      let replayCached = true;
       if (replayKey) {
-        await this.cacheCompleted(redis, replayKey, fingerprint, result);
+        replayCached = await this.cacheCompleted(
+          redis,
+          replayKey,
+          owner,
+          fingerprint,
+          result,
+        );
+      }
+      if (!semanticCached || !replayCached) {
+        throw new ConflictException(
+          "Результат фиксации не удалось безопасно закэшировать; повтор заблокирован до сверки",
+        );
       }
       return result;
     } catch (error) {
+      await lease.stop();
       // The failure can happen after amoCRM accepted POST /leads. Keep a
       // bounded fail-closed marker instead of releasing the lock and turning
       // an ambiguous response into a second lead on retry.
-      await this.markUncertain(redis, semanticKey, fingerprint);
-      if (replayKey) await this.markUncertain(redis, replayKey, fingerprint);
+      await this.markUncertain(redis, semanticKey, owner, fingerprint);
+      if (replayKey) {
+        await this.markUncertain(redis, replayKey, owner, fingerprint);
+      }
       throw error;
+    } finally {
+      await lease.stop();
     }
   }
 
@@ -240,51 +308,58 @@ export class ClientFixationSafetyService {
   private async cacheCompleted<T>(
     redis: any,
     key: string,
+    owner: string,
     fingerprint: string,
     result: T,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
-      const cached = await redis.set(
+      const cached = await this.compareOwnerSet(
+        redis,
         key,
+        owner,
         this.serialize({
           fingerprint,
           status: "completed",
           result,
         } satisfies StoredFixation<T>),
-        "PX",
         COMPLETED_TTL_MS,
-        "XX",
       );
-      if (cached !== "OK") {
+      if (!cached) {
         this.logger.error(
-          "Client fixation guard expired before the result could be cached",
+          "Client fixation lease was lost before the result could be cached",
         );
       }
+      return cached;
     } catch (error: any) {
-      // The external mutation may already exist. Returning an error here
-      // would encourage another POST, so preserve the original response.
       this.logger.error(
         `Failed to cache client fixation result: ${error?.message || error}`,
       );
+      return false;
     }
   }
 
   private async markUncertain(
     redis: any,
     key: string,
+    owner: string,
     fingerprint: string,
   ): Promise<void> {
     try {
-      await redis.set(
+      const preserved = await this.compareOwnerSet(
+        redis,
         key,
+        owner,
         this.serialize({
           fingerprint,
           status: "uncertain",
         } satisfies StoredFixation),
-        "PX",
         PROCESSING_TTL_MS,
-        "XX",
       );
+      if (!preserved) {
+        this.logger.error(
+          "Client fixation lease was lost before ambiguity could be recorded",
+        );
+      }
     } catch (error: any) {
       this.logger.error(
         `Failed to preserve ambiguous client fixation guard: ${error?.message || error}`,
@@ -298,9 +373,96 @@ export class ClientFixationSafetyService {
     );
   }
 
-  private async safeDelete(redis: any, key: string): Promise<void> {
+  private startLeaseRenewal(
+    redis: any,
+    keys: string[],
+    owner: string,
+  ): {
+    hasLostOwnership: () => boolean;
+    stop: () => Promise<void>;
+  } {
+    let stopped = false;
+    let lostOwnership = false;
+    let inFlight = Promise.resolve();
+    const renew = async () => {
+      if (stopped) return;
+      try {
+        const renewed = await Promise.all(
+          keys.map((key) => this.renewOwned(redis, key, owner)),
+        );
+        if (renewed.some((owned) => !owned)) {
+          lostOwnership = true;
+          this.logger.error(
+            "Client fixation lease ownership was lost during renewal",
+          );
+        }
+      } catch (error: any) {
+        lostOwnership = true;
+        this.logger.error(
+          `Failed to renew client fixation lease: ${error?.message || error}`,
+        );
+      }
+    };
+    const timer = setInterval(() => {
+      inFlight = inFlight.then(renew, renew);
+    }, LEASE_RENEW_INTERVAL_MS);
+    timer.unref?.();
+    return {
+      hasLostOwnership: () => lostOwnership,
+      stop: async () => {
+        stopped = true;
+        clearInterval(timer);
+        await inFlight;
+      },
+    };
+  }
+
+  private async compareOwnerSet(
+    redis: any,
+    key: string,
+    owner: string,
+    value: string,
+    ttlMs: number,
+  ): Promise<boolean> {
+    return (
+      Number(
+        await redis.eval(
+          COMPARE_OWNER_SET_SCRIPT,
+          1,
+          key,
+          owner,
+          value,
+          String(ttlMs),
+        ),
+      ) === 1
+    );
+  }
+
+  private async renewOwned(
+    redis: any,
+    key: string,
+    owner: string,
+  ): Promise<boolean> {
+    return (
+      Number(
+        await redis.eval(
+          COMPARE_OWNER_RENEW_SCRIPT,
+          1,
+          key,
+          owner,
+          String(PROCESSING_TTL_MS),
+        ),
+      ) === 1
+    );
+  }
+
+  private async releaseOwned(
+    redis: any,
+    key: string,
+    owner: string,
+  ): Promise<void> {
     try {
-      await redis.del(key);
+      await redis.eval(COMPARE_OWNER_DELETE_SCRIPT, 1, key, owner);
     } catch (error: any) {
       this.logger.error(
         `Failed to release client fixation guard: ${error?.message || error}`,
