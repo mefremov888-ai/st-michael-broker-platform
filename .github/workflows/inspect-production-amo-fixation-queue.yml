@@ -1,0 +1,168 @@
+name: Inspect production amo fixation queue (PII-safe read-only)
+
+# Manual inspection of FAILED/PENDING fixation delivery rows. The reviewed
+# inspector source is streamed from the exact workflow SHA, so this diagnostic
+# does not require rebuilding the currently deployed application image.
+# It emits aggregate counts and per-run pseudonymous HMAC aliases only. The script
+# performs one exact read-only-mode SELECT plus one Prisma findMany SELECT and
+# never calls amoCRM.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect aggregate amo queue state
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    steps:
+      - name: Checkout exact inspector source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate canonical production request and inspect queue
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ github.sha }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          HEALTH_URL: https://broker.stmichael.ru/api/health
+          GH_TOKEN: ${{ github.token }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Inspector is restricted to the canonical repository"; exit 1; }
+          test "$EXPECTED_REF" = "refs/heads/master" || { echo "Inspector is restricted to master"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid inspector SHA"; exit 1; }
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          inspector_path=scripts/inspect-amo-fixation-queue.js
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || { echo "Checked-out inspector source is not the dispatched exact SHA"; exit 1; }
+          test -f "$inspector_path" -a ! -L "$inspector_path" || { echo "Inspector source is missing or unsafe"; exit 1; }
+          inspector_sha=$(sha256sum -- "$inspector_path" | awk '{print $1}')
+          [[ "$inspector_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
+
+          for required_tool in curl gh jq; do
+            command -v "$required_tool" >/dev/null || { echo "Required source-attestation tool is missing"; exit 1; }
+          done
+          health_body=$(curl --fail --silent --show-error --max-time 15 --proto '=https' --tlsv1.2 "$HEALTH_URL")
+          deployed_sha=$(printf '%s' "$health_body" | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')
+          unset health_body
+          [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Public production health did not attest a valid deployed SHA"; exit 1; }
+          compare_status=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$EXPECTED_SHA" \
+            --jq '.status')
+          case "$compare_status" in
+            ahead|identical) ;;
+            *) echo "Public production SHA is not a canonical ancestor of exact master source"; exit 1;;
+          esac
+          unset compare_status GH_TOKEN
+
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          # Send the guard program and the base64 payload through the same
+          # fingerprint-pinned SSH stdin. The delimiter contains characters
+          # outside the base64 alphabet, so source bytes cannot terminate it.
+          {
+            cat <<'REMOTE_PREFIX'
+          set -euo pipefail
+          export LC_ALL=C
+          deploy_path=$1
+          expected_script_sha=$2
+          expected_deployed_sha=$3
+          canonical_origin=https://github.com/sereganikitin/st-michael-broker-platform.git
+
+          for required_tool in base64 docker flock git readlink; do
+            command -v "$required_tool" >/dev/null || { echo "Required inspector tool is missing"; exit 1; }
+          done
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$expected_script_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
+          [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid expected production SHA"; exit 1; }
+
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing absolute non-root directory"; exit 1; }
+
+          test -f /tmp/st-michael-production-deploy.lock -a ! -L /tmp/st-michael-production-deploy.lock || { echo "Production deploy lock is missing or unsafe"; exit 1; }
+          exec 9</tmp/st-michael-production-deploy.lock
+          flock -s -n 9 || { echo "A production deploy or migration holds the server lock"; exit 1; }
+
+          cd -- "$deploy_root"
+          test "$(git rev-parse --show-toplevel 2>/dev/null)" = "$deploy_root" || { echo "Deploy path is not the repository root"; exit 1; }
+          test "$(git remote get-url origin)" = "$canonical_origin" || { echo "Production origin is not canonical"; exit 1; }
+          test "$(git symbolic-ref --short HEAD 2>/dev/null)" = "master" || { echo "Production checkout is not on master"; exit 1; }
+          production_sha=$(git rev-parse HEAD)
+          [[ "$production_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid production checkout SHA"; exit 1; }
+          test "$production_sha" = "$expected_deployed_sha" || { echo "Production checkout differs from public health attestation"; exit 1; }
+          test "$(git rev-parse refs/heads/master)" = "$production_sha" || { echo "Production master and checkout differ"; exit 1; }
+
+          test "$(docker inspect --format '{{.State.Running}}' st-michael-api 2>/dev/null)" = "true" || { echo "Production API container is not running"; exit 1; }
+          test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' st-michael-api 2>/dev/null)" = "api" || { echo "Unexpected production API container"; exit 1; }
+          container_sha=$(docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')
+          test "$container_sha" = "$production_sha" || { echo "Production API image and checkout differ"; exit 1; }
+
+          # Only the temporary script inside the API container is writable.
+          # Its hash is checked before execution and the EXIT trap removes it.
+          base64 -d <<'PII_SAFE_INSPECTOR_PAYLOAD' | docker exec -i st-michael-api sh -c '
+            set -eu
+            expected_script_sha=$1
+            case "$expected_script_sha" in ""|*[!0-9a-f]*) exit 1;; esac
+            test "${#expected_script_sha}" -eq 64
+            for required_tool in mktemp node rm sha256sum; do
+              command -v "$required_tool" >/dev/null || exit 1
+            done
+            umask 077
+            inspector=$(mktemp /app/scripts/.inspect-amo-fixation-queue.XXXXXX.js)
+            cleanup() { rm -f -- "$inspector"; }
+            trap cleanup EXIT HUP INT TERM
+            cat > "$inspector"
+            actual_script_sha=$(sha256sum "$inspector")
+            actual_script_sha=${actual_script_sha%% *}
+            test "$actual_script_sha" = "$expected_script_sha"
+            node "$inspector"
+          ' inspector "$expected_script_sha"
+          REMOTE_PREFIX
+            base64 -w 0 -- "$inspector_path"
+            printf '\nPII_SAFE_INSPECTOR_PAYLOAD\n'
+          } | timeout --foreground 4m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$inspector_sha' '$deployed_sha'"
