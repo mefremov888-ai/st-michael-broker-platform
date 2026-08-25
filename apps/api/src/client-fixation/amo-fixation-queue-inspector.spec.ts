@@ -323,6 +323,11 @@ describe("PII-safe amo fixation queue inspector", () => {
     expect(workflow).toContain("ahead|identical) ;;");
     expect(workflow).toContain("unset health_body");
     expect(workflow).toContain("unset compare_status GH_TOKEN");
+    expect(workflow).toContain("runner_temp=${RUNNER_TEMP:-/tmp}");
+    expect(workflow).toContain(
+      'mktemp -d "$runner_temp/st-michael-amo-queue-inspector.XXXXXX"',
+    );
+    expect(workflow).not.toContain("ssh_root=$(mktemp -d)\n");
     expect(workflow).toContain("expected_deployed_sha=$3");
     expect(workflow).toContain(
       'test "$production_sha" = "$expected_deployed_sha"',

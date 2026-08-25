@@ -82,7 +82,9 @@ jobs:
           esac
           unset compare_status GH_TOKEN
 
-          ssh_root=$(mktemp -d)
+          runner_temp=${RUNNER_TEMP:-/tmp}
+          test -d "$runner_temp" -a ! -L "$runner_temp" || { echo "Runner temp directory is missing or unsafe"; exit 1; }
+          ssh_root=$(mktemp -d "$runner_temp/st-michael-amo-queue-inspector.XXXXXX")
           known_hosts="$ssh_root/known_hosts"
           private_key="$ssh_root/deploy-key"
           trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
