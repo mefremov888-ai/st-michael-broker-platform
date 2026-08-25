@@ -212,11 +212,15 @@ jobs:
           echo "Exact-SHA successful rehearsal attestation is current (${rehearsal_age_seconds}s old)."
 
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
-        # 2026-05-27 fix: env-секция обязательна, иначе envs: передаёт пустоту.
+        shell: bash
         # 2026-06-05: добавлены AMO_CLIENT_ID / AMO_CLIENT_SECRET / AMO_REFRESH_TOKEN —
         # нужны для авто-refresh access_token (см. PR #82).
         env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
           AMO_ACCESS_TOKEN: ${{ secrets.AMO_ACCESS_TOKEN }}
           AMO_CLIENT_ID: ${{ secrets.AMO_CLIENT_ID }}
           AMO_CLIENT_SECRET: ${{ secrets.AMO_CLIENT_SECRET }}
@@ -257,21 +261,57 @@ jobs:
           PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
           PRODUCTION_COMPOSE_OVERRIDE_SHA256: ${{ vars.PRODUCTION_COMPOSE_OVERRIDE_SHA256 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.DEPLOY_PORT || 22 }}
-          fingerprint: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
-          script_stop: true
-          command_timeout: 75m
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid EXPECTED_DEPLOY_SHA"; exit 1; }
+          [[ "$ATTESTED_BACKUP_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid attested backup run id"; exit 1; }
+          [[ "$ATTESTED_BACKUP_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid attested backup run attempt"; exit 1; }
+          [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]] || { echo "Production database identity variable is missing or invalid"; exit 1; }
+          [[ "$PRODUCTION_MIN_BROKER_ROWS" =~ ^[1-9][0-9]*$ ]] || { echo "Production broker-row floor is missing or invalid"; exit 1; }
+          [[ "$PRODUCTION_COMPOSE_OVERRIDE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Production compose override SHA-256 variable is missing or invalid"; exit 1; }
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
           # AMO_* из GH secrets автоматически в .env на сервере.
           # Чтобы обновить токен: gh secret set AMO_* ... + push.
           # ВАЖНО: refresh_token ротируется на каждом использовании.
           # На сервере приоритет у БД (SystemSetting) — деплой пишет в .env
           # как fallback. См. apps/api/src/common/amo-token-bootstrap.service.ts.
-          envs: AMO_ACCESS_TOKEN,AMO_CLIENT_ID,AMO_CLIENT_SECRET,AMO_REFRESH_TOKEN,MANGO_API_KEY,MANGO_API_SALT,MANGO_API_URL,MANGO_CALLBACK_URL,MANGO_OUTBOUND_LINE,SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,SMTP_FROM,SMTP_SECURE,DADATA_API_KEY,ANTHROPIC_API_KEY,GOOGLE_SERVICE_ACCOUNT_JSON,TELEGRAM_BOT_TOKEN,OPS_TELEGRAM_BOT_TOKEN,OPS_ALERT_CHAT_ID,OPS_ALERT_CHAT_IDS,EXPECTED_DEPLOY_SHA,ATTESTED_BACKUP_RUN_ID,ATTESTED_BACKUP_RUN_ATTEMPT,PRODUCTION_PG_SYSTEM_IDENTIFIER,PRODUCTION_MIN_BROKER_ROWS,PRODUCTION_COMPOSE_OVERRIDE_SHA256,DEPLOY_PATH
-          script: |
+          # Значения (включая многострочный Google JSON) сериализуются Bash %q
+          # только в зашифрованный stdin SSH и не попадают в argv процесса.
+          forwarded_names=(
+            AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN
+            MANGO_API_KEY MANGO_API_SALT MANGO_API_URL MANGO_CALLBACK_URL MANGO_OUTBOUND_LINE
+            SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE
+            DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON
+            TELEGRAM_BOT_TOKEN OPS_TELEGRAM_BOT_TOKEN OPS_ALERT_CHAT_ID OPS_ALERT_CHAT_IDS
+            EXPECTED_DEPLOY_SHA ATTESTED_BACKUP_RUN_ID ATTESTED_BACKUP_RUN_ATTEMPT
+            PRODUCTION_PG_SYSTEM_IDENTIFIER PRODUCTION_MIN_BROKER_ROWS
+            PRODUCTION_COMPOSE_OVERRIDE_SHA256 DEPLOY_PATH
+          )
+          {
+            for forwarded_name in "${forwarded_names[@]}"; do
+              printf 'export %s=%q\n' "$forwarded_name" "${!forwarded_name}"
+            done
+            cat <<'REMOTE'
             set -euo pipefail
             cd "$DEPLOY_PATH"
             command -v git >/dev/null
@@ -352,6 +392,13 @@ jobs:
             echo "=== Запуск reviewed deploy-update.sh exact SHA ==="
             DEPLOY_REPO_DIR="$PWD" DEPLOY_LOCK_HELD=1 bash "$TRUSTED_DEPLOY_SCRIPT"
             echo "=== Деплой завершён успешно ==="
+          REMOTE
+          } | timeout --foreground 75m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s'
 
   # 2026-08-20: `deploy` тихо пропускается на каждом обычном push (by design —
   # confirm_production не выставлен). Раньше это никак не было видно: весь

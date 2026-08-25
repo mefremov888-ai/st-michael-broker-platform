@@ -59,7 +59,7 @@ describe("loyalty production workflow safety", () => {
     }
   });
 
-  it("pins the production ED25519 host fingerprint for deploy and rehearsal", () => {
+  it("pins every mutating release SSH connection to the verified ED25519 key", () => {
     for (const workflow of [
       deployWorkflow,
       rehearsalWorkflow,
@@ -70,9 +70,17 @@ describe("loyalty production workflow safety", () => {
         "EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}",
       );
       expect(workflow).toContain(
-        "fingerprint: ${{ vars.DEPLOY_HOST_FINGERPRINT }}",
+        'ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST"',
       );
+      expect(workflow).toContain(
+        'test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT"',
+      );
+      expect(workflow).toContain("-o HostKeyAlgorithms=ssh-ed25519");
+      expect(workflow).toContain("-o StrictHostKeyChecking=yes");
+      expect(workflow).toContain('-o UserKnownHostsFile="$known_hosts"');
       expect(workflow).toContain("^SHA256:[A-Za-z0-9+/]{43}$");
+      expect(workflow).not.toContain("appleboy/ssh-action");
+      expect(workflow).not.toContain("fingerprint:");
       expect(workflow).not.toContain('echo "$EXPECTED_SSH_FINGERPRINT"');
     }
     expect(rehearsalWorkflow).toContain("group: production-deploy");
@@ -80,6 +88,65 @@ describe("loyalty production workflow safety", () => {
       "DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}",
     );
     expect(rehearsalWorkflow).not.toContain('cd "${{ secrets.DEPLOY_PATH }}"');
+  });
+
+  it("streams only the reviewed deploy environment allowlist through encrypted stdin", () => {
+    const allowlistStart = deployWorkflow.indexOf("forwarded_names=(");
+    const allowlistEnd = deployWorkflow.indexOf(
+      "\n          )",
+      allowlistStart,
+    );
+    const forwardedNames = deployWorkflow
+      .slice(allowlistStart + "forwarded_names=(".length, allowlistEnd)
+      .match(/[A-Z][A-Z0-9_]*/g);
+    const sshPipeStart = deployWorkflow.indexOf(
+      "} | timeout --foreground 75m ssh -T",
+      allowlistEnd,
+    );
+    const sshPipeEnd = deployWorkflow.indexOf("'bash -s'", sshPipeStart);
+    const sshCommand = deployWorkflow.slice(sshPipeStart, sshPipeEnd);
+
+    expect(forwardedNames).toEqual([
+      "AMO_ACCESS_TOKEN",
+      "AMO_CLIENT_ID",
+      "AMO_CLIENT_SECRET",
+      "AMO_REFRESH_TOKEN",
+      "MANGO_API_KEY",
+      "MANGO_API_SALT",
+      "MANGO_API_URL",
+      "MANGO_CALLBACK_URL",
+      "MANGO_OUTBOUND_LINE",
+      "SMTP_HOST",
+      "SMTP_PORT",
+      "SMTP_USER",
+      "SMTP_PASS",
+      "SMTP_FROM",
+      "SMTP_SECURE",
+      "DADATA_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GOOGLE_SERVICE_ACCOUNT_JSON",
+      "TELEGRAM_BOT_TOKEN",
+      "OPS_TELEGRAM_BOT_TOKEN",
+      "OPS_ALERT_CHAT_ID",
+      "OPS_ALERT_CHAT_IDS",
+      "EXPECTED_DEPLOY_SHA",
+      "ATTESTED_BACKUP_RUN_ID",
+      "ATTESTED_BACKUP_RUN_ATTEMPT",
+      "PRODUCTION_PG_SYSTEM_IDENTIFIER",
+      "PRODUCTION_MIN_BROKER_ROWS",
+      "PRODUCTION_COMPOSE_OVERRIDE_SHA256",
+      "DEPLOY_PATH",
+    ]);
+    expect(deployWorkflow).toContain(
+      'printf \'export %s=%q\\n\' "$forwarded_name" "${!forwarded_name}"',
+    );
+    expect(deployWorkflow).toContain("cat <<'REMOTE'");
+    expect(sshPipeStart).toBeGreaterThan(allowlistEnd);
+    expect(sshPipeEnd).toBeGreaterThan(sshPipeStart);
+    expect(sshCommand).not.toMatch(
+      /AMO_|MANGO_|SMTP_|DADATA_|ANTHROPIC_|GOOGLE_|TELEGRAM_/,
+    );
+    expect(deployWorkflow).not.toContain("SendEnv");
   });
 
   it("requires a fresh successful exact-SHA rehearsal before manual deploy", () => {
@@ -92,9 +159,9 @@ describe("loyalty production workflow safety", () => {
     expect(rehearsalWorkflow).toContain(
       "EXPECTED_REHEARSAL_SHA: ${{ github.sha }}",
     );
-    expect(rehearsalWorkflow).toContain(
-      "envs: DEPLOY_PATH,EXPECTED_REHEARSAL_SHA",
-    );
+    expect(rehearsalWorkflow).toContain("DEPLOY_PATH=$1");
+    expect(rehearsalWorkflow).toContain("EXPECTED_REHEARSAL_SHA=$2");
+    expect(rehearsalWorkflow).toContain("<<'REMOTE'");
     expect(rehearsalWorkflow).toContain(
       'if [ "$TRUSTED_REHEARSAL_SHA" != "$EXPECTED_REHEARSAL_SHA" ]; then',
     );
@@ -293,7 +360,7 @@ describe("loyalty production workflow safety", () => {
     );
     const sshDeploy = deployWorkflow.indexOf("      - name: Deploy via SSH");
     const sshDeployScript = deployWorkflow.indexOf(
-      "\n          script: |",
+      "\n        run: |",
       sshDeploy,
     );
     const sshDeployHeader = deployWorkflow.slice(sshDeploy, sshDeployScript);
@@ -494,7 +561,8 @@ describe("loyalty production workflow safety", () => {
       .map((line) => line.trim())
       .filter((line) => /\bdocker\s+\S+\s+prune\b/.test(line));
     const dockerCommandLines = remoteLines.filter(
-      (line) => /\bdocker\s+/.test(line) && !line.startsWith("for required_tool"),
+      (line) =>
+        /\bdocker\s+/.test(line) && !line.startsWith("for required_tool"),
     );
     const parsedWorkflow = parse(buildCacheReclaimWorkflow) as {
       jobs: Record<string, { steps: unknown[] }>;
@@ -555,9 +623,9 @@ describe("loyalty production workflow safety", () => {
     expect(Object.keys(parsedWorkflow.jobs)).toEqual(["reclaim"]);
     expect(parsedWorkflow.jobs.reclaim.steps).toHaveLength(1);
     expect(buildCacheReclaimWorkflow.match(/<<'REMOTE'/g)).toHaveLength(1);
-    expect(buildCacheReclaimWorkflow.match(/ssh -i "\$private_key"/g)).toHaveLength(
-      1,
-    );
+    expect(
+      buildCacheReclaimWorkflow.match(/ssh -i "\$private_key"/g),
+    ).toHaveLength(1);
     expect(remoteStart).toBeGreaterThan(-1);
     expect(remoteEnd).toBeGreaterThan(remoteStart);
     expect(remoteBody).toContain("MIN_AVAILABLE_BYTES=8589934592");
@@ -566,7 +634,7 @@ describe("loyalty production workflow safety", () => {
       "CANONICAL_REPOSITORY_URL=https://github.com/sereganikitin/st-michael-broker-platform.git",
     );
     expect(remoteBody).toContain(
-      "git ls-remote --exit-code \"$CANONICAL_REPOSITORY_URL\" refs/heads/master",
+      'git ls-remote --exit-code "$CANONICAL_REPOSITORY_URL" refs/heads/master',
     );
     expect(remoteBody).toContain(
       'test "$canonical_sha_before" = "$expected_cleanup_sha"',
@@ -595,16 +663,16 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain('test -z "${DOCKER_HOST:-}"');
     expect(remoteBody).toContain('test "$(docker context show)" = "default"');
     expect(remoteBody).toContain("BACKUP_PARENT=/var/backups/stmichael");
-    expect(remoteBody).toContain(
-      "BACKUP_DIR=$BACKUP_PARENT/loyalty-predeploy",
-    );
+    expect(remoteBody).toContain("BACKUP_DIR=$BACKUP_PARENT/loyalty-predeploy");
     expect(remoteBody).toContain('test ! -L "$BACKUP_PARENT"');
     expect(remoteBody).toContain('test ! -L "$BACKUP_DIR"');
     expect(remoteBody).toContain('available_bytes "$backup_storage_path"');
     expect(remoteBody).toContain(
       'git -C "$deploy_root" status --porcelain=v1 --untracked-files=all',
     );
-    expect(remoteBody).toContain('test "$containers_after" = "$containers_before"');
+    expect(remoteBody).toContain(
+      'test "$containers_after" = "$containers_before"',
+    );
     expect(remoteBody).toContain('test "$running_after" = "$running_before"');
     expect(remoteBody).toContain(
       'test "$tagged_images_after" = "$tagged_images_before"',
@@ -629,9 +697,9 @@ describe("loyalty production workflow safety", () => {
     expect(fingerprintsAfter).toBeGreaterThan(databaseChecks[1]);
     expect(finalThreshold).toBeGreaterThan(fingerprintsAfter);
     expect(pruneLines).toEqual(["docker builder prune --all --force"]);
-    expect(remoteBody.match(/docker builder prune --all --force/g)).toHaveLength(
-      1,
-    );
+    expect(
+      remoteBody.match(/docker builder prune --all --force/g),
+    ).toHaveLength(1);
     expect(remoteBody).not.toMatch(
       /docker\s+(?:system|image|volume|container|network|buildx)\s+prune|docker(?:-compose|\s+compose)|\bdocker\s+(?:rm|rmi|start|stop|restart|kill|run|build|pull|push)\b/,
     );
@@ -648,13 +716,13 @@ describe("loyalty production workflow safety", () => {
       "done < <(docker volume ls -q | sort)",
       "docker network inspect --format '{{.Id}}|{{.Name}}|{{.Driver}}|{{.Scope}}|{{.Internal}}|{{.Attachable}}|{{json .Options}}|{{json .Labels}}' \"$network_id\"",
       "done < <(docker network ls -q --no-trunc | sort)",
-      "test \"$(docker inspect --format '{{.State.Running}}' st-michael-postgres 2>/dev/null)\" = \"true\" || { echo \"Production PostgreSQL container is not running\"; exit 1; }",
+      'test "$(docker inspect --format \'{{.State.Running}}\' st-michael-postgres 2>/dev/null)" = "true" || { echo "Production PostgreSQL container is not running"; exit 1; }',
       "docker exec st-michael-postgres pg_isready -U postgres -d broker_platform >/dev/null",
-      "actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT current_database()\")",
-      "actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT system_identifier FROM pg_control_system()\")",
-      "broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT COUNT(*) FROM public.brokers\")",
-      "database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT pg_database_size(current_database())\")",
-      "test \"$(docker context show)\" = \"default\" || { echo \"Docker default context is not active\"; exit 1; }",
+      'actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT current_database()")',
+      'actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT system_identifier FROM pg_control_system()")',
+      'broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT COUNT(*) FROM public.brokers")',
+      'database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT pg_database_size(current_database())")',
+      'test "$(docker context show)" = "default" || { echo "Docker default context is not active"; exit 1; }',
       "docker_endpoint=$(docker context inspect default --format '{{.Endpoints.docker.Host}}')",
       "docker_root_reported=$(docker info --format '{{.DockerRootDir}}')",
       "docker system df",
@@ -664,20 +732,22 @@ describe("loyalty production workflow safety", () => {
     expect(
       remoteLines.filter((line) => />/.test(line.replaceAll("<none>", ""))),
     ).toEqual([
-      "command -v \"$required_tool\" >/dev/null || { echo \"Required cleanup tool is missing\"; exit 1; }",
+      'command -v "$required_tool" >/dev/null || { echo "Required cleanup tool is missing"; exit 1; }',
       "exec 9>/tmp/st-michael-production-deploy.lock",
-      "test \"$(docker inspect --format '{{.State.Running}}' st-michael-postgres 2>/dev/null)\" = \"true\" || { echo \"Production PostgreSQL container is not running\"; exit 1; }",
+      'test "$(docker inspect --format \'{{.State.Running}}\' st-michael-postgres 2>/dev/null)" = "true" || { echo "Production PostgreSQL container is not running"; exit 1; }',
       "docker exec st-michael-postgres pg_isready -U postgres -d broker_platform >/dev/null",
-      "echo \"Builder cache was the only approved target, but the backup reserve is still insufficient\" >&2",
+      'echo "Builder cache was the only approved target, but the backup reserve is still insufficient" >&2',
     ]);
     expect(remoteBody.match(/docker system df/g)).toHaveLength(2);
-    expect(remoteBody.match(/docker exec st-michael-postgres/g)).toHaveLength(5);
-    expect(remoteBody).toContain('SELECT current_database()');
-    expect(remoteBody).toContain(
-      'SELECT system_identifier FROM pg_control_system()',
+    expect(remoteBody.match(/docker exec st-michael-postgres/g)).toHaveLength(
+      5,
     );
-    expect(remoteBody).toContain('SELECT COUNT(*) FROM public.brokers');
-    expect(remoteBody).toContain('SELECT pg_database_size(current_database())');
+    expect(remoteBody).toContain("SELECT current_database()");
+    expect(remoteBody).toContain(
+      "SELECT system_identifier FROM pg_control_system()",
+    );
+    expect(remoteBody).toContain("SELECT COUNT(*) FROM public.brokers");
+    expect(remoteBody).toContain("SELECT pg_database_size(current_database())");
   });
 
   it("creates a fresh exact-SHA DB backup without retention or service changes", () => {
@@ -694,12 +764,13 @@ describe("loyalty production workflow safety", () => {
       "      - name: Create and fully decode-verify server-local backup",
     );
     const sshStepScript = backupWorkflow.indexOf(
-      "\n          script: |",
+      "\n        run: |",
       sshStepStart,
     );
     const sshStepHeader = backupWorkflow.slice(sshStepStart, sshStepScript);
-    const remoteStart = backupWorkflow.lastIndexOf("          script: |");
-    const remoteBody = backupWorkflow.slice(remoteStart);
+    const remoteStart = backupWorkflow.indexOf("<<'REMOTE'", sshStepStart);
+    const remoteEnd = backupWorkflow.indexOf("\n          REMOTE", remoteStart);
+    const remoteBody = backupWorkflow.slice(remoteStart, remoteEnd);
     const lock = remoteBody.indexOf(
       "exec 8>/tmp/st-michael-production-deploy.lock",
     );
@@ -757,12 +828,15 @@ describe("loyalty production workflow safety", () => {
     );
     expect(backupWorkflow).toContain("EXPECTED_BACKUP_SHA: ${{ github.sha }}");
     expect(backupWorkflow).toContain(
-      "appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262",
+      'ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST"',
     );
     expect(backupWorkflow).toContain(
-      "fingerprint: ${{ vars.DEPLOY_HOST_FINGERPRINT }}",
+      'test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT"',
     );
-    expect(backupWorkflow).toContain("script_stop: true");
+    expect(backupWorkflow).toContain("-o HostKeyAlgorithms=ssh-ed25519");
+    expect(backupWorkflow).not.toContain("appleboy/ssh-action");
+    expect(remoteStart).toBeGreaterThan(sshStepStart);
+    expect(remoteEnd).toBeGreaterThan(remoteStart);
     expect(remoteBody).toContain(
       'test "$trusted_backup_sha" = "$EXPECTED_BACKUP_SHA"',
     );
