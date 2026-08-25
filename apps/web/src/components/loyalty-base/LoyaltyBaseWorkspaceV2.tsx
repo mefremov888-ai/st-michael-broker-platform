@@ -57,8 +57,11 @@ import {
 } from "@/lib/loyalty-base-api";
 import {
   emptyLoyaltyFilters,
+  formatLoyaltyMetricExplanation,
+  loyaltyMetricPeriodLabel,
   toCanonicalFilter,
   type LoyaltyFilterFormState,
+  type LoyaltyMetricExplanation,
 } from "@/lib/loyalty-ui-model";
 import {
   addLoyaltyContact,
@@ -151,6 +154,8 @@ function KpiCard({
   period,
   source,
   exactness,
+  includedSemantics,
+  excludedSemantics,
   icon: Icon,
   onClick,
   loading,
@@ -162,11 +167,20 @@ function KpiCard({
   period: string;
   source: string;
   exactness: string;
+  includedSemantics?: string;
+  excludedSemantics?: string;
   icon: typeof Users;
   onClick?: () => void;
   loading: boolean;
 }) {
-  const tooltip = `Формула: ${formula}\nПериод: ${period}\nИсточник: ${source}\nТочность: ${exactness}`;
+  const tooltip = formatLoyaltyMetricExplanation({
+    formula,
+    period,
+    source,
+    exactness,
+    includedSemantics,
+    excludedSemantics,
+  });
   return (
     <button
       type="button"
@@ -204,27 +218,55 @@ function Metric({
   label,
   children,
   onClick,
+  explanation,
 }: {
   label: string;
   children: ReactNode;
   onClick?: () => void;
+  explanation?: LoyaltyMetricExplanation;
 }) {
+  const tooltip = explanation
+    ? formatLoyaltyMetricExplanation(explanation)
+    : "";
+  const content = (
+    <>
+      <span className="flex items-start justify-between gap-2 text-xs text-text-muted">
+        <span>{label}</span>
+        {tooltip && (
+          <Info className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        )}
+      </span>
+      <span className="mt-1 block font-semibold break-words">{children}</span>
+      {tooltip && (
+        <span
+          role="tooltip"
+          className="pointer-events-none invisible absolute left-2 right-2 top-[calc(100%-0.25rem)] z-40 whitespace-pre-line rounded-lg bg-text p-3 text-xs font-normal leading-relaxed text-surface opacity-0 shadow-xl group-hover:visible group-hover:opacity-100 group-focus-visible:visible group-focus-visible:opacity-100"
+        >
+          {tooltip}
+        </span>
+      )}
+    </>
+  );
   if (onClick)
     return (
       <button
         type="button"
-        className="rounded-xl border border-border p-3 text-left transition hover:border-accent/50 hover:bg-accent/5"
+        className="group relative rounded-xl border border-border p-3 text-left transition hover:border-accent/50 hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         onClick={onClick}
-        aria-label={`${label}: открыть детализацию`}
+        title={tooltip || undefined}
+        aria-label={`${label}: открыть детализацию${tooltip ? `. ${tooltip}` : ""}`}
       >
-        <span className="block text-xs text-text-muted">{label}</span>
-        <span className="mt-1 block font-semibold break-words">{children}</span>
+        {content}
       </button>
     );
   return (
-    <div className="rounded-xl border border-border p-3">
-      <dt className="text-xs text-text-muted">{label}</dt>
-      <dd className="mt-1 font-semibold break-words">{children}</dd>
+    <div
+      className="group relative rounded-xl border border-border p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      title={tooltip || undefined}
+      tabIndex={tooltip ? 0 : undefined}
+      aria-label={tooltip ? `${label}. ${tooltip}` : undefined}
+    >
+      {content}
     </div>
   );
 }
@@ -262,6 +304,8 @@ const availabilityValue = (key: string, value: unknown) => {
       "месяц из источника или последняя известная дата",
     UNAVAILABLE_FOR_AGENCY: "недоступен для агентств",
     EXACT_DEALS_ONLY: "точны только подтверждённые сделки",
+    SOURCE_DECLARED: "заявлено в исходном срезе, не подтверждено событиями",
+    UNKNOWN: "точность источником не подтверждена",
     UNAVAILABLE: "недоступен",
   };
   return labels[String(value)] || String(value || "Нет данных");
@@ -1210,6 +1254,44 @@ export function LoyaltyBaseWorkspaceV2() {
           : () => openPeriodRanking("agencies"),
     },
   ];
+  const metricExplanation = (
+    key: string,
+    fallbackFormula: string,
+    options: {
+      period?: string;
+      periodFilterApplied?: boolean | null;
+      source?: string;
+      exactness?: string;
+    } = {},
+  ): LoyaltyMetricExplanation => {
+    const methodology = overview?.kpiMetadata[key];
+    const technicalFormula = methodology?.formula.trim();
+    const rawExactness =
+      methodology?.exactness || options.exactness || exactness;
+    return {
+      formula:
+        technicalFormula && technicalFormula !== fallbackFormula
+          ? `${fallbackFormula}\nТехническое правило: ${technicalFormula}`
+          : fallbackFormula,
+      period: loyaltyMetricPeriodLabel(
+        options.period || ratingLabel,
+        methodology?.periodFilterApplied ?? options.periodFilterApplied,
+      ),
+      source: methodology?.source || options.source || source,
+      exactness: availabilityValue("exactness", rawExactness),
+      includedSemantics: methodology?.includedSemantics || undefined,
+      excludedSemantics: methodology?.excludedSemantics || undefined,
+    };
+  };
+  const sourceReportedExplanation = (key: string, fallbackFormula: string) =>
+    metricExplanation(key, fallbackFormula, {
+      periodFilterApplied: false,
+      source: sourceReported?.label || "Срез Анны",
+      exactness:
+        sourceReported?.exactness.join(", ") ||
+        sourceReported?.confirmationStatus ||
+        "Не подтверждено событиями",
+    });
   const exportCsv = async () => {
     setExporting(true);
     setActionError("");
@@ -1635,6 +1717,8 @@ export function LoyaltyBaseWorkspaceV2() {
                       ? "Нет событий для подтверждения точности"
                       : methodology?.exactness || exactness
                   }
+                  includedSemantics={methodology?.includedSemantics}
+                  excludedSemantics={methodology?.excludedSemantics}
                   loading={overviewLoading}
                 />
               );
@@ -1659,24 +1743,40 @@ export function LoyaltyBaseWorkspaceV2() {
               <Metric
                 label="Фиксации"
                 onClick={() => openActivityDrilldown("fixations")}
+                explanation={metricExplanation(
+                  "activities.fixations",
+                  "Количество подтверждённых фиксаций за выбранный период",
+                )}
               >
                 {number(overview?.activities.fixations ?? null)}
               </Metric>
               <Metric
                 label="Встречи"
                 onClick={() => openActivityDrilldown("meetings")}
+                explanation={metricExplanation(
+                  "activities.meetings",
+                  "Количество подтверждённых встреч за выбранный период",
+                )}
               >
                 {number(overview?.activities.meetings ?? null)}
               </Metric>
               <Metric
                 label="Сделки"
                 onClick={() => openActivityDrilldown("deals")}
+                explanation={metricExplanation(
+                  "activities.deals",
+                  "Количество подтверждённых сделок за выбранный период",
+                )}
               >
                 {number(overview?.activities.deals ?? null)}
               </Metric>
               <Metric
                 label="Сумма ДДУ"
                 onClick={() => openActivityDrilldown("dealAmount")}
+                explanation={metricExplanation(
+                  "dealAmount",
+                  "Сумма подтверждённых ДДУ за выбранный период",
+                )}
               >
                 {money(overview?.dealAmount ?? null)}
               </Metric>
@@ -1711,10 +1811,10 @@ export function LoyaltyBaseWorkspaceV2() {
               <div className="mt-3 grid gap-3 xl:grid-cols-2">
                 {(
                   [
-                    ["Брокеры", sourceReported.brokers],
-                    ["Агентства", sourceReported.agencies],
+                    ["Брокеры", "brokers", sourceReported.brokers],
+                    ["Агентства", "agencies", sourceReported.agencies],
                   ] as const
-                ).map(([label, group]) => (
+                ).map(([label, groupKey, group]) => (
                   <article
                     className="rounded-xl border border-border bg-surface p-3"
                     key={label}
@@ -1728,31 +1828,55 @@ export function LoyaltyBaseWorkspaceV2() {
                     <dl className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                       <Metric
                         label={`Фиксации · известно у ${group.fixationKnownRecords}`}
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.fixations`,
+                          `Сумма заявленных фиксаций по ${label.toLowerCase()}, у которых значение известно`,
+                        )}
                       >
                         {number(group.fixations)}
                       </Metric>
                       <Metric
                         label={`Встречи · известно у ${group.meetingKnownRecords}`}
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.meetings`,
+                          `Сумма заявленных встреч по ${label.toLowerCase()}, у которых значение известно`,
+                        )}
                       >
                         {number(group.meetings)}
                       </Metric>
                       <Metric
                         label={`Сделки · известно у ${group.dealKnownRecords}`}
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.deals`,
+                          `Сумма заявленных сделок по ${label.toLowerCase()}, у которых значение известно`,
+                        )}
                       >
                         {number(group.deals)}
                       </Metric>
                       <Metric
                         label={`БТ · известно у ${group.brokerTourKnownRecords}`}
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.brokerTours`,
+                          `Сумма заявленных посещений БТ по ${label.toLowerCase()}, у которых значение известно`,
+                        )}
                       >
                         {number(group.brokerTours)}
                       </Metric>
                       <Metric
                         label={`Звонки · известно у ${group.callKnownRecords}`}
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.calls`,
+                          `Сумма заявленных звонков по ${label.toLowerCase()}, у которых значение известно`,
+                        )}
                       >
                         {number(group.calls)}
                       </Metric>
                       <Metric
                         label={`Сумма ДДУ · известно у ${group.dealAmountKnownRecords}`}
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.dealAmount`,
+                          `Сумма заявленных ДДУ по ${label.toLowerCase()}, у которых значение известно`,
+                        )}
                       >
                         {money(group.dealAmount)}
                       </Metric>
@@ -1761,30 +1885,51 @@ export function LoyaltyBaseWorkspaceV2() {
                       <dl className="mt-2 grid gap-2 sm:grid-cols-3">
                         <Metric
                           label={`Не звонили · известно у ${sourceReported.brokers.notCalledKnownCount}`}
+                          explanation={sourceReportedExplanation(
+                            "sourceReportedSummary.brokers.notCalledCurrentMonth",
+                            "Количество брокеров с известной датой последнего звонка раньше текущего московского месяца",
+                          )}
                         >
                           {number(sourceReported.brokers.notCalledCurrentMonth)}
                         </Metric>
-                        <Metric label="Новые брокеры">
+                        <Metric
+                          label="Новые брокеры"
+                          explanation={sourceReportedExplanation(
+                            "sourceReportedSummary.brokers.newCount",
+                            "Количество брокеров на явной стадии «Новый» с явно нулевыми БТ, фиксациями, встречами и сделками",
+                          )}
+                        >
                           {number(sourceReported.brokers.newCount)}
                         </Metric>
-                        <Metric label="БТ без фиксации">
+                        <Metric
+                          label="БТ без фиксации"
+                          explanation={sourceReportedExplanation(
+                            "sourceReportedSummary.brokers.btWithoutFixation",
+                            "Количество брокеров с явно подтверждённым БТ и явно нулевым числом фиксаций",
+                          )}
+                        >
                           {number(sourceReported.brokers.btWithoutFixation)}
                         </Metric>
                       </dl>
                     )}
-                    <div className="mt-2 rounded-lg bg-surface-secondary p-3 text-sm">
-                      <span className="text-xs text-text-muted">
-                        Лидер исходного среза
-                      </span>
-                      <b className="mt-1 block">
-                        {group.top?.name || "Нет данных"}
-                      </b>
-                      {group.top && (
-                        <span className="text-xs text-text-muted">
-                          {group.top.deals.toLocaleString("ru-RU")} сделок ·{" "}
-                          {money(group.top.dealAmount)}
+                    <div className="mt-2">
+                      <Metric
+                        label="Лидер исходного среза"
+                        explanation={sourceReportedExplanation(
+                          `sourceReportedSummary.${groupKey}.top`,
+                          `Лидер среди ${label.toLowerCase()}: сначала по заявленным сделкам, затем по заявленной сумме`,
+                        )}
+                      >
+                        <span className="block">
+                          {group.top?.name || "Нет данных"}
                         </span>
-                      )}
+                        {group.top && (
+                          <span className="block text-xs font-normal text-text-muted">
+                            {group.top.deals.toLocaleString("ru-RU")} сделок ·{" "}
+                            {money(group.top.dealAmount)}
+                          </span>
+                        )}
+                      </Metric>
                     </div>
                   </article>
                 ))}
