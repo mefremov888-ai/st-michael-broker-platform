@@ -76,13 +76,28 @@ function stableJson(value: unknown): string {
   return JSON.stringify(String(value));
 }
 
-/**
- * PII-free semantic identity for a parsed fixation request. Object key order
- * does not affect the digest, while confirmDuplicate remains part of it so
- * the explicitly confirmed operation is not mistaken for the first check.
- */
+/** Exact, PII-free identity used for UUID replay/conflict detection. */
 export function clientFixationFingerprint(payload: unknown): string {
   return createHash("sha256").update(stableJson(payload)).digest("hex");
+}
+
+/**
+ * Global business identity used for the distributed single-writer lock.
+ * amoCRM uniqueness is phone-based, so every simultaneous submission for one
+ * canonical phone must share a writer regardless of actor, project, agency,
+ * presentation fields, or the obsolete confirmDuplicate flag. The stored
+ * exact request fingerprint includes actorId, preventing a completed response
+ * from ever being replayed into another cabinet.
+ */
+export function clientFixationSemanticFingerprint(payload: unknown): string {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return clientFixationFingerprint(payload);
+  }
+
+  const parsed = payload as Record<string, unknown>;
+  return clientFixationFingerprint({
+    phone: typeof parsed.phone === "string" ? parsed.phone.trim() : parsed.phone,
+  });
 }
 
 /**
@@ -108,8 +123,14 @@ export class ClientFixationSafetyService {
     action: () => Promise<T>,
   ): Promise<T> {
     const redis = this.queue.client as any;
-    const fingerprint = clientFixationFingerprint(request.payload);
-    const semanticKey = `client-fixation:semantic:${request.actorId}:${fingerprint}`;
+    const fingerprint = clientFixationFingerprint({
+      actorId: request.actorId,
+      payload: request.payload,
+    });
+    const semanticFingerprint = clientFixationSemanticFingerprint(
+      request.payload,
+    );
+    const semanticKey = `client-fixation:semantic:${semanticFingerprint}`;
     const idempotencyKey = request.idempotencyKey?.trim();
     const replayKey = idempotencyKey
       ? `client-fixation:idempotency:${request.actorId}:${idempotencyKey}`

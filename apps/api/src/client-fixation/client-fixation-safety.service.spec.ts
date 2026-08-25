@@ -1,6 +1,7 @@
 import {
   ClientFixationSafetyService,
   clientFixationFingerprint,
+  clientFixationSemanticFingerprint,
 } from "./client-fixation-safety.service";
 
 class FakeRedis {
@@ -125,6 +126,27 @@ describe("ClientFixationSafetyService", () => {
     expect(left).not.toContain(payload.phone);
   });
 
+  it("uses canonical phone for the global semantic lock", () => {
+    const base = clientFixationSemanticFingerprint(payload);
+    const changedPresentation = clientFixationSemanticFingerprint({
+      ...payload,
+      fullName: "Другое написание имени",
+      comment: "Изменённый комментарий",
+      amount: 18_000_000,
+      project: "MOMENTS",
+      agencyInn: "7800000000",
+      responsibleBrokerId: "a6019ff9-7cc4-45d4-b13e-6678e0bf0f55",
+      confirmDuplicate: true,
+    });
+    const changedPhone = clientFixationSemanticFingerprint({
+      ...payload,
+      phone: "+79990000002",
+    });
+
+    expect(changedPresentation).toBe(base);
+    expect(changedPhone).not.toBe(base);
+  });
+
   it("allows only one amo lead for two parallel identical legacy requests", async () => {
     const { service } = createService();
     const releaseAmo = deferred<{ id: number }>();
@@ -175,6 +197,74 @@ describe("ClientFixationSafetyService", () => {
     releaseAmo.resolve({ id: 32310587 });
     await expect(first).resolves.toEqual({ id: 32310587 });
     expect(amoCreateLead).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks parallel variations of the same business fixation", async () => {
+    const { service } = createService();
+    const releaseAmo = deferred<{ id: number }>();
+    const enteredAmo = deferred<void>();
+    const amoCreateLead = jest.fn(() => {
+      enteredAmo.resolve();
+      return releaseAmo.promise;
+    });
+
+    const first = service.execute(
+      {
+        actorId: "broker-1",
+        payload,
+        idempotencyKey: "b5066154-6973-4730-bc62-d3df0dc85925",
+      },
+      amoCreateLead,
+    );
+    await enteredAmo.promise;
+    const second = service.execute(
+      {
+        actorId: "broker-1",
+        payload: {
+          ...payload,
+          fullName: "Другое написание имени",
+          comment: "Изменённый комментарий",
+          project: "MOMENTS",
+          agencyInn: "7800000000",
+          confirmDuplicate: true,
+        },
+        idempotencyKey: "7c5ae5b9-33b7-4420-98d7-a562edda3731",
+      },
+      amoCreateLead,
+    );
+
+    await expect(second).rejects.toMatchObject({ status: 409 });
+    releaseAmo.resolve({ id: 32310587 });
+    await expect(first).resolves.toEqual({ id: 32310587 });
+    expect(amoCreateLead).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes the same phone globally without replaying another actor result", async () => {
+    const { service } = createService();
+    const releaseAmo = deferred<{ id: number }>();
+    const enteredAmo = deferred<void>();
+    const firstAction = jest.fn(() => {
+      enteredAmo.resolve();
+      return releaseAmo.promise;
+    });
+    const secondAction = jest.fn().mockResolvedValue({ id: 32310589 });
+
+    const first = service.execute(
+      { actorId: "broker-1", payload },
+      firstAction,
+    );
+    await enteredAmo.promise;
+    await expect(
+      service.execute({ actorId: "broker-2", payload }, secondAction),
+    ).rejects.toMatchObject({ status: 409 });
+
+    releaseAmo.resolve({ id: 32310587 });
+    await expect(first).resolves.toEqual({ id: 32310587 });
+    await expect(
+      service.execute({ actorId: "broker-2", payload }, secondAction),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(firstAction).toHaveBeenCalledTimes(1);
+    expect(secondAction).not.toHaveBeenCalled();
   });
 
   it("replays a completed response for the same UUID without another amo lead", async () => {
@@ -250,8 +340,8 @@ describe("ClientFixationSafetyService", () => {
       payload,
       idempotencyKey: "b5066154-6973-4730-bc62-d3df0dc85925",
     };
-    const fingerprint = clientFixationFingerprint(payload);
-    const semanticKey = `client-fixation:semantic:broker-1:${fingerprint}`;
+    const semanticFingerprint = clientFixationSemanticFingerprint(payload);
+    const semanticKey = `client-fixation:semantic:${semanticFingerprint}`;
     const replayKey =
       "client-fixation:idempotency:broker-1:b5066154-6973-4730-bc62-d3df0dc85925";
 
@@ -357,7 +447,7 @@ describe("ClientFixationSafetyService", () => {
     expect(amoCreateLead).not.toHaveBeenCalled();
   });
 
-  it("treats confirmDuplicate as a distinct explicit operation", () => {
+  it("keeps confirmDuplicate distinct in the exact UUID fingerprint", () => {
     expect(clientFixationFingerprint(payload)).not.toBe(
       clientFixationFingerprint({ ...payload, confirmDuplicate: true }),
     );
