@@ -865,6 +865,25 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain(
       '[[ "$target_api_id" =~ ^sha256:[0-9a-f]{64}$ ]]',
     );
+    expect(remoteBody).toContain("image_has_prefix()");
+    expect(remoteBody).toContain(
+      "NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e)",
+    );
+    expect(remoteBody).not.toContain("e40d1ed4639f");
+    expect(remoteBody).toContain(
+      'test "${image_id:7:12}" = "$expected_prefix"',
+    );
+    for (const prefixCheck of [
+      'image_has_prefix "$target_api_id" "$TARGET_API_PREFIX"',
+      'image_has_prefix "$target_web_id" "$TARGET_WEB_PREFIX"',
+      'image_has_prefix "$newer_api_id" "${NEWER_API_PREFIXES[$newer_index]}"',
+      'image_has_prefix "$newer_web_id" "${NEWER_WEB_PREFIXES[$newer_index]}"',
+    ]) {
+      expect(remoteBody).toContain(prefixCheck);
+    }
+    expect(remoteBody).not.toMatch(
+      /\[\[ "\$(?:target|newer)_(?:api|web)_id" == "sha256:/,
+    );
     expect(remoteBody).toContain(
       'test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id"',
     );
