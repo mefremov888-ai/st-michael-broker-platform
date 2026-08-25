@@ -54,6 +54,10 @@ export const refreshTokenDtoSchema = z.object({
 
 // Client fixation schemas
 export const fixClientDtoSchema = z.object({
+  // Optional for backward compatibility. New clients reuse this UUID when a
+  // response is lost; the API also protects legacy/different-key double posts
+  // with a semantic Redis fingerprint.
+  idempotencyKey: z.string().uuid().optional(),
   phone: phoneSchema,
   fullName: z.string().min(2, 'Full name too short'),
   // 2026-07-02: allow пустая строка / пробелы — фронт иногда шлёт "" когда

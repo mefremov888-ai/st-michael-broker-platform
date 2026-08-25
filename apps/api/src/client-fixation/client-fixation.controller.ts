@@ -14,13 +14,17 @@ import {
 } from '@st-michael/shared';
 import { UserRole, UniquenessStatus, Project } from '@st-michael/shared';
 import { FixationFailureInterceptor } from './fixation-failure.interceptor';
+import { ClientFixationSafetyService } from './client-fixation-safety.service';
 
 @ApiTags('clients')
 @Controller('clients')
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class ClientFixationController {
-  constructor(private readonly clientFixationService: ClientFixationService) {}
+  constructor(
+    private readonly clientFixationService: ClientFixationService,
+    private readonly fixationSafety: ClientFixationSafetyService,
+  ) {}
 
   @Post('import')
   @UseInterceptors(FileInterceptor('file'))
@@ -41,7 +45,15 @@ export class ClientFixationController {
   @ApiResponse({ status: 201, description: 'Client fixed successfully' })
   async fixClient(@CurrentUser() user: CurrentUserPayload, @Body() body: unknown) {
     const data = fixClientDtoSchema.parse(body) as any;
-    return this.clientFixationService.fixClient(user.id, data);
+    const { idempotencyKey, ...fixation } = data;
+    return this.fixationSafety.execute(
+      {
+        actorId: user.id,
+        payload: fixation,
+        idempotencyKey,
+      },
+      () => this.clientFixationService.fixClient(user.id, fixation),
+    );
   }
 
   // 2026-06-19: список коллег по агентству — для координаторов в форме фиксации,
