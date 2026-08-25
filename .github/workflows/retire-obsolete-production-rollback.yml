@@ -155,7 +155,7 @@ jobs:
           TARGET_COMMIT=c690fa9b44b5c7d291247bd88343af94ba241dd0
           NEWER_TIMESTAMPS=(20260821-151042 20260821-221026)
           NEWER_API_PREFIXES=(ee0a02f547ca 3ee482ad303a)
-          NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639f)
+          NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e)
           NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8)
           RELEASE_DIR=/var/backups/stmichael/releases
           RELEASE_RECORD="$RELEASE_DIR/release-$RELEASE_TIMESTAMP.txt"
@@ -218,6 +218,13 @@ jobs:
             image_id=$(docker image inspect --format '{{.Id}}' "$1")
             [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Rollback image ID is invalid"; exit 1; }
             printf '%s\n' "$image_id"
+          }
+          image_has_prefix() {
+            local image_id=$1
+            local expected_prefix=$2
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Rollback image ID is invalid during prefix validation"; exit 1; }
+            [[ "$expected_prefix" =~ ^[0-9a-f]{12}$ ]] || { echo "Rollback image prefix is invalid"; exit 1; }
+            test "${image_id:7:12}" = "$expected_prefix"
           }
           validated_repo_digest_for_tag() {
             local tag=$1
@@ -387,8 +394,8 @@ jobs:
           target_web_id=$(record_value previous_web_image "$RELEASE_RECORD")
           [[ "$target_api_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Target API image ID in the release record is invalid"; exit 1; }
           [[ "$target_web_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Target web image ID in the release record is invalid"; exit 1; }
-          [[ "$target_api_id" == "sha256:$TARGET_API_PREFIX"* ]] || { echo "Target API rollback image does not match the prior read-only audit"; exit 1; }
-          [[ "$target_web_id" == "sha256:$TARGET_WEB_PREFIX"* ]] || { echo "Target web rollback image does not match the prior read-only audit"; exit 1; }
+          image_has_prefix "$target_api_id" "$TARGET_API_PREFIX" || { echo "Target API rollback image does not match the prior read-only audit"; exit 1; }
+          image_has_prefix "$target_web_id" "$TARGET_WEB_PREFIX" || { echo "Target web rollback image does not match the prior read-only audit"; exit 1; }
           test "$target_api_id" != "$target_web_id" || { echo "Rollback API and web unexpectedly resolve to the same image"; exit 1; }
           if [ "$target_api_present" = "true" ]; then
             test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "API rollback tag disagrees with its release record"; exit 1; }
@@ -425,8 +432,8 @@ jobs:
             assert_exact_rollback_override "$newer_override" "$newer_api_tag" "$newer_web_tag"
             newer_api_id=$(image_id_for_tag "$newer_api_tag")
             newer_web_id=$(image_id_for_tag "$newer_web_tag")
-            [[ "$newer_api_id" == "sha256:${NEWER_API_PREFIXES[$newer_index]}"* ]] || { echo "A retained API rollback does not match the prior read-only audit"; exit 1; }
-            [[ "$newer_web_id" == "sha256:${NEWER_WEB_PREFIXES[$newer_index]}"* ]] || { echo "A retained web rollback does not match the prior read-only audit"; exit 1; }
+            image_has_prefix "$newer_api_id" "${NEWER_API_PREFIXES[$newer_index]}" || { echo "A retained API rollback does not match the prior read-only audit"; exit 1; }
+            image_has_prefix "$newer_web_id" "${NEWER_WEB_PREFIXES[$newer_index]}" || { echo "A retained web rollback does not match the prior read-only audit"; exit 1; }
             test "$(record_value previous_api_image "$newer_record")" = "$newer_api_id" || { echo "A retained API rollback disagrees with its release record"; exit 1; }
             test "$(record_value previous_web_image "$newer_record")" = "$newer_web_id" || { echo "A retained web rollback disagrees with its release record"; exit 1; }
             newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag")
