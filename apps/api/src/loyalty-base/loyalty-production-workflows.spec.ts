@@ -17,6 +17,9 @@ describe("loyalty production workflow safety", () => {
   const diskReclaimWorkflow = readRepositoryFile(
     ".github/workflows/reclaim-production-disk-no-restart.yml",
   );
+  const buildCacheReclaimWorkflow = readRepositoryFile(
+    ".github/workflows/reclaim-production-build-cache-no-restart.yml",
+  );
   const backupWorkflow = readRepositoryFile(
     ".github/workflows/backup-production-loyalty-predeploy.yml",
   );
@@ -473,6 +476,208 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain('echo "cleanup_threshold_satisfied=false"');
     expect(remoteBody).toContain('echo "cleanup_threshold_satisfied=true"');
     expect(remoteBody).not.toContain("|| true");
+  });
+
+  it("reclaims only reproducible Docker build cache without restarting production", () => {
+    const remoteStart = buildCacheReclaimWorkflow.indexOf("<<'REMOTE'");
+    const remoteEnd = buildCacheReclaimWorkflow.indexOf(
+      "\n          REMOTE",
+      remoteStart,
+    );
+    const remoteBody = buildCacheReclaimWorkflow.slice(remoteStart, remoteEnd);
+    const remoteLines = remoteBody
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const pruneLines = remoteBody
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /\bdocker\s+\S+\s+prune\b/.test(line));
+    const dockerCommandLines = remoteLines.filter(
+      (line) => /\bdocker\s+/.test(line) && !line.startsWith("for required_tool"),
+    );
+    const parsedWorkflow = parse(buildCacheReclaimWorkflow) as {
+      jobs: Record<string, { steps: unknown[] }>;
+    };
+    const databaseChecks = Array.from(
+      remoteBody.matchAll(/\n\s*assert_database\r?\n/g),
+      (match) => match.index,
+    );
+    const lock = remoteBody.indexOf(
+      "exec 9>/tmp/st-michael-production-deploy.lock",
+    );
+    const canonicalPrecheck = remoteBody.indexOf(
+      "canonical_sha_before=$(canonical_master_sha)",
+    );
+    const fingerprintsBefore = remoteBody.indexOf(
+      "containers_before=$(container_inventory | inventory_hash)",
+    );
+    const canonicalRecheck = remoteBody.indexOf(
+      "canonical_sha_at_prune=$(canonical_master_sha)",
+    );
+    const builderPrune = remoteBody.indexOf(
+      "docker builder prune --all --force",
+    );
+    const fingerprintsAfter = remoteBody.indexOf(
+      "containers_after=$(container_inventory | inventory_hash)",
+    );
+    const finalThreshold = remoteBody.indexOf(
+      'if [ "$root_after" -lt "$required_backup_bytes_after" ]',
+    );
+
+    expect(buildCacheReclaimWorkflow).toContain("workflow_dispatch:");
+    expect(buildCacheReclaimWorkflow).toContain("confirm_cleanup:");
+    expect(buildCacheReclaimWorkflow).toContain("required: true");
+    expect(buildCacheReclaimWorkflow).toContain("default: false");
+    expect(buildCacheReclaimWorkflow).toContain("type: boolean");
+    expect(buildCacheReclaimWorkflow).toContain(
+      "CONFIRM_CLEANUP: ${{ inputs.confirm_cleanup }}",
+    );
+    expect(buildCacheReclaimWorkflow).toContain(
+      'test "$CONFIRM_CLEANUP" = "true"',
+    );
+    expect(buildCacheReclaimWorkflow).toContain(
+      'test "$EXPECTED_REF" = "refs/heads/master"',
+    );
+    expect(buildCacheReclaimWorkflow).toContain(
+      "EXPECTED_CLEANUP_SHA: ${{ github.sha }}",
+    );
+    expect(buildCacheReclaimWorkflow).toContain(
+      "EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}",
+    );
+    expect(buildCacheReclaimWorkflow).toContain(
+      'test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT"',
+    );
+    expect(buildCacheReclaimWorkflow).toContain("group: production-deploy");
+    expect(buildCacheReclaimWorkflow).toContain("cancel-in-progress: false");
+    expect(buildCacheReclaimWorkflow).toContain("environment: production");
+    expect(buildCacheReclaimWorkflow).not.toContain("continue-on-error: true");
+    expect(Object.keys(parsedWorkflow.jobs)).toEqual(["reclaim"]);
+    expect(parsedWorkflow.jobs.reclaim.steps).toHaveLength(1);
+    expect(buildCacheReclaimWorkflow.match(/<<'REMOTE'/g)).toHaveLength(1);
+    expect(buildCacheReclaimWorkflow.match(/ssh -i "\$private_key"/g)).toHaveLength(
+      1,
+    );
+    expect(remoteStart).toBeGreaterThan(-1);
+    expect(remoteEnd).toBeGreaterThan(remoteStart);
+    expect(remoteBody).toContain("MIN_AVAILABLE_BYTES=8589934592");
+    expect(remoteBody).toContain("BACKUP_SIZE_OVERHEAD_BYTES=67108864");
+    expect(remoteBody).toContain(
+      "CANONICAL_REPOSITORY_URL=https://github.com/sereganikitin/st-michael-broker-platform.git",
+    );
+    expect(remoteBody).toContain(
+      "git ls-remote --exit-code \"$CANONICAL_REPOSITORY_URL\" refs/heads/master",
+    );
+    expect(remoteBody).toContain(
+      'test "$canonical_sha_before" = "$expected_cleanup_sha"',
+    );
+    expect(remoteBody).toContain(
+      'test "$canonical_sha_at_prune" = "$expected_cleanup_sha"',
+    );
+    expect(remoteBody).toContain(
+      "required_backup_bytes=$((MIN_AVAILABLE_BYTES + database_size_bytes + BACKUP_SIZE_OVERHEAD_BYTES))",
+    );
+    expect(remoteBody).toContain(
+      "exec 9>/tmp/st-michael-production-deploy.lock",
+    );
+    expect(remoteBody).toContain("flock -n 9");
+    expect(remoteBody).toContain("container_inventory_sha256_before");
+    expect(remoteBody).toContain("running_container_inventory_sha256_before");
+    expect(remoteBody).toContain("tagged_image_inventory_sha256_before");
+    expect(remoteBody).toContain("volume_inventory_sha256_before");
+    expect(remoteBody).toContain("network_inventory_sha256_before");
+    expect(remoteBody).toContain("{{.State.Pid}}");
+    expect(remoteBody).toContain("{{.State.StartedAt}}");
+    expect(remoteBody).toContain("{{.RestartCount}}");
+    expect(remoteBody).toContain("{{json .Mounts}}");
+    expect(remoteBody).toContain("docker volume inspect --format");
+    expect(remoteBody).toContain("docker network inspect --format");
+    expect(remoteBody).toContain('test -z "${DOCKER_HOST:-}"');
+    expect(remoteBody).toContain('test "$(docker context show)" = "default"');
+    expect(remoteBody).toContain("BACKUP_PARENT=/var/backups/stmichael");
+    expect(remoteBody).toContain(
+      "BACKUP_DIR=$BACKUP_PARENT/loyalty-predeploy",
+    );
+    expect(remoteBody).toContain('test ! -L "$BACKUP_PARENT"');
+    expect(remoteBody).toContain('test ! -L "$BACKUP_DIR"');
+    expect(remoteBody).toContain('available_bytes "$backup_storage_path"');
+    expect(remoteBody).toContain(
+      'git -C "$deploy_root" status --porcelain=v1 --untracked-files=all',
+    );
+    expect(remoteBody).toContain('test "$containers_after" = "$containers_before"');
+    expect(remoteBody).toContain('test "$running_after" = "$running_before"');
+    expect(remoteBody).toContain(
+      'test "$tagged_images_after" = "$tagged_images_before"',
+    );
+    expect(remoteBody).toContain('test "$volumes_after" = "$volumes_before"');
+    expect(remoteBody).toContain('test "$networks_after" = "$networks_before"');
+    expect(remoteBody).toContain(
+      'test "$deploy_head_after" = "$deploy_head_before"',
+    );
+    expect(remoteBody).toContain(
+      'test "$deploy_status_after" = "$deploy_status_before"',
+    );
+    expect(remoteBody).toContain("backup_reserve_threshold_satisfied=true");
+    expect(databaseChecks).toHaveLength(2);
+    expect(lock).toBeGreaterThan(-1);
+    expect(canonicalPrecheck).toBeGreaterThan(lock);
+    expect(databaseChecks[0]).toBeGreaterThan(canonicalPrecheck);
+    expect(fingerprintsBefore).toBeGreaterThan(databaseChecks[0]);
+    expect(canonicalRecheck).toBeGreaterThan(fingerprintsBefore);
+    expect(builderPrune).toBeGreaterThan(canonicalRecheck);
+    expect(databaseChecks[1]).toBeGreaterThan(builderPrune);
+    expect(fingerprintsAfter).toBeGreaterThan(databaseChecks[1]);
+    expect(finalThreshold).toBeGreaterThan(fingerprintsAfter);
+    expect(pruneLines).toEqual(["docker builder prune --all --force"]);
+    expect(remoteBody.match(/docker builder prune --all --force/g)).toHaveLength(
+      1,
+    );
+    expect(remoteBody).not.toMatch(
+      /docker\s+(?:system|image|volume|container|network|buildx)\s+prune|docker(?:-compose|\s+compose)|\bdocker\s+(?:rm|rmi|start|stop|restart|kill|run|build|pull|push)\b/,
+    );
+    expect(remoteBody).not.toMatch(
+      /\b(?:systemctl|service|restart|stop|kill|prisma|cp|mv|rm|rmdir|truncate|unlink|shred|tee|touch|dd|install|mkdir|ln|chmod|chown|find)\b/,
+    );
+    expect(remoteBody).not.toContain("|| true");
+    expect(dockerCommandLines).toEqual([
+      "docker inspect --format '{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.Pid}}|{{.State.StartedAt}}|{{.RestartCount}}|{{json .Mounts}}' \"$container_id\"",
+      "done < <(docker container ls -aq --no-trunc | sort)",
+      "docker container ls -q --no-trunc | sort",
+      "docker image ls --digests --no-trunc --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Digest}}' \\",
+      "docker volume inspect --format '{{.Name}}|{{.Driver}}|{{.Mountpoint}}|{{.Scope}}|{{json .Labels}}|{{json .Options}}' \"$volume_name\"",
+      "done < <(docker volume ls -q | sort)",
+      "docker network inspect --format '{{.Id}}|{{.Name}}|{{.Driver}}|{{.Scope}}|{{.Internal}}|{{.Attachable}}|{{json .Options}}|{{json .Labels}}' \"$network_id\"",
+      "done < <(docker network ls -q --no-trunc | sort)",
+      "test \"$(docker inspect --format '{{.State.Running}}' st-michael-postgres 2>/dev/null)\" = \"true\" || { echo \"Production PostgreSQL container is not running\"; exit 1; }",
+      "docker exec st-michael-postgres pg_isready -U postgres -d broker_platform >/dev/null",
+      "actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT current_database()\")",
+      "actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT system_identifier FROM pg_control_system()\")",
+      "broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT COUNT(*) FROM public.brokers\")",
+      "database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc \"SELECT pg_database_size(current_database())\")",
+      "test \"$(docker context show)\" = \"default\" || { echo \"Docker default context is not active\"; exit 1; }",
+      "docker_endpoint=$(docker context inspect default --format '{{.Endpoints.docker.Host}}')",
+      "docker_root_reported=$(docker info --format '{{.DockerRootDir}}')",
+      "docker system df",
+      "docker builder prune --all --force",
+      "docker system df",
+    ]);
+    expect(
+      remoteLines.filter((line) => />/.test(line.replaceAll("<none>", ""))),
+    ).toEqual([
+      "command -v \"$required_tool\" >/dev/null || { echo \"Required cleanup tool is missing\"; exit 1; }",
+      "exec 9>/tmp/st-michael-production-deploy.lock",
+      "test \"$(docker inspect --format '{{.State.Running}}' st-michael-postgres 2>/dev/null)\" = \"true\" || { echo \"Production PostgreSQL container is not running\"; exit 1; }",
+      "docker exec st-michael-postgres pg_isready -U postgres -d broker_platform >/dev/null",
+      "echo \"Builder cache was the only approved target, but the backup reserve is still insufficient\" >&2",
+    ]);
+    expect(remoteBody.match(/docker system df/g)).toHaveLength(2);
+    expect(remoteBody.match(/docker exec st-michael-postgres/g)).toHaveLength(5);
+    expect(remoteBody).toContain('SELECT current_database()');
+    expect(remoteBody).toContain(
+      'SELECT system_identifier FROM pg_control_system()',
+    );
+    expect(remoteBody).toContain('SELECT COUNT(*) FROM public.brokers');
+    expect(remoteBody).toContain('SELECT pg_database_size(current_database())');
   });
 
   it("creates a fresh exact-SHA DB backup without retention or service changes", () => {
