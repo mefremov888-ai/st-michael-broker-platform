@@ -7,7 +7,10 @@ import {
 import { Prisma, PrismaClient } from "@st-michael/database";
 import { AmoCrmAdapter } from "@st-michael/integrations";
 import { createHash } from "crypto";
-import { google } from "googleapis";
+import {
+  auth as googleAuth,
+  sheets as createGoogleSheets,
+} from "googleapis/build/src/apis/sheets";
 import type { CurrentUserPayload } from "../auth/current-user.decorator";
 import { LoyaltyPermissionService } from "../loyalty-workflow/loyalty-permission.service";
 import {
@@ -287,11 +290,11 @@ export class LoyaltySyncService {
   }
 
   private async readGoogle(spreadsheetId: string) {
-    const auth = new google.auth.GoogleAuth({
+    const auth = new googleAuth.GoogleAuth({
       credentials: this.credentials(),
       scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
     });
-    const sheets = google.sheets({ version: "v4", auth });
+    const sheets = createGoogleSheets({ version: "v4", auth });
     // Metadata also defines the later A1 bounds. Capture the conservative
     // horizon before that first source read so concurrent grid expansion can
     // never appear covered by a timestamp taken after the metadata snapshot.

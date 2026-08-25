@@ -64,7 +64,7 @@ RUN rm -rf packages/shared/dist packages/shared/tsconfig.tsbuildinfo \
 RUN rm -rf packages/integrations/dist packages/integrations/tsconfig.tsbuildinfo \
  && npm run build --workspace=packages/integrations
 RUN rm -rf apps/api/dist apps/api/tsconfig.tsbuildinfo \
- && npm run build --workspace=apps/api
+ && NODE_OPTIONS=--max-old-space-size=1024 npm run build --workspace=apps/api
 
 # ─── runtime ───
 FROM mirror.gcr.io/library/node:20.20.2-alpine
