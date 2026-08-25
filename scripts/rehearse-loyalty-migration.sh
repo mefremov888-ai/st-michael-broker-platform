@@ -176,10 +176,17 @@ docker run -d --name "$REHEARSAL_ID" --network "$REHEARSAL_NET" \
 
 echo "Ждём готовности изолированного контейнера..."
 i=0
-until docker exec "$REHEARSAL_ID" pg_isready -U postgres >/dev/null 2>&1; do
+# pg_isready can report that the temporary init server accepts connections
+# before docker-entrypoint has finished creating POSTGRES_DB. Even a query can
+# briefly succeed against that temporary process before it stops. Restore must
+# wait for the final postgres process at PID 1 AND the exact isolated database.
+until docker exec "$REHEARSAL_ID" sh -c \
+    '[ "$(cat /proc/1/comm)" = postgres ]' 2>/dev/null \
+    && docker exec "$REHEARSAL_ID" psql -U postgres -d rehearsal -Atqc 'SELECT 1' \
+    >/dev/null 2>&1; do
     i=$((i + 1))
     if [ "$i" -gt 60 ]; then
-        echo "✗ Изолированный Postgres не поднялся за 60 секунд"
+        echo "✗ Изолированная база rehearsal не стала доступна за 60 секунд"
         exit 1
     fi
     sleep 1
