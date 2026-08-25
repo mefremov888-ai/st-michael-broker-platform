@@ -9,8 +9,13 @@ import { getSystemSetting } from '../common/system-setting';
 import { buildPhoneSearchConditions } from '../admin/brokers-import.helper';
 import { OpsAlertService } from '../ops-alert/ops-alert.service';
 import {
+  AMO_CREATE_IN_PROGRESS_MARKER,
+  AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+  AMO_RETRY_MAX_ATTEMPTS,
   AMO_UNIQUENESS_RECHECK_MARKER,
+  markAmoCreateFailure,
   publicAmoSyncError,
+  requiresAmoCreateReconciliation,
   sanitizeAmoSyncError,
 } from '../common/amo-sync-retry';
 
@@ -332,6 +337,12 @@ export class ClientFixationService {
           uniquenessReason: isExceptionAfterSalesMeeting
             ? `EXCEPTION_AFTER_SALES_MEETING:${amoVerdict?.triggerLeadId || ''} ${amoVerdict?.reason || ''}`
             : null,
+          // Fail closed before POST /leads. A crash after amo accepts the
+          // request must leave a reconciliation row, never an auto-retry row.
+          amoSyncStatus: 'FAILED',
+          amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+          amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+          amoSyncLastAttemptAt: new Date(),
           ...fixationFormFields,
         },
       });
@@ -391,7 +402,7 @@ export class ClientFixationService {
         }
       } catch (e: any) {
         amoSyncOk = false;
-        amoSyncError = sanitizeAmoSyncError(e);
+        amoSyncError = markAmoCreateFailure(e);
         console.error('[fixClient] amo createFixationRequest failed:', amoSyncError);
       }
 
@@ -438,20 +449,35 @@ export class ClientFixationService {
       // try/catch чтобы это не валило фиксацию: клиент УЖЕ в БД, статус
       // amo-синка — второстепенно.
       try {
-        await this.prisma.client.update({
-          where: { id: client.id },
+        const finalSync = await this.prisma.client.updateMany({
+          where: {
+            id: client.id,
+            amoLeadId: null,
+            amoSyncStatus: 'FAILED',
+            amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+            amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+          },
           data: {
             amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
             amoSyncError: amoSyncOk ? null : amoSyncError,
-            amoSyncAttempts: { increment: 1 },
+            amoSyncAttempts: requiresAmoCreateReconciliation(amoSyncError)
+              ? AMO_RETRY_MAX_ATTEMPTS
+              : 1,
             amoSyncLastAttemptAt: new Date(),
             // 2026-06-04: критично сохранять lead id, иначе webhook от amoCRM
             // на этот лид не сможет найти Client (искал по amoLeadId).
             ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
           } as any,
         });
+        if (finalSync.count !== 1) {
+          throw new Error('amo sync linkage compare-and-set was not applied');
+        }
       } catch (e: any) {
-        console.error('[fixClient] failed to update amoSyncStatus (миграция не применена?):', e?.message || e);
+        // The pre-POST marker is already durable. Do not report SYNCED when
+        // the amo lead id could not be linked back to this local row.
+        amoSyncOk = false;
+        amoSyncError = AMO_CREATE_IN_PROGRESS_MARKER;
+        console.error('[fixClient] failed to persist final amoSyncStatus:', e?.message || e);
       }
 
       if (!amoSyncOk) {
@@ -500,7 +526,9 @@ export class ClientFixationService {
         amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
         message: amoSyncOk
           ? 'Client conditionally fixed. Expires in 30 days.'
-          : 'Клиент зафиксирован в кабинете, но не передан в amoCRM из-за технической ошибки. Менеджеры уведомлены. При срочности — свяжитесь напрямую.',
+          : requiresAmoCreateReconciliation(amoSyncError)
+            ? 'Клиент зафиксирован в кабинете, но результат передачи в amoCRM не подтверждён. Автоповтор заблокирован до ручной сверки; менеджеры уведомлены.'
+            : 'Клиент зафиксирован в кабинете, но не передан в amoCRM из-за технической ошибки. Менеджеры уведомлены. При срочности — свяжитесь напрямую.',
         managerContacts,
       };
     }
@@ -626,6 +654,10 @@ export class ClientFixationService {
           : previousLeadId
             ? `Повторная фиксация. Предыдущий лид #${previousLeadId} (${previousLeadInfo || 'закрыт'})`
             : 'Повторная фиксация после закрытой',
+        amoSyncStatus: 'FAILED',
+        amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+        amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+        amoSyncLastAttemptAt: new Date(),
         ...fixationFormFields,
       },
     });
@@ -672,22 +704,35 @@ export class ClientFixationService {
       }
     } catch (e: any) {
       amoSyncOk = false;
-      amoSyncError = sanitizeAmoSyncError(e);
+      amoSyncError = markAmoCreateFailure(e);
       console.error('[fixClient refix] amo createFixationRequest failed:', amoSyncError);
     }
 
     try {
-      await this.prisma.client.update({
-        where: { id: newClient.id },
+      const finalSync = await this.prisma.client.updateMany({
+        where: {
+          id: newClient.id,
+          amoLeadId: null,
+          amoSyncStatus: 'FAILED',
+          amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+          amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+        },
         data: {
           amoSyncStatus: amoSyncOk ? 'SYNCED' : 'FAILED',
           amoSyncError: amoSyncOk ? null : amoSyncError,
-          amoSyncAttempts: { increment: 1 },
+          amoSyncAttempts: requiresAmoCreateReconciliation(amoSyncError)
+            ? AMO_RETRY_MAX_ATTEMPTS
+            : 1,
           amoSyncLastAttemptAt: new Date(),
           ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
         } as any,
       });
+      if (finalSync.count !== 1) {
+        throw new Error('amo sync linkage compare-and-set was not applied');
+      }
     } catch (e: any) {
+      amoSyncOk = false;
+      amoSyncError = AMO_CREATE_IN_PROGRESS_MARKER;
       console.error('[fixClient refix] failed to update amoSyncStatus:', e?.message || e);
     }
 
@@ -769,7 +814,9 @@ export class ClientFixationService {
         ? isExceptionAfterSalesMeeting
           ? 'Создана новая фиксация на ручной проверке КЦ.'
           : `Создана новая фиксация со ссылкой на предыдущую (${previousFixDate || 'закрыта'}). Истекает через 30 дней.`
-        : 'Создана новая фиксация, но не передана в amoCRM. Менеджеры уведомлены.',
+        : requiresAmoCreateReconciliation(amoSyncError)
+          ? 'Новая фиксация сохранена, но результат передачи в amoCRM не подтверждён. Автоповтор заблокирован до ручной сверки; менеджеры уведомлены.'
+          : 'Создана новая фиксация, но не передана в amoCRM. Менеджеры уведомлены.',
       managerContacts,
     };
   }
@@ -1843,26 +1890,37 @@ export class ClientFixationService {
     const safeBrokerId = this.safeAlertIdentifier(brokerId);
     const category = this.categorizeAmoSyncError(error);
     const safeScenario = this.safeAlertIdentifier(scenario);
+    const reconciliationRequired = requiresAmoCreateReconciliation(error);
+    const headline = reconciliationRequired
+      ? '⚠ Результат передачи фиксации в amoCRM не подтверждён.'
+      : '⚠ Фиксация не передана в amoCRM.';
+    const disposition = reconciliationRequired
+      ? 'Клиент сохранён в кабинете. Автоповтор заблокирован: сначала нужна ручная сверка с amoCRM.'
+      : 'Клиент сохранён в кабинете и оставлен для автоматического ретрая.';
     const body = [
-      '⚠ Фиксация не передана в amoCRM.',
+      headline,
       `clientId: ${safeClientId}`,
       `brokerId: ${safeBrokerId}`,
       `category: ${category}`,
       `scenario: ${safeScenario}`,
-      'Клиент сохранён в кабинете и оставлен для автоматического ретрая.',
+      disposition,
     ].join('\n');
 
     if (this.opsAlerts) {
       try {
         await this.opsAlerts.sendSafely(
           [
-            '🔴 PROD: amoCRM fixation sync failed',
+            reconciliationRequired
+              ? '🔴 PROD: amoCRM fixation result is ambiguous'
+              : '🔴 PROD: amoCRM fixation sync failed',
             `clientId: ${safeClientId}`,
             `brokerId: ${safeBrokerId}`,
             `category: ${category}`,
             `scenario: ${safeScenario}`,
             `at: ${new Date().toISOString()}`,
-            'Client remains queued for automatic retry.',
+            reconciliationRequired
+              ? 'Automatic retry is blocked; reconcile the possible amoCRM lead manually.'
+              : 'Client remains queued for automatic retry.',
           ].join('\n'),
           {
             dedupKey: `fixation-amo-sync:${safeClientId}:${category}`,
@@ -1939,7 +1997,10 @@ export class ClientFixationService {
   }
 
   private categorizeAmoSyncError(error: string): string {
-    const normalized = String(error || '').toLowerCase();
+    const raw = String(error || '');
+    const normalized = (raw.startsWith(AMO_CREATE_RECONCILIATION_REQUIRED_MARKER)
+      ? raw.slice(AMO_CREATE_RECONCILIATION_REQUIRED_MARKER.length)
+      : raw).toLowerCase();
     if (normalized === 'amo_auth_401' || normalized === 'amo_forbidden_403') {
       return 'AMO_AUTH_ERROR';
     }

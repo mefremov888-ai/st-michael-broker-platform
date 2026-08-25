@@ -2,6 +2,10 @@ import type { PrismaClient } from '@st-michael/database';
 
 export const AMO_UNIQUENESS_RECHECK_MARKER =
   'AMO_UNIQUENESS_RECHECK_REQUIRED:';
+export const AMO_CREATE_RECONCILIATION_REQUIRED_MARKER =
+  'AMO_CREATE_RECONCILIATION_REQUIRED:';
+export const AMO_CREATE_IN_PROGRESS_MARKER =
+  `${AMO_CREATE_RECONCILIATION_REQUIRED_MARKER}AMO_CREATE_IN_PROGRESS`;
 export const AMO_RETRY_MAX_ATTEMPTS = 10;
 const AMO_SYNC_ERROR_CODES = new Set([
   'AMO_AUTH_401',
@@ -25,7 +29,10 @@ const AMO_SYNC_ERROR_CODES = new Set([
  */
 export function sanitizeAmoSyncError(error: unknown): string {
   const raw = String((error as any)?.message || error || '');
-  if (raw.startsWith(AMO_UNIQUENESS_RECHECK_MARKER)) return raw.slice(0, 200);
+  if (
+    raw.startsWith(AMO_UNIQUENESS_RECHECK_MARKER) ||
+    raw.startsWith(AMO_CREATE_RECONCILIATION_REQUIRED_MARKER)
+  ) return raw.slice(0, 200);
   if (AMO_SYNC_ERROR_CODES.has(raw)) return raw;
 
   const normalized = raw.toLowerCase();
@@ -70,12 +77,45 @@ export function sanitizeAmoSyncError(error: unknown): string {
   return 'AMO_SYNC_FAILED';
 }
 
+/**
+ * Converts an error thrown around POST /leads into a durable retry decision.
+ * Only explicit rejection before mutation is considered safe for automatic
+ * retry. A network/5xx/invalid/unknown response may mean that amoCRM created
+ * the lead but the caller lost its id, so it must be reconciled manually.
+ */
+export function markAmoCreateFailure(error: unknown): string {
+  const code = sanitizeAmoSyncError(error);
+  if (code.startsWith(AMO_CREATE_RECONCILIATION_REQUIRED_MARKER)) return code;
+  if ([
+    'AMO_AUTH_401',
+    'AMO_FORBIDDEN_403',
+    'AMO_RATE_LIMIT_429',
+    'AMO_CONFIGURATION_ERROR',
+    'FIXATION_AGENCY_MISSING',
+    'BROKER_AMO_CONTACT_MISSING',
+  ].includes(code)) return code;
+  return `${AMO_CREATE_RECONCILIATION_REQUIRED_MARKER}${code}`;
+}
+
+export function requiresAmoCreateReconciliation(error: unknown): boolean {
+  return String((error as any)?.message || error || '').startsWith(
+    AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+  );
+}
+
+export function isSafeAmoCreateRetry(error: unknown): boolean {
+  return !requiresAmoCreateReconciliation(markAmoCreateFailure(error));
+}
+
 /** Safe, operator-facing text. Never returns the stored raw dependency body. */
 export function publicAmoSyncError(error: unknown): string | null {
   if (!error) return null;
   const code = sanitizeAmoSyncError(error);
   if (code.startsWith(AMO_UNIQUENESS_RECHECK_MARKER)) {
     return 'Ожидается повторная проверка уникальности в amoCRM';
+  }
+  if (code.startsWith(AMO_CREATE_RECONCILIATION_REQUIRED_MARKER)) {
+    return 'Ответ amoCRM неоднозначен. Автоповтор заблокирован до ручной сверки.';
   }
   const messages: Record<string, string> = {
     AMO_AUTH_401: 'amoCRM отклонила авторизацию. Проверьте подключение.',

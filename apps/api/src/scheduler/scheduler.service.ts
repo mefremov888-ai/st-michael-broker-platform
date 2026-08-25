@@ -27,10 +27,15 @@ import {
 } from '../amocrm/broker-tour-sync';
 import { OpsAlertService } from '../ops-alert/ops-alert.service';
 import {
+  AMO_CREATE_IN_PROGRESS_MARKER,
+  AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
   AMO_RETRY_MAX_ATTEMPTS,
   AMO_UNIQUENESS_RECHECK_MARKER,
   hasConfiguredAmoCredentials,
+  isSafeAmoCreateRetry,
+  markAmoCreateFailure,
   requeueAmoAuthDeadLetters,
+  requiresAmoCreateReconciliation,
   sanitizeAmoSyncError,
 } from '../common/amo-sync-retry';
 
@@ -792,7 +797,7 @@ export class SchedulerService {
               if (client) {
                 client = await this.prisma.client.update({
                   where: { id: client.id },
-                  data: { amoLeadId: BigInt(leadRef.id), amoReconciliationStatus: 'STALE' } as any,
+                  data: { amoLeadId: BigInt(leadRef.id) },
                 });
               }
             }
@@ -1011,6 +1016,31 @@ export class SchedulerService {
   }
 
   private async runAmoFailedRetry() {
+    // Alert on durable reconciliation rows independently of amo credentials.
+    // A total count plus a bounded newest-ID sample gives operators visibility
+    // without starving row 21+ or flooding one Telegram message per row.
+    const reconciliationWhere = {
+      amoLeadId: null,
+      amoSyncError: {
+        startsWith: AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+      },
+    };
+    const reconciliationCount = await this.prisma.client.count({
+      where: reconciliationWhere,
+    });
+    if (reconciliationCount > 0) {
+      const reconciliationRows = await this.prisma.client.findMany({
+        where: reconciliationWhere,
+        select: { id: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 20,
+      });
+      const sampleIds = reconciliationRows.map((row) => String(row.id));
+      await this.sendOpsAlert(
+        `🔴 PROD: автоповтор фиксаций заблокирован\nreconciliationCount: ${reconciliationCount}\nnewestClientIds: ${sampleIds.join(', ') || 'none'}\nЛиды могли уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
+        `scheduler:amo-retry:reconciliation-summary:${reconciliationCount}:${sampleIds[0] || 'none'}`,
+      );
+    }
     if (!hasConfiguredAmoCredentials()) {
       await this.alertAmoTokenMissing();
       return;
@@ -1022,6 +1052,14 @@ export class SchedulerService {
         // If an amo id is already recorded, creating another lead is unsafe.
         // Such rows require reconciliation, not createFixationRequest.
         amoLeadId: null,
+        OR: [
+          { amoSyncError: null },
+          {
+            amoSyncError: {
+              not: { startsWith: AMO_CREATE_RECONCILIATION_REQUIRED_MARKER },
+            },
+          },
+        ],
       },
       include: { broker: true, responsibleBroker: true },
       // Legacy rows can have no last-attempt timestamp. Put them first instead
@@ -1040,6 +1078,46 @@ export class SchedulerService {
     for (const client of candidates) {
       const requiresUniquenessRecheck = String(client.amoSyncError || '')
         .startsWith(AMO_UNIQUENESS_RECHECK_MARKER);
+      const storedError = String(client.amoSyncError || '');
+      const hasDurableCreateMarker = requiresAmoCreateReconciliation(storedError);
+      const hasLegacyAmbiguousCreateError = !requiresUniquenessRecheck
+        && !hasDurableCreateMarker
+        && (storedError
+          ? !isSafeAmoCreateRetry(storedError)
+          : client.amoSyncStatus === 'FAILED');
+      if (hasDurableCreateMarker || hasLegacyAmbiguousCreateError) {
+        const retryBroker = client.responsibleBroker ?? client.broker;
+        const clientId = String(client.id);
+        const brokerId = retryBroker?.id ? String(retryBroker.id) : 'unknown';
+        if (hasLegacyAmbiguousCreateError) {
+          const durableError = markAmoCreateFailure(
+            storedError || 'AMO_SYNC_FAILED',
+          );
+          const terminalized = await this.prisma.client.updateMany({
+            where: {
+              id: client.id,
+              amoLeadId: null,
+              amoSyncError: client.amoSyncError,
+              ...(client.amoSyncStatus
+                ? { amoSyncStatus: client.amoSyncStatus }
+                : {}),
+            },
+            data: {
+              amoSyncStatus: 'FAILED' as any,
+              amoSyncError: durableError,
+              amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+              amoSyncLastAttemptAt: new Date(),
+            },
+          });
+          if (!terminalized.count) continue;
+        }
+        await this.sendOpsAlert(
+          `🔴 PROD: автоповтор фиксации заблокирован\nclientId: ${clientId}\nbrokerId: ${brokerId}\nЛид мог уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
+          `scheduler:amo-retry:reconciliation-required:${clientId}`,
+        );
+        failed++;
+        continue;
+      }
       // Только ошибка вокруг самого createFixationRequest (POST, создающего
       // лид) неоднозначна — отваливающийся до него checkUniqueness ничего
       // не создаёт, ретраить его безопасно как обычно.
@@ -1113,6 +1191,29 @@ export class SchedulerService {
           continue;
         }
 
+        const claim = await this.prisma.client.updateMany({
+          where: {
+            id: client.id,
+            amoLeadId: null,
+            amoSyncError: client.amoSyncError ?? null,
+            ...(client.amoSyncStatus
+              ? { amoSyncStatus: client.amoSyncStatus }
+              : {}),
+            ...(client.amoSyncAttempts !== undefined
+              ? { amoSyncAttempts: client.amoSyncAttempts }
+              : {}),
+            ...(client.amoSyncLastAttemptAt !== undefined
+              ? { amoSyncLastAttemptAt: client.amoSyncLastAttemptAt }
+              : {}),
+          },
+          data: {
+            amoSyncStatus: 'FAILED' as any,
+            amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+            amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+            amoSyncLastAttemptAt: new Date(),
+          },
+        });
+        if (claim.count !== 1) continue;
         leadCreateAttempted = true;
         const resultLead = await this.amo.createFixationRequest({
           clientPhone: client.phone,
@@ -1135,12 +1236,18 @@ export class SchedulerService {
         });
         const createdAmoLeadId = resultLead?.id ? Number(resultLead.id) : null;
         if (!createdAmoLeadId) throw new Error('amoCRM не вернула id созданной сделки');
-        await this.prisma.client.update({
-          where: { id: client.id },
+        const linked = await this.prisma.client.updateMany({
+          where: {
+            id: client.id,
+            amoLeadId: null,
+            amoSyncStatus: 'FAILED' as any,
+            amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+            amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+          },
           data: {
             amoSyncStatus: 'SYNCED' as any,
             amoSyncError: null,
-            amoSyncAttempts: { increment: 1 },
+            amoSyncAttempts: Number(client.amoSyncAttempts || 0) + 1,
             amoSyncLastAttemptAt: new Date(),
             // 2026-06-11: без этого retry успешно создавал лид в amoCRM,
             // но id не возвращался обратно в БД — UI продолжал показывать
@@ -1148,7 +1255,6 @@ export class SchedulerService {
             // (статус SYNCED). Webhook от amoCRM искал Client по amoLeadId
             // и не находил.
             amoLeadId: BigInt(createdAmoLeadId),
-            amoReconciliationStatus: 'STALE' as any,
             ...(retryVerdict?.rule === 'RULE_EXCEPTION_AFTER_SALES_MEETING'
               ? {
                   uniquenessStatus: UniquenessStatus.UNDER_REVIEW,
@@ -1164,6 +1270,14 @@ export class SchedulerService {
                 : {}),
           } as any,
         });
+        if (linked.count !== 1) {
+          await this.sendOpsAlert(
+            `🔴 PROD: amoCRM создала лид, но связь не сохранена\nclientId: ${clientId}\nbrokerId: ${brokerId}\namoLeadId: ${createdAmoLeadId}\nТребуется ручная привязка; повтор POST запрещён.`,
+            `scheduler:amo-retry:linkage-failed:${clientId}`,
+          );
+          failed++;
+          continue;
+        }
 
         // 2026-06-11: первый createFixationRequest упал — значит
         // ClientFixationService Морикит НЕ уведомил. Лид в amoCRM теперь
@@ -1220,24 +1334,50 @@ export class SchedulerService {
         // задвоить лид, поэтому для этой категории не даём крону тронуть
         // клиента снова (тот же принцип, что уже применён к дохлому токену
         // ниже) — attempts сразу выставляются в максимум, ручной «Повторить»
-        // в /admin/broker-applications остаётся доступен после проверки
-        // в самой amoCRM (см. code-review PR #288).
+        // разблокируется только отдельной ручной сверкой/привязкой найденного
+        // amoLeadId; обычная кнопка «Повторить» marker не снимает.
+        const createFailure = leadCreateAttempted
+          ? markAmoCreateFailure(e)
+          : safeError;
         const isAmbiguousPost = leadCreateAttempted
-          && (safeError === 'AMO_NETWORK_ERROR' || safeError === 'AMO_TEMPORARY_UNAVAILABLE');
+          && requiresAmoCreateReconciliation(createFailure);
         const nextAttempts = isAmbiguousPost
           ? AMO_RETRY_MAX_ATTEMPTS
           : Number(client.amoSyncAttempts || 0) + 1;
-        await this.prisma.client.update({
-          where: { id: client.id },
-          data: {
-            amoSyncError: requiresUniquenessRecheck ? client.amoSyncError : safeError,
-            amoSyncAttempts: isAmbiguousPost ? AMO_RETRY_MAX_ATTEMPTS : { increment: 1 },
-            amoSyncLastAttemptAt: new Date(),
-            ...(nextAttempts >= AMO_RETRY_MAX_ATTEMPTS
-              ? { amoSyncStatus: 'FAILED' as any }
-              : {}),
-          },
-        });
+        const finalError = isAmbiguousPost
+          ? createFailure
+          : requiresUniquenessRecheck
+            ? client.amoSyncError
+            : safeError;
+        if (leadCreateAttempted) {
+          await this.prisma.client.updateMany({
+            where: {
+              id: client.id,
+              amoLeadId: null,
+              amoSyncStatus: 'FAILED' as any,
+              amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+              amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+            },
+            data: {
+              amoSyncStatus: 'FAILED' as any,
+              amoSyncError: finalError,
+              amoSyncAttempts: nextAttempts,
+              amoSyncLastAttemptAt: new Date(),
+            },
+          });
+        } else {
+          await this.prisma.client.update({
+            where: { id: client.id },
+            data: {
+              amoSyncError: finalError,
+              amoSyncAttempts: { increment: 1 },
+              amoSyncLastAttemptAt: new Date(),
+              ...(nextAttempts >= AMO_RETRY_MAX_ATTEMPTS
+                ? { amoSyncStatus: 'FAILED' as any }
+                : {}),
+            },
+          });
+        }
         failed++;
         if (isAmbiguousPost) {
           const retryBroker = client.responsibleBroker ?? client.broker;

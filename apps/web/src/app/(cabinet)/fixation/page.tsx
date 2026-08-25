@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiGet, apiPost } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -77,6 +77,12 @@ export default function FixationPage() {
   const [readinessLevel, setReadinessLevel] = useState<'Холодный' | 'Тёплый' | 'Горячий' | ''>('Тёплый');
 
   const [loading, setLoading] = useState(false);
+  // React state is asynchronous, so `loading` alone cannot stop two submit
+  // events in the same tick. This ref is flipped before the first await.
+  const submitInFlightRef = useRef(false);
+  // Keep the UUID stable for a retry of the same payload after a lost response.
+  // A changed payload (including confirmDuplicate=true) gets a fresh UUID.
+  const requestIdentityRef = useRef<{ fingerprint: string; key: string } | null>(null);
   const [error, setError] = useState('');
   const [showSuccess, setShowSuccess] = useState(false);
   // КБ7 (2026-05-26): пользователь нажал «Отправить» хотя бы раз —
@@ -190,8 +196,20 @@ export default function FixationPage() {
     updateParticipant(i, 'phone', d.slice(0, 10));
   };
 
+  const idempotencyKeyFor = (payload: Record<string, unknown>): string => {
+    const fingerprint = JSON.stringify(payload);
+    if (requestIdentityRef.current?.fingerprint === fingerprint) {
+      return requestIdentityRef.current.key;
+    }
+    const key = crypto.randomUUID();
+    requestIdentityRef.current = { fingerprint, key };
+    return key;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
     setAttempted(true);
     // КБ7: валидируем перед отправкой.
     const foreignD = foreignPhone.replace(/\D/g, '').length;
@@ -202,6 +220,7 @@ export default function FixationPage() {
         const el = document.querySelector('.field-invalid') as HTMLElement | null;
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 50);
+      submitInFlightRef.current = false;
       return;
     }
 
@@ -217,6 +236,7 @@ export default function FixationPage() {
           const el = document.querySelector('[data-other-broker-section]') as HTMLElement | null;
           if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }, 50);
+        submitInFlightRef.current = false;
         return;
       }
     }
@@ -234,7 +254,7 @@ export default function FixationPage() {
       phone = '+7' + phoneDigits;
     }
 
-    const payload = {
+    const fixationPayload = {
       phone,
       fullName,
       // 2026-07-02: trim + falsy → undefined. Раньше email со случайным
@@ -258,6 +278,10 @@ export default function FixationPage() {
         })),
       ...(respMode === 'other' && responsibleBroker ? { responsibleBrokerId: responsibleBroker.id } : {}),
     };
+    const payload = {
+      ...fixationPayload,
+      idempotencyKey: idempotencyKeyFor(fixationPayload),
+    };
 
     try {
       const result: any = await apiPost('/clients/fix', payload);
@@ -276,8 +300,12 @@ export default function FixationPage() {
           `• Сделок: ${ec.dealsCount}\n\n` +
           `Создать новую фиксацию всё равно?`
         );
-        if (!ok) { setLoading(false); return; }
-        const result2: any = await apiPost('/clients/fix', { ...payload, confirmDuplicate: true });
+        if (!ok) return;
+        const confirmedPayload = { ...fixationPayload, confirmDuplicate: true };
+        const result2: any = await apiPost('/clients/fix', {
+          ...confirmedPayload,
+          idempotencyKey: idempotencyKeyFor(confirmedPayload),
+        });
         if (result2?.amoSyncStatus === 'FAILED' && Array.isArray(result2?.managerContacts)) {
           setAmoWarn({
             message: result2.message || 'Заявка сохранена в кабинете, но не передана в amoCRM.',
@@ -296,9 +324,10 @@ export default function FixationPage() {
       }
     } catch (err: any) {
       setError(err.message || 'Ошибка при отправке заявки');
+    } finally {
+      setLoading(false);
+      submitInFlightRef.current = false;
     }
-
-    setLoading(false);
   };
 
   const resetForm = () => {
@@ -319,6 +348,7 @@ export default function FixationPage() {
     setReadinessLevel('Тёплый');
     setShowSuccess(false);
     setAmoWarn(null);
+    requestIdentityRef.current = null;
   };
 
   const brokerPhoneDisplay = broker?.phone || '—';
