@@ -339,6 +339,12 @@ describe("PII-safe amo fixation queue inspector", () => {
     expect(workflow).toContain(
       'test "$actual_script_sha" = "$expected_script_sha"',
     );
+    expect(workflow).toContain(
+      "mktemp /app/scripts/.inspect-amo-fixation-queue.XXXXXX",
+    );
+    expect(workflow).not.toContain(
+      "mktemp /app/scripts/.inspect-amo-fixation-queue.XXXXXX.js",
+    );
     expect(workflow).toContain("trap cleanup EXIT HUP INT TERM");
     expect(workflow.match(/\bssh -T\b/g) || []).toHaveLength(1);
     expect(workflow).not.toMatch(

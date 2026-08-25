@@ -149,7 +149,7 @@ jobs:
               command -v "$required_tool" >/dev/null || exit 1
             done
             umask 077
-            inspector=$(mktemp /app/scripts/.inspect-amo-fixation-queue.XXXXXX.js)
+            inspector=$(mktemp /app/scripts/.inspect-amo-fixation-queue.XXXXXX)
             cleanup() { rm -f -- "$inspector"; }
             trap cleanup EXIT HUP INT TERM
             cat > "$inspector"
