@@ -10,7 +10,12 @@
 
 "use strict";
 
-const { createHash, createHmac, randomBytes } = require("node:crypto");
+const {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} = require("node:crypto");
 const { lstatSync, readFileSync } = require("node:fs");
 const { isAbsolute, resolve } = require("node:path");
 
@@ -31,6 +36,8 @@ const COMPLETION_ID_DOMAIN =
   "st-michael:amo-fixation-lead-reconciliation-completion:v1";
 const ADVISORY_LOCK_DOMAIN =
   "st-michael:amo-fixation-lead-reconciliation-advisory-lock:v1";
+const ROW_AUDIT_ATTESTATION_DOMAIN =
+  "st-michael:amo-fixation-lead-reconciliation-row-audit:v1";
 
 const RESOLUTION_CLASSES = Object.freeze([
   "database_lead_already_present",
@@ -772,7 +779,66 @@ function hasExactKeys(value, expectedKeys) {
   );
 }
 
-function validateCompletionLedger(ledger, gate) {
+// sourceRowHash is already a domain-separated HMAC of the exact pre-CAS row
+// snapshot. This second domain-separated HMAC binds that snapshot digest to
+// the classified error and every persisted per-link audit field, so a later
+// idempotent/noop run can authenticate the ledger without retaining PII.
+function rowAuditAttestation(payload, attestationKey) {
+  if (!Buffer.isBuffer(attestationKey) || attestationKey.length < 32) {
+    fail("ATTESTATION_KEY_INVALID");
+  }
+  const exactFields = [
+    ["schemaVersion", payload?.schemaVersion],
+    ["source", payload?.source],
+    ["sourceSha", payload?.sourceSha],
+    ["reviewedRunId", payload?.reviewedRunId],
+    ["cohortDigest", payload?.cohortDigest],
+    ["inspectorSha256", payload?.inspectorSha256],
+    ["applySha256", payload?.applySha256],
+    ["clientId", payload?.clientId],
+    ["amoLeadId", payload?.amoLeadId],
+    ["resolution", payload?.resolution],
+    ["errorClass", payload?.errorClass],
+    ["sourceRowHash", payload?.sourceRowHash],
+    ["amoSyncAttempts", payload?.amoSyncAttempts],
+    ["amoSyncLastAttemptAt", payload?.amoSyncLastAttemptAt],
+    ["attemptsPreserved", payload?.attemptsPreserved],
+    ["lastAttemptPreserved", payload?.lastAttemptPreserved],
+    ["requeued", payload?.requeued],
+    ["amoMutation", payload?.amoMutation],
+  ];
+  const hmac = createHmac("sha256", attestationKey).update(
+    ROW_AUDIT_ATTESTATION_DOMAIN,
+    "utf8",
+  );
+  for (const entry of exactFields) {
+    const encoded = Buffer.from(JSON.stringify(entry), "utf8");
+    hmac
+      .update("\0", "utf8")
+      .update(String(encoded.length), "ascii")
+      .update(":", "ascii")
+      .update(encoded);
+  }
+  return hmac.digest("hex");
+}
+
+function secureHexDigestMatches(actual, expected) {
+  if (
+    !/^[0-9a-f]{64}$/.test(String(actual || "")) ||
+    !/^[0-9a-f]{64}$/.test(String(expected || ""))
+  ) {
+    return false;
+  }
+  return timingSafeEqual(
+    Buffer.from(actual, "hex"),
+    Buffer.from(expected, "hex"),
+  );
+}
+
+function validateCompletionLedger(ledger, gate, attestationKey) {
+  if (!Buffer.isBuffer(attestationKey) || attestationKey.length < 32) {
+    fail("ATTESTATION_KEY_INVALID");
+  }
   if (ledger.completion.length !== 1) fail("COMPLETION_AUDIT_MISSING");
   const payload = ledger.completion[0]?.payload;
   if (
@@ -857,6 +923,7 @@ function validateCompletionLedger(ledger, gate) {
         "resolution",
         "errorClass",
         "sourceRowHash",
+        "rowAuditAttestation",
         "amoSyncAttempts",
         "amoSyncLastAttemptAt",
         "attemptsPreserved",
@@ -865,7 +932,7 @@ function validateCompletionLedger(ledger, gate) {
         "amoMutation",
       ]) ||
       audit.entityId !== rowPayload.clientId ||
-      rowPayload.schemaVersion !== 1 ||
+      rowPayload.schemaVersion !== 2 ||
       rowPayload.source !== APPLY_AUDIT_SOURCE ||
       rowPayload.sourceSha !== gate.sourceSha ||
       rowPayload.reviewedRunId !== gate.reviewedRunId ||
@@ -875,6 +942,7 @@ function validateCompletionLedger(ledger, gate) {
       rowPayload.resolution !== "single_strong_candidate" ||
       !isCasLinkEligibleErrorClass(rowPayload.errorClass) ||
       !/^[0-9a-f]{64}$/.test(String(rowPayload.sourceRowHash || "")) ||
+      !/^[0-9a-f]{64}$/.test(String(rowPayload.rowAuditAttestation || "")) ||
       rowPayload.attemptsPreserved !== true ||
       rowPayload.lastAttemptPreserved !== true ||
       rowPayload.requeued !== false ||
@@ -886,6 +954,14 @@ function validateCompletionLedger(ledger, gate) {
         typeof rowPayload.amoSyncLastAttemptAt !== "string")
     ) {
       fail("ROW_AUDIT_MALFORMED");
+    }
+    if (
+      !secureHexDigestMatches(
+        rowPayload.rowAuditAttestation,
+        rowAuditAttestation(rowPayload, attestationKey),
+      )
+    ) {
+      fail("ROW_AUDIT_ATTESTATION_INVALID");
     }
     if (rowByClient.has(rowPayload.clientId)) fail("ROW_AUDIT_DUPLICATE");
     rowByClient.set(rowPayload.clientId, rowPayload);
@@ -983,6 +1059,29 @@ function sourceRowHash(record, attestationKey) {
 }
 
 async function createRowAudit(transaction, record, gate, attestationKey) {
+  const payload = {
+    schemaVersion: 2,
+    source: APPLY_AUDIT_SOURCE,
+    sourceSha: gate.sourceSha,
+    reviewedRunId: gate.reviewedRunId,
+    cohortDigest: gate.expectedCohortDigest,
+    inspectorSha256: gate.inspectorSha256,
+    applySha256: gate.applySha256,
+    clientId: record.row.id,
+    amoLeadId: String(record.candidateLeadId),
+    resolution: record.resolution,
+    errorClass: record.errorClass,
+    sourceRowHash: sourceRowHash(record, attestationKey),
+    amoSyncAttempts: record.row.amoSyncAttempts,
+    amoSyncLastAttemptAt: optionalDateIso(
+      record.row.amoSyncLastAttemptAt,
+      "QUEUE_LAST_ATTEMPT_AT_INVALID",
+    ),
+    attemptsPreserved: true,
+    lastAttemptPreserved: true,
+    requeued: false,
+    amoMutation: false,
+  };
   await transaction.auditLog.create({
     data: {
       userId: null,
@@ -990,27 +1089,8 @@ async function createRowAudit(transaction, record, gate, attestationKey) {
       entity: "Client",
       entityId: record.row.id,
       payload: {
-        schemaVersion: 1,
-        source: APPLY_AUDIT_SOURCE,
-        sourceSha: gate.sourceSha,
-        reviewedRunId: gate.reviewedRunId,
-        cohortDigest: gate.expectedCohortDigest,
-        inspectorSha256: gate.inspectorSha256,
-        applySha256: gate.applySha256,
-        clientId: record.row.id,
-        amoLeadId: String(record.candidateLeadId),
-        resolution: record.resolution,
-        errorClass: record.errorClass,
-        sourceRowHash: sourceRowHash(record, attestationKey),
-        amoSyncAttempts: record.row.amoSyncAttempts,
-        amoSyncLastAttemptAt: optionalDateIso(
-          record.row.amoSyncLastAttemptAt,
-          "QUEUE_LAST_ATTEMPT_AT_INVALID",
-        ),
-        attemptsPreserved: true,
-        lastAttemptPreserved: true,
-        requeued: false,
-        amoMutation: false,
+        ...payload,
+        rowAuditAttestation: rowAuditAttestation(payload, attestationKey),
       },
     },
   });
@@ -1141,7 +1221,13 @@ function assertFinalAmoEvidence(rows, amoEvidence, expectedLinks, inspector) {
   }
 }
 
-async function tryCompletedNoop({ prisma, inspector, requestGet, gate }) {
+async function tryCompletedNoop({
+  prisma,
+  inspector,
+  requestGet,
+  gate,
+  attestationKey,
+}) {
   const initialLedger = await findRepairLedger(prisma, gate);
   if (
     initialLedger.completion.length === 0 &&
@@ -1149,7 +1235,11 @@ async function tryCompletedNoop({ prisma, inspector, requestGet, gate }) {
   ) {
     return false;
   }
-  const initialCompleted = validateCompletionLedger(initialLedger, gate);
+  const initialCompleted = validateCompletionLedger(
+    initialLedger,
+    gate,
+    attestationKey,
+  );
   const clientIds = initialCompleted.links.map((link) => link.clientId).sort();
   const preLockRows = await prisma.client.findMany({
     where: { id: { in: clientIds } },
@@ -1170,7 +1260,7 @@ async function tryCompletedNoop({ prisma, inspector, requestGet, gate }) {
       await lockClientWriters(transaction);
       await acquireRepairAdvisoryLock(transaction, gate);
       const ledger = await findRepairLedger(transaction, gate);
-      const completed = validateCompletionLedger(ledger, gate);
+      const completed = validateCompletionLedger(ledger, gate, attestationKey);
       const rows = await transaction.client.findMany({
         where: {
           id: { in: completed.links.map((link) => link.clientId).sort() },
@@ -1403,6 +1493,7 @@ async function main() {
       inspector,
       requestGet,
       gate,
+      attestationKey,
     });
     if (alreadyCompleted) {
       summary = {
@@ -1476,6 +1567,7 @@ module.exports = {
   FAILURE_PHASE,
   KNOWN_QUEUE_ROWS,
   RESOLUTION_CLASSES,
+  ROW_AUDIT_ATTESTATION_DOMAIN,
   ROW_ACTION,
   TRANSACTION_TIMEOUT_MS,
   advisoryLockKey,
@@ -1499,6 +1591,7 @@ module.exports = {
   readExecutionGate,
   reportManifest,
   rowSnapshot,
+  rowAuditAttestation,
   safeFailureCode,
   tryCompletedNoop,
   validateCompletionLedger,
