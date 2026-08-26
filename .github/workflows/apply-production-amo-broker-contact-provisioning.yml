@@ -23,92 +23,8 @@ on:
         description: Exact 64-character HMAC digest from the reviewed inspector output
         required: true
         type: string
-      expected_queue_rows:
-        description: Exact exhausted queue-row count
-        required: true
-        type: string
-      expected_effective_broker_groups:
-        description: Exact effective broker-group count
-        required: true
-        type: string
-      link_existing_broker_contact_groups:
-        description: Exact link-existing group count
-        required: true
-        type: string
-      link_existing_broker_contact_rows:
-        description: Exact link-existing queue-row count
-        required: true
-        type: string
-      promote_existing_contact_candidate_groups:
-        description: Exact promote-existing group count
-        required: true
-        type: string
-      promote_existing_contact_candidate_rows:
-        description: Exact promote-existing queue-row count
-        required: true
-        type: string
-      create_contact_candidate_groups:
-        description: Exact create-contact group count
-        required: true
-        type: string
-      create_contact_candidate_rows:
-        description: Exact create-contact queue-row count
-        required: true
-        type: string
-      already_linked_groups:
-        description: Exact already-linked group count
-        required: true
-        type: string
-      already_linked_rows:
-        description: Exact already-linked queue-row count
-        required: true
-        type: string
-      effective_broker_missing_groups:
-        description: Exact missing-broker group count (must be zero to apply)
-        required: true
-        type: string
-      effective_broker_missing_rows:
-        description: Exact missing-broker queue-row count (must be zero to apply)
-        required: true
-        type: string
-      broker_merged_groups:
-        description: Exact merged-broker group count (must be zero to apply)
-        required: true
-        type: string
-      broker_merged_rows:
-        description: Exact merged-broker queue-row count (must be zero to apply)
-        required: true
-        type: string
-      no_valid_phone_groups:
-        description: Exact no-valid-phone group count (must be zero to apply)
-        required: true
-        type: string
-      no_valid_phone_rows:
-        description: Exact no-valid-phone queue-row count (must be zero to apply)
-        required: true
-        type: string
-      db_phone_ambiguous_groups:
-        description: Exact DB-phone-ambiguous group count (must be zero to apply)
-        required: true
-        type: string
-      db_phone_ambiguous_rows:
-        description: Exact DB-phone-ambiguous queue-row count (must be zero to apply)
-        required: true
-        type: string
-      ambiguous_exact_contacts_groups:
-        description: Exact amo-ambiguous group count (must be zero to apply)
-        required: true
-        type: string
-      ambiguous_exact_contacts_rows:
-        description: Exact amo-ambiguous queue-row count (must be zero to apply)
-        required: true
-        type: string
-      candidate_already_bound_groups:
-        description: Exact occupied-contact group count (must be zero to apply)
-        required: true
-        type: string
-      candidate_already_bound_rows:
-        description: Exact occupied-contact queue-row count (must be zero to apply)
+      expected_count_manifest:
+        description: Exact canonical 22-count manifest from the reviewed inspector (colon-separated)
         required: true
         type: string
 
@@ -153,30 +69,9 @@ jobs:
           PROVISION_CONFIRM_EXACT_SHA: ${{ inputs.confirm_exact_sha }}
           PROVISION_REVIEWED_PLAN_RUN_ID: ${{ inputs.reviewed_inspector_run_id }}
           PROVISION_EXPECTED_COHORT_DIGEST: ${{ inputs.expected_cohort_digest }}
+          PROVISION_EXPECTED_COUNT_MANIFEST: ${{ inputs.expected_count_manifest }}
           COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}
           BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}
-          EXPECTED_QUEUE_ROWS: ${{ inputs.expected_queue_rows }}
-          EXPECTED_EFFECTIVE_BROKER_GROUPS: ${{ inputs.expected_effective_broker_groups }}
-          EXPECTED_LINK_EXISTING_BROKER_CONTACT_GROUPS: ${{ inputs.link_existing_broker_contact_groups }}
-          EXPECTED_LINK_EXISTING_BROKER_CONTACT_ROWS: ${{ inputs.link_existing_broker_contact_rows }}
-          EXPECTED_PROMOTE_EXISTING_CONTACT_CANDIDATE_GROUPS: ${{ inputs.promote_existing_contact_candidate_groups }}
-          EXPECTED_PROMOTE_EXISTING_CONTACT_CANDIDATE_ROWS: ${{ inputs.promote_existing_contact_candidate_rows }}
-          EXPECTED_CREATE_CONTACT_CANDIDATE_GROUPS: ${{ inputs.create_contact_candidate_groups }}
-          EXPECTED_CREATE_CONTACT_CANDIDATE_ROWS: ${{ inputs.create_contact_candidate_rows }}
-          EXPECTED_ALREADY_LINKED_GROUPS: ${{ inputs.already_linked_groups }}
-          EXPECTED_ALREADY_LINKED_ROWS: ${{ inputs.already_linked_rows }}
-          EXPECTED_EFFECTIVE_BROKER_MISSING_GROUPS: ${{ inputs.effective_broker_missing_groups }}
-          EXPECTED_EFFECTIVE_BROKER_MISSING_ROWS: ${{ inputs.effective_broker_missing_rows }}
-          EXPECTED_BROKER_MERGED_GROUPS: ${{ inputs.broker_merged_groups }}
-          EXPECTED_BROKER_MERGED_ROWS: ${{ inputs.broker_merged_rows }}
-          EXPECTED_NO_VALID_PHONE_GROUPS: ${{ inputs.no_valid_phone_groups }}
-          EXPECTED_NO_VALID_PHONE_ROWS: ${{ inputs.no_valid_phone_rows }}
-          EXPECTED_DB_PHONE_AMBIGUOUS_GROUPS: ${{ inputs.db_phone_ambiguous_groups }}
-          EXPECTED_DB_PHONE_AMBIGUOUS_ROWS: ${{ inputs.db_phone_ambiguous_rows }}
-          EXPECTED_AMBIGUOUS_EXACT_CONTACTS_GROUPS: ${{ inputs.ambiguous_exact_contacts_groups }}
-          EXPECTED_AMBIGUOUS_EXACT_CONTACTS_ROWS: ${{ inputs.ambiguous_exact_contacts_rows }}
-          EXPECTED_CANDIDATE_ALREADY_BOUND_GROUPS: ${{ inputs.candidate_already_bound_groups }}
-          EXPECTED_CANDIDATE_ALREADY_BOUND_ROWS: ${{ inputs.candidate_already_bound_rows }}
         run: |
           set -euo pipefail
           test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Provisioner is restricted to the canonical repository"; exit 1; }
@@ -196,35 +91,8 @@ jobs:
           case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
           [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
 
-          expected_counts=(
-            "$EXPECTED_QUEUE_ROWS"
-            "$EXPECTED_EFFECTIVE_BROKER_GROUPS"
-            "$EXPECTED_LINK_EXISTING_BROKER_CONTACT_GROUPS"
-            "$EXPECTED_LINK_EXISTING_BROKER_CONTACT_ROWS"
-            "$EXPECTED_PROMOTE_EXISTING_CONTACT_CANDIDATE_GROUPS"
-            "$EXPECTED_PROMOTE_EXISTING_CONTACT_CANDIDATE_ROWS"
-            "$EXPECTED_CREATE_CONTACT_CANDIDATE_GROUPS"
-            "$EXPECTED_CREATE_CONTACT_CANDIDATE_ROWS"
-            "$EXPECTED_ALREADY_LINKED_GROUPS"
-            "$EXPECTED_ALREADY_LINKED_ROWS"
-            "$EXPECTED_EFFECTIVE_BROKER_MISSING_GROUPS"
-            "$EXPECTED_EFFECTIVE_BROKER_MISSING_ROWS"
-            "$EXPECTED_BROKER_MERGED_GROUPS"
-            "$EXPECTED_BROKER_MERGED_ROWS"
-            "$EXPECTED_NO_VALID_PHONE_GROUPS"
-            "$EXPECTED_NO_VALID_PHONE_ROWS"
-            "$EXPECTED_DB_PHONE_AMBIGUOUS_GROUPS"
-            "$EXPECTED_DB_PHONE_AMBIGUOUS_ROWS"
-            "$EXPECTED_AMBIGUOUS_EXACT_CONTACTS_GROUPS"
-            "$EXPECTED_AMBIGUOUS_EXACT_CONTACTS_ROWS"
-            "$EXPECTED_CANDIDATE_ALREADY_BOUND_GROUPS"
-            "$EXPECTED_CANDIDATE_ALREADY_BOUND_ROWS"
-          )
-          for count in "${expected_counts[@]}"; do
-            [[ "$count" =~ ^(0|[1-9][0-9]{0,5})$ ]] || { echo "Every expected count must be a canonical bounded integer"; exit 1; }
-          done
-          count_manifest=$(IFS=:; printf '%s' "${expected_counts[*]}")
-          [[ "$count_manifest" =~ ^[0-9]+(:[0-9]+){21}$ ]] || { echo "Invalid exact-count manifest"; exit 1; }
+          count_manifest=$PROVISION_EXPECTED_COUNT_MANIFEST
+          [[ "$count_manifest" =~ ^(0|[1-9][0-9]{0,5})(:(0|[1-9][0-9]{0,5})){21}$ ]] || { echo "Invalid exact-count manifest"; exit 1; }
 
           apply_path=scripts/apply-amo-broker-contact-provisioning.js
           inspector_path=scripts/inspect-amo-broker-link-repair-plan.js
@@ -324,7 +192,7 @@ jobs:
           test "$confirmation" = "PROVISION_AMO_BROKER_CONTACTS" || { echo "Exact provisioning confirmation is missing"; exit 1; }
           test "$confirm_sha" = "$expected_source_sha" || { echo "Exact SHA confirmation is missing"; exit 1; }
           [[ "$reviewed_plan_run_id" =~ ^[1-9][0-9]{5,19}$ ]] || { echo "Reviewed inspector run ID is invalid"; exit 1; }
-          [[ "$count_manifest" =~ ^[0-9]+(:[0-9]+){21}$ ]] || { echo "Invalid exact-count manifest"; exit 1; }
+          [[ "$count_manifest" =~ ^(0|[1-9][0-9]{0,5})(:(0|[1-9][0-9]{0,5})){21}$ ]] || { echo "Invalid exact-count manifest"; exit 1; }
           [[ "$expected_cohort_digest" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected cohort attestation digest is invalid"; exit 1; }
 
           deploy_root=$(readlink -f -- "$deploy_path")
@@ -380,6 +248,14 @@ jobs:
             set -- $count_manifest
             IFS=$old_ifs
             test "$#" -eq 22
+            for expected_count in "$@"; do
+              case "$expected_count" in
+                0|[1-9]|[1-9][0-9]*) ;;
+                *) exit 1 ;;
+              esac
+              test "${#expected_count}" -le 6
+            done
+            unset expected_count
             export EXPECTED_QUEUE_ROWS=$1
             export EXPECTED_EFFECTIVE_BROKER_GROUPS=$2
             export EXPECTED_LINK_EXISTING_BROKER_CONTACT_GROUPS=$3

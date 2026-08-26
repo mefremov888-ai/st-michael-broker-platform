@@ -1247,13 +1247,30 @@ describe("production-safe amo broker-contact provisioner", () => {
     ).toBe(0);
   });
 
-  it("has a syntactically valid exact-SHA, two-file, secret-backed exclusive-lock workflow with all 26 gates and no deploy", () => {
+  it("has a syntactically valid exact-SHA, two-file, secret-backed exclusive-lock workflow with a bounded manifest and no deploy", () => {
     const parsed = parse(workflow) as any;
     const workflowDispatch = parsed.on.workflow_dispatch;
-    expect(Object.keys(workflowDispatch.inputs)).toHaveLength(26);
+    expect(Object.keys(workflowDispatch.inputs)).toEqual([
+      "confirmation",
+      "confirm_exact_sha",
+      "reviewed_inspector_run_id",
+      "expected_cohort_digest",
+      "expected_count_manifest",
+    ]);
+    expect(Object.keys(workflowDispatch.inputs).length).toBeLessThanOrEqual(10);
     for (const input of Object.values(workflowDispatch.inputs) as any[]) {
       expect(input.required).toBe(true);
+      expect(input.type).toBe("string");
+      expect(input.default).toBeUndefined();
     }
+    expect(parsed.jobs.apply.steps[1].env).toMatchObject({
+      PROVISION_CONFIRMATION: "${{ inputs.confirmation }}",
+      PROVISION_CONFIRM_EXACT_SHA: "${{ inputs.confirm_exact_sha }}",
+      PROVISION_REVIEWED_PLAN_RUN_ID: "${{ inputs.reviewed_inspector_run_id }}",
+      PROVISION_EXPECTED_COHORT_DIGEST: "${{ inputs.expected_cohort_digest }}",
+      PROVISION_EXPECTED_COUNT_MANIFEST:
+        "${{ inputs.expected_count_manifest }}",
+    });
     const shell = parsed.jobs.apply.steps[1].run as string;
     const bash =
       process.platform === "win32"
@@ -1283,6 +1300,74 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(remoteSyntax.status).toBe(0);
     expect(remoteSyntax.stderr).toBe("");
 
+    const manifestGate = shell
+      .split("\n")
+      .find((line: string) =>
+        line.includes('[[ "$count_manifest" =~ ^(0|[1-9]'),
+      )
+      ?.trim();
+    expect(manifestGate).toBeDefined();
+    expect(
+      (
+        shell.match(
+          /\[\[ "\$count_manifest" =~ \^\(0\|\[1-9\]\[0-9\]\{0,5\}\)\(\:\(0\|\[1-9\]\[0-9\]\{0,5\}\)\)\{21\}\$ \]\]/g,
+        ) || []
+      ).length,
+    ).toBe(2);
+    const canonicalManifest = [12, 9, 1, 1, 1, 2, 6, 8, 1, 1]
+      .concat(Array(12).fill(0))
+      .join(":");
+    for (const [manifest, accepted] of [
+      [canonicalManifest, true],
+      [Array(22).fill("0").join(":"), true],
+      [["999999", ...Array(21).fill("0")].join(":"), true],
+      [Array(21).fill("0").join(":"), false],
+      [Array(23).fill("0").join(":"), false],
+      [["01", ...Array(21).fill("0")].join(":"), false],
+      [["1000000", ...Array(21).fill("0")].join(":"), false],
+      [["-1", ...Array(21).fill("0")].join(":"), false],
+      [["$()", ...Array(21).fill("0")].join(":"), false],
+      [["0;echo_PII", ...Array(21).fill("0")].join(":"), false],
+      [["0\nPII", ...Array(21).fill("0")].join(":"), false],
+    ] as Array<[string, boolean]>) {
+      const result = spawnSync(
+        bash,
+        [
+          "-c",
+          `set -euo pipefail\ncount_manifest=$1\n${manifestGate}`,
+          "manifest-contract",
+          manifest,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status === 0).toBe(accepted);
+      expect(result.stdout).not.toMatch(/PII|echo_PII/);
+    }
+
+    const expectedCountEnvironmentOrder = [
+      "EXPECTED_QUEUE_ROWS",
+      "EXPECTED_EFFECTIVE_BROKER_GROUPS",
+      ...provisioner.RESOLUTION_CLASSES.flatMap((resolution: string) => {
+        const name = resolution.toUpperCase();
+        return [`EXPECTED_${name}_GROUPS`, `EXPECTED_${name}_ROWS`];
+      }),
+    ];
+    const countExpansionStart = shell.indexOf("export EXPECTED_QUEUE_ROWS=$1");
+    const finalCountExport = "export EXPECTED_CANDIDATE_ALREADY_BOUND_ROWS=$4";
+    const countExpansionEnd =
+      shell.indexOf(finalCountExport, countExpansionStart) +
+      finalCountExport.length;
+    const countExpansion = shell.slice(countExpansionStart, countExpansionEnd);
+    expect(
+      [...countExpansion.matchAll(/export (EXPECTED_[A-Z_]+)=\$[1-9]/g)].map(
+        (match) => match[1],
+      ),
+    ).toEqual(expectedCountEnvironmentOrder);
+    expect(countExpansion.match(/shift 9/g) || []).toHaveLength(2);
+    expect(shell).toContain('for expected_count in "$@"; do');
+    expect(shell).toContain('test "${#expected_count}" -le 6');
+    expect(shell).not.toMatch(/\$\{\{\s*inputs\.[^}]+\}\}/);
+
     expect(workflow).toContain("group: production-deploy");
     expect(workflow).toMatch(/permissions:\s*[\s\S]*?actions: read/);
     expect(workflow).toContain("environment: production");
@@ -1307,6 +1392,13 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(workflow).toContain("BROKER_CONTACT_GATE_HMAC_KEY_FILE");
     expect(workflow).toContain('test "$runtime_gate_hash" = "$file_gate_hash"');
     expect(workflow).toContain("PROVISION_EXPECTED_COHORT_DIGEST");
+    expect(workflow).toContain("PROVISION_EXPECTED_COUNT_MANIFEST");
+    expect(workflow).toContain(
+      "count_manifest=$PROVISION_EXPECTED_COUNT_MANIFEST",
+    );
+    expect(workflow).not.toMatch(
+      /inputs\.expected_(?:queue_rows|effective_broker_groups)/,
+    );
     expect(workflow).toContain("cohort-attestation.key");
     expect(workflow).toContain(
       'BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file"',
