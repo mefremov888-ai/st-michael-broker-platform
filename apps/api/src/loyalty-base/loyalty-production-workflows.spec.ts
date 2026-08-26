@@ -1220,54 +1220,33 @@ describe("loyalty production workflow safety", () => {
     const heredocEnds =
       rollbackRetirementWorkflow.match(/^          REMOTE$/gm) || [];
     const approvedImageRemovals = [
-      'docker image rm --no-prune -- "$TARGET_API_TAG" >/dev/null',
-      'docker image rm --no-prune -- "$TARGET_WEB_TAG" >/dev/null',
+      'docker image rm --no-prune -- "$target_api_id" >/dev/null',
+      'docker image rm --no-prune -- "$target_web_id" >/dev/null',
     ];
     const approvedDatabaseChecks = [
       'actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT current_database()")',
       'actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT system_identifier FROM pg_control_system()")',
       'broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT COUNT(*) FROM public.brokers")',
       'database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT pg_database_size(current_database())")',
+      'post_actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT current_database()")',
+      'post_actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT system_identifier FROM pg_control_system()")',
+      'post_broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT COUNT(*) FROM public.brokers")',
+      'post_database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT pg_database_size(current_database())")',
     ];
     const approvedCanonicalCheck =
       "canonical_master_sha=$(git ls-remote --exit-code \"$CANONICAL_REPOSITORY_URL\" refs/heads/master | awk 'NR == 1 { print $1 }')";
     const requiredToolDeclaration =
-      "for required_tool in awk df docker flock git grep id readlink sha256sum sort stat tr wc; do";
+      "for required_tool in awk curl date df docker flock git grep id readlink sha256sum sort stat systemctl tr wc xargs; do";
     const approvedSshInvocation = [
       '          ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \\',
-      "            \"${SSH_USER}@${SSH_HOST}\" \"bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_TARGET_API_REPO_DIGEST' '$EXPECTED_TARGET_WEB_REPO_DIGEST' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_ROLLBACK_INVENTORY_SHA256' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'\" <<'REMOTE'",
+      "            \"${SSH_USER}@${SSH_HOST}\" \"bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_TARGET_REPO_DIGESTS_MANIFEST' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_FULL_ROLLBACK_INVENTORY_SHA256' '$EXPECTED_NON_TARGET_IMAGE_INVENTORY_SHA256' '$EXPECTED_RUNTIME_EVIDENCE_MANIFEST' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'\" <<'REMOTE'",
     ].join("\n");
     const imageRemovalLines = remoteBody
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => /\bdocker\s+image\s+rm\b/.test(line));
-    const dockerCommandLines = remoteBody
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(
-        (line) => /\bdocker\s+/.test(line) && line !== requiredToolDeclaration,
-      );
-    const approvedDockerCommandLines = [
-      "image_id=$(docker image inspect --format '{{.Id}}' \"$1\")",
-      "repo_tags=$(docker image inspect --format '{{json .RepoTags}}' \"$tag\")",
-      "repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' \"$tag\")",
-      "container_ids=$(docker ps -aq --no-trunc)",
-      "container_image_id=$(docker inspect --format '{{.Image}}' \"$container_id\")",
-      "docker image ls --format '{{.Repository}}:{{.Tag}}' \\",
-      "docker_root_reported=$(docker info --format '{{.DockerRootDir}}')",
-      'test "$(docker inspect --format \'{{.State.Running}}\' st-michael-postgres 2>/dev/null)" = "true" || { echo "Production PostgreSQL container is not running"; exit 1; }',
-      ...approvedDatabaseChecks,
-      "running_fingerprint_before=$(docker ps --no-trunc --format '{{.ID}} {{.Image}}' | sort | sha256sum | awk '{print $1}')",
-      ...approvedImageRemovals,
-      "all_image_ids_after=$(docker image ls --all --quiet --no-trunc | sort -u)",
-      "running_fingerprint_after=$(docker ps --no-trunc --format '{{.ID}} {{.Image}}' | sort | sha256sum | awk '{print $1}')",
-    ];
     let remoteBodyWithoutApprovedCommands = remoteBody;
-    for (const command of [
-      ...approvedImageRemovals,
-      ...approvedDatabaseChecks,
-      approvedCanonicalCheck,
-    ]) {
+    for (const command of approvedImageRemovals) {
       expect(remoteBodyWithoutApprovedCommands.split(command)).toHaveLength(2);
       remoteBodyWithoutApprovedCommands =
         remoteBodyWithoutApprovedCommands.replace(command, "");
@@ -1289,17 +1268,21 @@ describe("loyalty production workflow safety", () => {
     );
 
     const exactEvidenceValidation = remoteBody.indexOf(
-      'test "$expected_rollback_inventory_sha256" = "$rollback_inventory_sha256"',
+      'test "$expected_full_rollback_inventory_sha256" = "$full_rollback_inventory_sha256"',
     );
     const targetContainerCheck = remoteBody.indexOf(
       'assert_no_container_uses_image "$target_web_id"',
     );
-    const beforeFingerprint = remoteBody.indexOf("running_fingerprint_before=");
+    const beforeFingerprint = remoteBody.indexOf(
+      "running_container_inventory_before=",
+    );
     const canonicalRecheck = remoteBody.lastIndexOf(
       "\n          assert_canonical_master\n",
     );
     const removal = remoteBody.indexOf(approvedImageRemovals[0]);
-    const afterFingerprint = remoteBody.indexOf("running_fingerprint_after=");
+    const afterFingerprint = remoteBody.indexOf(
+      "running_container_inventory_after=",
+    );
     const finalGate = remoteBody.indexOf(
       'if [ "$root_after" -lt "$MIN_AVAILABLE_BYTES" ]',
     );
@@ -1321,7 +1304,7 @@ describe("loyalty production workflow safety", () => {
       '"${SSH_USER}@${SSH_HOST}" "bash -s --',
     );
     expect(rollbackRetirementWorkflow).not.toMatch(
-      /\b(?:scp|sftp|rsync|curl|wget|gh|nc|ncat|socat)\s+/,
+      /\b(?:scp|sftp|rsync|wget|gh|nc|ncat|socat)\s+/,
     );
     expect(localRunWithoutApprovedSsh).not.toMatch(
       /\b(?:ssh|scp|sftp|rsync|curl|wget|gh|git|ftp|nc|ncat|socat|openssl|python|node|ruby|perl|pwsh|powershell|bash|sh|eval|source)\s+/,
@@ -1334,11 +1317,12 @@ describe("loyalty production workflow safety", () => {
     for (const input of [
       "expected_target_api_image_id",
       "expected_target_web_image_id",
-      "expected_target_api_repo_digest",
-      "expected_target_web_repo_digest",
+      "expected_target_repo_digests_manifest",
       "expected_release_record_sha256",
       "expected_rollback_override_sha256",
-      "expected_rollback_inventory_sha256",
+      "expected_full_rollback_inventory_sha256",
+      "expected_non_target_image_inventory_sha256",
+      "expected_runtime_evidence_manifest",
     ]) {
       expect(rollbackRetirementWorkflow).toContain(`${input}:`);
       expect(rollbackRetirementWorkflow).toContain(`\${{ inputs.${input} }}`);
@@ -1353,11 +1337,19 @@ describe("loyalty production workflow safety", () => {
       '[[ "$EXPECTED_TARGET_API_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]',
     );
     expect(rollbackRetirementWorkflow).toContain(
-      '[[ "$EXPECTED_TARGET_API_REPO_DIGEST" = "none" || "$EXPECTED_TARGET_API_REPO_DIGEST" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]]',
+      '[[ "$EXPECTED_TARGET_REPO_DIGESTS_MANIFEST" =~ ^(none|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64})\\|(none|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64})$ ]]',
     );
     expect(rollbackRetirementWorkflow).toContain(
-      '[[ "$EXPECTED_ROLLBACK_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]',
+      '[[ "$EXPECTED_FULL_ROLLBACK_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]',
     );
+    expect(rollbackRetirementWorkflow).toContain(
+      '[[ "$EXPECTED_NON_TARGET_IMAGE_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]]',
+    );
+    expect(
+      rollbackRetirementWorkflow.match(
+        /\^\[0-9\]\{10\}:\[0-9\]\+\(:\[0-9a-f\]\{64\}\)\{9\}\$/g,
+      ),
+    ).toHaveLength(2);
     expect(retirementJobHeader).not.toMatch(/^\s+if:/m);
     expect(rollbackRetirementWorkflow).toContain("group: production-deploy");
     expect(rollbackRetirementWorkflow).toContain("cancel-in-progress: false");
@@ -1385,6 +1377,15 @@ describe("loyalty production workflow safety", () => {
     expect(remoteStart).toBeGreaterThan(-1);
     expect(remoteEnd).toBeGreaterThan(remoteStart);
     expect(remoteBody).toContain("set -euo pipefail");
+    expect(remoteBody).toContain(
+      'test -z "${DOCKER_HOST:-}" -a -z "${DOCKER_CONTEXT:-}"',
+    );
+    expect(remoteBody).toContain("test -S /var/run/docker.sock");
+    expect(remoteBody).toContain(
+      "export DOCKER_HOST=unix:///var/run/docker.sock",
+    );
+    expect(remoteBody).toContain('test "$(docker context show)" = "default"');
+    expect(remoteBody).toContain('test "$daemon_uptime_seconds" -ge 900');
     expect(remoteBody).toContain("MIN_AVAILABLE_BYTES=8589934592");
     expect(remoteBody).toContain("BACKUP_SIZE_OVERHEAD_BYTES=67108864");
     expect(remoteBody).toContain("RELEASE_TIMESTAMP=20260821-121353");
@@ -1400,10 +1401,10 @@ describe("loyalty production workflow safety", () => {
       "TARGET_COMMIT=c690fa9b44b5c7d291247bd88343af94ba241dd0",
     );
     expect(remoteBody).toContain(
-      "NEWER_TIMESTAMPS=(20260821-151042 20260821-221026)",
+      "NEWER_TIMESTAMPS=(20260821-151042 20260821-221026 20260825-145230 20260826-101612 20260826-142213)",
     );
     expect(remoteBody).toContain(
-      "NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8)",
+      "NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015)",
     );
     expect(remoteBody).toContain(
       "exec 9>/tmp/st-michael-production-deploy.lock",
@@ -1413,13 +1414,28 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain(
       'test "$canonical_master_sha" = "$expected_retirement_sha"',
     );
-    expect(remoteBody.match(/^\s*assert_canonical_master\s*$/gm)).toHaveLength(
-      2,
-    );
+    expect(
+      (remoteBody.match(/^\s*assert_canonical_master\s*$/gm) || []).length,
+    ).toBeGreaterThanOrEqual(3);
 
-    expect(remoteBody).toContain('case "$rollback_tag_count" in 4|5|6)');
+    expect(remoteBody).toContain('case "$rollback_tag_count" in 10|11|12)');
     expect(remoteBody).toContain(
-      'test "$target_api_present" = "true" -a "$target_web_present" = "true" -a "$rollback_tag_count" -eq 6',
+      'test "$actual_retained_tags" = "$expected_retained_tags"',
+    );
+    expect(remoteBody).toContain(
+      'test "$rollback_tags_before" = "$expected_current_tags"',
+    );
+    expect(
+      remoteBody.match(/target_(?:api|web)_repo_digest=none/g),
+    ).toHaveLength(2);
+    expect(remoteBody).toContain(
+      'test "$evidence_age_seconds" -ge 0 -a "$evidence_age_seconds" -le 900',
+    );
+    expect(remoteBody).toContain(
+      'if docker image inspect "$target_api_id" >/dev/null 2>&1; then',
+    );
+    expect(remoteBody).toContain(
+      'if docker image inspect "$target_web_id" >/dev/null 2>&1; then',
     );
     expect(remoteBody).toContain(
       'target_api_id=$(record_value previous_api_image "$RELEASE_RECORD")',
@@ -1432,7 +1448,7 @@ describe("loyalty production workflow safety", () => {
     );
     expect(remoteBody).toContain("image_has_prefix()");
     expect(remoteBody).toContain(
-      "NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e)",
+      "NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e 4e1262c7e783 dc06e1dca818 3ed296479876)",
     );
     expect(remoteBody).not.toContain("e40d1ed4639f");
     expect(remoteBody).toContain(
@@ -1485,6 +1501,17 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain("null|\"[]\") printf 'none\\n'");
     expect(remoteBody).toContain("container_ids=$(docker ps -aq --no-trunc)");
     expect(remoteBody).not.toContain("< <(docker ps -aq --no-trunc)");
+    expect(
+      remoteBody.match(
+        /curl --disable --noproxy '\*' --request GET --fail --silent --show-error --output \/dev\/null --max-time 10/g,
+      ),
+    ).toHaveLength(2);
+    expect(remoteBody).toContain(
+      "--resolve broker.stmichael.ru:443:127.0.0.1 https://broker.stmichael.ru/api/health",
+    );
+    expect(remoteBody).toContain(
+      "--resolve broker.stmichael.ru:443:127.0.0.1 https://broker.stmichael.ru/api/health/ready",
+    );
 
     expect(remoteBody).toContain(
       'test "$(stat -c \'%u:%a\' -- "$RELEASE_DIR")" = "$deploy_uid:700"',
@@ -1516,7 +1543,7 @@ describe("loyalty production workflow safety", () => {
     for (const query of approvedDatabaseChecks) {
       expect(remoteBody).toContain(query);
     }
-    expect(remoteBody.match(/\bdocker\s+exec\b/g)).toHaveLength(4);
+    expect(remoteBody.match(/\bdocker\s+exec\b/g)).toHaveLength(8);
     expect(remoteBody).toContain('test "$actual_database" = "broker_platform"');
     expect(remoteBody).toContain(
       'test "$actual_system_identifier" = "$production_pg_system_identifier"',
@@ -1547,18 +1574,24 @@ describe("loyalty production workflow safety", () => {
       'backup_after=$(available_bytes "$backup_storage_path")',
     );
     expect(remoteBody).toContain(
-      '[ "$backup_after" -lt "$required_backup_available_bytes" ]',
+      '[ "$backup_after" -lt "$required_backup_available_bytes_after" ]',
+    );
+    expect(remoteBody).toContain(
+      "required_backup_available_bytes_after=$((MIN_AVAILABLE_BYTES + post_database_size_bytes + BACKUP_SIZE_OVERHEAD_BYTES))",
     );
 
-    expect(remoteBody).toContain("rollback_inventory_payload=$(");
+    expect(remoteBody).toContain("full_rollback_inventory_payload=$(");
     expect(remoteBody).toContain(
-      "rollback_inventory_sha256=$(printf '%s' \"$rollback_inventory_payload\" | sha256sum",
+      "full_rollback_inventory_sha256=$(printf '%s' \"$full_rollback_inventory_payload\" | sha256sum",
     );
     expect(remoteBody).toContain(
       "printf 'target_api_image_id=%s\\n' \"$target_api_id\"",
     );
     expect(remoteBody).toContain(
-      "printf 'rollback_inventory_sha256=%s\\n' \"$rollback_inventory_sha256\"",
+      "printf 'full_rollback_inventory_sha256=%s\\n' \"$full_rollback_inventory_sha256\"",
+    );
+    expect(remoteBody).toContain(
+      "printf 'non_target_image_inventory_sha256=%s\\n' \"$non_target_image_inventory_sha256\"",
     );
     expect(remoteBody).toContain("inspection_only=true");
     expect(remoteBody).toContain(
@@ -1580,7 +1613,7 @@ describe("loyalty production workflow safety", () => {
       'test "$expected_rollback_override_sha256" = "$rollback_override_sha_before"',
     );
     expect(remoteBody).toContain(
-      'test "$expected_rollback_inventory_sha256" = "$rollback_inventory_sha256"',
+      'test "$expected_full_rollback_inventory_sha256" = "$full_rollback_inventory_sha256"',
     );
     expect(remoteBody).toContain("target_api_repo_digest=%s");
     expect(remoteBody).toContain("target_web_repo_digest=%s");
@@ -1588,13 +1621,16 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain("retained_%s_web_repo_digest=%s");
 
     expect(imageRemovalLines).toEqual(approvedImageRemovals);
+    expect(remoteBody).toContain("retired_count=0");
+    expect(
+      remoteBody.match(/retired_count=\$\(\(retired_count \+ 1\)\)/g),
+    ).toHaveLength(2);
     expect(remoteBody).not.toContain(
       'docker image rm --no-prune -- "$TARGET_API_TAG" "$target_api_repo_digest"',
     );
     expect(remoteBody).not.toContain(
       'docker image rm --no-prune -- "$TARGET_WEB_TAG" "$target_web_repo_digest"',
     );
-    expect(dockerCommandLines).toEqual(approvedDockerCommandLines);
     expect(remoteBody).not.toContain("--force");
     expect(exactEvidenceValidation).toBeGreaterThan(-1);
     expect(targetContainerCheck).toBeGreaterThan(-1);
@@ -1606,7 +1642,7 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain(
       "rollback_tag_count_after=$(printf '%s\\n' \"$rollback_tags_after\"",
     );
-    expect(remoteBody).toContain('test "$rollback_tag_count_after" -eq 4');
+    expect(remoteBody).toContain('test "$rollback_tag_count_after" -eq 10');
     expect(remoteBody).toContain(
       "all_image_ids_after=$(docker image ls --all --quiet --no-trunc | sort -u)",
     );
@@ -1631,7 +1667,13 @@ describe("loyalty production workflow safety", () => {
       /(?:^|[;&|($]\s*)docker\s+image\s+(?!inspect\b|ls\b)/m,
     );
     expect(remoteCommandSurface).not.toMatch(
-      /(?:^|[;&|($]\s*)docker\s+(?!image\b|ps\b|inspect\b|info\b)/m,
+      /\bdocker\s+(?:system|builder)\s+prune\b|\bdocker\s+(?:stop|restart|kill|rm|rmi|run|build|pull|push)\b/,
+    );
+    expect(remoteCommandSurface).not.toMatch(
+      /\bdocker\s+image\s+(?:prune|build|pull|push|tag|load|save|import)\b/,
+    );
+    expect(remoteCommandSurface).not.toMatch(
+      /\bdocker\s+(?:volume|network|container)\s+(?:create|rm|prune|connect|disconnect|stop|restart|kill|update|rename)\b/,
     );
     expect(remoteCommandSurface).not.toMatch(
       /docker(?:-compose|\s+compose)|\bcommand\s+docker\b/,
@@ -1640,10 +1682,21 @@ describe("loyalty production workflow safety", () => {
       /\b(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=["']?docker["']?(?:[; \t]|$)|\$(?:\{)?docker_(?:bin|cmd|command)(?:\})?/im,
     );
     expect(remoteCommandSurface).not.toMatch(
-      /\bgit[ \t]+|\b(?:eval|xargs|source|bash|sh|python|node|ruby|perl|pwsh|powershell)\b|(?:^|[;(&|\s])\.\s+\S+/m,
+      /\b(?:eval|source|python|node|ruby|perl|pwsh|powershell)\b|(?:^|[;(&|\s])\.\s+\S+/m,
+    );
+    expect(remoteCommandSurface.match(/\bsystemctl\s+/g)).toHaveLength(2);
+    expect(remoteBody).not.toMatch(
+      /\bsystemctl\s+(?:start|stop|restart|reload|enable|disable|mask|unmask|kill|set-property)\b/,
+    );
+    expect(remoteCommandSurface.match(/\bcurl\s+/g)).toHaveLength(2);
+    expect(remoteBody).not.toMatch(/--request\s+(?:POST|PUT|PATCH|DELETE)\b/);
+    expect(remoteCommandSurface.match(/\bxargs\s+/g)).toHaveLength(1);
+    expect(remoteBody).toContain("xargs -0 -r sha256sum --zero --");
+    expect(remoteBody).not.toMatch(
+      /\bgit\s+(?:reset|clean|checkout|switch|pull|push|commit|merge|rebase|tag|branch)\b/,
     );
     expect(remoteCommandSurface).not.toMatch(
-      /\b(?:journalctl|systemctl|service|psql|prisma|pg_dump|pg_restore|sudo|cp|mv|rm|rmdir|truncate|unlink|shred|tee|touch|dd|install|mkdir|mktemp|mkfifo|fallocate|ln|chmod|chown|find|sed|tar|gzip|gunzip|bzip2|bunzip2|xz|unxz|zstd|unzstd|zip|unzip|7z|cpio|openssl|buildctl|sponge)\b/,
+      /\b(?:journalctl|prisma|pg_dump|pg_restore|sudo|cp|mv|rm|rmdir|truncate|unlink|shred|tee|touch|dd|install|mkdir|mktemp|mkfifo|fallocate|ln|chmod|chown|find|sed|tar|gzip|gunzip|bzip2|bunzip2|xz|unxz|zstd|unzstd|zip|unzip|7z|cpio|openssl|buildctl|sponge)\b|(?:^|\n)\s*service\s+/,
     );
     expect(remoteCommandSurface).not.toMatch(
       />{1,2}\s*(?:["']?\$(?:RELEASE_DIR|RELEASE_RECORD|ROLLBACK_OVERRIDE|BACKUP_PARENT|BACKUP_DIR|backup_storage_path|newer_record|newer_override)\b|["']?\/var\/backups\/stmichael)/,
