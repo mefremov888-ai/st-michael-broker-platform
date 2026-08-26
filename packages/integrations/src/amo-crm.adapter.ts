@@ -88,6 +88,39 @@ export interface CreateLeadDto {
   custom_fields_values?: any[];
 }
 
+export interface FixationClientContactInput {
+  clientPhone: string;
+  clientEmail?: string;
+  clientName: string;
+  clientRegion?: string;
+  presentationSent?: boolean;
+}
+
+function fixationClientCustomFields(data: FixationClientContactInput): any[] {
+  const fields: any[] = [
+    {
+      field_code: "PHONE",
+      values: [{ value: data.clientPhone, enum_code: "WORK" }],
+    },
+  ];
+  if (data.clientEmail) {
+    fields.push({
+      field_code: "EMAIL",
+      values: [{ value: data.clientEmail, enum_code: "WORK" }],
+    });
+  }
+  if (data.clientRegion) {
+    fields.push({
+      field_id: 589265,
+      values: [{ value: data.clientRegion }],
+    });
+  }
+  if (data.presentationSent) {
+    fields.push({ field_id: 835955, values: [{ value: true }] });
+  }
+  return fields;
+}
+
 export interface UpdateLeadDto {
   name?: string;
   price?: number;
@@ -828,6 +861,28 @@ export class AmoCrmAdapter {
     return result?._embedded?.contacts?.[0];
   }
 
+  /**
+   * One-shot client-contact mutation for a caller that already owns the
+   * shared fixation phone lease and has durably armed reconciliation. It does
+   * no lookup/upsert and inherits createContact's retryTransient:false POST.
+   */
+  async createFixationClientContactOnce(
+    data: FixationClientContactInput,
+  ): Promise<AmoContact> {
+    if (
+      typeof data?.clientPhone !== "string" ||
+      last10Digits(data.clientPhone).length !== 10 ||
+      typeof data?.clientName !== "string" ||
+      !data.clientName.trim()
+    ) {
+      throw new Error("FIXATION_CLIENT_CONTACT_INPUT_INVALID");
+    }
+    return this.createContact({
+      name: data.clientName,
+      custom_fields_values: fixationClientCustomFields(data),
+    });
+  }
+
   async updateContact(
     id: number,
     data: Partial<CreateContactDto>,
@@ -1241,10 +1296,9 @@ export class AmoCrmAdapter {
         throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_INCOMPLETE");
       }
     }
-    const contactsMap = await this.getContactsByIds(
-      Array.from(allContactIds),
-      { strict: true },
-    );
+    const contactsMap = await this.getContactsByIds(Array.from(allContactIds), {
+      strict: true,
+    });
 
     const isBroker = (c: any): boolean => {
       const fields = c?.custom_fields_values || [];
@@ -1509,8 +1563,10 @@ export class AmoCrmAdapter {
     clientName: string;
     clientRegion?: string; // правка 2026-05-22: регион клиента (REGION=589265)
     presentationSent?: boolean; // правка 2026-05-22: «Отправлена презентация» на контакт клиента
+    existingClientAmoContactId?: number;
     brokerPhone: string;
     brokerAmoContactId: number; // required invariant; linked as the lead's second contact
+    additionalBrokerAmoContactIds?: number[];
     agencyName: string;
     agencyInn: string;
     comment: string;
@@ -1547,38 +1603,70 @@ export class AmoCrmAdapter {
       throw new Error("BROKER_AMO_CONTACT_MISSING");
     }
 
-    // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
-    const clientCustomFields: any[] = [
-      {
-        field_code: "PHONE",
-        values: [{ value: data.clientPhone, enum_code: "WORK" }],
-      },
+    const additionalBrokerAmoContactIds =
+      data.additionalBrokerAmoContactIds === undefined
+        ? []
+        : data.additionalBrokerAmoContactIds;
+    if (
+      !Array.isArray(additionalBrokerAmoContactIds) ||
+      additionalBrokerAmoContactIds.some(
+        (id) => !Number.isSafeInteger(id) || id <= 0,
+      ) ||
+      new Set(additionalBrokerAmoContactIds).size !==
+        additionalBrokerAmoContactIds.length ||
+      additionalBrokerAmoContactIds.includes(data.brokerAmoContactId)
+    ) {
+      throw new Error("AMO_FIXATION_BROKER_CONTACT_SET_INVALID");
+    }
+    if (
+      data.reuseLeadId !== undefined &&
+      (data.existingClientAmoContactId !== undefined ||
+        data.additionalBrokerAmoContactIds !== undefined)
+    ) {
+      throw new Error("AMO_FIXATION_RECOVERY_CONTRACT_REUSE_UNSUPPORTED");
+    }
+    const brokerAmoContactIds = [
+      data.brokerAmoContactId,
+      ...additionalBrokerAmoContactIds
+        .slice()
+        .sort((left, right) => left - right),
     ];
-    if (data.clientEmail) {
-      clientCustomFields.push({
-        field_code: "EMAIL",
-        values: [{ value: data.clientEmail, enum_code: "WORK" }],
-      });
+    if (
+      data.existingClientAmoContactId !== undefined &&
+      (!Number.isSafeInteger(data.existingClientAmoContactId) ||
+        data.existingClientAmoContactId <= 0)
+    ) {
+      throw new Error("AMO_FIXATION_CLIENT_CONTACT_ID_INVALID");
     }
-    if (data.clientRegion) {
-      clientCustomFields.push({
-        field_id: 589265,
-        values: [{ value: data.clientRegion }],
-      });
+    if (
+      additionalBrokerAmoContactIds.length > 0 &&
+      data.existingClientAmoContactId === undefined
+    ) {
+      throw new Error("AMO_FIXATION_ADDITIONAL_BROKERS_REQUIRE_EXACT_CLIENT");
     }
-    if (data.presentationSent) {
-      clientCustomFields.push({ field_id: 835955, values: [{ value: true }] });
+    if (
+      data.existingClientAmoContactId !== undefined &&
+      brokerAmoContactIds.includes(data.existingClientAmoContactId)
+    ) {
+      throw new Error("AMO_FIXATION_CONTACT_ROLE_COLLISION");
     }
 
-    let contact = await this.findContactByPhone(data.clientPhone, {
-      strict: true,
-    });
+    // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
+    const clientCustomFields = fixationClientCustomFields(data);
+
+    const contactWasPreResolved = data.existingClientAmoContactId !== undefined;
+    let contact = contactWasPreResolved
+      ? ({
+          id: data.existingClientAmoContactId,
+          name: data.clientName,
+        } as AmoContact)
+      : await this.findContactByPhone(data.clientPhone, { strict: true });
     if (!contact) {
       contact = await this.createContact({
         name: data.clientName,
         custom_fields_values: clientCustomFields,
       });
-    } else {
+    } else if (!contactWasPreResolved) {
       // Контакт существует — обновим переданные поля (email/region/presentation).
       // Без try/catch: если amo вернёт ошибку, мы не валим всю операцию.
       try {
@@ -1593,6 +1681,10 @@ export class AmoCrmAdapter {
     //   583447 — "Сколько комнат рассматривает"
     //   833045 — "Стоимость без скидок, руб" (= бюджет покупки)
     //   604555 — "Метраж, м2"
+    if (!Number.isSafeInteger(contact?.id) || contact.id <= 0) {
+      throw new Error("AMO_FIXATION_CLIENT_CONTACT_ID_INVALID");
+    }
+
     const customFields: any[] = [];
     // 2026-06-09: 587387 «Тип объекта» и 583447 «Кол-во комнат» — это
     // multiselect (нужны enum_id). PATCH с value=строкой возвращает
@@ -1726,10 +1818,10 @@ export class AmoCrmAdapter {
     // Правка 2026-05-22: к лиду привязываются ДВА контакта — клиент И брокер.
     // Без брокера в `contacts` непонятно «от кого пришла заявка» (на скриншоте
     // КБ3 в лиде виден второй контакт «Малыгина Елена Александровна» — агент).
-    const leadContacts: Array<{ id: number }> = [];
-    if (contact?.id) leadContacts.push({ id: contact.id });
-    if (data.brokerAmoContactId)
-      leadContacts.push({ id: data.brokerAmoContactId });
+    const leadContacts: Array<{ id: number }> = [
+      { id: contact.id },
+      ...brokerAmoContactIds.map((id) => ({ id })),
+    ];
 
     // 2026-06-03: режим переиспользования существующего лида.
     // Когда у контакта уже есть активный лид в КЦ (Новое обращение /

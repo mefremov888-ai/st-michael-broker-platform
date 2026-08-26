@@ -449,6 +449,197 @@ describe("AmoCrmAdapter broker contact safety", () => {
     expect(createLead).not.toHaveBeenCalled();
   });
 
+  it("creates a fixation client contact through exactly one one-shot contact primitive", async () => {
+    const adapter = new AmoCrmAdapter();
+    const createContact = jest
+      .spyOn(adapter, "createContact")
+      .mockResolvedValue({ id: 501, name: "Client" });
+
+    await expect(
+      adapter.createFixationClientContactOnce({
+        clientPhone: "+79990000501",
+        clientEmail: "client@example.test",
+        clientName: "Client",
+        clientRegion: "Moscow",
+      }),
+    ).resolves.toMatchObject({ id: 501 });
+
+    expect(createContact).toHaveBeenCalledTimes(1);
+    expect(createContact).toHaveBeenCalledWith({
+      name: "Client",
+      custom_fields_values: [
+        {
+          field_code: "PHONE",
+          values: [{ value: "+79990000501", enum_code: "WORK" }],
+        },
+        {
+          field_code: "EMAIL",
+          values: [{ value: "client@example.test", enum_code: "WORK" }],
+        },
+        { field_id: 589265, values: [{ value: "Moscow" }] },
+      ],
+    });
+  });
+
+  it("uses a pre-resolved exact client and every sibling broker in the sole lead create", async () => {
+    global.fetch = jest.fn();
+    const adapter = new AmoCrmAdapter();
+    const findContact = jest.spyOn(adapter, "findContactByPhone");
+    const createContact = jest.spyOn(adapter, "createContact");
+    const updateContact = jest.spyOn(adapter, "updateContact");
+    const createLead = jest
+      .spyOn(adapter, "createLead")
+      .mockResolvedValue({ id: 601, name: "Fixation" });
+    jest.spyOn(adapter, "updateLead").mockResolvedValue(undefined);
+    jest.spyOn(adapter, "addNoteToLead").mockResolvedValue(undefined);
+
+    await expect(
+      adapter.createFixationRequest({
+        clientPhone: "+79990000601",
+        clientName: "Client",
+        existingClientAmoContactId: 101,
+        brokerPhone: "+79990000602",
+        brokerAmoContactId: 201,
+        additionalBrokerAmoContactIds: [303, 301, 302],
+        agencyName: "Agency",
+        agencyInn: "7700000000",
+        comment: "",
+        project: "ZORGE9" as any,
+      }),
+    ).resolves.toMatchObject({ id: 601 });
+
+    expect(findContact).not.toHaveBeenCalled();
+    expect(createContact).not.toHaveBeenCalled();
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(createLead).toHaveBeenCalledTimes(1);
+    expect(createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pipeline_id: AMO_PIPELINES.KC,
+        contacts: [
+          { id: 101 },
+          { id: 201 },
+          { id: 301 },
+          { id: 302 },
+          { id: 303 },
+        ],
+      }),
+    );
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "duplicate additional ids",
+      { additionalBrokerAmoContactIds: [301, 301] },
+      "AMO_FIXATION_BROKER_CONTACT_SET_INVALID",
+    ],
+    [
+      "primary repeated as additional",
+      { additionalBrokerAmoContactIds: [201] },
+      "AMO_FIXATION_BROKER_CONTACT_SET_INVALID",
+    ],
+    [
+      "invalid additional id",
+      { additionalBrokerAmoContactIds: [0] },
+      "AMO_FIXATION_BROKER_CONTACT_SET_INVALID",
+    ],
+    [
+      "unsafe additional id",
+      { additionalBrokerAmoContactIds: [Number.MAX_SAFE_INTEGER + 1] },
+      "AMO_FIXATION_BROKER_CONTACT_SET_INVALID",
+    ],
+    [
+      "client equals primary broker",
+      { existingClientAmoContactId: 201 },
+      "AMO_FIXATION_CONTACT_ROLE_COLLISION",
+    ],
+    [
+      "client equals additional broker",
+      { existingClientAmoContactId: 301, additionalBrokerAmoContactIds: [301] },
+      "AMO_FIXATION_CONTACT_ROLE_COLLISION",
+    ],
+    [
+      "additional without exact client",
+      {
+        existingClientAmoContactId: undefined,
+        additionalBrokerAmoContactIds: [301],
+      },
+      "AMO_FIXATION_ADDITIONAL_BROKERS_REQUIRE_EXACT_CLIENT",
+    ],
+    [
+      "additional with reuse",
+      { additionalBrokerAmoContactIds: [301], reuseLeadId: 999 },
+      "AMO_FIXATION_RECOVERY_CONTRACT_REUSE_UNSUPPORTED",
+    ],
+    [
+      "pre-resolved client with reuse",
+      { additionalBrokerAmoContactIds: undefined, reuseLeadId: 999 },
+      "AMO_FIXATION_RECOVERY_CONTRACT_REUSE_UNSUPPORTED",
+    ],
+    [
+      "pre-resolved client with zero reuse id",
+      { additionalBrokerAmoContactIds: undefined, reuseLeadId: 0 },
+      "AMO_FIXATION_RECOVERY_CONTRACT_REUSE_UNSUPPORTED",
+    ],
+  ])(
+    "rejects %s before any contact or lead mutation",
+    async (_label, overrides, expectedError) => {
+      global.fetch = jest.fn();
+      const adapter = new AmoCrmAdapter();
+      const findContact = jest.spyOn(adapter, "findContactByPhone");
+      const createContact = jest.spyOn(adapter, "createContact");
+      const updateContact = jest.spyOn(adapter, "updateContact");
+      const createLead = jest.spyOn(adapter, "createLead");
+
+      await expect(
+        adapter.createFixationRequest({
+          clientPhone: "+79990000701",
+          clientName: "Client",
+          existingClientAmoContactId: 101,
+          brokerPhone: "+79990000702",
+          brokerAmoContactId: 201,
+          additionalBrokerAmoContactIds: [],
+          agencyName: "Agency",
+          agencyInn: "7700000000",
+          comment: "",
+          project: "ZORGE9" as any,
+          ...(overrides as any),
+        }),
+      ).rejects.toThrow(expectedError as string);
+
+      expect(findContact).not.toHaveBeenCalled();
+      expect(createContact).not.toHaveBeenCalled();
+      expect(updateContact).not.toHaveBeenCalled();
+      expect(createLead).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid pre-resolved client contact id %s before any request",
+    async (existingClientAmoContactId) => {
+      global.fetch = jest.fn();
+      const adapter = new AmoCrmAdapter();
+      const createLead = jest.spyOn(adapter, "createLead");
+
+      await expect(
+        adapter.createFixationRequest({
+          clientPhone: "+79990000801",
+          clientName: "Client",
+          existingClientAmoContactId,
+          brokerPhone: "+79990000802",
+          brokerAmoContactId: 201,
+          agencyName: "Agency",
+          agencyInn: "7700000000",
+          comment: "",
+          project: "ZORGE9" as any,
+        }),
+      ).rejects.toThrow("AMO_FIXATION_CLIENT_CONTACT_ID_INVALID");
+      expect(createLead).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ["omitted", undefined, undefined],
     ["omitted with fromBroker=false", undefined, false],
@@ -476,9 +667,9 @@ describe("AmoCrmAdapter broker contact safety", () => {
       };
       if (fromBroker !== undefined) data.fromBroker = fromBroker;
 
-      await expect(
-        adapter.createFixationRequest(data),
-      ).rejects.toThrow("BROKER_AMO_CONTACT_MISSING");
+      await expect(adapter.createFixationRequest(data)).rejects.toThrow(
+        "BROKER_AMO_CONTACT_MISSING",
+      );
       expect(global.fetch).not.toHaveBeenCalled();
       expect(findClientContact).not.toHaveBeenCalled();
       expect(createClientContact).not.toHaveBeenCalled();
