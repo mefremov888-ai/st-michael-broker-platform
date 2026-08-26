@@ -117,6 +117,30 @@ export async function recordUncertainAmoBrokerContactCreate(
   });
 }
 
+/**
+ * Commit the fail-safe gate outside the caller's long interactive transaction.
+ * The caller must already hold the shared advisory + broker row lock. If the
+ * process or transaction dies after this commit, a later lock holder observes
+ * the marker and cannot issue another POST.
+ */
+export async function armDurableAmoBrokerContactCreateGate(
+  database: any,
+  brokerId: string,
+): Promise<void> {
+  await database.auditLog.create({
+    data: {
+      userId: null,
+      action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+      entity: "Broker",
+      entityId: brokerId,
+      payload: {
+        reason: "PRE_MUTATION_DURABLE_GATE",
+        automaticRetryBlocked: true,
+      },
+    },
+  });
+}
+
 export async function recordResolvedAmoBrokerContactCreate(
   transaction: any,
   brokerId: string,

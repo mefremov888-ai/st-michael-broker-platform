@@ -728,6 +728,7 @@ describe("production-safe amo broker-contact provisioner", () => {
       auditLog: { create: jest.fn() },
     };
     const prisma = {
+      auditLog: tx.auditLog,
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     };
 
@@ -775,6 +776,7 @@ describe("production-safe amo broker-contact provisioner", () => {
       },
     };
     const prisma = {
+      auditLog: tx.auditLog,
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     };
     const requestGet = jest.fn().mockResolvedValue(contactsPage([]));
@@ -796,11 +798,14 @@ describe("production-safe amo broker-contact provisioner", () => {
         sleepImpl: jest.fn(),
         requestIdFactory: () => requestId,
       }),
-    ).rejects.toMatchObject({ code: "AMO_CREATE_RECONCILIATION_REQUIRED" });
+    ).rejects.toMatchObject({ code: "AMO_POST_MUTATION_NOT_RECONCILED" });
     expect(mutateOnce).toHaveBeenCalledTimes(1);
+    expect(tx.auditLog.create.mock.invocationCallOrder[0]).toBeLessThan(
+      mutateOnce.mock.invocationCallOrder[0],
+    );
     expect(requestGet).toHaveBeenCalledTimes(7);
     expect(marker).toBe(provisioner.AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION);
-    expect(tx.broker.update).toHaveBeenCalledTimes(1);
+    expect(tx.broker.update).not.toHaveBeenCalled();
     expect(tx.broker.updateMany).not.toHaveBeenCalled();
     expect(tx.client).not.toHaveProperty("update");
 
@@ -903,6 +908,7 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(remoteSyntax.stderr).toBe("");
 
     expect(workflow).toContain("group: production-deploy");
+    expect(workflow).toMatch(/permissions:\s*[\s\S]*?actions: read/);
     expect(workflow).toContain("environment: production");
     expect(provisioner.HISTORICAL_COUNT_EVIDENCE_RUN_ID).toBe("32947094767");
     expect(workflow).toContain("/actions/runs/$PROVISION_REVIEWED_PLAN_RUN_ID");

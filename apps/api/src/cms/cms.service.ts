@@ -2,7 +2,7 @@ import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitLeadDate } from '@st-michael/integrations';
 import { getSystemSetting } from '../common/system-setting';
-import { acquireAmoBrokerContactAdvisoryXactLock, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate, recordUncertainAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
+import { acquireAmoBrokerContactAdvisoryXactLock, armDurableAmoBrokerContactCreateGate, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
 import { COMMISSION_RATES, LEVEL_THRESHOLDS_BY_PROJECT, paymentTermsForPolicy, rateFor } from '../commission/commission.service';
 
 const KNOWN_KEYS = ['hero', 'advantages', 'commission', 'contact', 'howto', 'projectsSection', 'cooperation'] as const;
@@ -649,6 +649,7 @@ export class CmsService {
     // brokerId в нашей БД создан, синк может пройти позже.
     let amoLeadId: number | undefined;
     let amoContactId: number | undefined;
+    let durableCreateGateArmed = false;
     try {
       amoContactId = await this.prisma.$transaction(
         async (tx) => {
@@ -686,6 +687,8 @@ export class CmsService {
             }
           } else {
             if (unresolvedCreate) return null;
+            await armDurableAmoBrokerContactCreateGate(this.prisma, created.id);
+            durableCreateGateArmed = true;
             let createError: unknown = null;
             try {
               contact = await this.amo.createContact({
@@ -725,7 +728,6 @@ export class CmsService {
               contact = null;
             }
             if (!contact) {
-              await recordUncertainAmoBrokerContactCreate(tx, created.id);
               return null;
             }
           }
@@ -758,6 +760,9 @@ export class CmsService {
       );
       if (!amoContactId) {
         throw new Error('AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED');
+      }
+      if (durableCreateGateArmed) {
+        await recordResolvedAmoBrokerContactCreate(this.prisma, created.id);
       }
       const amo = await this.amo.createBrokerLeadFromLanding({
         brokerName: data.fullName,

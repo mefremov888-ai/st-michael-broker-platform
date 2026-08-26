@@ -1183,6 +1183,7 @@ async function provisionAmoContact({
   sleepImpl,
   requestIdFactory = () => `provision_${randomBytes(16).toString("hex")}`,
   onCreateMutationOutcome = () => undefined,
+  beforeCreateMutation = () => undefined,
 }) {
   const preLookups = await lookupPhones(record.phones, requestGet, planModule);
   const preContacts = collectExactContacts(record.phones, preLookups);
@@ -1198,6 +1199,7 @@ async function provisionAmoContact({
     });
   } else if (record.resolution === "create_contact_candidate") {
     activeFailurePhase = FAILURE_PHASE.AMO_MUTATION;
+    await beforeCreateMutation();
     const requestId = requestIdFactory();
     if (!/^provision_[0-9a-f]{32}$/.test(requestId)) {
       fail("AMO_CREATE_REQUEST_ID_INVALID");
@@ -1272,6 +1274,31 @@ async function recordUncertainAmoBrokerContactCreate(
   await transaction.broker.update({
     where: { id: brokerId },
     data: { updatedAt: new Date() },
+  });
+}
+
+async function armDurableAmoBrokerContactCreateGate(
+  database,
+  brokerId,
+  sourceSha,
+  reviewedPlanRunId,
+) {
+  await database.auditLog.create({
+    data: {
+      userId: null,
+      action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+      entity: "Broker",
+      entityId: brokerId,
+      payload: {
+        source: "production_amo_broker_contact_provisioner",
+        sourceSha,
+        reviewedPlanRunId,
+        reason: "PRE_MUTATION_DURABLE_GATE",
+        automaticRetryBlocked: true,
+        clientsMutated: false,
+        retriesRun: false,
+      },
+    },
   });
 }
 
@@ -1605,6 +1632,7 @@ async function provisionAndLinkBrokerContact({
   requestIdFactory,
 }) {
   const queueIds = record.queueRows.map((row) => row.id);
+  let durableCreateGateArmed = false;
   const result = await prisma.$transaction(
     async (tx) => {
       activeFailurePhase = FAILURE_PHASE.PREFLIGHT;
@@ -1632,38 +1660,24 @@ async function provisionAndLinkBrokerContact({
         fail("AMO_CREATE_UNCERTAIN_MARKER_PRESENT");
       }
 
-      let createMutationMayHaveCommitted = false;
-      let contactId;
-      try {
-        contactId = await provisionAmoContact({
-          record,
-          broker: before.currentBroker,
-          requestGet,
-          mutateOnce,
-          planModule,
-          sleepImpl,
-          requestIdFactory,
-          onCreateMutationOutcome: (mutation) => {
-            createMutationMayHaveCommitted = Boolean(
-              mutation?.accepted || mutation?.uncertain,
-            );
-          },
-        });
-      } catch (error) {
-        if (
-          record.resolution === "create_contact_candidate" &&
-          createMutationMayHaveCommitted
-        ) {
-          await recordUncertainAmoBrokerContactCreate(
-            tx,
+      const contactId = await provisionAmoContact({
+        record,
+        broker: before.currentBroker,
+        requestGet,
+        mutateOnce,
+        planModule,
+        sleepImpl,
+        requestIdFactory,
+        beforeCreateMutation: async () => {
+          await armDurableAmoBrokerContactCreateGate(
+            prisma,
             record.broker.id,
             sourceSha,
             reviewedPlanRunId,
           );
-          return { unresolvedCreate: true };
-        }
-        throw error;
-      }
+          durableCreateGateArmed = true;
+        },
+      });
 
       activeFailurePhase = FAILURE_PHASE.DATABASE_CAS;
       const [currentBroker, currentQueueRows, allBrokers] = await Promise.all([
@@ -1717,9 +1731,6 @@ async function provisionAndLinkBrokerContact({
           },
         },
       });
-      if (unresolvedCreate) {
-        await recordResolvedAmoBrokerContactCreate(tx, record.broker.id);
-      }
       return contactId;
     },
     {
@@ -1728,8 +1739,8 @@ async function provisionAndLinkBrokerContact({
       timeout: TRANSACTION_TIMEOUT_MS,
     },
   );
-  if (result && typeof result === "object" && result.unresolvedCreate) {
-    fail("AMO_CREATE_RECONCILIATION_REQUIRED");
+  if (durableCreateGateArmed) {
+    await recordResolvedAmoBrokerContactCreate(prisma, record.broker.id);
   }
   return result;
 }

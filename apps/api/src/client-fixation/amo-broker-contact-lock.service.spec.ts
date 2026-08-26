@@ -171,10 +171,7 @@ describe("shared amo broker-contact advisory lock", () => {
           entityId: fullBroker.id,
         }),
       });
-      expect(prisma.broker.update).toHaveBeenCalledWith({
-        where: { id: fullBroker.id },
-        data: { updatedAt: expect.any(Date) },
-      });
+      expect(prisma.broker.update).not.toHaveBeenCalled();
       expect(prisma.broker.updateMany).not.toHaveBeenCalled();
 
       prisma.auditLog.findFirst.mockResolvedValue({

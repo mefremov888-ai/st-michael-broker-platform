@@ -8,7 +8,7 @@ import * as XLSX from 'xlsx';
 import { getSystemSetting } from '../common/system-setting';
 import { buildPhoneSearchConditions } from '../admin/brokers-import.helper';
 import { OpsAlertService } from '../ops-alert/ops-alert.service';
-import { acquireAmoBrokerContactAdvisoryXactLock, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate, recordUncertainAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
+import { acquireAmoBrokerContactAdvisoryXactLock, armDurableAmoBrokerContactCreateGate, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
 import { AMO_CREATE_IN_PROGRESS_MARKER, AMO_CREATE_RECONCILIATION_REQUIRED_MARKER, AMO_RETRY_MAX_ATTEMPTS, AMO_UNIQUENESS_RECHECK_MARKER, markAmoCreateFailure, publicAmoSyncError, requiresAmoCreateReconciliation, sanitizeAmoSyncError } from '../common/amo-sync-retry';
 
 const UNIQUENESS_DAYS = 30;
@@ -1161,6 +1161,7 @@ export class ClientFixationService {
       select: { phone: true },
     });
     if (!lockSource) throw new NotFoundException('Broker not found');
+    let durableCreateGateArmed = false;
     return this.prisma
       .$transaction(
         async (tx) => {
@@ -1230,6 +1231,8 @@ export class ClientFixationService {
               return { ...broker, reconciliationRequired: true };
             }
 
+            await armDurableAmoBrokerContactCreateGate(this.prisma, brokerId);
+            durableCreateGateArmed = true;
             let createError: unknown = null;
             try {
               amoContact = await this.amoCrmAdapter.createContact(payload);
@@ -1252,7 +1255,6 @@ export class ClientFixationService {
               amoContact = null;
             }
             if (!amoContact) {
-              await recordUncertainAmoBrokerContactCreate(tx, brokerId);
               return { ...broker, reconciliationRequired: true };
             }
           }
@@ -1282,9 +1284,12 @@ export class ClientFixationService {
           timeout: 120_000,
         },
       )
-      .then((result: any) => {
+      .then(async (result: any) => {
         if (result?.reconciliationRequired) {
           throw new Error('AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED');
+        }
+        if (durableCreateGateArmed) {
+          await recordResolvedAmoBrokerContactCreate(this.prisma, brokerId);
         }
         return result;
       });

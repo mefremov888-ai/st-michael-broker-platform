@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto';
 import { AmoCrmAdapter, AMO_CONTACT_FIELDS, brokerToAmoContactFields, agencyToAmoCompanyFields, mapMeetingStatus, leadToProject, BROKER_PIPELINE_ID } from '@st-michael/integrations';
 import { CatalogService } from '../catalog/catalog.service';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
-import { acquireAmoBrokerContactAdvisoryXactLock, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate, recordUncertainAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
+import { acquireAmoBrokerContactAdvisoryXactLock, armDurableAmoBrokerContactCreateGate, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
 
 const UPLOADS_ROOT = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATAR_PUBLIC_PREFIX = '/files';
@@ -966,6 +966,7 @@ export class AuthService {
     });
     if (!exists) return;
 
+    let durableCreateGateArmed = false;
     const lockedContact = await this.prisma.$transaction(
       async (tx) => {
         await acquireAmoBrokerContactAdvisoryXactLock(tx, brokerId, exists.phone);
@@ -1025,6 +1026,8 @@ export class AuthService {
                 reconciliationRequired: true,
               };
             }
+            await armDurableAmoBrokerContactCreateGate(this.prisma, brokerId);
+            durableCreateGateArmed = true;
             let createError: unknown = null;
             try {
               existing = await this.amo.createContact(payload);
@@ -1047,7 +1050,6 @@ export class AuthService {
               existing = null;
             }
             if (!existing) {
-              await recordUncertainAmoBrokerContactCreate(tx, brokerId);
               return {
                 primaryAgency,
                 amoContactId: null,
@@ -1088,6 +1090,9 @@ export class AuthService {
     if (!lockedContact) return;
     if (lockedContact.reconciliationRequired) {
       throw new Error('AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED');
+    }
+    if (durableCreateGateArmed) {
+      await recordResolvedAmoBrokerContactCreate(this.prisma, brokerId);
     }
     const { primaryAgency, amoContactId } = lockedContact;
 
