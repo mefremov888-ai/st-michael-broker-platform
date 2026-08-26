@@ -1,0 +1,332 @@
+name: Apply production amo fixation lead reconciliation (link-only)
+
+# One-off exact-cohort repair. amoCRM is GET-only; the database operation is a
+# Serializable, audited CAS link for independently reproduced strong leads.
+# Requeue count is a hard-coded zero.
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type LINK_AMO_FIXATION_LEADS"
+        required: true
+        type: string
+      exact_sha:
+        description: "Exact deployed 40-character master SHA"
+        required: true
+        type: string
+      reviewed_inspector_run_id:
+        description: "Successful exact-SHA inspector workflow run ID (<24h)"
+        required: true
+        type: string
+      expected_cohort_digest:
+        description: "Reviewed 64-character cohort HMAC"
+        required: true
+        type: string
+      expected_resolution_manifest:
+        description: "Fixed inspector resolution order: key=count comma list"
+        required: true
+        type: string
+      expected_error_manifest:
+        description: "Fixed inspector error-class order: key=count comma list"
+        required: true
+        type: string
+      expected_cas_count:
+        description: "Reviewed rowsWithCasLinkCandidate (1..12)"
+        required: true
+        type: string
+      expected_shared_strong_count:
+        description: "Must be exactly 0"
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  apply:
+    name: Apply exact-cohort link-only CAS repair
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - name: Checkout exact apply source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate all gates and run the link-only repair
+        shell: bash
+        env:
+          REQUEST_CONFIRMATION: ${{ inputs.confirmation }}
+          REQUEST_EXACT_SHA: ${{ inputs.exact_sha }}
+          REVIEWED_INSPECTOR_RUN_ID: ${{ inputs.reviewed_inspector_run_id }}
+          EXPECTED_COHORT_DIGEST: ${{ inputs.expected_cohort_digest }}
+          EXPECTED_RESOLUTION_MANIFEST: ${{ inputs.expected_resolution_manifest }}
+          EXPECTED_ERROR_MANIFEST: ${{ inputs.expected_error_manifest }}
+          EXPECTED_CAS_COUNT: ${{ inputs.expected_cas_count }}
+          EXPECTED_SHARED_STRONG_COUNT: ${{ inputs.expected_shared_strong_count }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          EXPECTED_CHECKOUT_SHA: ${{ github.sha }}
+          EXPECTED_QUEUE_ROWS: "12"
+          EXPECTED_REQUEUE_COUNT: "0"
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          INSPECTOR_WORKFLOW_PATH: .github/workflows/inspect-production-amo-fixation-lead-reconciliation.yml
+          HEALTH_URL: https://broker.stmichael.ru/api/health
+          GH_TOKEN: ${{ github.token }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}
+        run: |
+          set -euo pipefail
+          test "$REQUEST_CONFIRMATION" = "LINK_AMO_FIXATION_LEADS" || { echo "Exact confirmation is required"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Apply is restricted to the canonical repository"; exit 1; }
+          test "$EXPECTED_REF" = "refs/heads/master" || { echo "Apply is restricted to master"; exit 1; }
+          [[ "$EXPECTED_CHECKOUT_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid checked-out SHA"; exit 1; }
+          test "$REQUEST_EXACT_SHA" = "$EXPECTED_CHECKOUT_SHA" || { echo "Exact SHA confirmation differs from checked-out master"; exit 1; }
+          [[ "$REVIEWED_INSPECTOR_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]] || { echo "Invalid reviewed inspector run ID"; exit 1; }
+          [[ "$EXPECTED_COHORT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid expected cohort digest"; exit 1; }
+          [[ "$EXPECTED_RESOLUTION_MANIFEST" =~ ^[a-z_]+=(0|[1-9][0-9]{0,2})(,[a-z_]+=(0|[1-9][0-9]{0,2})){12}$ ]] || { echo "Invalid resolution manifest encoding"; exit 1; }
+          [[ "$EXPECTED_ERROR_MANIFEST" =~ ^[a-z_]+=(0|[1-9][0-9]{0,2})(,[a-z_]+=(0|[1-9][0-9]{0,2})){13}$ ]] || { echo "Invalid error manifest encoding"; exit 1; }
+          [[ "$EXPECTED_CAS_COUNT" =~ ^([1-9]|1[0-2])$ ]] || { echo "Expected CAS count must be 1..12"; exit 1; }
+          test "$EXPECTED_SHARED_STRONG_COUNT" = "0" || { echo "Shared strong count must be zero"; exit 1; }
+          test "$EXPECTED_QUEUE_ROWS" = "12" || { echo "Queue count must remain exactly 12"; exit 1; }
+          test "$EXPECTED_REQUEUE_COUNT" = "0" || { echo "Requeue count must remain zero"; exit 1; }
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint is missing or invalid"; exit 1; }
+
+          apply_path=scripts/apply-amo-fixation-lead-reconciliation.js
+          inspector_path=scripts/inspect-amo-fixation-lead-reconciliation.js
+          test "$(git rev-parse HEAD)" = "$REQUEST_EXACT_SHA" || { echo "Checked-out source differs from exact SHA"; exit 1; }
+          test -f "$apply_path" -a ! -L "$apply_path" || { echo "Apply source is missing or unsafe"; exit 1; }
+          test -f "$inspector_path" -a ! -L "$inspector_path" || { echo "Inspector source is missing or unsafe"; exit 1; }
+          apply_sha=$(sha256sum -- "$apply_path" | awk '{print $1}')
+          inspector_sha=$(sha256sum -- "$inspector_path" | awk '{print $1}')
+          [[ "$apply_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid apply source hash"; exit 1; }
+          [[ "$inspector_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
+
+          for required_tool in curl date gh jq sha256sum tar wc; do
+            command -v "$required_tool" >/dev/null || { echo "Required source-attestation tool is missing"; exit 1; }
+          done
+          health_body=$(curl --fail --silent --show-error --max-time 15 --proto '=https' --tlsv1.2 "$HEALTH_URL")
+          deployed_sha=$(printf '%s' "$health_body" | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')
+          unset health_body
+          test "$deployed_sha" = "$REQUEST_EXACT_SHA" || { echo "Public production SHA differs from exact request"; exit 1; }
+
+          runner_temp=${RUNNER_TEMP:-/tmp}
+          test -d "$runner_temp" -a ! -L "$runner_temp" || { echo "Runner temp directory is missing or unsafe"; exit 1; }
+          run_json=$(mktemp "$runner_temp/st-michael-reviewed-inspector.XXXXXX")
+          trap 'rm -f -- "$run_json"' EXIT
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$CANONICAL_REPOSITORY/actions/runs/$REVIEWED_INSPECTOR_RUN_ID" > "$run_json"
+          jq -e \
+            --arg repository "$CANONICAL_REPOSITORY" \
+            --arg workflow "$INSPECTOR_WORKFLOW_PATH" \
+            --arg sha "$REQUEST_EXACT_SHA" \
+            --arg run_id "$REVIEWED_INSPECTOR_RUN_ID" \
+            '(.id | tostring) == $run_id and
+             .repository.full_name == $repository and
+             .head_repository.full_name == $repository and
+             .path == $workflow and
+             .event == "workflow_dispatch" and
+             .run_attempt == 1 and
+             .status == "completed" and
+             .conclusion == "success" and
+             .head_branch == "master" and
+             .head_sha == $sha' "$run_json" >/dev/null || { echo "Reviewed inspector run metadata is not exact"; exit 1; }
+          reviewed_started_at=$(jq -er '.run_started_at | select(type == "string")' "$run_json")
+          reviewed_started_epoch=$(date -u -d "$reviewed_started_at" +%s)
+          now_epoch=$(date -u +%s)
+          reviewed_age=$((now_epoch - reviewed_started_epoch))
+          test "$reviewed_age" -ge 0 -a "$reviewed_age" -lt 86400 || { echo "Reviewed inspector run is older than 24 hours or from the future"; exit 1; }
+          rm -f -- "$run_json"
+          trap - EXIT
+          unset GH_TOKEN reviewed_started_at reviewed_started_epoch now_epoch reviewed_age
+
+          ssh_root=$(mktemp -d "$runner_temp/st-michael-amo-lead-link-apply.XXXXXX")
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          payload_root="$ssh_root/payload"
+          payload_archive="$ssh_root/link-only-apply.tar"
+          payload_apply="$payload_root/apply.js"
+          payload_inspector="$payload_root/inspector.js"
+          attestation_key_file="$payload_root/attestation.key"
+          payload_manifest="$payload_root/manifest"
+          trap 'rm -f -- "$known_hosts" "$private_key" "$payload_apply" "$payload_inspector" "$attestation_key_file" "$payload_manifest" "$payload_archive"; rmdir -- "$payload_root" 2>/dev/null || true; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          mkdir -- "$payload_root"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          printf '%s' "$COHORT_ATTESTATION_KEY" > "$attestation_key_file"
+          unset COHORT_ATTESTATION_KEY
+          test "$(wc -c < "$attestation_key_file")" -ge 32 || { echo "Cohort attestation key is missing or too short"; exit 1; }
+          attestation_key_sha=$(sha256sum -- "$attestation_key_file" | awk '{print $1}')
+          cp -- "$apply_path" "$payload_apply"
+          cp -- "$inspector_path" "$payload_inspector"
+          printf 'apply_sha256=%s\ninspector_sha256=%s\nsource_sha=%s\nreviewed_run_id=%s\ncohort_digest=%s\nresolution_manifest=%s\nerror_manifest=%s\nexpected_cas_count=%s\nexpected_shared_strong_count=0\nexpected_queue_rows=12\nexpected_requeue_count=0\nattestation_key_sha256=%s\n' \
+            "$apply_sha" "$inspector_sha" "$REQUEST_EXACT_SHA" "$REVIEWED_INSPECTOR_RUN_ID" "$EXPECTED_COHORT_DIGEST" "$EXPECTED_RESOLUTION_MANIFEST" "$EXPECTED_ERROR_MANIFEST" "$EXPECTED_CAS_COUNT" "$attestation_key_sha" > "$payload_manifest"
+          chmod 600 "$payload_apply" "$payload_inspector" "$attestation_key_file" "$payload_manifest"
+          tar --format=ustar -C "$payload_root" -cf "$payload_archive" apply.js inspector.js attestation.key manifest
+          payload_sha=$(sha256sum -- "$payload_archive" | awk '{print $1}')
+          [[ "$payload_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid link-only payload hash"; exit 1; }
+
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          {
+            cat <<'REMOTE_PREFIX'
+          set -euo pipefail
+          export LC_ALL=C
+          deploy_path=$1
+          expected_apply_sha=$2
+          expected_inspector_sha=$3
+          expected_source_sha=$4
+          canonical_origin=https://github.com/sereganikitin/st-michael-broker-platform.git
+
+          for required_tool in base64 docker flock git mktemp readlink sed sha256sum tar wc; do
+            command -v "$required_tool" >/dev/null || { echo "Required apply tool is missing"; exit 1; }
+          done
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$expected_apply_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid expected apply hash"; exit 1; }
+          [[ "$expected_inspector_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid expected inspector hash"; exit 1; }
+          [[ "$expected_source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid expected source SHA"; exit 1; }
+
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing non-root directory"; exit 1; }
+          test -f /tmp/st-michael-production-deploy.lock -a ! -L /tmp/st-michael-production-deploy.lock || { echo "Production deploy lock is missing or unsafe"; exit 1; }
+          exec 9</tmp/st-michael-production-deploy.lock
+          flock -x -n 9 || { echo "Another production operation holds the server lock"; exit 1; }
+
+          cd -- "$deploy_root"
+          test "$(git rev-parse --show-toplevel 2>/dev/null)" = "$deploy_root" || { echo "Deploy path is not the repository root"; exit 1; }
+          test "$(git remote get-url origin)" = "$canonical_origin" || { echo "Production origin is not canonical"; exit 1; }
+          test "$(git symbolic-ref --short HEAD 2>/dev/null)" = "master" || { echo "Production checkout is not on master"; exit 1; }
+          production_sha=$(git rev-parse HEAD)
+          test "$production_sha" = "$expected_source_sha" || { echo "Production checkout differs from exact source"; exit 1; }
+          test "$(git rev-parse refs/heads/master)" = "$production_sha" || { echo "Production master and checkout differ"; exit 1; }
+          test "$(docker inspect --format '{{.State.Running}}' st-michael-api 2>/dev/null)" = "true" || { echo "Production API container is not running"; exit 1; }
+          test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' st-michael-api 2>/dev/null)" = "api" || { echo "Unexpected production API container"; exit 1; }
+          container_sha=$(docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')
+          test "$container_sha" = "$production_sha" || { echo "Production API image and checkout differ"; exit 1; }
+
+          payload_archive=$(mktemp /tmp/st-michael-amo-lead-link-apply.XXXXXX)
+          cleanup_payload() { rm -f -- "$payload_archive"; }
+          trap cleanup_payload EXIT HUP INT TERM
+          base64 -d > "$payload_archive" <<'PII_SAFE_LEAD_LINK_APPLY_PAYLOAD'
+          REMOTE_PREFIX
+            base64 -w 0 -- "$payload_archive"
+            printf '\nPII_SAFE_LEAD_LINK_APPLY_PAYLOAD\n'
+            printf 'expected_payload_sha=%s\n' "$payload_sha"
+            cat <<'REMOTE_SUFFIX'
+          [[ "$expected_payload_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid payload hash"; exit 1; }
+          actual_payload_sha=$(sha256sum "$payload_archive")
+          actual_payload_sha=${actual_payload_sha%% *}
+          test "$actual_payload_sha" = "$expected_payload_sha" || { echo "Link-only payload hash mismatch"; exit 1; }
+          mapfile -t payload_entries < <(tar -tf "$payload_archive")
+          test "${#payload_entries[@]}" -eq 4 || { echo "Unexpected link-only payload"; exit 1; }
+          test "${payload_entries[0]}" = "apply.js" || { echo "Unexpected apply payload entry"; exit 1; }
+          test "${payload_entries[1]}" = "inspector.js" || { echo "Unexpected inspector payload entry"; exit 1; }
+          test "${payload_entries[2]}" = "attestation.key" || { echo "Unexpected key payload entry"; exit 1; }
+          test "${payload_entries[3]}" = "manifest" || { echo "Unexpected manifest payload entry"; exit 1; }
+          payload_apply_sha=$(tar -xOf "$payload_archive" manifest | sed -n 's/^apply_sha256=//p')
+          payload_inspector_sha=$(tar -xOf "$payload_archive" manifest | sed -n 's/^inspector_sha256=//p')
+          payload_source_sha=$(tar -xOf "$payload_archive" manifest | sed -n 's/^source_sha=//p')
+          test "$payload_apply_sha" = "$expected_apply_sha" || { echo "Payload apply hash differs from reviewed source"; exit 1; }
+          test "$payload_inspector_sha" = "$expected_inspector_sha" || { echo "Payload inspector hash differs from reviewed source"; exit 1; }
+          test "$payload_source_sha" = "$expected_source_sha" || { echo "Payload source SHA differs from production"; exit 1; }
+
+          docker exec -i st-michael-api sh -c '
+            set -eu
+            for required_tool in mktemp node rm sed sha256sum tar wc; do
+              command -v "$required_tool" >/dev/null || exit 1
+            done
+            test -n "${DATABASE_URL:-}"
+            test -n "${AMO_ACCESS_TOKEN:-}"
+            umask 077
+            payload_root=$(mktemp -d /app/scripts/.apply-amo-lead-link.XXXXXX)
+            apply_script="$payload_root/apply.js"
+            inspector_script="$payload_root/inspector.js"
+            key_file="$payload_root/attestation.key"
+            manifest="$payload_root/manifest"
+            cleanup() { rm -f -- "$apply_script" "$inspector_script" "$key_file" "$manifest"; rmdir -- "$payload_root" 2>/dev/null || true; }
+            trap cleanup EXIT HUP INT TERM
+            tar -xf - -C "$payload_root"
+            test -f "$apply_script" -a ! -L "$apply_script"
+            test -f "$inspector_script" -a ! -L "$inspector_script"
+            test -f "$key_file" -a ! -L "$key_file"
+            test -f "$manifest" -a ! -L "$manifest"
+            test "$(wc -l < "$manifest")" -eq 12
+            value() { sed -n "s/^$1=//p" "$manifest"; }
+            apply_sha=$(value apply_sha256)
+            inspector_sha=$(value inspector_sha256)
+            source_sha=$(value source_sha)
+            reviewed_run_id=$(value reviewed_run_id)
+            cohort_digest=$(value cohort_digest)
+            resolution_manifest=$(value resolution_manifest)
+            error_manifest=$(value error_manifest)
+            expected_cas_count=$(value expected_cas_count)
+            expected_shared_strong_count=$(value expected_shared_strong_count)
+            expected_queue_rows=$(value expected_queue_rows)
+            expected_requeue_count=$(value expected_requeue_count)
+            expected_key_sha=$(value attestation_key_sha256)
+            test "${#apply_sha}" -eq 64
+            test "${#inspector_sha}" -eq 64
+            test "${#source_sha}" -eq 40
+            test "$expected_queue_rows" = "12"
+            test "$expected_requeue_count" = "0"
+            test "$expected_shared_strong_count" = "0"
+            actual_apply_sha=$(sha256sum "$apply_script"); actual_apply_sha=${actual_apply_sha%% *}
+            actual_inspector_sha=$(sha256sum "$inspector_script"); actual_inspector_sha=${actual_inspector_sha%% *}
+            actual_key_sha=$(sha256sum "$key_file"); actual_key_sha=${actual_key_sha%% *}
+            test "$actual_apply_sha" = "$apply_sha"
+            test "$actual_inspector_sha" = "$inspector_sha"
+            test "$actual_key_sha" = "$expected_key_sha"
+            test "$(wc -c < "$key_file")" -ge 32
+            export BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$key_file"
+            export LEAD_RECONCILIATION_INSPECTOR_MODULE="$inspector_script"
+            export LEAD_RECONCILIATION_CONFIRMATION=LINK_AMO_FIXATION_LEADS
+            export LEAD_RECONCILIATION_SOURCE_SHA="$source_sha"
+            export LEAD_RECONCILIATION_CONFIRM_EXACT_SHA="$source_sha"
+            export LEAD_RECONCILIATION_DEPLOYED_GIT_SHA="$source_sha"
+            export LEAD_RECONCILIATION_REVIEWED_INSPECTOR_RUN_ID="$reviewed_run_id"
+            export LEAD_RECONCILIATION_EXPECTED_COHORT_DIGEST="$cohort_digest"
+            export LEAD_RECONCILIATION_INSPECTOR_SHA256="$inspector_sha"
+            export LEAD_RECONCILIATION_APPLY_SHA256="$apply_sha"
+            export LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS="$expected_queue_rows"
+            export LEAD_RECONCILIATION_EXPECTED_REQUEUE_COUNT="$expected_requeue_count"
+            export LEAD_RECONCILIATION_EXPECTED_CAS_COUNT="$expected_cas_count"
+            export LEAD_RECONCILIATION_EXPECTED_SHARED_STRONG_COUNT="$expected_shared_strong_count"
+            export LEAD_RECONCILIATION_EXPECTED_RESOLUTION_MANIFEST="$resolution_manifest"
+            export LEAD_RECONCILIATION_EXPECTED_ERROR_MANIFEST="$error_manifest"
+            node "$apply_script"
+          ' < "$payload_archive"
+          REMOTE_SUFFIX
+          } | timeout --foreground 39m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$apply_sha' '$inspector_sha' '$REQUEST_EXACT_SHA'"

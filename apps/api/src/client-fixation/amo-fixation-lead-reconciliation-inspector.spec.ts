@@ -22,6 +22,7 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
   loadedScript._compile(script, scriptPath);
   const inspector = loadedScript.exports as {
     ATTEMPT_LIMIT: number;
+    CAS_LINK_ELIGIBLE_ERROR_CLASSES: readonly string[];
     COHORT_ATTESTATION_DOMAIN: string;
     EXPECTED_ACCOUNT_ID: number;
     KC_PIPELINE_ID: number;
@@ -56,6 +57,16 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     reportHash: (kind: string, value: unknown, key: Buffer) => string | null;
     unixTimestampEvidence: (values: unknown, reference: Date) => any;
   };
+
+  const casLinkEligibleErrors: Array<[string, string]> = [
+    [
+      "AMO_CREATE_RECONCILIATION_REQUIRED: private payload",
+      "create_reconciliation_required",
+    ],
+    ["fetch failed: ECONNRESET", "network_failure"],
+    ["FIXATION_AGENCY_MISSING", "fixation_agency_missing"],
+    ["BROKER_AMO_CONTACT_MISSING", "broker_amo_contact_missing"],
+  ];
 
   const metadata = {
     inspectorSha256: "a".repeat(64),
@@ -723,6 +734,58 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     expect(report.plan.retryAuthorized).toBe(false);
   });
 
+  it.each(casLinkEligibleErrors)(
+    "advises only a database CAS link for exact strong evidence in %s",
+    (amoSyncError, errorClass) => {
+      const report = inspector.buildReport(
+        fixedCohort(queueRow({ amoSyncError })),
+        evidence([leadEnvelope(32310587)]),
+        metadata,
+        attestationKey,
+        aliasKey,
+      );
+      expect(inspector.CAS_LINK_ELIGIBLE_ERROR_CLASSES).toEqual(
+        casLinkEligibleErrors.map(([, value]) => value),
+      );
+      expect(report.records[0]).toMatchObject({
+        errorClass,
+        resolution: "single_strong_candidate",
+        exactClientContacts: { count: 1 },
+        linkedLeadEvidence: { strong: 1, weak: 0 },
+        advisory: {
+          casLinkCandidate: true,
+          executablePayload: false,
+          databaseMutationAuthorized: false,
+          amoMutationAuthorized: false,
+          retryAuthorized: false,
+        },
+      });
+      expect(report.aggregates.rowsWithCasLinkCandidate).toBe(1);
+    },
+  );
+
+  it.each([
+    ["AMO_TEMPORARY_UNAVAILABLE", "temporary_unavailable"],
+    ["UNRECOGNIZED_LEGACY_FAILURE", "other"],
+  ])(
+    "rejects an unsafe or unknown error class even with exact strong evidence: %s",
+    (amoSyncError, errorClass) => {
+      const report = inspector.buildReport(
+        fixedCohort(queueRow({ amoSyncError })),
+        evidence([leadEnvelope(32310587)]),
+        metadata,
+        attestationKey,
+        aliasKey,
+      );
+      expect(report.records[0]).toMatchObject({
+        errorClass,
+        resolution: "single_strong_candidate",
+        advisory: { casLinkCandidate: false, retryAuthorized: false },
+      });
+      expect(report.aggregates.rowsWithCasLinkCandidate).toBe(0);
+    },
+  );
+
   it("keeps weak, ambiguous-contact and changed-cohort states non-executable", () => {
     const weakLead = leadEnvelope(32310600, {
       createdAt: 1779860000,
@@ -738,18 +801,6 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     );
     expect(weak.records[0]).toMatchObject({
       resolution: "single_weak_candidate",
-      advisory: { casLinkCandidate: false, retryAuthorized: false },
-    });
-
-    const strongButNotAmbiguousPost = inspector.buildReport(
-      fixedCohort(queueRow({ amoSyncError: "BROKER_AMO_CONTACT_MISSING" })),
-      evidence([leadEnvelope(32310587)]),
-      metadata,
-      attestationKey,
-      aliasKey,
-    );
-    expect(strongButNotAmbiguousPost.records[0]).toMatchObject({
-      resolution: "single_strong_candidate",
       advisory: { casLinkCandidate: false, retryAuthorized: false },
     });
 
