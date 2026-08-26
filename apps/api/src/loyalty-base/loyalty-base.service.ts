@@ -650,6 +650,28 @@ function dateOnly(value: unknown): string | null {
     : null;
 }
 
+function moscowDateOnly(value: unknown): string | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(String(value).trim());
+  if (!Number.isFinite(parsed.getTime())) return null;
+  const parts = moscowDateParts(parsed);
+  return `${parts.year}-${String(parts.month + 1).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+}
+
+function timestampInPeriod(
+  value: unknown,
+  period: LoyaltyFilterPeriod,
+): boolean {
+  if (!value) return false;
+  const parsed = value instanceof Date ? value : new Date(String(value).trim());
+  const timestamp = parsed.getTime();
+  return (
+    Number.isFinite(timestamp) &&
+    timestamp >= period.from.getTime() &&
+    timestamp <= period.to.getTime()
+  );
+}
+
 function daysSinceDate(value: unknown, now = new Date()): number | null {
   const normalized = dateOnly(value);
   if (!normalized) return null;
@@ -5325,12 +5347,7 @@ export class LoyaltyBaseService {
       if (Array.isArray(record?.activities)) {
         return record.activities.some((activity: any) => {
           if (activity.type !== type) return false;
-          const occurredAt = dateOnly(activity.occurredAt);
-          return (
-            occurredAt !== null &&
-            occurredAt >= period.fromIso.slice(0, 10) &&
-            occurredAt <= period.toIso.slice(0, 10)
-          );
+          return timestampInPeriod(activity.occurredAt, period);
         });
       }
       const fields: Record<string, string> = {
@@ -5418,18 +5435,13 @@ export class LoyaltyBaseService {
       return this.unavailablePeriodMetrics(period);
     }
     const rows = record.activities.filter((activity: any) => {
-      const occurredAt = dateOnly(activity.occurredAt);
-      return (
-        occurredAt !== null &&
-        occurredAt >= period.fromIso.slice(0, 10) &&
-        occurredAt <= period.toIso.slice(0, 10)
-      );
+      return timestampInPeriod(activity.occurredAt, period);
     });
     const forType = (type: string) =>
       rows.filter((activity: any) => activity.type === type);
     const lastDate = (type: string) => {
       const values = forType(type)
-        .map((activity: any) => dateOnly(activity.occurredAt))
+        .map((activity: any) => moscowDateOnly(activity.occurredAt))
         .filter(Boolean) as string[];
       return values.sort().at(-1) || null;
     };

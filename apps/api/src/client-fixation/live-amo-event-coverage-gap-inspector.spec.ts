@@ -492,6 +492,14 @@ describe("PII-safe live amoCRM event coverage gap inspector", () => {
     expect(sourceScript).not.toMatch(
       /method:\s*["'`](?:POST|PUT|PATCH|DELETE)["'`]/i,
     );
+    expect(sourceScript).not.toMatch(
+      /response\.(?:json|text|arrayBuffer|blob)\s*\(/,
+    );
+    expect(sourceScript).toContain(
+      "const MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024",
+    );
+    expect(sourceScript).toContain("items.length > PAGE_LIMIT");
+    expect(source.MAX_RESPONSE_BODY_BYTES).toBe(8 * 1024 * 1024);
 
     const collector = inspector.createEvidenceCollector();
     await collector.onContact({

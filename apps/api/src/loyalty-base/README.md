@@ -302,8 +302,8 @@ Each row also has `periodMetrics` with the requested `{ from, to }`,
 `availability`, counts/amount and last dates. It is `EXACT` only when Anna has
 INCLUDED event rows for the active snapshot; otherwise every metric is `null`
 and availability is `UNAVAILABLE`. Lifetime totals are never relabelled as
-selected-period values. OUR currently reports period metrics as unavailable
-until a separately verified aggregate query is introduced.
+selected-period values. OUR computes bounded local aggregates and labels them
+`LOCAL_PRELIMINARY` / `APPROXIMATE`; they are not presented as exact CRM history.
 
 Status precedence is deterministic. Brokers use `DORMANT → TOP_SELLER →
 SELLER → OFFERING → FIXATING → BROKER_TOUR → NEW` (BT may also be a secondary

@@ -3627,6 +3627,57 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
+  it("uses Moscow calendar boundaries for exact Anna activity timestamps", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const period = (service as any).parseOptionalFilterPeriod(
+      { from: "2026-08-01", to: "2026-08-31" },
+      "activityPeriod",
+    );
+    const item = {
+      metricSource: {
+        kind: "EXACT_ACTIVITIES",
+        observedThrough: "2026-09-02T00:00:00.000Z",
+      },
+    };
+    const record = {
+      activities: [
+        {
+          type: "FIXATION",
+          occurredAt: new Date("2026-07-31T20:59:59.999Z"),
+        },
+        {
+          type: "FIXATION",
+          occurredAt: new Date("2026-07-31T21:00:00.000Z"),
+        },
+        {
+          type: "DEAL",
+          occurredAt: new Date("2026-08-31T20:59:59.999Z"),
+          amount: "100.00",
+        },
+        {
+          type: "DEAL",
+          occurredAt: new Date("2026-08-31T21:00:00.000Z"),
+          amount: "900.00",
+        },
+      ],
+    };
+
+    expect((service as any).annaPeriodMetrics(record, item, period)).toEqual({
+      period: { from: "2026-08-01", to: "2026-08-31" },
+      availability: "EXACT",
+      fixations: 1,
+      meetings: 0,
+      deals: 1,
+      dealAmount: "100.00",
+      lastFixationAt: "2026-08-01",
+      lastMeetingAt: null,
+      lastDealAt: "2026-08-31",
+    });
+    expect(
+      (service as any).annaActivityPresence(record, item, "FIXATION", period),
+    ).toBe(true);
+  });
+
   it("streams a BOM CSV, neutralizes formulas, masks contacts and audits only counts", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);

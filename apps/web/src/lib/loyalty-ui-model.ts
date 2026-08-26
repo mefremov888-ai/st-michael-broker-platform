@@ -1,3 +1,4 @@
+import { getLoyaltyCallResultOptions } from "./loyalty-base-api";
 import type {
   LoyaltyAgencyStatus,
   LoyaltyBaseKey,
@@ -163,7 +164,7 @@ const number = (value: string) => {
     : undefined;
 };
 const boolean = (value: TriState) =>
-  value === "" ? undefined : value === "true";
+  value === "true" ? true : value === "false" ? false : undefined;
 
 export function toCanonicalFilter(
   unsafeState: LoyaltyFilterFormState,
@@ -263,6 +264,7 @@ export const AGENCY_SCENARIOS: ReadonlyArray<
 > = [
   ["NOT_CALLED_IN_PERIOD", "Не звонили в период"],
   ["CALLED_IN_PERIOD", "Звонили в период"],
+  ["HAS_DEALS", "Есть сделки / топ"],
   ["UNASSIGNED", "Не назначен"],
   ["BT_VISITED", "Был БТ"],
   ["BT_NOT_VISITED", "Не было БТ"],
@@ -309,6 +311,75 @@ const TRI_STATES: ReadonlyArray<TriState> = ["", "true", "false"];
 const DATA_QUALITY_VALUES: ReadonlyArray<
   LoyaltyFilterFormState["dataQuality"]
 > = ["", "FULL", "NEEDS_COMPLETION", "NOT_FOUND_IN_CRM", "CONFLICT"];
+const BROKER_STATUS_VALUES: ReadonlyArray<LoyaltyBrokerStatus | ""> = [
+  "",
+  "TOP_SELLER",
+  "SELLER",
+  "OFFERING",
+  "FIXATING",
+  "BROKER_TOUR",
+  "DORMANT",
+  "NEW",
+];
+const AGENCY_STATUS_VALUES: ReadonlyArray<LoyaltyAgencyStatus | ""> = [
+  "",
+  "VIP_PARTNER",
+  "SELLING_PARTNER",
+  "ACTIVE_PARTNER",
+  "FIXATING_PARTNER",
+  "WARM_PARTNER",
+  "STARTING_PARTNER",
+  "DORMANT_PARTNER",
+  "NEW_AGENCY",
+];
+const GEOGRAPHY_VALUES: ReadonlyArray<LoyaltyFilterFormState["geography"]> = [
+  "",
+  "MOSCOW",
+  "REGION",
+];
+const WORK_FORMAT_VALUES: ReadonlyArray<LoyaltyFilterFormState["workFormat"]> =
+  ["", "Агентство", "Частный брокер", "Координатор"];
+const AGENCY_SIZE_VALUES: ReadonlyArray<LoyaltyFilterFormState["agencySize"]> =
+  ["", "Крупное", "Среднее", "Небольшое"];
+const PROJECTS_ON_SITE_VALUES: ReadonlyArray<
+  LoyaltyFilterFormState["projectsOnSite"]
+> = ["", "YES", "NO", "IN_PROGRESS"];
+const SORT_VALUES: ReadonlyArray<LoyaltySortField> = [
+  "name",
+  "city",
+  "lastCallAt",
+  "fixations",
+  "meetings",
+  "deals",
+  "dealAmount",
+  "brokerTours",
+  "brokerCount",
+  "rating",
+  "updatedAt",
+];
+const SORT_ORDER_VALUES: ReadonlyArray<LoyaltyFilterFormState["sortOrder"]> = [
+  "asc",
+  "desc",
+];
+const DATE_ONLY_INPUT = /^\d{4}-\d{2}-\d{2}$/;
+const NON_NEGATIVE_INTEGER_INPUT = /^\d+$/;
+
+function isValidDateOnlyInput(value: string): boolean {
+  if (value === "") return true;
+  if (!DATE_ONLY_INPUT.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return (
+    Number.isFinite(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value
+  );
+}
+
+function isValidNonNegativeIntegerInput(value: string): boolean {
+  if (value === "") return true;
+  if (!NON_NEGATIVE_INTEGER_INPUT.test(value)) return false;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0;
+}
 
 /**
  * UI capability contract for one concrete base/entity pair. The API remains
@@ -350,9 +421,62 @@ export function sanitizeLoyaltyFilterState(
 ): LoyaltyFilterFormState {
   const capabilities = loyaltyFilterCapabilities(base, entityType);
   const patch: Partial<LoyaltyFilterFormState> = {};
+  const clear = (key: keyof LoyaltyFilterFormState) => {
+    Object.assign(patch, { [key]: "" });
+  };
   const scenarioAllowed =
     state.scenario === "" ||
     capabilities.scenarios.some(([scenario]) => scenario === state.scenario);
+
+  for (const key of [
+    "hasAmo",
+    "dealsInPeriod",
+    "bt",
+    "meetings",
+    "websitePresent",
+    "individualTerms",
+    "specialTermsProposed",
+    "rewardPresent",
+  ] as const) {
+    if (!TRI_STATES.includes(state[key])) clear(key);
+  }
+  for (const key of [
+    "callFrom",
+    "callTo",
+    "activityFrom",
+    "activityTo",
+  ] as const) {
+    if (!isValidDateOnlyInput(state[key])) clear(key);
+  }
+  for (const key of [
+    "dealsMin",
+    "dealsMax",
+    "meetingsMin",
+    "meetingsMax",
+    "staleDays",
+  ] as const) {
+    if (!isValidNonNegativeIntegerInput(state[key])) clear(key);
+  }
+
+  const statusValues =
+    entityType === "brokers" ? BROKER_STATUS_VALUES : AGENCY_STATUS_VALUES;
+  if (!statusValues.includes(state.status as never)) patch.status = "";
+  if (!GEOGRAPHY_VALUES.includes(state.geography)) patch.geography = "";
+  if (!WORK_FORMAT_VALUES.includes(state.workFormat)) patch.workFormat = "";
+  if (!AGENCY_SIZE_VALUES.includes(state.agencySize)) patch.agencySize = "";
+  if (!PROJECTS_ON_SITE_VALUES.includes(state.projectsOnSite)) {
+    patch.projectsOnSite = "";
+  }
+  if (!SORT_VALUES.includes(state.sortBy)) patch.sortBy = "name";
+  if (!SORT_ORDER_VALUES.includes(state.sortOrder)) patch.sortOrder = "asc";
+  if (
+    state.lastCallResult !== "" &&
+    !getLoyaltyCallResultOptions(entityType).some(
+      ({ code }) => code === state.lastCallResult,
+    )
+  ) {
+    patch.lastCallResult = "";
+  }
 
   if (
     (!capabilities.hasAmo && state.hasAmo !== "") ||
@@ -398,6 +522,62 @@ const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
 
 const objectRecord = (value: unknown): Record<string, unknown> =>
   isObjectRecord(value) ? value : {};
+
+function sanitizeLoyaltyColumnFilters(
+  entityType: LoyaltyEntityType,
+  value: unknown,
+): LoyaltyColumnFilters {
+  const candidate = objectRecord(value);
+  const output: LoyaltyColumnFilters = {};
+  const statusValues =
+    entityType === "brokers" ? BROKER_STATUS_VALUES : AGENCY_STATUS_VALUES;
+  if (["HAS_PHONE", "NO_PHONE"].includes(String(candidate.contact || ""))) {
+    output.contact = candidate.contact as LoyaltyColumnFilters["contact"];
+  }
+  if (
+    typeof candidate.statusStage === "string" &&
+    candidate.statusStage !== "" &&
+    statusValues.includes(candidate.statusStage as never)
+  ) {
+    output.statusStage =
+      candidate.statusStage as LoyaltyColumnFilters["statusStage"];
+  }
+  if (
+    [
+      "BT_VISITED",
+      "BT_NOT_VISITED",
+      "HAS_FIXATIONS",
+      "NO_FIXATIONS",
+      "HAS_MEETINGS",
+      "NO_MEETINGS",
+    ].includes(String(candidate.activity || ""))
+  ) {
+    output.activity = candidate.activity as LoyaltyColumnFilters["activity"];
+  }
+  if (
+    ["CALLED_IN_PERIOD", "NOT_CALLED_IN_PERIOD"].includes(
+      String(candidate.calls || ""),
+    )
+  ) {
+    output.calls = candidate.calls as LoyaltyColumnFilters["calls"];
+  }
+  if (typeof candidate.assignee === "string" && candidate.assignee.trim()) {
+    output.assignee = candidate.assignee.trim();
+  }
+  if (
+    [
+      "HAS_DEALS",
+      "NO_DEALS",
+      "ONE_TO_TWO",
+      "ONE_TO_FOUR",
+      "THREE_PLUS",
+      "FIVE_PLUS",
+    ].includes(String(candidate.deals || ""))
+  ) {
+    output.deals = candidate.deals as LoyaltyColumnFilters["deals"];
+  }
+  return output;
+}
 
 const formStateFromSavedView = (
   value: Record<string, unknown>,
@@ -446,9 +626,10 @@ export function restoreLoyaltySavedView(
     entityType,
     formStateFromSavedView(savedFilters),
   );
-  const columns = (
-    isObjectRecord(ui.columns) ? ui.columns : objectRecord(snapshot.columns)
-  ) as LoyaltyColumnFilters;
+  const columns = sanitizeLoyaltyColumnFilters(
+    entityType,
+    isObjectRecord(ui.columns) ? ui.columns : snapshot.columns,
+  );
   const segment = sanitizeLoyaltySegment(
     base,
     entityType,

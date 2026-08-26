@@ -315,6 +315,10 @@ test("defines authoritative filter capabilities for every base/entity pair", () 
     ourAgency.scenarios.some(([value]) => value === "SITE_NOT_PLACED"),
     false,
   );
+  assert.equal(
+    ourAgency.scenarios.some(([value]) => value === "HAS_DEALS"),
+    true,
+  );
   assert.deepEqual(ourAgency.segments, []);
 
   const annaAgency = loyaltyFilterCapabilities("anna", "agencies");
@@ -381,8 +385,24 @@ test("sanitizes untrusted saved views with the current filter capability matrix"
         archived: "only",
         scenario: "SITE_PLACED",
         individualTerms: "true",
+        bt: "garbage",
+        dealsInPeriod: "garbage",
+        meetings: "garbage",
+        rewardPresent: "garbage",
+        status: "garbage",
+        geography: "garbage",
+        lastCallResult: "garbage",
+        dealsMin: "-2",
+        activityFrom: "2026-02-31",
+        sortBy: "garbage",
+        sortOrder: "garbage",
       },
-      columns: { activity: "HAS_MEETINGS" },
+      columns: {
+        activity: "HAS_MEETINGS",
+        deals: "garbage",
+        calls: "garbage",
+        statusStage: "garbage",
+      },
       segment: "NEW_BROKER",
     },
   });
@@ -397,14 +417,42 @@ test("sanitizes untrusted saved views with the current filter capability matrix"
   assert.equal(restored.filters.archived, "exclude");
   assert.equal(restored.filters.scenario, "");
   assert.equal(restored.filters.individualTerms, "true");
+  assert.equal(restored.filters.bt, "");
+  assert.equal(restored.filters.dealsInPeriod, "");
+  assert.equal(restored.filters.meetings, "");
+  assert.equal(restored.filters.rewardPresent, "");
+  assert.equal(restored.filters.status, "");
+  assert.equal(restored.filters.geography, "");
+  assert.equal(restored.filters.lastCallResult, "");
+  assert.equal(restored.filters.dealsMin, "");
+  assert.equal(restored.filters.activityFrom, "");
+  assert.equal(restored.filters.sortBy, "name");
+  assert.equal(restored.filters.sortOrder, "asc");
   assert.deepEqual(restored.columns, { activity: "HAS_MEETINGS" });
   assert.equal(restored.segment, "");
+
+  const canonical = toCanonicalFilter(restored.filters, "agencies", "ours");
+  assert.equal(canonical.bt, undefined);
+  assert.equal(canonical.dealsInPeriod, undefined);
+  assert.equal(canonical.meetings, undefined);
+  assert.equal(canonical.rewardPresent, undefined);
 
   const emptyEnvelope = restoreLoyaltySavedView("ours", "agencies", {
     archived: "only",
     ui: { filters: {} },
   });
   assert.equal(emptyEnvelope.filters.archived, "exclude");
+});
+
+test("retains the supported HAS_DEALS scenario for OUR agencies", () => {
+  const filters = emptyLoyaltyFilters();
+  filters.scenario = "HAS_DEALS";
+  const safe = sanitizeLoyaltyFilterState("ours", "agencies", filters);
+  assert.equal(safe.scenario, "HAS_DEALS");
+  assert.equal(
+    toCanonicalFilter(filters, "agencies", "ours").scenario,
+    "HAS_DEALS",
+  );
 });
 
 test("round-trips browser-local date and datetime controls without a timezone shift", () => {
