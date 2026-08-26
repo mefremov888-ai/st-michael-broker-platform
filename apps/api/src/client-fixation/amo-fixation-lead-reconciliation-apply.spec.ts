@@ -293,34 +293,27 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     ).toThrow("amo fixation lead reconciliation failed");
   });
 
-  it("locks candidate occupancy and rejects a lead bound to any client", async () => {
+  it("checks candidate occupancy under the global client writer lock", async () => {
     const plan = repair.buildExecutionPlan(
       strongReport().rows,
       strongReport().amoEvidence,
       inspector,
     );
-    const Prisma = {
-      join: (values: unknown[]) => values,
-      sql: (strings: TemplateStringsArray, ...values: unknown[]) => ({
-        strings: [...strings],
-        values,
-      }),
-    };
     await expect(
-      repair.lockAndCheckCandidateOccupancy(
-        { $queryRaw: jest.fn(async () => []) },
-        Prisma,
+      repair.checkCandidateOccupancy(
+        { client: { findMany: jest.fn(async () => []) } },
         plan.actionable,
       ),
     ).resolves.toBeUndefined();
     await expect(
-      repair.lockAndCheckCandidateOccupancy(
+      repair.checkCandidateOccupancy(
         {
-          $queryRaw: jest.fn(async () => [
-            { id: "occupied-client", amo_lead_id: 32310587n },
-          ]),
+          client: {
+            findMany: jest.fn(async () => [
+              { id: "occupied-client", amoLeadId: 32310587n },
+            ]),
+          },
         },
-        Prisma,
         plan.actionable,
       ),
     ).rejects.toThrow("amo fixation lead reconciliation failed");
@@ -581,7 +574,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     output.mockRestore();
   });
 
-  it("uses one bounded Serializable transaction so audit or final GET failure rolls back all CAS links", () => {
+  it("does every GET scan before the short globally locked write transaction", async () => {
     expect(applySource).toContain('isolationLevel: "Serializable"');
     expect(applySource).toContain("timeout: TRANSACTION_TIMEOUT_MS");
     expect(repair.TRANSACTION_TIMEOUT_MS).toBe(300_000);
@@ -589,16 +582,45 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       /async function executeFirstApply[\s\S]*?async function main/,
     )?.[0];
     expect(transactionBody).toBeDefined();
+    expect(transactionBody).not.toContain("collectAmoEvidence");
+    expect(transactionBody).not.toContain("requestGet");
     expect(transactionBody).toContain("await casLinkClient(");
     expect(transactionBody).toContain("await createRowAudit(");
-    expect(transactionBody).toContain("const finalEvidence =");
     expect(transactionBody).toContain("await createCompletionAudit(");
-    expect(transactionBody!.indexOf("const finalEvidence =")).toBeLessThan(
-      transactionBody!.indexOf("await createCompletionAudit("),
+    expect(transactionBody!.indexOf("await lockClientWriters(")).toBeLessThan(
+      transactionBody!.indexOf("await loadExactCohort("),
     );
+    expect(transactionBody!.indexOf("await lockClientWriters(")).toBeLessThan(
+      transactionBody!.indexOf("await checkCandidateOccupancy("),
+    );
+    expect(transactionBody!.indexOf("await lockClientWriters(")).toBeLessThan(
+      transactionBody!.indexOf("await casLinkClient("),
+    );
+    const preWriteBody = applySource.match(
+      /async function collectPreWriteScans[\s\S]*?async function executeFirstApply/,
+    )?.[0];
+    expect(preWriteBody).toContain("scan <= 3");
+    expect(preWriteBody).toContain("inspector.collectAmoEvidence(");
+    expect(preWriteBody).not.toContain("$transaction");
+    const idempotentBody = applySource.match(
+      /async function tryCompletedNoop[\s\S]*?function assertCompletedDatabaseState/,
+    )?.[0];
+    expect(idempotentBody!.indexOf("collectAmoEvidence(")).toBeLessThan(
+      idempotentBody!.indexOf("prisma.$transaction("),
+    );
+    expect(applySource).not.toContain("FOR UPDATE");
     expect(applySource.match(/prisma\.\$transaction\s*\(/g) || []).toHaveLength(
       2,
     );
+
+    const executeRaw: jest.Mock = jest.fn(async () => 0);
+    await repair.lockClientWriters({ $executeRaw: executeRaw });
+    expect(executeRaw).toHaveBeenCalledTimes(1);
+    expect(executeRaw.mock.calls[0][0].join(" ")).toBe(
+      "LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE",
+    );
+    expect(applySource).toContain("Commit-time invariant only");
+    expect(applySource).toContain("does not claim permanent uniqueness");
   });
 
   it("delegates all amo access to the exact inspector GET requester and fails on HTTP errors", async () => {

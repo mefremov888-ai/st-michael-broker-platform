@@ -878,37 +878,18 @@ function validateCompletionLedger(ledger, gate) {
   return { links, rowByClient };
 }
 
-async function lockClientRows(transaction, Prisma, clientIds) {
-  const ids = [...new Set(clientIds.map(String))].sort();
-  if (ids.length < 1 || ids.length > KNOWN_QUEUE_ROWS) {
-    fail("CLIENT_LOCK_SET_INVALID");
+async function lockClientWriters(transaction) {
+  if (!transaction || typeof transaction.$executeRaw !== "function") {
+    fail("CLIENT_TABLE_LOCK_TRANSACTION_INVALID");
   }
-  const locked = await transaction.$queryRaw(
-    Prisma.sql`SELECT id FROM clients WHERE id IN (${Prisma.join(
-      ids,
-    )}) ORDER BY id FOR UPDATE`,
-  );
-  if (!Array.isArray(locked) || locked.length !== ids.length) {
-    fail("CLIENT_LOCK_SET_CHANGED");
-  }
+  // Commit-time invariant only: every INSERT/UPDATE/DELETE takes ROW EXCLUSIVE,
+  // which conflicts with this mode. Existing writers finish before our stable
+  // occupancy check; new writers wait until commit. amoLeadId is intentionally
+  // non-unique, so this repair does not claim permanent uniqueness after commit.
+  await transaction.$executeRaw`LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE`;
 }
 
-async function lockBrokerRows(transaction, Prisma, brokerIds) {
-  const ids = [...new Set(brokerIds.filter(Boolean).map(String))].sort();
-  if (ids.length < 1 || ids.length > KNOWN_QUEUE_ROWS * 2) {
-    fail("BROKER_LOCK_SET_INVALID");
-  }
-  const locked = await transaction.$queryRaw(
-    Prisma.sql`SELECT id FROM brokers WHERE id IN (${Prisma.join(
-      ids,
-    )}) ORDER BY id FOR UPDATE`,
-  );
-  if (!Array.isArray(locked) || locked.length !== ids.length) {
-    fail("BROKER_LOCK_SET_CHANGED");
-  }
-}
-
-async function lockAndCheckCandidateOccupancy(transaction, Prisma, actionable) {
+async function checkCandidateOccupancy(transaction, actionable) {
   const candidateIds = actionable
     .map((record) => BigInt(record.candidateLeadId))
     .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
@@ -918,11 +899,11 @@ async function lockAndCheckCandidateOccupancy(transaction, Prisma, actionable) {
   ) {
     fail("CANDIDATE_LEAD_SET_INVALID");
   }
-  const occupied = await transaction.$queryRaw(
-    Prisma.sql`SELECT id, amo_lead_id FROM clients WHERE amo_lead_id IN (${Prisma.join(
-      candidateIds,
-    )}) ORDER BY amo_lead_id, id FOR UPDATE`,
-  );
+  const occupied = await transaction.client.findMany({
+    where: { amoLeadId: { in: candidateIds } },
+    select: { id: true, amoLeadId: true },
+    orderBy: [{ amoLeadId: "asc" }, { id: "asc" }],
+  });
   if (!Array.isArray(occupied)) fail("CANDIDATE_OCCUPANCY_INVALID");
   if (occupied.length !== 0) fail("CANDIDATE_LEAD_ALREADY_OCCUPIED");
 }
@@ -1129,24 +1110,36 @@ function assertFinalAmoEvidence(rows, amoEvidence, expectedLinks, inspector) {
   }
 }
 
-async function tryCompletedNoop({
-  prisma,
-  Prisma,
-  inspector,
-  requestGet,
-  gate,
-}) {
+async function tryCompletedNoop({ prisma, inspector, requestGet, gate }) {
+  const initialLedger = await findRepairLedger(prisma, gate);
+  if (
+    initialLedger.completion.length === 0 &&
+    initialLedger.rows.length === 0
+  ) {
+    return false;
+  }
+  const initialCompleted = validateCompletionLedger(initialLedger, gate);
+  const clientIds = initialCompleted.links.map((link) => link.clientId).sort();
+  const preLockRows = await prisma.client.findMany({
+    where: { id: { in: clientIds } },
+    select: CLIENT_SELECT,
+    orderBy: { id: "asc" },
+  });
+  assertCompletedDatabaseState(preLockRows, initialCompleted, inspector);
+  const evidence = await inspector.collectAmoEvidence(preLockRows, requestGet);
+  assertFinalAmoEvidence(
+    preLockRows,
+    evidence,
+    initialCompleted.links,
+    inspector,
+  );
+
   return prisma.$transaction(
     async (transaction) => {
       await acquireRepairAdvisoryLock(transaction, gate);
+      await lockClientWriters(transaction);
       const ledger = await findRepairLedger(transaction, gate);
-      if (ledger.completion.length === 0) return false;
       const completed = validateCompletionLedger(ledger, gate);
-      await lockClientRows(
-        transaction,
-        Prisma,
-        completed.links.map((link) => link.clientId),
-      );
       const rows = await transaction.client.findMany({
         where: {
           id: { in: completed.links.map((link) => link.clientId).sort() },
@@ -1154,36 +1147,12 @@ async function tryCompletedNoop({
         select: CLIENT_SELECT,
         orderBy: { id: "asc" },
       });
-      if (rows.length !== completed.links.length) {
-        fail("COMPLETED_DATABASE_ROWS_MISSING");
-      }
-      await lockBrokerRows(
-        transaction,
-        Prisma,
-        rows.flatMap((row) => [row.brokerId, row.responsibleBrokerId]),
-      );
+      assertSameCohort(preLockRows, rows, inspector);
+      assertCompletedDatabaseState(rows, completed, inspector);
+      assertFinalAmoEvidence(rows, evidence, completed.links, inspector);
       const expectedByClient = new Map(
         completed.links.map((link) => [link.clientId, link]),
       );
-      for (const row of rows) {
-        const expected = expectedByClient.get(String(row.id));
-        const rowAudit = completed.rowByClient.get(String(row.id));
-        if (
-          !expected ||
-          !rowAudit ||
-          inspector.optionalStoredAmoLeadId(row.amoLeadId) !==
-            expected.amoLeadId ||
-          row.amoSyncStatus !== "SYNCED" ||
-          row.amoSyncError !== null ||
-          row.amoSyncAttempts !== rowAudit.amoSyncAttempts ||
-          optionalDateIso(
-            row.amoSyncLastAttemptAt,
-            "QUEUE_LAST_ATTEMPT_AT_INVALID",
-          ) !== rowAudit.amoSyncLastAttemptAt
-        ) {
-          fail("COMPLETED_DATABASE_POSTCONDITION_INVALID");
-        }
-      }
       const occupied = await transaction.client.findMany({
         where: {
           amoLeadId: {
@@ -1206,8 +1175,6 @@ async function tryCompletedNoop({
       ) {
         fail("COMPLETED_CANDIDATE_OCCUPANCY_INVALID");
       }
-      const evidence = await inspector.collectAmoEvidence(rows, requestGet);
-      assertFinalAmoEvidence(rows, evidence, completed.links, inspector);
       return true;
     },
     {
@@ -1218,75 +1185,136 @@ async function tryCompletedNoop({
   );
 }
 
-async function executeFirstApply({
+function assertCompletedDatabaseState(rows, completed, inspector) {
+  if (!Array.isArray(rows) || rows.length !== completed.links.length) {
+    fail("COMPLETED_DATABASE_ROWS_MISSING");
+  }
+  const expectedByClient = new Map(
+    completed.links.map((link) => [link.clientId, link]),
+  );
+  for (const row of rows) {
+    const expected = expectedByClient.get(String(row.id));
+    const rowAudit = completed.rowByClient.get(String(row.id));
+    if (
+      !expected ||
+      !rowAudit ||
+      inspector.optionalStoredAmoLeadId(row.amoLeadId) !== expected.amoLeadId ||
+      row.amoSyncStatus !== "SYNCED" ||
+      row.amoSyncError !== null ||
+      row.amoSyncAttempts !== rowAudit.amoSyncAttempts ||
+      optionalDateIso(
+        row.amoSyncLastAttemptAt,
+        "QUEUE_LAST_ATTEMPT_AT_INVALID",
+      ) !== rowAudit.amoSyncLastAttemptAt
+    ) {
+      fail("COMPLETED_DATABASE_POSTCONDITION_INVALID");
+    }
+  }
+}
+
+async function collectPreWriteScans({
   prisma,
-  Prisma,
   inspector,
   requestGet,
   gate,
   attestationKey,
-  firstRows,
-  firstPlan,
 }) {
   const metadata = {
     inspectorSha256: gate.inspectorSha256,
     deployedGitSha: gate.deployedGitSha,
   };
-  const firstPlanIdentity = planIdentity(firstPlan, inspector);
+  let priorRows = null;
+  let expectedIdentity = null;
+  let finalScan = null;
+  for (let scan = 1; scan <= 3; scan += 1) {
+    activeFailurePhase =
+      scan === 1
+        ? FAILURE_PHASE.FIRST_SCAN
+        : scan === 2
+          ? FAILURE_PHASE.SECOND_SCAN
+          : FAILURE_PHASE.FINAL_SCAN;
+    const rows = await loadExactCohort(prisma, inspector);
+    if (priorRows) assertSameCohort(priorRows, rows, inspector);
+    const evidence = await inspector.collectAmoEvidence(rows, requestGet);
+    const report = inspector.buildReport(
+      rows,
+      evidence,
+      metadata,
+      attestationKey,
+      randomBytes(32),
+    );
+    assertReportMatchesGate(report, gate);
+    const plan = buildExecutionPlan(rows, evidence, inspector);
+    assertExactPlan(plan, gate);
+    const identity = planIdentity(plan, inspector);
+    if (expectedIdentity !== null && identity !== expectedIdentity) {
+      fail("EXECUTION_PLAN_DRIFT_BETWEEN_SCANS");
+    }
+    expectedIdentity = identity;
+    priorRows = rows;
+    finalScan = { rows, evidence, plan, identity };
+  }
+  return finalScan;
+}
+
+async function executeFirstApply({
+  prisma,
+  Prisma,
+  inspector,
+  gate,
+  attestationKey,
+  lastPreLockRows,
+  finalEvidence,
+  expectedPlanIdentity,
+}) {
+  const metadata = {
+    inspectorSha256: gate.inspectorSha256,
+    deployedGitSha: gate.deployedGitSha,
+  };
   return prisma.$transaction(
     async (transaction) => {
       activeFailurePhase = FAILURE_PHASE.TRANSACTION_LOCK;
       await acquireRepairAdvisoryLock(transaction, gate);
+      await lockClientWriters(transaction);
       const ledger = await findRepairLedger(transaction, gate);
       if (ledger.completion.length !== 0 || ledger.rows.length !== 0) {
         fail("AUDIT_LEDGER_CHANGED_DURING_APPLY");
       }
 
-      await lockClientRows(
-        transaction,
-        Prisma,
-        firstRows.map((row) => row.id),
-      );
-      await lockBrokerRows(
-        transaction,
-        Prisma,
-        firstRows.flatMap((row) => [row.brokerId, row.responsibleBrokerId]),
-      );
-      const secondRows = await loadExactCohort(transaction, inspector);
-      assertSameCohort(firstRows, secondRows, inspector);
-
-      activeFailurePhase = FAILURE_PHASE.SECOND_SCAN;
-      const secondEvidence = await inspector.collectAmoEvidence(
-        secondRows,
-        requestGet,
-      );
-      const secondReport = inspector.buildReport(
-        secondRows,
-        secondEvidence,
+      const lockedRows = await loadExactCohort(transaction, inspector);
+      assertSameCohort(lastPreLockRows, lockedRows, inspector);
+      const lockedReport = inspector.buildReport(
+        lockedRows,
+        finalEvidence,
         metadata,
         attestationKey,
         randomBytes(32),
       );
-      assertReportMatchesGate(secondReport, gate);
-      const secondPlan = buildExecutionPlan(
-        secondRows,
-        secondEvidence,
+      assertReportMatchesGate(lockedReport, gate);
+      const lockedPlan = buildExecutionPlan(
+        lockedRows,
+        finalEvidence,
         inspector,
       );
-      assertExactPlan(secondPlan, gate);
-      if (planIdentity(secondPlan, inspector) !== firstPlanIdentity) {
-        fail("EXECUTION_PLAN_DRIFT_BETWEEN_SCANS");
+      assertExactPlan(lockedPlan, gate);
+      if (planIdentity(lockedPlan, inspector) !== expectedPlanIdentity) {
+        fail("EXECUTION_PLAN_DRIFT_BEFORE_COMMIT");
       }
-
-      activeFailurePhase = FAILURE_PHASE.OCCUPANCY;
-      await lockAndCheckCandidateOccupancy(
-        transaction,
-        Prisma,
-        secondPlan.actionable,
+      assertFinalAmoEvidence(
+        lockedRows,
+        finalEvidence,
+        lockedPlan.actionable.map((record) => ({
+          clientId: record.row.id,
+          amoLeadId: record.candidateLeadId,
+        })),
+        inspector,
       );
 
+      activeFailurePhase = FAILURE_PHASE.OCCUPANCY;
+      await checkCandidateOccupancy(transaction, lockedPlan.actionable);
+
       activeFailurePhase = FAILURE_PHASE.DATABASE_CAS;
-      for (const record of secondPlan.actionable) {
+      for (const record of lockedPlan.actionable) {
         await casLinkClient(transaction, Prisma, record);
         activeFailurePhase = FAILURE_PHASE.AUDIT;
         await createRowAudit(transaction, record, gate, attestationKey);
@@ -1295,45 +1323,13 @@ async function executeFirstApply({
 
       await assertLinkedDatabasePostconditions(
         transaction,
-        secondPlan.actionable,
-        inspector,
-      );
-
-      activeFailurePhase = FAILURE_PHASE.FINAL_SCAN;
-      const finalEvidence = await inspector.collectAmoEvidence(
-        secondRows,
-        requestGet,
-      );
-      const finalReport = inspector.buildReport(
-        secondRows,
-        finalEvidence,
-        metadata,
-        attestationKey,
-        randomBytes(32),
-      );
-      assertReportMatchesGate(finalReport, gate);
-      const finalPlan = buildExecutionPlan(
-        secondRows,
-        finalEvidence,
-        inspector,
-      );
-      assertExactPlan(finalPlan, gate);
-      if (planIdentity(finalPlan, inspector) !== firstPlanIdentity) {
-        fail("EXECUTION_PLAN_DRIFT_BEFORE_COMMIT");
-      }
-      assertFinalAmoEvidence(
-        secondRows,
-        finalEvidence,
-        secondPlan.actionable.map((record) => ({
-          clientId: record.row.id,
-          amoLeadId: record.candidateLeadId,
-        })),
+        lockedPlan.actionable,
         inspector,
       );
 
       activeFailurePhase = FAILURE_PHASE.AUDIT;
-      await createCompletionAudit(transaction, secondPlan, gate);
-      return { linked: secondPlan.actionable.length };
+      await createCompletionAudit(transaction, lockedPlan, gate);
+      return { linked: lockedPlan.actionable.length };
     },
     {
       isolationLevel: "Serializable",
@@ -1373,7 +1369,6 @@ async function main() {
     activeFailurePhase = FAILURE_PHASE.IDEMPOTENCY;
     const alreadyCompleted = await tryCompletedNoop({
       prisma,
-      Prisma,
       inspector,
       requestGet,
       gate,
@@ -1392,35 +1387,23 @@ async function main() {
         amoMutations: 0,
       };
     } else {
-      activeFailurePhase = FAILURE_PHASE.FIRST_SCAN;
-      const firstRows = await loadExactCohort(prisma, inspector);
-      const firstEvidence = await inspector.collectAmoEvidence(
-        firstRows,
+      const finalScan = await collectPreWriteScans({
+        prisma,
+        inspector,
         requestGet,
-      );
-      const firstReport = inspector.buildReport(
-        firstRows,
-        firstEvidence,
-        {
-          inspectorSha256: gate.inspectorSha256,
-          deployedGitSha: gate.deployedGitSha,
-        },
+        gate,
         attestationKey,
-        randomBytes(32),
-      );
-      assertReportMatchesGate(firstReport, gate);
-      const firstPlan = buildExecutionPlan(firstRows, firstEvidence, inspector);
-      assertExactPlan(firstPlan, gate);
+      });
 
       const result = await executeFirstApply({
         prisma,
         Prisma,
         inspector,
-        requestGet,
         gate,
         attestationKey,
-        firstRows,
-        firstPlan,
+        lastPreLockRows: finalScan.rows,
+        finalEvidence: finalScan.evidence,
+        expectedPlanIdentity: finalScan.identity,
       });
       summary = {
         event: "lead_reconciliation_completed",
@@ -1471,11 +1454,13 @@ module.exports = {
   buildExecutionPlan,
   buildWriteDatabaseUrl,
   casLinkClient,
+  checkCandidateOccupancy,
+  collectPreWriteScans,
   completionEntityId,
   executeFirstApply,
   findRepairLedger,
   formatFixedManifest,
-  lockAndCheckCandidateOccupancy,
+  lockClientWriters,
   parseFixedManifest,
   planIdentity,
   readExecutionGate,
