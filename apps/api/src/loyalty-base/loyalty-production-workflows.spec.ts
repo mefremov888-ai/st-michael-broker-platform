@@ -1492,19 +1492,22 @@ describe("loyalty production workflow safety", () => {
       /\[\[ "\$(?:target|newer)_(?:api|web)_id" == "sha256:/,
     );
     expect(remoteBody).toContain(
-      'test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id"',
+      'if ! current_target_api_id=$(image_id_for_tag "$TARGET_API_TAG"); then',
     );
     expect(remoteBody).toContain(
-      'test "$(record_value previous_api_image "$newer_record")" = "$newer_api_id"',
+      'if ! newer_record_api_id=$(record_value previous_api_image "$newer_record"); then',
     );
     expect(remoteBody).toContain(
-      'test "$(record_value previous_web_image "$newer_record")" = "$newer_web_id"',
+      'if ! newer_record_web_id=$(record_value previous_web_image "$newer_record"); then',
     );
     expect(remoteBody).toContain("repo_tags=$(docker image inspect");
     expect(remoteBody).toContain("repo_digests=$(docker image inspect");
     expect(remoteBody).toContain("validated_repo_digest_for_tag()");
     expect(remoteBody).toContain(
-      "repo_tags=$(docker image inspect --format '{{range .RepoTags}}{{println .}}{{end}}' \"$tag\" | sort -u)",
+      "if ! expected_repo_tags=$(printf '%s\\n' \"$expected_repo_tags\" | awk 'NF' | sort -u); then",
+    );
+    expect(remoteBody).toContain(
+      "if ! repo_tags=$(docker image inspect --format '{{range .RepoTags}}{{println .}}{{end}}' \"$tag\" | awk 'NF' | sort -u); then",
     );
     expect(remoteBody).toContain("expected_retained_repo_tags()");
     expect(remoteBody).toContain("api:20260825-145230|api:20260825-160034)");
@@ -1516,7 +1519,10 @@ describe("loyalty production workflow safety", () => {
       'test "$newer_web_id" = "$DUPLICATE_RETAINED_WEB_IMAGE_ID"',
     );
     expect(remoteBody).toContain(
-      'validated_repo_digest_for_tag "$newer_api_tag" "$(expected_retained_repo_tags api "$newer_timestamp")"',
+      'if ! expected_newer_api_repo_tags=$(expected_retained_repo_tags api "$newer_timestamp"); then',
+    );
+    expect(remoteBody).toContain(
+      'if ! newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag" "$expected_newer_api_repo_tags" "retained_api_${newer_timestamp}"); then',
     );
     expect(remoteBody).toContain(
       "grep -Eq '^\\[\"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}\"\\]$'",
@@ -1525,14 +1531,62 @@ describe("loyalty production workflow safety", () => {
       "repo_digest=${repo_digests:2:${#repo_digests}-4}",
     );
     expect(remoteBody).toContain(
-      'test "$(image_id_for_tag "$repo_digest")" = "$(image_id_for_tag "$tag")"',
+      'if ! repo_digest_image_id=$(image_id_for_tag "$repo_digest"); then',
     );
     expect(remoteBody).toContain(
-      'target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG")',
+      'if ! tag_image_id=$(image_id_for_tag "$tag"); then',
     );
     expect(remoteBody).toContain(
-      'target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")',
+      'if ! target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG" "$TARGET_API_TAG" "target_api"); then',
     );
+    expect(remoteBody).toContain(
+      'if ! target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG" "$TARGET_WEB_TAG" "target_web"); then',
+    );
+    expect(remoteBody).toContain("inspect_stage_failed()");
+    for (const safeDiagnostic of [
+      "rollback_repo_tag_stage=%s",
+      "rollback_repo_tag_expected_count=%s",
+      "rollback_repo_tag_actual_count=%s",
+      "rollback_repo_tag_expected_sha256=%s",
+      "rollback_repo_tag_actual_sha256=%s",
+      "rollback_repo_digest_stage=%s",
+      "rollback_repo_digest_actual_count=%s",
+      "rollback_repo_digest_actual_sha256=%s",
+    ]) {
+      expect(remoteBody).toContain(safeDiagnostic);
+    }
+    for (const stderrFailure of [
+      'echo "Rollback image ID lookup failed" >&2',
+      'echo "Rollback image repo-tag topology differs from the exact audit" >&2',
+      'echo "Rollback image has an unexpected digest reference" >&2',
+      'echo "Rollback release record key lookup failed" >&2',
+      'echo "Unsupported retained rollback component" >&2',
+      'echo "Deploy path is not a Git worktree" >&2',
+      'echo "Docker daemon MainPID is invalid" >&2',
+      'echo "Runtime event audit hash is invalid" >&2',
+    ]) {
+      expect(remoteBody).toContain(stderrFailure);
+    }
+    expect(remoteBody).toContain(
+      "printf 'rollback_repo_tag_actual_sha256=%s\\n' \"$actual_tag_sha256\" >&2",
+    );
+    expect(remoteBody).toContain(
+      "printf 'rollback_repo_digest_actual_sha256=%s\\n' \"$actual_digest_sha256\" >&2",
+    );
+    expect(remoteBody).not.toMatch(
+      /printf '[^']*=%s\\n' "\$(?:repo_tags|repo_digests)"/,
+    );
+    const capturedHelperCalls = remoteBody
+      .split(/\r?\n/)
+      .filter((line) =>
+        /\$\((?:image_id_for_tag|validated_repo_digest_for_tag|record_value|expected_retained_repo_tags|deploy_worktree_sha256|docker_daemon_snapshot|runtime_event_audit)\b/.test(
+          line,
+        ),
+      );
+    expect(capturedHelperCalls.length).toBeGreaterThan(30);
+    for (const capturedHelperCall of capturedHelperCalls) {
+      expect(capturedHelperCall.trim()).toMatch(/^if ! /);
+    }
     expect(remoteBody).toContain(
       "target_api_repo_digest=$expected_target_api_repo_digest",
     );
@@ -1688,10 +1742,10 @@ describe("loyalty production workflow safety", () => {
       "all_image_ids_after=$(docker image ls --all --quiet --no-trunc | sort -u)",
     );
     expect(remoteBody).toContain(
-      'test "$(image_id_for_tag "$newer_api_tag")" = "${newer_api_ids[$newer_index]}"',
+      'if ! post_newer_api_id=$(image_id_for_tag "$newer_api_tag"); then',
     );
     expect(remoteBody).toContain(
-      'test "$(image_id_for_tag "$newer_web_tag")" = "${newer_web_ids[$newer_index]}"',
+      'if ! post_newer_web_id=$(image_id_for_tag "$newer_web_tag"); then',
     );
     expect(remoteBody).toContain(
       "printf 'retired_rollback_tags=%s\\n' \"$retired_count\"",
