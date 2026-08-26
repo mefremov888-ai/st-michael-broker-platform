@@ -21,12 +21,23 @@ describe("PII-safe amo broker-link repair-plan inspector", () => {
   loadedScript.paths = NodeModule._nodeModulePaths(dirname(scriptPath));
   loadedScript._compile(script, scriptPath);
   const inspector = loadedScript.exports as {
+    BROKER_OWNER_SELECT: Record<string, any>;
+    BROKER_PROVISION_SELECT: Record<string, any>;
+    OWNERSHIP_QUEUE_ROW_SELECT: Record<string, any>;
+    PROVISIONING_QUEUE_ROW_SELECT: Record<string, any>;
     EXPECTED_ACCOUNT_ID: number;
     MAX_RESPONSE_BYTES: number;
     STATEMENT_TIMEOUT_MS: number;
     assertExpectedAccount: (request: any) => Promise<void>;
     assertReadOnlySession: (prisma: any) => Promise<void>;
     buildReadOnlyDatabaseUrl: (value: string) => string;
+    buildProvisioningReport: (
+      queueRows: any[],
+      brokers: any[],
+      lookups: Map<string, any>,
+      generatedAt?: Date,
+      hashKey?: Buffer,
+    ) => any;
     buildReport: (
       queueRows: any[],
       brokers: any[],
@@ -111,12 +122,123 @@ describe("PII-safe amo broker-link repair-plan inspector", () => {
     expect(script.match(/process\.stdout\.write\s*\(/g) || []).toHaveLength(1);
     expect(script.match(/process\.stderr\.write\s*\(/g) || []).toHaveLength(1);
     expect(script).not.toMatch(/console\.(?:log|info|warn|error)/);
-    expect(script).not.toMatch(/\b(?:fullName|email)\s*:/);
     expect(script).toContain('createHmac("sha256", hashKey)');
     expect(script).toContain("hashKey = randomBytes(32)");
     expect(script).toContain("databaseMutationAuthorized: false");
     expect(script).toContain("amoMutationAuthorized: false");
     expect(script).toContain("retryAuthorized: false");
+  });
+
+  it("uses a PII-minimal Prisma select by default and a full mutation-source select only for provisioning attestation without emitting raw PII", () => {
+    expect(inspector.BROKER_OWNER_SELECT).toEqual({
+      id: true,
+      amoContactId: true,
+      phone: true,
+      mergedIntoId: true,
+      phones: {
+        select: { phone: true },
+        orderBy: { phone: "asc" },
+      },
+    });
+    expect(inspector.BROKER_OWNER_SELECT).not.toHaveProperty("fullName");
+    expect(inspector.BROKER_OWNER_SELECT).not.toHaveProperty("email");
+    expect(inspector.BROKER_OWNER_SELECT).not.toHaveProperty("brokerAgencies");
+    expect(inspector.OWNERSHIP_QUEUE_ROW_SELECT).toMatchObject({
+      broker: { select: inspector.BROKER_OWNER_SELECT },
+      responsibleBroker: { select: inspector.BROKER_OWNER_SELECT },
+    });
+    expect(inspector.PROVISIONING_QUEUE_ROW_SELECT).toMatchObject({
+      broker: { select: inspector.BROKER_PROVISION_SELECT },
+      responsibleBroker: { select: inspector.BROKER_PROVISION_SELECT },
+    });
+    expect(inspector.BROKER_PROVISION_SELECT).toMatchObject({
+      fullName: true,
+      email: true,
+      region: true,
+      presentationSent: true,
+      doNotCall: true,
+      brokerAgencies: {
+        where: { isPrimary: true },
+        orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
+        take: 2,
+      },
+    });
+    expect(script).toContain(
+      "select: provisioningMode\n        ? PROVISIONING_QUEUE_ROW_SELECT\n        : OWNERSHIP_QUEUE_ROW_SELECT",
+    );
+    const provisioningReportSource = script.slice(
+      script.indexOf("function buildProvisioningReport("),
+      script.indexOf("async function main()"),
+    );
+    expect(provisioningReportSource).not.toMatch(
+      /broker\.(?:fullName|email|region|position|telegramUsername|telegramId|whatsappUsername|presentationSent|doNotCall|brokerAgencies)/,
+    );
+
+    const rawPii = {
+      fullName: "Private Broker 9a81c6",
+      email: "private-9a81c6@example.test",
+      region: "Private Region 9a81c6",
+      agencyName: "Private Agency 9a81c6",
+      agencyInn: "7700123456",
+      agencyAddress: "Private address 9a81c6",
+      syncError: "private-9a81c6@example.test +79991112233",
+    };
+    const effective = broker({
+      id: "broker-private-9a81c6",
+      phone: "+79991112233",
+      ...rawPii,
+      brokerAgencies: [
+        {
+          id: "membership-private-9a81c6",
+          agencyId: "agency-private-9a81c6",
+          isPrimary: true,
+          joinedAt: new Date("2026-08-26T00:00:00.000Z"),
+          agency: {
+            id: "agency-private-9a81c6",
+            name: rawPii.agencyName,
+            inn: rawPii.agencyInn,
+            address: rawPii.agencyAddress,
+          },
+        },
+      ],
+    });
+    const queueRows = [
+      row("queue-private-9a81c6", effective, {
+        amoSyncError: rawPii.syncError,
+      }),
+    ];
+    const generatedAt = new Date("2026-08-26T00:00:00.000Z");
+    const reportKey = Buffer.alloc(32, 0x51);
+    const defaultJson = JSON.stringify(
+      inspector.buildReport(
+        queueRows,
+        [effective],
+        new Map([
+          ["+79991112233", { contactIds: [], pagesRead: 1, contactsRead: 0 }],
+        ]),
+        generatedAt,
+        reportKey,
+      ),
+    );
+    const provisioningJson = JSON.stringify(
+      inspector.buildProvisioningReport(
+        queueRows,
+        [effective],
+        new Map([
+          ["+79991112233", { contacts: [], pagesRead: 1, contactsRead: 0 }],
+        ]),
+        generatedAt,
+        reportKey,
+      ),
+    );
+    for (const output of [defaultJson, provisioningJson]) {
+      for (const privateValue of Object.values(rawPii)) {
+        expect(output).not.toContain(String(privateValue));
+      }
+      expect(output).not.toContain("+79991112233");
+      expect(output).not.toContain("broker-private-9a81c6");
+      expect(output).not.toContain("agency-private-9a81c6");
+    }
   });
 
   it("preserves datasource options while enforcing PostgreSQL read-only mode", async () => {
