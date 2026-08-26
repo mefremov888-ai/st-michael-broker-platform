@@ -13,6 +13,7 @@
 "use strict";
 
 const { createHmac, randomBytes } = require("node:crypto");
+const { lstatSync, readFileSync } = require("node:fs");
 
 const AMO_ORIGIN = "https://stmichael.amocrm.ru";
 const EXPECTED_ACCOUNT_ID = 28552900;
@@ -25,11 +26,86 @@ const REQUEST_ATTEMPTS = 4;
 const MIN_REQUEST_INTERVAL_MS = 180;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const HASH_DOMAIN = "st-michael:amo-broker-link-repair-plan:v1";
+const COHORT_ATTESTATION_DOMAIN =
+  "st-michael:amo-broker-contact-provisioning-cohort-attestation:v1";
 const QUEUE_STATUSES = ["FAILED", "PENDING"];
 
 const CONTACT_FIELDS = Object.freeze({
   PHONE: 557903,
   IS_BROKER: 835415,
+});
+
+// Keep global ownership reads deliberately narrow: unrelated broker profile
+// edits must not invalidate the account-wide phone/contact ownership proof.
+const BROKER_OWNER_SELECT = Object.freeze({
+  id: true,
+  amoContactId: true,
+  phone: true,
+  mergedIntoId: true,
+  phones: {
+    select: { phone: true },
+    orderBy: { phone: "asc" },
+  },
+});
+
+// This must stay structurally identical to BROKER_PROVISION_SELECT in the
+// apply script. These are the source fields from which POST/PATCH payloads and
+// their primary-agency values are built, so the reviewed HMAC binds all of
+// them rather than only ownership fields.
+const BROKER_PROVISION_SELECT = Object.freeze({
+  ...BROKER_OWNER_SELECT,
+  fullName: true,
+  email: true,
+  region: true,
+  position: true,
+  telegramUsername: true,
+  telegramId: true,
+  whatsappUsername: true,
+  presentationSent: true,
+  doNotCall: true,
+  updatedAt: true,
+  brokerAgencies: {
+    where: { isPrimary: true },
+    select: {
+      id: true,
+      agencyId: true,
+      isPrimary: true,
+      joinedAt: true,
+      agency: {
+        select: {
+          id: true,
+          name: true,
+          inn: true,
+          address: true,
+        },
+      },
+    },
+    orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
+    take: 2,
+  },
+});
+
+const QUEUE_BASE_SELECT = Object.freeze({
+  id: true,
+  brokerId: true,
+  responsibleBrokerId: true,
+  amoLeadId: true,
+  fixationAgencyId: true,
+  amoSyncStatus: true,
+  amoSyncAttempts: true,
+  amoSyncError: true,
+});
+
+const OWNERSHIP_QUEUE_ROW_SELECT = Object.freeze({
+  ...QUEUE_BASE_SELECT,
+  broker: { select: BROKER_OWNER_SELECT },
+  responsibleBroker: { select: BROKER_OWNER_SELECT },
+});
+
+const PROVISIONING_QUEUE_ROW_SELECT = Object.freeze({
+  ...QUEUE_BASE_SELECT,
+  broker: { select: BROKER_PROVISION_SELECT },
+  responsibleBroker: { select: BROKER_PROVISION_SELECT },
 });
 
 const RESOLUTION_CLASSES = [
@@ -78,6 +154,7 @@ const FAILURE_PHASE = Object.freeze({
   DATABASE: "DATABASE",
   ACCOUNT: "ACCOUNT",
   CONTACT_LOOKUP: "CONTACT_LOOKUP",
+  ATTESTATION: "ATTESTATION",
   REPORT: "REPORT",
 });
 
@@ -105,6 +182,13 @@ const FAILURE_CODE_BY_MESSAGE = new Map([
     "AMO_CONTACTS_PAGINATION_SAFETY_BOUND_EXCEEDED",
   ],
   ["Report hash key is invalid", "REPORT_HASH_KEY_INVALID"],
+  ["Cohort attestation key is invalid", "COHORT_ATTESTATION_KEY_INVALID"],
+  [
+    "Cohort attestation key file is invalid",
+    "COHORT_ATTESTATION_KEY_FILE_INVALID",
+  ],
+  ["Inspector source SHA is invalid", "INSPECTOR_SOURCE_SHA_INVALID"],
+  ["Deployed Git SHA is invalid", "DEPLOYED_GIT_SHA_INVALID"],
   ["Inspector mode is invalid", "INSPECTOR_MODE_INVALID"],
 ]);
 
@@ -525,6 +609,226 @@ function reportHash(kind, value, hashKey) {
     .digest("hex")
     .slice(0, 24);
   return `${kind}_${digest}`;
+}
+
+function cohortAttestationKey(value) {
+  const key = Buffer.isBuffer(value)
+    ? Buffer.from(value)
+    : typeof value === "string"
+      ? Buffer.from(value, "utf8")
+      : null;
+  if (!key || key.length < 32) {
+    throw new Error("Cohort attestation key is invalid");
+  }
+  return key;
+}
+
+function readCohortAttestationKeyFile(pathValue) {
+  if (typeof pathValue !== "string" || !pathValue || pathValue.includes("\0")) {
+    throw new Error("Cohort attestation key file is invalid");
+  }
+  try {
+    const stats = lstatSync(pathValue);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new Error("Cohort attestation key file is invalid");
+    }
+    return cohortAttestationKey(readFileSync(pathValue));
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "Cohort attestation key is invalid"
+    ) {
+      throw error;
+    }
+    throw new Error("Cohort attestation key file is invalid");
+  }
+}
+
+function cohortAttestationMetadata(inspectorSha256, deployedGitSha) {
+  if (
+    typeof inspectorSha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(inspectorSha256)
+  ) {
+    throw new Error("Inspector source SHA is invalid");
+  }
+  if (
+    typeof deployedGitSha !== "string" ||
+    !/^[0-9a-f]{40}$/.test(deployedGitSha)
+  ) {
+    throw new Error("Deployed Git SHA is invalid");
+  }
+  return { inspectorSha256, deployedGitSha };
+}
+
+function canonicalAtom(value) {
+  if (value === null) return ["null"];
+  if (value === undefined) return ["undefined"];
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime())
+      ? ["date", value.toISOString()]
+      : ["date", "invalid"];
+  }
+  if (typeof value === "bigint") return ["bigint", value.toString(10)];
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return ["number", "non-finite"];
+    return ["number", String(value)];
+  }
+  if (typeof value === "boolean") return ["boolean", value ? "1" : "0"];
+  return ["string", String(value)];
+}
+
+function compareCanonical(left, right) {
+  const leftJson = JSON.stringify(left);
+  const rightJson = JSON.stringify(right);
+  if (leftJson < rightJson) return -1;
+  if (leftJson > rightJson) return 1;
+  return 0;
+}
+
+function canonicalPhoneTuple(value) {
+  return [canonicalAtom(value), canonicalAtom(normalizePhone(value))];
+}
+
+function canonicalBrokerTuple(role, broker) {
+  if (!broker) return [role, ["missing"]];
+  const additionalPhones = (Array.isArray(broker.phones) ? broker.phones : [])
+    .map((entry) => canonicalPhoneTuple(entry?.phone))
+    .sort(compareCanonical);
+  return [
+    role,
+    canonicalAtom(broker.id),
+    canonicalAtom(broker.amoContactId),
+    canonicalAtom(broker.mergedIntoId),
+    ["primaryPhone", canonicalPhoneTuple(broker.phone)],
+    ["additionalPhones", additionalPhones],
+  ];
+}
+
+function canonicalProvisioningBrokerTuple(role, broker) {
+  if (!broker) return [role, ["missing"]];
+  const primaryAgencies = (
+    Array.isArray(broker.brokerAgencies) ? broker.brokerAgencies : []
+  )
+    .map((membership) => [
+      "primaryAgencyMembership",
+      canonicalAtom(membership?.id),
+      canonicalAtom(membership?.agencyId),
+      canonicalAtom(membership?.isPrimary),
+      canonicalAtom(membership?.joinedAt),
+      [
+        "agency",
+        canonicalAtom(membership?.agency?.id),
+        canonicalAtom(membership?.agency?.name),
+        canonicalAtom(membership?.agency?.inn),
+        canonicalAtom(membership?.agency?.address),
+      ],
+    ])
+    .sort(compareCanonical);
+  return [
+    role,
+    ["ownership", canonicalBrokerTuple("broker", broker)],
+    ["fullName", canonicalAtom(broker.fullName)],
+    ["email", canonicalAtom(broker.email)],
+    ["region", canonicalAtom(broker.region)],
+    ["position", canonicalAtom(broker.position)],
+    ["telegramUsername", canonicalAtom(broker.telegramUsername)],
+    ["telegramId", canonicalAtom(broker.telegramId)],
+    ["whatsappUsername", canonicalAtom(broker.whatsappUsername)],
+    ["presentationSent", canonicalAtom(broker.presentationSent)],
+    ["doNotCall", canonicalAtom(broker.doNotCall)],
+    ["updatedAt", canonicalAtom(broker.updatedAt)],
+    ["primaryAgencies", primaryAgencies],
+  ];
+}
+
+function canonicalQueueTuples(queueRows) {
+  if (!Array.isArray(queueRows)) {
+    throw new Error("Invalid cohort attestation input");
+  }
+  return queueRows
+    .map((row) => [
+      "queue",
+      canonicalAtom(row?.id),
+      canonicalAtom(row?.brokerId),
+      canonicalAtom(row?.responsibleBrokerId),
+      canonicalAtom(row?.amoLeadId),
+      canonicalAtom(row?.fixationAgencyId),
+      canonicalAtom(row?.amoSyncStatus),
+      canonicalAtom(row?.amoSyncAttempts),
+      canonicalAtom(row?.amoSyncError),
+      canonicalProvisioningBrokerTuple("assignedBroker", row?.broker),
+      canonicalProvisioningBrokerTuple(
+        "responsibleBroker",
+        row?.responsibleBroker,
+      ),
+    ])
+    .sort(compareCanonical);
+}
+
+function canonicalBrokerTuples(allBrokers) {
+  if (!Array.isArray(allBrokers)) {
+    throw new Error("Invalid cohort attestation input");
+  }
+  return allBrokers
+    .map((broker) => canonicalBrokerTuple("brokerOwnership", broker))
+    .sort(compareCanonical);
+}
+
+function canonicalAmoContactTuples(lookups) {
+  if (!lookups || typeof lookups.entries !== "function") {
+    throw new Error("Invalid cohort attestation input");
+  }
+  return [...lookups.entries()]
+    .map(([phone, lookup]) => {
+      if (!lookup || !Array.isArray(lookup.contacts)) {
+        throw new Error("Malformed amoCRM contacts page");
+      }
+      const contacts = lookup.contacts
+        .map((contact) => {
+          const contactId = positiveInteger(contact?.contactId);
+          if (!contactId || typeof contact?.brokerFlag !== "boolean") {
+            throw new Error("Invalid amoCRM contact record");
+          }
+          return [
+            "exactContact",
+            canonicalAtom(contactId),
+            canonicalAtom(contact.brokerFlag),
+          ];
+        })
+        .sort(compareCanonical);
+      return ["amoExactPhoneLookup", canonicalPhoneTuple(phone), contacts];
+    })
+    .sort(compareCanonical);
+}
+
+function buildCohortAttestation(
+  queueRows,
+  allBrokers,
+  lookups,
+  keyValue,
+  inspectorSha256,
+  deployedGitSha,
+) {
+  const key = cohortAttestationKey(keyValue);
+  const metadata = cohortAttestationMetadata(inspectorSha256, deployedGitSha);
+  const canonicalState = JSON.stringify([
+    ["schemaVersion", 1],
+    ["inspectorSha256", metadata.inspectorSha256],
+    ["deployedGitSha", metadata.deployedGitSha],
+    ["queue", canonicalQueueTuples(queueRows)],
+    ["brokerOwnership", canonicalBrokerTuples(allBrokers)],
+    ["amoExactContacts", canonicalAmoContactTuples(lookups)],
+  ]);
+  const digest = createHmac("sha256", key)
+    .update(COHORT_ATTESTATION_DOMAIN, "utf8")
+    .update("\0", "utf8")
+    .update(canonicalState, "utf8")
+    .digest("hex");
+  return {
+    digest,
+    inspectorSha256: metadata.inspectorSha256,
+    deployedGitSha: metadata.deployedGitSha,
+  };
 }
 
 function classifySyncError(error) {
@@ -1081,6 +1385,25 @@ function buildProvisioningReport(
 }
 
 async function main() {
+  const rawMode = String(process.env.BROKER_CONTACT_PROVISIONING_PLAN || "0");
+  if (rawMode !== "0" && rawMode !== "1") {
+    throw new Error("Inspector mode is invalid");
+  }
+  const provisioningMode = rawMode === "1";
+  let attestationConfiguration = null;
+  if (provisioningMode) {
+    activeFailurePhase = FAILURE_PHASE.ATTESTATION;
+    attestationConfiguration = {
+      key: readCohortAttestationKeyFile(
+        process.env.BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE,
+      ),
+      ...cohortAttestationMetadata(
+        process.env.BROKER_CONTACT_INSPECTOR_SHA256,
+        process.env.BROKER_CONTACT_DEPLOYED_GIT_SHA,
+      ),
+    };
+  }
+
   const { PrismaClient } = require("@st-michael/database");
   const readOnlyDatabaseUrl = buildReadOnlyDatabaseUrl(
     process.env.DATABASE_URL,
@@ -1092,28 +1415,14 @@ async function main() {
   try {
     activeFailurePhase = FAILURE_PHASE.DATABASE;
     await assertReadOnlySession(prisma);
-    const brokerSelect = {
-      id: true,
-      amoContactId: true,
-      phone: true,
-      mergedIntoId: true,
-      phones: { select: { phone: true } },
-    };
     const queueRows = await prisma.client.findMany({
       where: {
         amoSyncStatus: { in: QUEUE_STATUSES },
         amoSyncAttempts: { gte: ATTEMPT_LIMIT },
       },
-      select: {
-        id: true,
-        amoLeadId: true,
-        fixationAgencyId: true,
-        amoSyncStatus: true,
-        amoSyncAttempts: true,
-        amoSyncError: true,
-        broker: { select: brokerSelect },
-        responsibleBroker: { select: brokerSelect },
-      },
+      select: provisioningMode
+        ? PROVISIONING_QUEUE_ROW_SELECT
+        : OWNERSHIP_QUEUE_ROW_SELECT,
       orderBy: [
         { amoSyncLastAttemptAt: "asc" },
         { createdAt: "asc" },
@@ -1121,7 +1430,7 @@ async function main() {
       ],
     });
     const allBrokers = await prisma.broker.findMany({
-      select: brokerSelect,
+      select: BROKER_OWNER_SELECT,
       orderBy: { id: "asc" },
     });
 
@@ -1130,11 +1439,6 @@ async function main() {
     await assertExpectedAccount(request);
 
     activeFailurePhase = FAILURE_PHASE.CONTACT_LOOKUP;
-    const rawMode = String(process.env.BROKER_CONTACT_PROVISIONING_PLAN || "0");
-    if (rawMode !== "0" && rawMode !== "1") {
-      throw new Error("Inspector mode is invalid");
-    }
-    const provisioningMode = rawMode === "1";
     const lookups = new Map();
     for (const phone of requiredLookupPhones(queueRows, allBrokers)) {
       lookups.set(
@@ -1147,7 +1451,17 @@ async function main() {
 
     activeFailurePhase = FAILURE_PHASE.REPORT;
     const report = provisioningMode
-      ? buildProvisioningReport(queueRows, allBrokers, lookups)
+      ? {
+          ...buildProvisioningReport(queueRows, allBrokers, lookups),
+          cohortAttestation: buildCohortAttestation(
+            queueRows,
+            allBrokers,
+            lookups,
+            attestationConfiguration.key,
+            attestationConfiguration.inspectorSha256,
+            attestationConfiguration.deployedGitSha,
+          ),
+        }
       : buildReport(queueRows, allBrokers, lookups);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } finally {
@@ -1162,8 +1476,13 @@ module.exports = {
   MAX_LOOKUP_PAGES,
   MAX_RESPONSE_BYTES,
   STATEMENT_TIMEOUT_MS,
+  BROKER_OWNER_SELECT,
+  BROKER_PROVISION_SELECT,
+  OWNERSHIP_QUEUE_ROW_SELECT,
+  PROVISIONING_QUEUE_ROW_SELECT,
   assertExpectedAccount,
   assertReadOnlySession,
+  buildCohortAttestation,
   buildReadOnlyDatabaseUrl,
   buildProvisioningReport,
   buildReport,
@@ -1176,6 +1495,7 @@ module.exports = {
   lookupExactContacts,
   normalizePhone,
   readJsonBounded,
+  readCohortAttestationKeyFile,
   reportHash,
   requiredLookupPhones,
 };

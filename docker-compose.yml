@@ -65,6 +65,12 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in server .env}
+      # Keep the current compose file parse-compatible with the previous
+      # release during the first rollout of this key. The deploy workflow and
+      # deploy-update.sh both reject an empty/weak target value before any
+      # build or migration, while live/rollback compose can still use the old
+      # server .env until the final atomic activation.
+      BROKER_CONTACT_GATE_HMAC_KEY: ${BROKER_CONTACT_GATE_HMAC_KEY:-}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
       API_PORT: 4000

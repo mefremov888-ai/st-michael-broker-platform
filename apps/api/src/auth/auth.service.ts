@@ -1,30 +1,57 @@
-import { Injectable, Inject, UnauthorizedException, BadRequestException } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import { PrismaClient, UserStatus } from '@st-michael/database';
-import { InjectQueue } from '@nestjs/bull';
-import type { Queue } from 'bull';
-import * as bcrypt from 'bcrypt';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { randomUUID } from 'crypto';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, brokerToAmoContactFields, agencyToAmoCompanyFields, mapMeetingStatus, leadToProject, BROKER_PIPELINE_ID } from '@st-michael/integrations';
-import { CatalogService } from '../catalog/catalog.service';
-import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
+import {
+  Injectable,
+  Inject,
+  UnauthorizedException,
+  BadRequestException,
+} from "@nestjs/common";
+import { JwtService } from "@nestjs/jwt";
+import { PrismaClient, UserStatus } from "@st-michael/database";
+import { InjectQueue } from "@nestjs/bull";
+import type { Queue } from "bull";
+import * as bcrypt from "bcrypt";
+import * as fs from "fs/promises";
+import * as path from "path";
+import { randomUUID } from "crypto";
+import {
+  AmoCrmAdapter,
+  AMO_CONTACT_FIELDS,
+  brokerToAmoContactFields,
+  agencyToAmoCompanyFields,
+  mapMeetingStatus,
+  leadToProject,
+  BROKER_PIPELINE_ID,
+} from "@st-michael/integrations";
+import { CatalogService } from "../catalog/catalog.service";
+import {
+  levelForSqm,
+  rateFor,
+  rateForWithPolicy,
+} from "../commission/commission.service";
+import {
+  acquireAmoBrokerContactAdvisoryXactLock,
+  armDurableAmoBrokerContactCreateGate,
+  getUnresolvedAmoBrokerContactCreateGate,
+  isAmoBrokerContact,
+  isDefinitiveAmoContactCreateRejection,
+  normalizeAmoBrokerContactLockPhone,
+  reconcileExactAmoBrokerContact,
+  recordResolvedAmoBrokerContactCreate,
+} from "../common/amo-broker-contact-lock";
 
-const UPLOADS_ROOT = process.env.UPLOADS_DIR || '/app/uploads';
-const AVATAR_PUBLIC_PREFIX = '/files';
+const UPLOADS_ROOT = process.env.UPLOADS_DIR || "/app/uploads";
+const AVATAR_PUBLIC_PREFIX = "/files";
 
 // 2026-06-15: общий HTML-шаблон для welcome / reset-password писем.
 // Брендовый цвет #B4936F (см. apps/web/tailwind.config). Table-based layout
 // для совместимости с Outlook / Apple Mail. preheader скрыт от тела письма
 // но показывается в списке inbox-а как preview-строка.
 function escapeHtml(s: string): string {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function renderEmailLayout(opts: {
@@ -34,7 +61,7 @@ function renderEmailLayout(opts: {
   cta?: { text: string; url: string };
   afterCta?: string;
 }): string {
-  const { title, preheader, body, cta, afterCta = '' } = opts;
+  const { title, preheader, body, cta, afterCta = "" } = opts;
   const ctaBlock = cta
     ? `
         <tr><td align="center" style="padding:8px 0 32px;">
@@ -52,7 +79,7 @@ function renderEmailLayout(opts: {
           <a href="${cta.url}" style="color:#B4936F;word-break:break-all;">${escapeHtml(cta.url)}</a>
         </td></tr>
       `
-    : '';
+    : "";
   return `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -87,7 +114,7 @@ function renderEmailLayout(opts: {
           ${body}
         </td></tr>
         ${ctaBlock}
-        ${afterCta ? `<tr><td style="padding:0 32px;">${afterCta}</td></tr>` : ''}
+        ${afterCta ? `<tr><td style="padding:0 32px;">${afterCta}</td></tr>` : ""}
         <tr><td style="padding:24px 32px 32px;border-top:1px solid #eee;">
           <p style="margin:0 0 8px;font-family:Helvetica,Arial,sans-serif;font-size:13px;color:#6a6a6a;">
             Вопросы? Напишите нам:
@@ -114,14 +141,27 @@ export class AuthService {
   static lastFeedSyncAt = 0;
 
   constructor(
-    @Inject('PrismaClient') private prisma: PrismaClient,
+    @Inject("PrismaClient") private prisma: PrismaClient,
     private jwtService: JwtService,
-    @InjectQueue('notifications') private notificationQueue: Queue,
+    @InjectQueue("notifications") private notificationQueue: Queue,
     private readonly catalogService: CatalogService,
   ) {}
 
   async register(
-    data: { phone: string; fullName?: string; firstName?: string; lastName?: string; middleName?: string; email?: string; password: string; inn?: string; innType?: 'PERSONAL' | 'AGENCY'; agencyName?: string; offerAccepted?: boolean; privacyAccepted?: boolean },
+    data: {
+      phone: string;
+      fullName?: string;
+      firstName?: string;
+      lastName?: string;
+      middleName?: string;
+      email?: string;
+      password: string;
+      inn?: string;
+      innType?: "PERSONAL" | "AGENCY";
+      agencyName?: string;
+      offerAccepted?: boolean;
+      privacyAccepted?: boolean;
+    },
     ip?: string | null,
     userAgent?: string | null,
   ) {
@@ -130,7 +170,10 @@ export class AuthService {
     // галочек. Если галочки стоят — ниже логируем акцепт с ip/ua/версией.
     // Normalize composite fullName from parts if provided
     if (!data.fullName && (data.firstName || data.lastName)) {
-      data.fullName = [data.lastName, data.firstName, data.middleName].filter(Boolean).join(' ').trim();
+      data.fullName = [data.lastName, data.firstName, data.middleName]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
     }
     // 2026-06-26: копим ВСЕ семантические ошибки регистрации (пустое ФИО,
     // дубль phone, дубль email) и кидаем разом массивом — UI подсветит сразу
@@ -138,25 +181,28 @@ export class AuthService {
     const errors: Array<{ field?: string; message: string }> = [];
 
     if (!data.fullName) {
-      errors.push({ field: 'fullName', message: 'Введите ФИО' });
+      errors.push({ field: "fullName", message: "Введите ФИО" });
     }
 
-    const existingByPhone = await this.prisma.broker.findUnique({ where: { phone: data.phone } });
+    const existingByPhone = await this.prisma.broker.findUnique({
+      where: { phone: data.phone },
+    });
 
     // Public self-activation is intentionally limited to an imported pending
     // BROKER. A passwordless MANAGER/ADMIN must never be activatable from the
     // public registration form while preserving elevated privileges.
     const isActivation = Boolean(
-      existingByPhone
-      && !existingByPhone.passwordHash
-      && existingByPhone.status === UserStatus.PENDING
-      && existingByPhone.role === 'BROKER',
+      existingByPhone &&
+      !existingByPhone.passwordHash &&
+      existingByPhone.status === UserStatus.PENDING &&
+      existingByPhone.role === "BROKER",
     );
 
     if (existingByPhone && !isActivation) {
       errors.push({
-        field: 'phone',
-        message: 'Аккаунт с этим номером уже существует. Обратитесь к администратору',
+        field: "phone",
+        message:
+          "Аккаунт с этим номером уже существует. Обратитесь к администратору",
       });
     }
     // 2026-07-02: email-конфликт больше не блокирует регистрацию.
@@ -201,21 +247,30 @@ export class AuthService {
           email: data.email,
           passwordHash,
           status: UserStatus.ACTIVE,
-          source: 'BROKER_CABINET',
+          source: "BROKER_CABINET",
         },
       });
     }
 
     // Create or link agency by INN.
     if (data.inn) {
-      const agencyName = data.agencyName || (data.innType === 'PERSONAL' ? `ИП ${data.fullName}` : `Агентство ${data.inn}`);
-      let agency = await this.prisma.agency.findUnique({ where: { inn: data.inn } });
+      const agencyName =
+        data.agencyName ||
+        (data.innType === "PERSONAL"
+          ? `ИП ${data.fullName}`
+          : `Агентство ${data.inn}`);
+      let agency = await this.prisma.agency.findUnique({
+        where: { inn: data.inn },
+      });
       if (!agency) {
         agency = await this.prisma.agency.create({
           data: { name: agencyName, inn: data.inn },
         });
       } else if (data.agencyName && agency.name !== data.agencyName) {
-        agency = await this.prisma.agency.update({ where: { id: agency.id }, data: { name: data.agencyName } });
+        agency = await this.prisma.agency.update({
+          where: { id: agency.id },
+          data: { name: data.agencyName },
+        });
       }
       // 2026-06-30: при активации привязка может уже существовать — не
       // создаём дубль через unique constraint (brokerId + agencyId).
@@ -234,8 +289,11 @@ export class AuthService {
     // при регистрации. Не отметил — не пишем (отдельный шаг позже).
     if (data.offerAccepted) {
       try {
-        const offerCurrent = await this.prisma.siteContent.findUnique({ where: { key: 'offer_terms' } });
-        const offerVersion = ((offerCurrent?.value as any)?.version as string) || '2026-06-15';
+        const offerCurrent = await this.prisma.siteContent.findUnique({
+          where: { key: "offer_terms" },
+        });
+        const offerVersion =
+          ((offerCurrent?.value as any)?.version as string) || "2026-06-15";
         await this.prisma.offerAcceptance.create({
           data: {
             brokerId: broker.id,
@@ -245,13 +303,19 @@ export class AuthService {
           },
         });
       } catch (e: any) {
-        console.error('[register] offer acceptance log failed:', e?.message || e);
+        console.error(
+          "[register] offer acceptance log failed:",
+          e?.message || e,
+        );
       }
     }
     if (data.privacyAccepted) {
       try {
-        const privacyCurrent = await this.prisma.siteContent.findUnique({ where: { key: 'privacy_terms' } });
-        const privacyVersion = ((privacyCurrent?.value as any)?.version as string) || '2026-06-15';
+        const privacyCurrent = await this.prisma.siteContent.findUnique({
+          where: { key: "privacy_terms" },
+        });
+        const privacyVersion =
+          ((privacyCurrent?.value as any)?.version as string) || "2026-06-15";
         await this.prisma.privacyAcceptance.create({
           data: {
             brokerId: broker.id,
@@ -261,7 +325,10 @@ export class AuthService {
           },
         });
       } catch (e: any) {
-        console.error('[register] privacy acceptance log failed:', e?.message || e);
+        console.error(
+          "[register] privacy acceptance log failed:",
+          e?.message || e,
+        );
       }
     }
 
@@ -270,7 +337,7 @@ export class AuthService {
     // Fire-and-forget — не валим регистрацию если SMTP лежит.
     if (data.email) {
       this.sendWelcomeEmail(data.email, data.fullName).catch((e) => {
-        console.error('[register] sendWelcomeEmail failed:', e?.message || e);
+        console.error("[register] sendWelcomeEmail failed:", e?.message || e);
       });
     }
 
@@ -278,7 +345,10 @@ export class AuthService {
     // syncBrokerProfileToAmo сам: если amoContactId уже есть → update,
     // иначе ищет по phone → update / create. Дублей контактов не будет.
     await this.syncBrokerProfileToAmo(broker.id).catch((e) => {
-      console.error('[register] syncBrokerProfileToAmo failed:', e?.message || e);
+      console.error(
+        "[register] syncBrokerProfileToAmo failed:",
+        e?.message || e,
+      );
     });
     const finalBroker = await this.prisma.broker.findUnique({
       where: { id: broker.id },
@@ -286,7 +356,7 @@ export class AuthService {
     });
 
     return {
-      message: 'Registration successful',
+      message: "Registration successful",
       brokerId: broker.id,
       amoLinked: !!finalBroker?.amoContactId,
       amoLeadsCount,
@@ -299,16 +369,19 @@ export class AuthService {
    * и контакты КЦ для вопросов. Шлётся через SMTP_*, если они настроены.
    * При SMTP-ошибке только логируется — не валим регистрацию.
    */
-  private async sendWelcomeEmail(email: string, fullName: string): Promise<void> {
+  private async sendWelcomeEmail(
+    email: string,
+    fullName: string,
+  ): Promise<void> {
     if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
-      console.warn('[welcome-email] SMTP не настроен, skip');
+      console.warn("[welcome-email] SMTP не настроен, skip");
       return;
     }
-    const webUrl = process.env.WEB_URL || 'https://broker.stmichael.ru';
+    const webUrl = process.env.WEB_URL || "https://broker.stmichael.ru";
     const loginUrl = `${webUrl}/login`;
     const html = renderEmailLayout({
-      title: 'Добро пожаловать',
-      preheader: 'Ваш личный кабинет брокера ST Michael готов к работе',
+      title: "Добро пожаловать",
+      preheader: "Ваш личный кабинет брокера ST Michael готов к работе",
       body: `
         <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1f1f1f;">
           Здравствуйте, <strong>${escapeHtml(fullName)}</strong>!
@@ -319,7 +392,7 @@ export class AuthService {
           свою комиссию по сделкам.
         </p>
       `,
-      cta: { text: 'Войти в кабинет', url: loginUrl },
+      cta: { text: "Войти в кабинет", url: loginUrl },
       afterCta: `
         <h2 style="margin:24px 0 12px;font-family:Georgia,'Times New Roman',serif;font-size:18px;font-weight:600;color:#1f1f1f;">
           Первые шаги
@@ -361,11 +434,11 @@ export class AuthService {
         </p>
       `,
     });
-    const nodemailer = require('nodemailer');
+    const nodemailer = require("nodemailer");
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT || 465),
-      secure: process.env.SMTP_SECURE !== 'false',
+      secure: process.env.SMTP_SECURE !== "false",
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
       // 2026-06-11: см. forgotPassword ниже — mail.stmichael.ru self-signed.
       tls: { rejectUnauthorized: false },
@@ -373,7 +446,7 @@ export class AuthService {
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: email,
-      subject: 'Добро пожаловать в ST Michael Broker Platform',
+      subject: "Добро пожаловать в ST Michael Broker Platform",
       html,
     });
     console.log(`[welcome-email] отправлено ${email}`);
@@ -389,9 +462,12 @@ export class AuthService {
         passwordHash: { not: null },
       },
     });
-    if (!broker) return { message: 'Если email зарегистрирован, на него отправлена ссылка' };
+    if (!broker)
+      return {
+        message: "Если email зарегистрирован, на него отправлена ссылка",
+      };
 
-    const token = require('crypto').randomBytes(32).toString('hex');
+    const token = require("crypto").randomBytes(32).toString("hex");
     const expires = new Date(Date.now() + 60 * 60 * 1000);
 
     await this.prisma.broker.update({
@@ -399,29 +475,29 @@ export class AuthService {
       data: { passwordResetToken: token, passwordResetExpiresAt: expires },
     });
 
-    const resetUrl = `${process.env.WEB_URL || 'https://72.56.241.199'}/reset-password?token=${token}`;
+    const resetUrl = `${process.env.WEB_URL || "https://72.56.241.199"}/reset-password?token=${token}`;
 
     if (process.env.SMTP_HOST && process.env.SMTP_USER) {
       try {
-        const nodemailer = require('nodemailer');
+        const nodemailer = require("nodemailer");
         const transporter = nodemailer.createTransport({
           host: process.env.SMTP_HOST,
           port: Number(process.env.SMTP_PORT || 465),
-          secure: process.env.SMTP_SECURE !== 'false',
+          secure: process.env.SMTP_SECURE !== "false",
           auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
           // 2026-06-11: mail.stmichael.ru использует self-signed сертификат —
           // без этой опции STARTTLS падает с «self-signed certificate» и
           // sendMail глушится try/catch ниже. Письма пропадают молча.
           tls: { rejectUnauthorized: false },
         });
-        const fullName = (broker as any)?.fullName || 'коллега';
+        const fullName = (broker as any)?.fullName || "коллега";
         await transporter.sendMail({
           from: process.env.SMTP_FROM || process.env.SMTP_USER,
           to: email,
-          subject: 'Восстановление пароля — ST Michael',
+          subject: "Восстановление пароля — ST Michael",
           html: renderEmailLayout({
-            title: 'Восстановление пароля',
-            preheader: 'Ссылка для сброса пароля действует 1 час',
+            title: "Восстановление пароля",
+            preheader: "Ссылка для сброса пароля действует 1 час",
             body: `
               <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#1f1f1f;">
                 Здравствуйте, <strong>${escapeHtml(fullName)}</strong>!
@@ -431,7 +507,7 @@ export class AuthService {
                 <strong>ST&nbsp;Michael</strong>. Нажмите кнопку ниже, чтобы задать новый пароль.
               </p>
             `,
-            cta: { text: 'Сбросить пароль', url: resetUrl },
+            cta: { text: "Сбросить пароль", url: resetUrl },
             afterCta: `
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:8px 0 16px;">
                 <tr><td bgcolor="#fcf7ef" style="padding:14px 16px;border-radius:6px;border-left:3px solid #B4936F;font-family:Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#6a5238;">
@@ -447,39 +523,45 @@ export class AuthService {
           }),
         });
       } catch (e) {
-        console.error('SMTP send failed:', e);
+        console.error("SMTP send failed:", e);
       }
     } else {
       console.log(`[FORGOT-PASSWORD] Reset link for ${email}: ${resetUrl}`);
     }
 
-    return { message: 'Если email зарегистрирован, на него отправлена ссылка' };
+    return { message: "Если email зарегистрирован, на него отправлена ссылка" };
   }
 
   async resetPassword(token: string, newPassword: string) {
-    const broker = await this.prisma.broker.findUnique({ where: { passwordResetToken: token } });
+    const broker = await this.prisma.broker.findUnique({
+      where: { passwordResetToken: token },
+    });
     if (
-      !broker
-      || broker.status !== UserStatus.ACTIVE
-      || !broker.passwordHash
-      || !broker.passwordResetExpiresAt
-      || broker.passwordResetExpiresAt < new Date()
+      !broker ||
+      broker.status !== UserStatus.ACTIVE ||
+      !broker.passwordHash ||
+      !broker.passwordResetExpiresAt ||
+      broker.passwordResetExpiresAt < new Date()
     ) {
-      throw new BadRequestException('Ссылка недействительна или истекла');
+      throw new BadRequestException("Ссылка недействительна или истекла");
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
     await this.prisma.broker.update({
       where: { id: broker.id },
-      data: { passwordHash, passwordResetToken: null, passwordResetExpiresAt: null },
+      data: {
+        passwordHash,
+        passwordResetToken: null,
+        passwordResetExpiresAt: null,
+      },
     });
 
-    return { message: 'Пароль успешно изменён' };
+    return { message: "Пароль успешно изменён" };
   }
 
   async sendOtp(phone: string) {
     // OTP disabled — kept for API compatibility
-    return { message: 'OTP not required' };
+    return { message: "OTP not required" };
   }
 
   async login(data: { phone: string; password: string }) {
@@ -501,65 +583,79 @@ export class AuthService {
     //   3) есть, пароль не совпал → обычная ошибка
     if (!broker) {
       throw new UnauthorizedException({
-        message: 'Аккаунт не найден. Зарегистрируйтесь.',
-        code: 'NEEDS_REGISTRATION',
+        message: "Аккаунт не найден. Зарегистрируйтесь.",
+        code: "NEEDS_REGISTRATION",
       });
     }
     if (broker.status === UserStatus.BLOCKED) {
-      throw new UnauthorizedException('Учётная запись заблокирована. Свяжитесь с менеджером.');
+      throw new UnauthorizedException(
+        "Учётная запись заблокирована. Свяжитесь с менеджером.",
+      );
     }
 
     const canSelfActivate =
-      broker.status === UserStatus.PENDING
-      && broker.role === 'BROKER'
-      && !broker.passwordHash;
+      broker.status === UserStatus.PENDING &&
+      broker.role === "BROKER" &&
+      !broker.passwordHash;
 
     if (!broker.passwordHash && canSelfActivate) {
       throw new UnauthorizedException({
-        message: 'Аккаунт ещё не активирован. Завершите регистрацию.',
-        code: 'NEEDS_ACTIVATION',
+        message: "Аккаунт ещё не активирован. Завершите регистрацию.",
+        code: "NEEDS_ACTIVATION",
       });
     }
 
     if (!broker.passwordHash) {
       throw new UnauthorizedException({
-        message: 'Доступ к аккаунту пока не разрешён. Обратитесь к администратору.',
-        code: 'ACCOUNT_UNAVAILABLE',
+        message:
+          "Доступ к аккаунту пока не разрешён. Обратитесь к администратору.",
+        code: "ACCOUNT_UNAVAILABLE",
       });
     }
 
     if (broker.status !== UserStatus.ACTIVE) {
       throw new UnauthorizedException({
-        message: 'Аккаунт ожидает активации администратором.',
-        code: 'ACCOUNT_PENDING',
+        message: "Аккаунт ожидает активации администратором.",
+        code: "ACCOUNT_PENDING",
       });
     }
 
     const isValid = await bcrypt.compare(data.password, broker.passwordHash);
     if (!isValid) {
-      throw new UnauthorizedException('Неверный логин или пароль');
+      throw new UnauthorizedException("Неверный логин или пароль");
     }
 
     const payload = { sub: broker.id, phone: broker.phone, role: broker.role };
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, {
-      expiresIn: process.env.JWT_REFRESH_TTL || '7d',
+      expiresIn: process.env.JWT_REFRESH_TTL || "7d",
     });
 
     // Trigger background amoCRM sync on login (fire-and-forget) — lookup by broker's phone
     if (process.env.AMO_ACCESS_TOKEN && broker.phone) {
-      this.syncBrokerFromAmo(broker.id, broker.phone, broker.amoContactId ? Number(broker.amoContactId) : null)
-        .catch((e) => console.error('Background amo sync on login failed:', e));
+      this.syncBrokerFromAmo(
+        broker.id,
+        broker.phone,
+        broker.amoContactId ? Number(broker.amoContactId) : null,
+      ).catch((e) => console.error("Background amo sync on login failed:", e));
     }
 
     // Trigger background catalog feed sync on login (rate-limited to once per 10 minutes)
     const FEED_COOLDOWN_MS = 10 * 60 * 1000;
     const now = Date.now();
-    if (!AuthService.lastFeedSyncAt || now - AuthService.lastFeedSyncAt > FEED_COOLDOWN_MS) {
+    if (
+      !AuthService.lastFeedSyncAt ||
+      now - AuthService.lastFeedSyncAt > FEED_COOLDOWN_MS
+    ) {
       AuthService.lastFeedSyncAt = now;
-      this.catalogService.syncFromFeed()
-        .then((r) => console.log(`[Login] Feed sync: +${r.created}, ~${r.updated}, total ${r.total}`))
-        .catch((e) => console.error('Login feed sync failed:', e));
+      this.catalogService
+        .syncFromFeed()
+        .then((r) =>
+          console.log(
+            `[Login] Feed sync: +${r.created}, ~${r.updated}, total ${r.total}`,
+          ),
+        )
+        .catch((e) => console.error("Login feed sync failed:", e));
     }
 
     return {
@@ -577,8 +673,12 @@ export class AuthService {
     };
   }
 
-  private async syncBrokerFromAmo(brokerId: string, phone: string, currentAmoContactId: number | null) {
-    const { statusToDealStatus } = require('@st-michael/integrations');
+  private async syncBrokerFromAmo(
+    brokerId: string,
+    phone: string,
+    currentAmoContactId: number | null,
+  ) {
+    const { statusToDealStatus } = require("@st-michael/integrations");
 
     // Find correct broker contact
     const brokerContact = await this.amo.findBrokerContactByPhone(phone);
@@ -607,9 +707,10 @@ export class AuthService {
         const status = statusToDealStatus(lead.status_id);
 
         const leadContacts = lead?._embedded?.contacts || [];
-        const clientRef = leadContacts.find((c: any) => c.id !== contactId) || leadContacts[0];
+        const clientRef =
+          leadContacts.find((c: any) => c.id !== contactId) || leadContacts[0];
 
-        let fullName = lead.name || 'Без имени';
+        let fullName = lead.name || "Без имени";
         let clientPhone = `+70000${leadRef.id}`;
         let email: string | null = null;
 
@@ -617,25 +718,39 @@ export class AuthService {
           const cc: any = await this.amo.getContact(clientRef.id);
           if (cc) {
             fullName = cc.name || fullName;
-            const pf = (cc.custom_fields_values || []).find((f: any) => f.field_code === 'PHONE');
-            let p = String(pf?.values?.[0]?.value || '').replace(/[\s\-()'"]/g, '');
-            if (p.startsWith('8') && p.length === 11) p = '+7' + p.slice(1);
-            if (p && !p.startsWith('+')) p = '+' + p;
+            const pf = (cc.custom_fields_values || []).find(
+              (f: any) => f.field_code === "PHONE",
+            );
+            let p = String(pf?.values?.[0]?.value || "").replace(
+              /[\s\-()'"]/g,
+              "",
+            );
+            if (p.startsWith("8") && p.length === 11) p = "+7" + p.slice(1);
+            if (p && !p.startsWith("+")) p = "+" + p;
             if (p) clientPhone = p;
-            const ef = (cc.custom_fields_values || []).find((f: any) => f.field_code === 'EMAIL');
+            const ef = (cc.custom_fields_values || []).find(
+              (f: any) => f.field_code === "EMAIL",
+            );
             email = ef?.values?.[0]?.value || null;
           }
         }
 
-        let client = await this.prisma.client.findFirst({ where: { phone: clientPhone, brokerId } });
+        let client = await this.prisma.client.findFirst({
+          where: { phone: clientPhone, brokerId },
+        });
         if (!client) {
           client = await this.prisma.client.create({
             data: {
-              brokerId, fullName, phone: clientPhone, email,
+              brokerId,
+              fullName,
+              phone: clientPhone,
+              email,
               project: project as any,
               amoLeadId: BigInt(lead.id),
-              uniquenessStatus: 'CONDITIONALLY_UNIQUE' as any,
-              uniquenessExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              uniquenessStatus: "CONDITIONALLY_UNIQUE" as any,
+              uniquenessExpiresAt: new Date(
+                Date.now() + 30 * 24 * 60 * 60 * 1000,
+              ),
             },
           });
         }
@@ -650,20 +765,37 @@ export class AuthService {
           include: { agency: true },
         });
         const totalSqm = Number(brokerAgency?.agency?.totalSqmSold || 0);
-        const dealDate = lead.created_at ? new Date(lead.created_at * 1000) : new Date();
-        const policyResult = await rateForWithPolicy(this.prisma, project, totalSqm, dealDate);
+        const dealDate = lead.created_at
+          ? new Date(lead.created_at * 1000)
+          : new Date();
+        const policyResult = await rateForWithPolicy(
+          this.prisma,
+          project,
+          totalSqm,
+          dealDate,
+        );
         const rate = policyResult.rate;
-        const commissionAmount = Math.round(amount * rate / 100);
+        const commissionAmount = Math.round((amount * rate) / 100);
 
-        const existingDeal = await this.prisma.deal.findFirst({ where: { amoDealId: BigInt(lead.id) } });
+        const existingDeal = await this.prisma.deal.findFirst({
+          where: { amoDealId: BigInt(lead.id) },
+        });
         const dealData = {
-          clientId: client.id, brokerId, project: project as any,
-          amount, sqm: 0,
-          commissionRate: rate, commissionAmount,
-          status: status as any, amoDealId: BigInt(lead.id),
+          clientId: client.id,
+          brokerId,
+          project: project as any,
+          amount,
+          sqm: 0,
+          commissionRate: rate,
+          commissionAmount,
+          status: status as any,
+          amoDealId: BigInt(lead.id),
         };
         if (existingDeal) {
-          await this.prisma.deal.update({ where: { id: existingDeal.id }, data: dealData });
+          await this.prisma.deal.update({
+            where: { id: existingDeal.id },
+            data: dealData,
+          });
         } else {
           await this.prisma.deal.create({ data: dealData });
         }
@@ -671,24 +803,41 @@ export class AuthService {
         // Sync meeting from lead custom fields
         try {
           const cf = lead?.custom_fields_values || [];
-          const dateField = cf.find((f: any) => f.field_name === 'Дата и время встречи');
-          const typeField = cf.find((f: any) => f.field_name === 'Встреча');
+          const dateField = cf.find(
+            (f: any) => f.field_name === "Дата и время встречи",
+          );
+          const typeField = cf.find((f: any) => f.field_name === "Встреча");
           const rawDate = dateField?.values?.[0]?.value;
           if (rawDate) {
             const meetingDate = new Date(Number(rawDate) * 1000);
             if (!isNaN(meetingDate.getTime())) {
-              const rawType = typeField?.values?.[0]?.value || '';
+              const rawType = typeField?.values?.[0]?.value || "";
               const v = rawType.toLowerCase();
-              const meetingType = v.includes('онлайн') ? 'ONLINE' : v.includes('тур') ? 'BROKER_TOUR' : 'OFFICE_VISIT';
+              const meetingType = v.includes("онлайн")
+                ? "ONLINE"
+                : v.includes("тур")
+                  ? "BROKER_TOUR"
+                  : "OFFICE_VISIT";
               const meetingStatus = mapMeetingStatus(lead.status_id);
-              const existing = await this.prisma.meeting.findFirst({ where: { clientId: client.id, brokerId, date: meetingDate } });
+              const existing = await this.prisma.meeting.findFirst({
+                where: { clientId: client.id, brokerId, date: meetingDate },
+              });
               if (existing) {
-                await this.prisma.meeting.update({ where: { id: existing.id }, data: { type: meetingType as any, status: meetingStatus as any } });
+                await this.prisma.meeting.update({
+                  where: { id: existing.id },
+                  data: {
+                    type: meetingType as any,
+                    status: meetingStatus as any,
+                  },
+                });
               } else {
                 // 2026-07-01: мини-детали клиента в комментарии.
-                const projectLabel = (client as any)?.project === 'ZORGE9' ? 'Зорге 9'
-                  : (client as any)?.project === 'SILVER_BOR' ? 'Серебряный Бор'
-                  : ((client as any)?.project || '');
+                const projectLabel =
+                  (client as any)?.project === "ZORGE9"
+                    ? "Зорге 9"
+                    : (client as any)?.project === "SILVER_BOR"
+                      ? "Серебряный Бор"
+                      : (client as any)?.project || "";
                 const commentLines = [
                   `Клиент: ${client.fullName}`,
                   `Телефон: ${client.phone}`,
@@ -696,10 +845,12 @@ export class AuthService {
                 ];
                 await this.prisma.meeting.create({
                   data: {
-                    brokerId, clientId: client.id,
-                    type: meetingType as any, status: meetingStatus as any,
+                    brokerId,
+                    clientId: client.id,
+                    type: meetingType as any,
+                    status: meetingStatus as any,
                     date: meetingDate,
-                    comment: commentLines.join('\n'),
+                    comment: commentLines.join("\n"),
                   },
                 });
               }
@@ -718,15 +869,19 @@ export class AuthService {
       });
 
       if (!broker || broker.status !== UserStatus.ACTIVE) {
-        throw new UnauthorizedException('Invalid refresh token');
+        throw new UnauthorizedException("Invalid refresh token");
       }
 
-      const newPayload = { sub: broker.id, phone: broker.phone, role: broker.role };
+      const newPayload = {
+        sub: broker.id,
+        phone: broker.phone,
+        role: broker.role,
+      };
       const accessToken = this.jwtService.sign(newPayload);
 
       return { accessToken };
     } catch {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException("Invalid refresh token");
     }
   }
 
@@ -741,7 +896,7 @@ export class AuthService {
     });
 
     if (!broker) {
-      throw new UnauthorizedException('Broker not found');
+      throw new UnauthorizedException("Broker not found");
     }
 
     return {
@@ -764,7 +919,9 @@ export class AuthService {
       source: broker.source,
       brokerTourVisited: broker.brokerTourVisited,
       brokerTourDate: broker.brokerTourDate,
-      telegramChatId: broker.telegramChatId ? broker.telegramChatId.toString() : null,
+      telegramChatId: broker.telegramChatId
+        ? broker.telegramChatId.toString()
+        : null,
       agencies: broker.brokerAgencies.map((ba) => ({
         id: ba.agency.id,
         name: ba.agency.name,
@@ -812,20 +969,25 @@ export class AuthService {
       };
     },
   ) {
-    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
-    if (!broker) throw new UnauthorizedException('Broker not found');
+    const broker = await this.prisma.broker.findUnique({
+      where: { id: brokerId },
+    });
+    if (!broker) throw new UnauthorizedException("Broker not found");
 
     if (data.phone && data.phone !== broker.phone) {
-      const existing = await this.prisma.broker.findUnique({ where: { phone: data.phone } });
-      if (existing) throw new BadRequestException('Phone already in use');
+      const existing = await this.prisma.broker.findUnique({
+        where: { phone: data.phone },
+      });
+      if (existing) throw new BadRequestException("Phone already in use");
     }
 
     let birthDate: Date | null | undefined;
     if (data.birthDate === null) {
       birthDate = null;
-    } else if (typeof data.birthDate === 'string' && data.birthDate.trim()) {
+    } else if (typeof data.birthDate === "string" && data.birthDate.trim()) {
       const d = new Date(data.birthDate);
-      if (isNaN(d.getTime())) throw new BadRequestException('Invalid birthDate');
+      if (isNaN(d.getTime()))
+        throw new BadRequestException("Invalid birthDate");
       birthDate = d;
     }
 
@@ -837,10 +999,18 @@ export class AuthService {
         ...(data.phone && { phone: data.phone }),
         ...(birthDate !== undefined && { birthDate }),
         ...(data.position !== undefined && { position: data.position || null }),
-        ...(data.telegramUsername !== undefined && { telegramUsername: data.telegramUsername || null }),
-        ...(data.telegramId !== undefined && { telegramId: data.telegramId || null }),
-        ...(data.whatsappUsername !== undefined && { whatsappUsername: data.whatsappUsername || null }),
-        ...(data.presentationSent !== undefined && { presentationSent: !!data.presentationSent }),
+        ...(data.telegramUsername !== undefined && {
+          telegramUsername: data.telegramUsername || null,
+        }),
+        ...(data.telegramId !== undefined && {
+          telegramId: data.telegramId || null,
+        }),
+        ...(data.whatsappUsername !== undefined && {
+          whatsappUsername: data.whatsappUsername || null,
+        }),
+        ...(data.presentationSent !== undefined && {
+          presentationSent: !!data.presentationSent,
+        }),
         ...(data.region !== undefined && { region: data.region || null }),
       },
     });
@@ -857,7 +1027,8 @@ export class AuthService {
         const link = await this.prisma.brokerAgency.findFirst({
           where: { brokerId, agencyId },
         });
-        if (!link) throw new BadRequestException('Agency not linked to this broker');
+        if (!link)
+          throw new BadRequestException("Agency not linked to this broker");
       }
 
       if (agencyId) {
@@ -865,13 +1036,17 @@ export class AuthService {
         await this.prisma.agency.update({
           where: { id: agencyId },
           data: {
-            ...(a.legalAddress !== undefined && { legalAddress: a.legalAddress || null }),
+            ...(a.legalAddress !== undefined && {
+              legalAddress: a.legalAddress || null,
+            }),
             ...(a.address !== undefined && { address: a.address || null }),
             ...(a.phone !== undefined && { phone: a.phone || null }),
             ...(a.email !== undefined && { email: a.email || null }),
             ...(a.bankName !== undefined && { bankName: a.bankName || null }),
             ...(a.bankBik !== undefined && { bankBik: a.bankBik || null }),
-            ...(a.bankAccount !== undefined && { bankAccount: a.bankAccount || null }),
+            ...(a.bankAccount !== undefined && {
+              bankAccount: a.bankAccount || null,
+            }),
             ...(a.correspondentAccount !== undefined && {
               correspondentAccount: a.correspondentAccount || null,
             }),
@@ -884,7 +1059,7 @@ export class AuthService {
     // подтягиваем актуальные данные брокера + primary-агентства и обновляем
     // контакт в амо. Без try/catch sync-ошибки повалили бы запрос пользователя.
     await this.syncBrokerProfileToAmo(brokerId).catch((e) => {
-      console.error('amoCRM profile sync failed:', e);
+      console.error("amoCRM profile sync failed:", e);
     });
 
     return {
@@ -907,47 +1082,186 @@ export class AuthService {
    * нашли — линкуем + обновляем. Если не нашли — создаём новый.
    */
   async syncBrokerProfileToAmo(brokerId: string) {
-    const broker = await this.prisma.broker.findUnique({
+    const exists = await this.prisma.broker.findUnique({
       where: { id: brokerId },
-      include: {
-        brokerAgencies: {
-          where: { isPrimary: true },
-          include: { agency: true },
-          take: 1,
-        },
-      },
+      select: { id: true, phone: true },
     });
-    if (!broker) return;
+    if (!exists) return;
 
-    const primaryAgency = broker.brokerAgencies[0]?.agency || null;
-    const customFields = brokerToAmoContactFields(broker, primaryAgency);
-    const payload = {
-      name: broker.fullName,
-      custom_fields_values: customFields,
-    } as any;
-
-    let amoContactId: bigint | null = broker.amoContactId ?? null;
-
-    if (amoContactId) {
-      await this.amo.updateContact(Number(amoContactId), payload);
-    } else if (broker.phone) {
-      // Нет линка — пробуем найти контакт по телефону среди БРОКЕРОВ (IS_BROKER=true)
-      const existing = await this.amo.findBrokerContactByPhone(broker.phone);
-      if (existing) {
-        amoContactId = BigInt(existing.id);
-        await this.amo.updateContact(existing.id, payload);
-      } else {
-        // Создаём новый контакт
-        const created = await this.amo.createContact(payload);
-        if (created?.id) amoContactId = BigInt(created.id);
-      }
-      if (amoContactId) {
-        await this.prisma.broker.update({
+    let durableCreateGateId: string | null = null;
+    let observedGateId: string | null = null;
+    const lockedContact = await this.prisma.$transaction(
+      async (tx) => {
+        await acquireAmoBrokerContactAdvisoryXactLock(
+          tx,
+          brokerId,
+          exists.phone,
+        );
+        const broker = await tx.broker.findUnique({
           where: { id: brokerId },
-          data: { amoContactId },
+          include: {
+            brokerAgencies: {
+              where: { isPrimary: true },
+              include: { agency: true },
+              take: 1,
+            },
+          },
         });
-      }
+        if (!broker) return null;
+        if (
+          normalizeAmoBrokerContactLockPhone(broker.phone) !==
+          normalizeAmoBrokerContactLockPhone(exists.phone)
+        ) {
+          throw new Error("AMO_BROKER_CONTACT_LOCK_PHONE_DRIFT");
+        }
+
+        const primaryAgency = broker.brokerAgencies[0]?.agency || null;
+        const customFields = brokerToAmoContactFields(broker, primaryAgency);
+        const payload = {
+          name: broker.fullName,
+          custom_fields_values: customFields,
+        } as any;
+        let amoContactId: bigint | null = broker.amoContactId ?? null;
+        observedGateId = await getUnresolvedAmoBrokerContactCreateGate(
+          this.prisma,
+          broker.phone,
+        );
+
+        if (amoContactId) {
+          if (observedGateId) {
+            const confirmed = await (this.amo as any).findContactByPhone(
+              broker.phone,
+              { strict: true },
+            );
+            if (
+              !confirmed ||
+              Number(confirmed.id) !== Number(amoContactId) ||
+              !isAmoBrokerContact(confirmed)
+            ) {
+              throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+            }
+          }
+          await this.amo.updateContact(Number(amoContactId), payload);
+        } else if (broker.phone) {
+          // The shared DB lock serializes this exact find -> optional POST ->
+          // local link flow with fixation sync and the production provisioner.
+          let existing = await (this.amo as any).findContactByPhone(
+            broker.phone,
+            { strict: true },
+          );
+          if (existing) {
+            if (observedGateId && !isAmoBrokerContact(existing)) {
+              throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+            }
+            if (isAmoBrokerContact(existing)) {
+              await this.amo.updateContact(existing.id, payload);
+            } else {
+              // Promote the exact existing contact without overwriting fields
+              // owned by another amoCRM workflow.
+              await this.amo.promoteContactToBroker(existing.id);
+              existing = await reconcileExactAmoBrokerContact({
+                expectedContactId: Number(existing.id),
+                lookup: () =>
+                  (this.amo as any).findContactByPhone(broker.phone, {
+                    strict: true,
+                  }),
+              });
+              if (!existing) {
+                throw new Error("AMO_BROKER_CONTACT_PROMOTION_NOT_RECONCILED");
+              }
+            }
+          } else {
+            if (observedGateId) {
+              return {
+                primaryAgency,
+                amoContactId: null,
+                reconciliationRequired: true,
+              };
+            }
+            durableCreateGateId = await armDurableAmoBrokerContactCreateGate(
+              this.prisma,
+              broker.phone,
+            );
+            let createError: unknown = null;
+            try {
+              existing = await this.amo.createContact(payload);
+            } catch (error) {
+              createError = error;
+            }
+            if (
+              createError &&
+              isDefinitiveAmoContactCreateRejection(createError)
+            ) {
+              await recordResolvedAmoBrokerContactCreate(
+                this.prisma,
+                broker.phone,
+                durableCreateGateId!,
+              );
+              durableCreateGateId = null;
+              throw createError;
+            }
+            const expectedContactId = Number.isSafeInteger(Number(existing?.id))
+              ? Number(existing.id)
+              : null;
+            try {
+              existing = await reconcileExactAmoBrokerContact({
+                expectedContactId,
+                lookup: () =>
+                  (this.amo as any).findContactByPhone(broker.phone, {
+                    strict: true,
+                  }),
+              });
+            } catch {
+              existing = null;
+            }
+            if (!existing) {
+              return {
+                primaryAgency,
+                amoContactId: null,
+                reconciliationRequired: true,
+              };
+            }
+          }
+          amoContactId = BigInt(existing.id);
+          if (amoContactId) {
+            const linked = await tx.broker.updateMany({
+              where: {
+                id: brokerId,
+                amoContactId: null,
+                mergedIntoId: null,
+              },
+              data: { amoContactId },
+            });
+            if (linked.count !== 1) {
+              throw new Error("AMO_BROKER_CONTACT_LINK_CAS_MISSED");
+            }
+          }
+        }
+        return {
+          primaryAgency,
+          amoContactId,
+          reconciliationRequired: false,
+        };
+      },
+      {
+        isolationLevel: "Serializable",
+        maxWait: 5_000,
+        timeout: 120_000,
+      },
+    );
+    if (!lockedContact) return;
+    if (lockedContact.reconciliationRequired) {
+      throw new Error("AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED");
     }
+    const gateToResolve = durableCreateGateId || observedGateId;
+    if (gateToResolve) {
+      await recordResolvedAmoBrokerContactCreate(
+        this.prisma,
+        exists.phone,
+        gateToResolve,
+      );
+    }
+    const { primaryAgency, amoContactId } = lockedContact;
 
     // 2026-07-03: синк реквизитов primary-агентства в amoCRM Company.
     // Поля юр.лица (Юр. лицо, Юр. адрес, ОГРН, КПП, БИК, Название банка,
@@ -974,10 +1288,15 @@ export class AuthService {
         if (amoCompanyId && amoContactId) {
           await this.amo
             .linkContactToCompany(Number(amoContactId), amoCompanyId)
-            .catch(() => { /* уже связаны — не критично */ });
+            .catch(() => {
+              /* уже связаны — не критично */
+            });
         }
       } catch (e: any) {
-        console.error('[syncBrokerProfileToAmo] agency company sync failed:', e?.message || e);
+        console.error(
+          "[syncBrokerProfileToAmo] agency company sync failed:",
+          e?.message || e,
+        );
       }
     }
   }
@@ -989,13 +1308,15 @@ export class AuthService {
    * Правка 2026-05-15.
    */
   async attachAgencyByInn(brokerId: string, inn: string) {
-    const cleanInn = String(inn || '').replace(/\D/g, '');
+    const cleanInn = String(inn || "").replace(/\D/g, "");
     if (cleanInn.length < 10 || cleanInn.length > 12) {
-      throw new BadRequestException('ИНН должен быть 10 или 12 цифр');
+      throw new BadRequestException("ИНН должен быть 10 или 12 цифр");
     }
 
     // Найти/создать локальное Agency.
-    let agency = await this.prisma.agency.findUnique({ where: { inn: cleanInn } });
+    let agency = await this.prisma.agency.findUnique({
+      where: { inn: cleanInn },
+    });
     if (!agency) {
       // Попробовать найти компанию в amoCRM.
       let amoName: string | null = null;
@@ -1005,7 +1326,9 @@ export class AuthService {
           amoName = amoCompany.name;
         } else {
           // Создать в amoCRM.
-          const created = await this.amo.createCompany({ name: `Агентство ${cleanInn}` });
+          const created = await this.amo.createCompany({
+            name: `Агентство ${cleanInn}`,
+          });
           amoName = created?.name || `Агентство ${cleanInn}`;
         }
       } catch {
@@ -1036,7 +1359,7 @@ export class AuthService {
 
     // Sync в amoCRM: подтянем актуальный ИНН/название агентства в карточку.
     await this.syncBrokerProfileToAmo(brokerId).catch((e) => {
-      console.error('amoCRM sync after attachAgency failed:', e);
+      console.error("amoCRM sync after attachAgency failed:", e);
     });
 
     return { agency: { id: agency.id, name: agency.name, inn: agency.inn } };
@@ -1054,12 +1377,14 @@ export class AuthService {
    *   указывает на старую Agency, это часть истории.
    */
   async replacePrimaryAgencyByInn(brokerId: string, inn: string) {
-    const cleanInn = String(inn || '').replace(/\D/g, '');
+    const cleanInn = String(inn || "").replace(/\D/g, "");
     if (cleanInn.length < 10 || cleanInn.length > 12) {
-      throw new BadRequestException('ИНН должен быть 10 или 12 цифр');
+      throw new BadRequestException("ИНН должен быть 10 или 12 цифр");
     }
 
-    let agency = await this.prisma.agency.findUnique({ where: { inn: cleanInn } });
+    let agency = await this.prisma.agency.findUnique({
+      where: { inn: cleanInn },
+    });
     if (!agency) {
       let amoName: string | null = null;
       try {
@@ -1067,7 +1392,9 @@ export class AuthService {
         if (amoCompany) {
           amoName = amoCompany.name;
         } else {
-          const created = await this.amo.createCompany({ name: `Агентство ${cleanInn}` });
+          const created = await this.amo.createCompany({
+            name: `Агентство ${cleanInn}`,
+          });
           amoName = created?.name || `Агентство ${cleanInn}`;
         }
       } catch {
@@ -1084,7 +1411,10 @@ export class AuthService {
     });
 
     if (existingPrimary?.agencyId === agency.id) {
-      return { agency: { id: agency.id, name: agency.name, inn: agency.inn }, changed: false };
+      return {
+        agency: { id: agency.id, name: agency.name, inn: agency.inn },
+        changed: false,
+      };
     }
 
     // Удаляем старую primary-связь(и).
@@ -1108,31 +1438,43 @@ export class AuthService {
 
     // Sync в amoCRM: подтянем актуальный ИНН/название агентства в карточку.
     await this.syncBrokerProfileToAmo(brokerId).catch((e) => {
-      console.error('amoCRM sync after replaceAgency failed:', e);
+      console.error("amoCRM sync after replaceAgency failed:", e);
     });
 
     return {
       agency: { id: agency.id, name: agency.name, inn: agency.inn },
       replacedFrom: existingPrimary
-        ? { id: existingPrimary.agency.id, name: existingPrimary.agency.name, inn: existingPrimary.agency.inn }
+        ? {
+            id: existingPrimary.agency.id,
+            name: existingPrimary.agency.name,
+            inn: existingPrimary.agency.inn,
+          }
         : null,
       changed: true,
     };
   }
 
-  async changePassword(brokerId: string, currentPassword: string, newPassword: string) {
+  async changePassword(
+    brokerId: string,
+    currentPassword: string,
+    newPassword: string,
+  ) {
     if (!newPassword || newPassword.length < 8) {
-      throw new BadRequestException('Новый пароль должен быть не менее 8 символов');
+      throw new BadRequestException(
+        "Новый пароль должен быть не менее 8 символов",
+      );
     }
 
-    const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
+    const broker = await this.prisma.broker.findUnique({
+      where: { id: brokerId },
+    });
     if (!broker || !broker.passwordHash) {
-      throw new UnauthorizedException('Broker not found');
+      throw new UnauthorizedException("Broker not found");
     }
 
     const valid = await bcrypt.compare(currentPassword, broker.passwordHash);
     if (!valid) {
-      throw new BadRequestException('Текущий пароль введён неверно');
+      throw new BadRequestException("Текущий пароль введён неверно");
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
@@ -1141,22 +1483,22 @@ export class AuthService {
       data: { passwordHash },
     });
 
-    return { ok: true, message: 'Пароль изменён' };
+    return { ok: true, message: "Пароль изменён" };
   }
 
   async uploadAvatar(brokerId: string, file: Express.Multer.File) {
-    if (!file) throw new BadRequestException('File required');
+    if (!file) throw new BadRequestException("File required");
     if (file.size > 5 * 1024 * 1024) {
-      throw new BadRequestException('Avatar must be ≤ 5 MB');
+      throw new BadRequestException("Avatar must be ≤ 5 MB");
     }
-    const mime = (file.mimetype || '').toLowerCase();
-    if (!mime.startsWith('image/')) {
-      throw new BadRequestException('Avatar must be an image');
+    const mime = (file.mimetype || "").toLowerCase();
+    if (!mime.startsWith("image/")) {
+      throw new BadRequestException("Avatar must be an image");
     }
 
-    const ext = (path.extname(file.originalname) || '.png').toLowerCase();
+    const ext = (path.extname(file.originalname) || ".png").toLowerCase();
     const fileName = `${randomUUID()}${ext}`;
-    const targetDir = path.join(UPLOADS_ROOT, 'avatars');
+    const targetDir = path.join(UPLOADS_ROOT, "avatars");
     await fs.mkdir(targetDir, { recursive: true });
     await fs.writeFile(path.join(targetDir, fileName), file.buffer);
 
@@ -1168,7 +1510,10 @@ export class AuthService {
       select: { avatarUrl: true },
     });
     if (broker?.avatarUrl?.startsWith(`${AVATAR_PUBLIC_PREFIX}/avatars/`)) {
-      const oldName = broker.avatarUrl.replace(`${AVATAR_PUBLIC_PREFIX}/avatars/`, '');
+      const oldName = broker.avatarUrl.replace(
+        `${AVATAR_PUBLIC_PREFIX}/avatars/`,
+        "",
+      );
       await fs.unlink(path.join(targetDir, oldName)).catch(() => {});
     }
 

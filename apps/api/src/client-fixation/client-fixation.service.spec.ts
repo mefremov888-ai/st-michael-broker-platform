@@ -6,6 +6,8 @@ import {
 } from "../common/amo-sync-retry";
 
 describe("ClientFixationService amo broker attachment", () => {
+  process.env.BROKER_CONTACT_GATE_HMAC_KEY =
+    "test-explicit-broker-contact-gate-key-32-bytes";
   let prisma: any;
   let amo: any;
   let queue: any;
@@ -20,6 +22,7 @@ describe("ClientFixationService amo broker attachment", () => {
         findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       brokerAgency: { create: jest.fn().mockResolvedValue({}) },
       agency: {
@@ -32,12 +35,21 @@ describe("ClientFixationService amo broker attachment", () => {
         update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
-      auditLog: { create: jest.fn().mockResolvedValue({}) },
+      auditLog: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+        create: jest.fn().mockResolvedValue({}),
+      },
       systemSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      $queryRaw: jest.fn().mockResolvedValue([{ id: "locked-broker" }]),
     };
+    prisma.$transaction = jest.fn(async (callback: any, _options?: any) =>
+      callback(prisma),
+    );
     amo = {
-      findBrokerContactByPhone: jest.fn(),
+      findContactByPhone: jest.fn(),
       updateContact: jest.fn().mockResolvedValue(undefined),
+      promoteContactToBroker: jest.fn().mockResolvedValue(undefined),
       createContact: jest.fn(),
       checkUniqueness: jest.fn(),
       createFixationRequest: jest.fn(),
@@ -95,8 +107,9 @@ describe("ClientFixationService amo broker attachment", () => {
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null);
     prisma.client.create.mockResolvedValue({ id: "client-1" });
-    amo.findBrokerContactByPhone.mockResolvedValue({
+    amo.findContactByPhone.mockResolvedValue({
       id: 777,
+      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
       name: "Новый брокер",
     });
     amo.checkUniqueness.mockResolvedValue({
@@ -114,12 +127,29 @@ describe("ClientFixationService amo broker attachment", () => {
       responsibleBrokerId: "responsible",
     });
 
-    expect(amo.findBrokerContactByPhone).toHaveBeenCalledWith(
-      responsible.phone,
-      { strict: true },
+    expect(amo.findContactByPhone).toHaveBeenCalledWith(responsible.phone, {
+      strict: true,
+    });
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: "Serializable" }),
     );
-    expect(prisma.broker.update).toHaveBeenCalledWith({
-      where: { id: "responsible" },
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(String(prisma.$queryRaw.mock.calls[0][0][0])).toContain(
+      "pg_advisory_xact_lock",
+    );
+    expect(Array.from(prisma.$queryRaw.mock.calls[1][0]).join("")).toContain(
+      "FOR UPDATE",
+    );
+    expect(prisma.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      amo.findContactByPhone.mock.invocationCallOrder[0],
+    );
+    expect(prisma.broker.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "responsible",
+        amoContactId: null,
+        mergedIntoId: null,
+      },
       data: { amoContactId: BigInt(777) },
     });
     expect(amo.createFixationRequest).toHaveBeenCalledWith(
@@ -128,6 +158,81 @@ describe("ClientFixationService amo broker attachment", () => {
         brokerAmoContactId: 777,
       }),
     );
+  });
+
+  it("stores a new fixation as safe pre-POST work when broker contact resolution fails", async () => {
+    const broker = {
+      id: "broker-contact-unavailable-new",
+      fullName: "Broker",
+      phone: "+79990000131",
+      email: null,
+      // A stale local id must not bypass a failed authoritative resolution.
+      amoContactId: BigInt(8131),
+      funnelStage: "FIXATION",
+      brokerAgencies: [],
+    };
+    const agency = {
+      id: "agency-contact-unavailable-new",
+      name: "Agency",
+      inn: "7744444444",
+    };
+    const client = { id: "client-contact-unavailable-new" };
+    const rawResolutionError =
+      "amoCRM 503 broker contact lookup failed secret=DO-NOT-LOG";
+
+    prisma.broker.findUnique.mockResolvedValue(broker);
+    prisma.agency.findUnique.mockResolvedValue(agency);
+    prisma.client.findFirst.mockResolvedValue(null);
+    prisma.client.create.mockResolvedValue(client);
+    amo.checkUniqueness.mockResolvedValue({
+      rule: "NO_CONFLICT",
+      verdict: "UNIQUE",
+      reason: "No conflict",
+    });
+    (service as any).ensureBrokerAmoContact = jest
+      .fn()
+      .mockRejectedValue(new Error(rawResolutionError));
+
+    const result = await service.fixClient(broker.id, {
+      phone: "+79991110131",
+      fullName: "Client",
+      project: "ZORGE9" as any,
+      agencyInn: agency.inn,
+    });
+
+    expect(amo.createFixationRequest).not.toHaveBeenCalled();
+    expect(prisma.client.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        amoSyncStatus: "FAILED",
+        amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+        amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+      }),
+    });
+    expect(prisma.client.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: client.id,
+        amoLeadId: null,
+        amoSyncStatus: "FAILED",
+        amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+        amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+      },
+      data: expect.objectContaining({
+        amoSyncStatus: "FAILED",
+        amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+        amoSyncAttempts: 1,
+        amoSyncLastAttemptAt: expect.any(Date),
+      }),
+    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        client,
+        amoSyncStatus: "FAILED",
+      }),
+    );
+    const loggedText = consoleError.mock.calls.flat().join(" ");
+    expect(loggedText).toContain("lead creation is blocked and queued");
+    expect(loggedText).not.toContain(rawResolutionError);
+    expect(loggedText).not.toContain("DO-NOT-LOG");
   });
 
   it("durably blocks automatic retry when a new-client amo create response is ambiguous", async () => {
@@ -224,75 +329,77 @@ describe("ClientFixationService amo broker attachment", () => {
   it.each(["throws", "CAS misses"])(
     "keeps the pre-POST marker when final new-client linkage persistence %s",
     async (failureMode) => {
-    const broker = {
-      id: "broker-new-link-failure",
-      fullName: "Broker",
-      phone: "+79990000111",
-      email: null,
-      amoContactId: BigInt(8111),
-      funnelStage: "FIXATION",
-      brokerAgencies: [],
-    };
-    const agency = {
-      id: "agency-new-link-failure",
-      name: "Agency",
-      inn: "7722222222",
-    };
-    const client = { id: "client-new-link-failure" };
-    prisma.broker.findUnique.mockResolvedValue(broker);
-    prisma.broker.findMany.mockResolvedValue([
-      {
-        id: "manager-1",
-        fullName: "Manager",
-        phone: "+79990000112",
-        telegramUsername: null,
-      },
-    ]);
-    prisma.agency.findUnique.mockResolvedValue(agency);
-    prisma.client.findFirst.mockResolvedValue(null);
-    prisma.client.create.mockResolvedValue(client);
-    if (failureMode === "throws") {
-      prisma.client.updateMany.mockRejectedValueOnce(
-        new Error("database unavailable"),
+      const broker = {
+        id: "broker-new-link-failure",
+        fullName: "Broker",
+        phone: "+79990000111",
+        email: null,
+        amoContactId: BigInt(8111),
+        funnelStage: "FIXATION",
+        brokerAgencies: [],
+      };
+      const agency = {
+        id: "agency-new-link-failure",
+        name: "Agency",
+        inn: "7722222222",
+      };
+      const client = { id: "client-new-link-failure" };
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.broker.findMany.mockResolvedValue([
+        {
+          id: "manager-1",
+          fullName: "Manager",
+          phone: "+79990000112",
+          telegramUsername: null,
+        },
+      ]);
+      prisma.agency.findUnique.mockResolvedValue(agency);
+      prisma.client.findFirst.mockResolvedValue(null);
+      prisma.client.create.mockResolvedValue(client);
+      if (failureMode === "throws") {
+        prisma.client.updateMany.mockRejectedValueOnce(
+          new Error("database unavailable"),
+        );
+      } else {
+        prisma.client.updateMany.mockResolvedValueOnce({ count: 0 });
+      }
+      amo.checkUniqueness.mockResolvedValue({
+        rule: "NO_CONFLICT",
+        verdict: "UNIQUE",
+        reason: "No conflict",
+      });
+      amo.createFixationRequest.mockResolvedValue({ id: 9101 });
+
+      const result = await service.fixClient(broker.id, {
+        phone: "+79991110011",
+        fullName: "Client",
+        project: "ZORGE9" as any,
+        agencyInn: agency.inn,
+      });
+
+      expect(prisma.client.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          amoSyncStatus: "FAILED",
+          amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+          amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+        }),
+      });
+      expect(prisma.client.create.mock.invocationCallOrder[0]).toBeLessThan(
+        amo.createFixationRequest.mock.invocationCallOrder[0],
       );
-    } else {
-      prisma.client.updateMany.mockResolvedValueOnce({ count: 0 });
-    }
-    amo.checkUniqueness.mockResolvedValue({
-      rule: "NO_CONFLICT",
-      verdict: "UNIQUE",
-      reason: "No conflict",
-    });
-    amo.createFixationRequest.mockResolvedValue({ id: 9101 });
-
-    const result = await service.fixClient(broker.id, {
-      phone: "+79991110011",
-      fullName: "Client",
-      project: "ZORGE9" as any,
-      agencyInn: agency.inn,
-    });
-
-    expect(prisma.client.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        amoSyncStatus: "FAILED",
-        amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
-        amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
-      }),
-    });
-    expect(prisma.client.create.mock.invocationCallOrder[0]).toBeLessThan(
-      amo.createFixationRequest.mock.invocationCallOrder[0],
-    );
-    expect(result).toEqual(
-      expect.objectContaining({
-        amoSyncStatus: "FAILED",
-        message: expect.stringContaining("результат передачи в amoCRM не подтверждён"),
-        managerContacts: expect.any(Array),
-      }),
-    );
-    expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("amoCRM fixation result is ambiguous"),
-      expect.any(Object),
-    );
+      expect(result).toEqual(
+        expect.objectContaining({
+          amoSyncStatus: "FAILED",
+          message: expect.stringContaining(
+            "результат передачи в amoCRM не подтверждён",
+          ),
+          managerContacts: expect.any(Array),
+        }),
+      );
+      expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
+        expect.stringContaining("amoCRM fixation result is ambiguous"),
+        expect.any(Object),
+      );
     },
   );
 
@@ -326,8 +433,9 @@ describe("ClientFixationService amo broker attachment", () => {
       if (args.where.id === "existing") return fullExisting;
       return null;
     });
-    amo.findBrokerContactByPhone.mockResolvedValue({
+    amo.findContactByPhone.mockResolvedValue({
       id: 778,
+      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
       name: existing.fullName,
     });
 
@@ -338,17 +446,66 @@ describe("ClientFixationService amo broker attachment", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(result).toEqual({ broker: existing, created: false });
-    expect(amo.findBrokerContactByPhone).toHaveBeenCalledWith(existing.phone, {
+    expect(amo.findContactByPhone).toHaveBeenCalledWith(existing.phone, {
       strict: true,
     });
-    expect(prisma.broker.update).toHaveBeenCalledWith({
-      where: { id: "existing" },
+    expect(prisma.broker.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "existing",
+        amoContactId: null,
+        mergedIntoId: null,
+      },
       data: { amoContactId: BigInt(778) },
     });
     expect(prisma.broker.create).not.toHaveBeenCalled();
   });
 
-  it("persists a fallback contact id returned while creating the broker lead", async () => {
+  it("promotes one exact unflagged contact before linking the broker", async () => {
+    const broker = {
+      id: "promote-unflagged",
+      fullName: "Promote Broker",
+      phone: "+79990000007",
+      email: null,
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerAgencies: [],
+    };
+    prisma.broker.findUnique.mockResolvedValue(broker);
+    amo.findContactByPhone
+      .mockResolvedValueOnce({
+        id: 781,
+        custom_fields_values: [
+          { field_id: 835415, values: [{ value: false }] },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 781,
+        custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
+      });
+
+    await expect(
+      (service as any).ensureBrokerAmoContact(broker.id),
+    ).resolves.toEqual(expect.objectContaining({ amoContactId: BigInt(781) }));
+
+    expect(amo.createContact).not.toHaveBeenCalled();
+    expect(amo.updateContact).not.toHaveBeenCalled();
+    expect(amo.promoteContactToBroker).toHaveBeenCalledTimes(1);
+    expect(amo.promoteContactToBroker).toHaveBeenCalledWith(781);
+    expect(amo.findContactByPhone).toHaveBeenCalledTimes(2);
+    expect(prisma.broker.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: broker.id,
+        amoContactId: null,
+        mergedIntoId: null,
+      },
+      data: { amoContactId: BigInt(781) },
+    });
+    expect(
+      prisma.broker.updateMany.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(amo.findContactByPhone.mock.invocationCallOrder[1]);
+  });
+
+  it("does not let the broker-lead helper perform a second unlocked contact create fallback", async () => {
     const creator = {
       id: "creator",
       fullName: "Создатель",
@@ -381,28 +538,20 @@ describe("ClientFixationService amo broker attachment", () => {
       return null;
     });
     prisma.broker.create.mockResolvedValue(created);
-    amo.findBrokerContactByPhone.mockResolvedValue(null);
+    amo.findContactByPhone.mockResolvedValue(null);
     amo.createContact.mockRejectedValue(
       new Error("amoCRM 400 /contacts: custom field rejected"),
     );
-    amo.createBrokerLeadFromLanding.mockResolvedValue({
-      contactId: 779,
-      leadId: 880,
-    });
+    await expect(
+      service.createBrokerByCreator("creator", {
+        fullName: created.fullName,
+        phone: created.phone,
+      }),
+    ).rejects.toThrow("Не удалось создать контакт брокера в amoCRM");
 
-    const result = await service.createBrokerByCreator("creator", {
-      fullName: created.fullName,
-      phone: created.phone,
-    });
-
-    expect(result.created).toBe(true);
-    expect(amo.createBrokerLeadFromLanding).toHaveBeenCalledWith(
-      expect.objectContaining({ existingContactId: undefined }),
-    );
-    expect(prisma.broker.update).toHaveBeenCalledWith({
-      where: { id: "new-broker" },
-      data: { amoContactId: BigInt(779) },
-    });
+    expect(amo.createBrokerLeadFromLanding).not.toHaveBeenCalled();
+    expect(prisma.broker.update).not.toHaveBeenCalled();
+    expect(prisma.broker.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not create a contact when the strict amo lookup fails", async () => {
@@ -415,7 +564,7 @@ describe("ClientFixationService amo broker attachment", () => {
       brokerAgencies: [],
     };
     prisma.broker.findUnique.mockResolvedValue(broker);
-    amo.findBrokerContactByPhone.mockRejectedValue(new Error("amoCRM 401"));
+    amo.findContactByPhone.mockRejectedValue(new Error("amoCRM 401"));
 
     await expect(
       (service as any).ensureBrokerAmoContact("new-broker"),
@@ -423,6 +572,40 @@ describe("ClientFixationService amo broker attachment", () => {
 
     expect(amo.createContact).not.toHaveBeenCalled();
     expect(prisma.broker.update).not.toHaveBeenCalled();
+    expect(prisma.broker.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("resolves a lost broker-contact POST only by strict GET and never posts twice", async () => {
+    const broker = {
+      id: "lost-broker-contact-response",
+      fullName: "Lost Response Broker",
+      phone: "+79990000006",
+      email: null,
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerAgencies: [],
+    };
+    prisma.broker.findUnique.mockResolvedValue(broker);
+    amo.findContactByPhone.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      id: 780,
+      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
+    });
+    amo.createContact.mockRejectedValue(new Error("lost response"));
+
+    await expect(
+      (service as any).ensureBrokerAmoContact(broker.id),
+    ).resolves.toEqual(expect.objectContaining({ amoContactId: BigInt(780) }));
+
+    expect(amo.createContact).toHaveBeenCalledTimes(1);
+    expect(amo.findContactByPhone).toHaveBeenCalledTimes(2);
+    expect(prisma.broker.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: broker.id,
+        amoContactId: null,
+        mergedIntoId: null,
+      },
+      data: { amoContactId: BigInt(780) },
+    });
   });
 
   it("queues REFIX_AMO_DOWN for retry and sends sanitized failure alerts", async () => {
@@ -700,67 +883,54 @@ describe("ClientFixationService amo broker attachment", () => {
     );
   });
 
-  it.each(["throws", "CAS misses"])(
-    "keeps the pre-POST marker when final refix linkage persistence %s",
-    async (failureMode) => {
+  it("stores a refix as safe pre-POST work when broker contact resolution fails", async () => {
     const broker = {
-      id: "broker-refix-link-failure",
+      id: "broker-contact-unavailable-refix",
       fullName: "Broker",
-      phone: "+79990000121",
+      phone: "+79990000141",
       email: null,
-      amoContactId: BigInt(8121),
+      amoContactId: BigInt(8141),
       funnelStage: "FIXATION",
       brokerAgencies: [],
     };
     const agency = {
-      id: "agency-refix-link-failure",
+      id: "agency-contact-unavailable-refix",
       name: "Agency",
-      inn: "7733333333",
+      inn: "7755555555",
     };
     const existingClient = {
-      id: "client-refix-closed-link-failure",
+      id: "client-contact-unavailable-closed",
       brokerId: broker.id,
       uniquenessStatus: "EXPIRED",
       uniquenessExpiresAt: new Date("2026-01-01T00:00:00.000Z"),
-      amoLeadId: BigInt(9921),
+      amoLeadId: BigInt(9941),
       createdAt: new Date("2026-07-01T00:00:00.000Z"),
       deals: [],
       broker,
     };
-    const newClient = { id: "client-refix-link-failure" };
+    const newClient = { id: "client-contact-unavailable-refix" };
+
     prisma.broker.findUnique.mockResolvedValue(broker);
-    prisma.broker.findMany.mockResolvedValue([
-      {
-        id: "manager-1",
-        fullName: "Manager",
-        phone: "+79990000122",
-        telegramUsername: null,
-      },
-    ]);
     prisma.agency.findUnique.mockResolvedValue(agency);
     prisma.client.findFirst.mockResolvedValue(existingClient);
     prisma.client.create.mockResolvedValue(newClient);
-    if (failureMode === "throws") {
-      prisma.client.updateMany.mockRejectedValueOnce(
-        new Error("database unavailable"),
-      );
-    } else {
-      prisma.client.updateMany.mockResolvedValueOnce({ count: 0 });
-    }
     amo.checkUniqueness.mockResolvedValue({
       rule: "RULE_3",
       verdict: "UNIQUE",
       reason: "Previous lead is closed",
     });
-    amo.createFixationRequest.mockResolvedValue({ id: 9102 });
+    (service as any).ensureBrokerAmoContact = jest
+      .fn()
+      .mockRejectedValue(new Error("broker contact lookup unavailable"));
 
     const result = await service.fixClient(broker.id, {
-      phone: "+79991110021",
+      phone: "+79991110141",
       fullName: "Client",
       project: "ZORGE9" as any,
       agencyInn: agency.inn,
     });
 
+    expect(amo.createFixationRequest).not.toHaveBeenCalled();
     expect(prisma.client.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         amoSyncStatus: "FAILED",
@@ -768,20 +938,113 @@ describe("ClientFixationService amo broker attachment", () => {
         amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
       }),
     });
-    expect(prisma.client.create.mock.invocationCallOrder[0]).toBeLessThan(
-      amo.createFixationRequest.mock.invocationCallOrder[0],
-    );
+    expect(prisma.client.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: newClient.id,
+        amoLeadId: null,
+        amoSyncStatus: "FAILED",
+        amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+        amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+      },
+      data: expect.objectContaining({
+        amoSyncStatus: "FAILED",
+        amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+        amoSyncAttempts: 1,
+        amoSyncLastAttemptAt: expect.any(Date),
+      }),
+    });
     expect(result).toEqual(
       expect.objectContaining({
+        client: newClient,
         amoSyncStatus: "FAILED",
-        message: expect.stringContaining("результат передачи в amoCRM не подтверждён"),
-        managerContacts: expect.any(Array),
       }),
     );
-    expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("amoCRM fixation result is ambiguous"),
-      expect.any(Object),
-    );
+  });
+
+  it.each(["throws", "CAS misses"])(
+    "keeps the pre-POST marker when final refix linkage persistence %s",
+    async (failureMode) => {
+      const broker = {
+        id: "broker-refix-link-failure",
+        fullName: "Broker",
+        phone: "+79990000121",
+        email: null,
+        amoContactId: BigInt(8121),
+        funnelStage: "FIXATION",
+        brokerAgencies: [],
+      };
+      const agency = {
+        id: "agency-refix-link-failure",
+        name: "Agency",
+        inn: "7733333333",
+      };
+      const existingClient = {
+        id: "client-refix-closed-link-failure",
+        brokerId: broker.id,
+        uniquenessStatus: "EXPIRED",
+        uniquenessExpiresAt: new Date("2026-01-01T00:00:00.000Z"),
+        amoLeadId: BigInt(9921),
+        createdAt: new Date("2026-07-01T00:00:00.000Z"),
+        deals: [],
+        broker,
+      };
+      const newClient = { id: "client-refix-link-failure" };
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.broker.findMany.mockResolvedValue([
+        {
+          id: "manager-1",
+          fullName: "Manager",
+          phone: "+79990000122",
+          telegramUsername: null,
+        },
+      ]);
+      prisma.agency.findUnique.mockResolvedValue(agency);
+      prisma.client.findFirst.mockResolvedValue(existingClient);
+      prisma.client.create.mockResolvedValue(newClient);
+      if (failureMode === "throws") {
+        prisma.client.updateMany.mockRejectedValueOnce(
+          new Error("database unavailable"),
+        );
+      } else {
+        prisma.client.updateMany.mockResolvedValueOnce({ count: 0 });
+      }
+      amo.checkUniqueness.mockResolvedValue({
+        rule: "RULE_3",
+        verdict: "UNIQUE",
+        reason: "Previous lead is closed",
+      });
+      amo.createFixationRequest.mockResolvedValue({ id: 9102 });
+
+      const result = await service.fixClient(broker.id, {
+        phone: "+79991110021",
+        fullName: "Client",
+        project: "ZORGE9" as any,
+        agencyInn: agency.inn,
+      });
+
+      expect(prisma.client.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          amoSyncStatus: "FAILED",
+          amoSyncError: AMO_CREATE_IN_PROGRESS_MARKER,
+          amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
+        }),
+      });
+      expect(prisma.client.create.mock.invocationCallOrder[0]).toBeLessThan(
+        amo.createFixationRequest.mock.invocationCallOrder[0],
+      );
+      expect(result).toEqual(
+        expect.objectContaining({
+          amoSyncStatus: "FAILED",
+          message: expect.stringContaining(
+            "результат передачи в amoCRM не подтверждён",
+          ),
+          managerContacts: expect.any(Array),
+        }),
+      );
+      expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
+        expect.stringContaining("amoCRM fixation result is ambiguous"),
+        expect.any(Object),
+      );
     },
   );
 
@@ -833,8 +1096,12 @@ describe("ClientFixationService amo broker attachment", () => {
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
       expect.stringContaining("clientId: client-morekit-failed"),
-      expect.objectContaining({ dedupKey: "fixation-morekit:client-morekit-failed" }),
+      expect.objectContaining({
+        dedupKey: "fixation-morekit:client-morekit-failed",
+      }),
     );
-    expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain("amoLeadId: 123456");
+    expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
+      "amoLeadId: 123456",
+    );
   });
 });

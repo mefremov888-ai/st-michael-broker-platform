@@ -1,104 +1,199 @@
-import { Injectable, Inject, NotFoundException } from '@nestjs/common';
-import { PrismaClient } from '@st-michael/database';
-import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitLeadDate } from '@st-michael/integrations';
-import { getSystemSetting } from '../common/system-setting';
+import { Injectable, Inject, NotFoundException } from "@nestjs/common";
+import { PrismaClient } from "@st-michael/database";
+import {
+  AmoCrmAdapter,
+  MorekitAdapter,
+  morekitPhone,
+  morekitLeadDate,
+} from "@st-michael/integrations";
+import { getSystemSetting } from "../common/system-setting";
+import {
+  acquireAmoBrokerContactAdvisoryXactLock,
+  armDurableAmoBrokerContactCreateGate,
+  getUnresolvedAmoBrokerContactCreateGate,
+  isAmoBrokerContact,
+  isDefinitiveAmoContactCreateRejection,
+  normalizeAmoBrokerContactLockPhone,
+  reconcileExactAmoBrokerContact,
+  recordResolvedAmoBrokerContactCreate,
+} from "../common/amo-broker-contact-lock";
 import {
   COMMISSION_RATES,
   LEVEL_THRESHOLDS_BY_PROJECT,
   paymentTermsForPolicy,
   rateFor,
-} from '../commission/commission.service';
+} from "../commission/commission.service";
 
-const KNOWN_KEYS = ['hero', 'advantages', 'commission', 'contact', 'howto', 'projectsSection', 'cooperation'] as const;
+const KNOWN_KEYS = [
+  "hero",
+  "advantages",
+  "commission",
+  "contact",
+  "howto",
+  "projectsSection",
+  "cooperation",
+] as const;
 
 const DEFAULT_CONTENT: Record<string, any> = {
   hero: {
-    tag: 'Партнёрская программа',
-    title: 'Доход растёт вместе с объёмом продаж агентства',
-    titleAccent: 'продаж агентства',
+    tag: "Партнёрская программа",
+    title: "Доход растёт вместе с объёмом продаж агентства",
+    titleAccent: "продаж агентства",
     description:
-      'Актуальная комиссия: {{commission.ZORGE9.range}} по Зорге 9 и {{commission.SILVER_BOR.range}} по Серебряному Бору.',
+      "Актуальная комиссия: {{commission.ZORGE9.range}} по Зорге 9 и {{commission.SILVER_BOR.range}} по Серебряному Бору.",
     stats: [
-      { number: '{{commission.ZORGE9.max}}', label: 'Максимальная ставка по Зорге 9' },
-      { number: '7 дней', label: 'Выплата вознаграждения' },
-      { number: '30 дней', label: 'Срок уникальности клиента' },
-      { number: '2', label: 'Активных проекта' },
+      {
+        number: "{{commission.ZORGE9.max}}",
+        label: "Максимальная ставка по Зорге 9",
+      },
+      { number: "7 дней", label: "Выплата вознаграждения" },
+      { number: "30 дней", label: "Срок уникальности клиента" },
+      { number: "2", label: "Активных проекта" },
     ],
   },
   advantages: {
-    tag: 'Преимущества',
-    title: 'Шесть причин, ради которых брокеры остаются с St Michael',
-    titleAccent: 'St Michael',
-    subtitle: 'Мы выстроили сотрудничество так, чтобы вы могли начать работать сразу — с первой сделки и с первого дня существования вашего ИП. Без дополнительных условий.',
+    tag: "Преимущества",
+    title: "Шесть причин, ради которых брокеры остаются с St Michael",
+    titleAccent: "St Michael",
+    subtitle:
+      "Мы выстроили сотрудничество так, чтобы вы могли начать работать сразу — с первой сделки и с первого дня существования вашего ИП. Без дополнительных условий.",
     items: [
-      { icon: 'headphones', title: 'Выделенный отдел партнёров', description: 'Сопровождение на всех этапах сделки.' },
-      { icon: 'shield', title: 'Защищаем брокера от увода клиента', description: 'С клиентами, которые пришли через вас, мы не работаем напрямую.' },
-      { icon: 'wallet', title: 'Быстрые выплаты', description: 'Вознаграждение — до 7 рабочих дней.' },
-      { icon: 'trending-up', title: 'Высокая комиссия', description: 'По КСБ — {{commission.SILVER_BOR.range}} за сделку, по Зорге 9 — {{commission.ZORGE9.range}}. Плюс квартальный и годовой бонусы.' },
-      { icon: 'sparkles', title: 'Не цепляемся за формальности', description: 'Регламент уникальности у нас гибче, чем у большинства застройщиков. Подтверждаем работу с клиентом, даже когда другие отказали бы.' },
-      { icon: 'graduation-cap', title: 'Обучение', description: 'Брокер-туры для быстрого старта продаж.' },
+      {
+        icon: "headphones",
+        title: "Выделенный отдел партнёров",
+        description: "Сопровождение на всех этапах сделки.",
+      },
+      {
+        icon: "shield",
+        title: "Защищаем брокера от увода клиента",
+        description:
+          "С клиентами, которые пришли через вас, мы не работаем напрямую.",
+      },
+      {
+        icon: "wallet",
+        title: "Быстрые выплаты",
+        description: "Вознаграждение — до 7 рабочих дней.",
+      },
+      {
+        icon: "trending-up",
+        title: "Высокая комиссия",
+        description:
+          "По КСБ — {{commission.SILVER_BOR.range}} за сделку, по Зорге 9 — {{commission.ZORGE9.range}}. Плюс квартальный и годовой бонусы.",
+      },
+      {
+        icon: "sparkles",
+        title: "Не цепляемся за формальности",
+        description:
+          "Регламент уникальности у нас гибче, чем у большинства застройщиков. Подтверждаем работу с клиентом, даже когда другие отказали бы.",
+      },
+      {
+        icon: "graduation-cap",
+        title: "Обучение",
+        description: "Брокер-туры для быстрого старта продаж.",
+      },
     ],
   },
   howto: {
-    tag: 'Старт',
-    title: 'Как начать сотрудничать с ST Michael',
-    titleAccent: 'ST Michael',
-    subtitle: 'Начать можно с первой же сделки — даже если ваше ИП открыто вчера. Никаких дополнительных условий.',
+    tag: "Старт",
+    title: "Как начать сотрудничать с ST Michael",
+    titleAccent: "ST Michael",
+    subtitle:
+      "Начать можно с первой же сделки — даже если ваше ИП открыто вчера. Никаких дополнительных условий.",
     steps: [
-      { num: '01', title: 'Проверка на уникальность', description: 'Проверьте клиента в кабинете перед сделкой.' },
-      { num: '02', title: 'Встреча в офисе продаж', description: 'Запишите клиента на встречу в офис продаж.' },
-      { num: '03', title: 'Фиксация клиента', description: 'После встречи клиент закреплён за вами на 30 дней — при необходимости можем продлить.' },
-      { num: '04', title: 'Сделка и выплата', description: 'После оплаты клиентом — вознаграждение приходит за 7 рабочих дней.' },
+      {
+        num: "01",
+        title: "Проверка на уникальность",
+        description: "Проверьте клиента в кабинете перед сделкой.",
+      },
+      {
+        num: "02",
+        title: "Встреча в офисе продаж",
+        description: "Запишите клиента на встречу в офис продаж.",
+      },
+      {
+        num: "03",
+        title: "Фиксация клиента",
+        description:
+          "После встречи клиент закреплён за вами на 30 дней — при необходимости можем продлить.",
+      },
+      {
+        num: "04",
+        title: "Сделка и выплата",
+        description:
+          "После оплаты клиентом — вознаграждение приходит за 7 рабочих дней.",
+      },
     ],
-    footer: 'Агентский договор оформляется при первой сделке',
-    ctaText: 'Стать партнёром',
+    footer: "Агентский договор оформляется при первой сделке",
+    ctaText: "Стать партнёром",
   },
   projectsSection: {
-    tag: 'Проекты',
-    title: 'Наши проекты',
-    titleAccent: 'Наши проекты',
-    subtitle: '',
+    tag: "Проекты",
+    title: "Наши проекты",
+    titleAccent: "Наши проекты",
+    subtitle: "",
   },
   // 2026-06-01: блок «Условия сотрудничества» — раньше был захардкожен в LandingClient.tsx
   cooperation: {
-    tag: 'Условия сотрудничества',
-    title: 'Всё прозрачно — документы',
-    titleAccent: 'документы',
-    subtitle: 'Брокер может заранее ознакомиться с условиями партнёрства до регистрации',
-    description: 'Мы рассматриваем сотрудничество с позиции «выиграл-выиграл». Все условия зафиксированы в документах и доступны в личном кабинете.',
-    ctaText: 'Стать партнёром',
+    tag: "Условия сотрудничества",
+    title: "Всё прозрачно — документы",
+    titleAccent: "документы",
+    subtitle:
+      "Брокер может заранее ознакомиться с условиями партнёрства до регистрации",
+    description:
+      "Мы рассматриваем сотрудничество с позиции «выиграл-выиграл». Все условия зафиксированы в документах и доступны в личном кабинете.",
+    ctaText: "Стать партнёром",
   },
   commission: {
-    tag: 'Комиссия и условия выплаты',
-    title: 'Условия вознаграждения',
-    titleAccent: 'вознаграждения',
-    subtitle: 'Актуальная ставка, шкала и условия оплаты задаются одной политикой для каждого проекта.',
+    tag: "Комиссия и условия выплаты",
+    title: "Условия вознаграждения",
+    titleAccent: "вознаграждения",
+    subtitle:
+      "Актуальная ставка, шкала и условия оплаты задаются одной политикой для каждого проекта.",
     // 2026-05-26: возвращён «Квартальный бонус» (был ксенин текст КБ4).
     cards: [
-      { title: 'Условия выплаты', text: 'Вознаграждение выплачивается в течение 7 рабочих дней после оплаты клиентом. ПВ ≥ 50% (Зорге 9) или ≥ 30% (Серебряный Бор) — единовременно.' },
-      { title: 'Квартальный бонус', text: 'При уровне Strong+ несколько кварталов подряд: +0,1% → +0,15% → +0,2% → +0,25% (максимум). Обнуляется при отсутствии продаж в квартале.' },
-      { title: 'Бонус за скорость', text: '+0,1% к ставке, если от заявки клиента до платной брони проходит не более 10 рабочих дней. Действует на оба проекта.' },
-      { title: 'Годовой бонус', text: '100 000 ₽ + памятный кубок за минимум одну сделку раз в 2 месяца в течение года.' },
-      { title: 'Коммерческие помещения', text: 'Продажа: помещения и фитнес — 3%, отдельно стоящие здания — 2%. Аренда: ритейл — 100% мес. платежа, фитнес/офис — 50%.' },
-      { title: 'Реферальная программа', text: 'Дополнительное вознаграждение за привлечение новых партнёров в программу.' },
+      {
+        title: "Условия выплаты",
+        text: "Вознаграждение выплачивается в течение 7 рабочих дней после оплаты клиентом. ПВ ≥ 50% (Зорге 9) или ≥ 30% (Серебряный Бор) — единовременно.",
+      },
+      {
+        title: "Квартальный бонус",
+        text: "При уровне Strong+ несколько кварталов подряд: +0,1% → +0,15% → +0,2% → +0,25% (максимум). Обнуляется при отсутствии продаж в квартале.",
+      },
+      {
+        title: "Бонус за скорость",
+        text: "+0,1% к ставке, если от заявки клиента до платной брони проходит не более 10 рабочих дней. Действует на оба проекта.",
+      },
+      {
+        title: "Годовой бонус",
+        text: "100 000 ₽ + памятный кубок за минимум одну сделку раз в 2 месяца в течение года.",
+      },
+      {
+        title: "Коммерческие помещения",
+        text: "Продажа: помещения и фитнес — 3%, отдельно стоящие здания — 2%. Аренда: ритейл — 100% мес. платежа, фитнес/офис — 50%.",
+      },
+      {
+        title: "Реферальная программа",
+        text: "Дополнительное вознаграждение за привлечение новых партнёров в программу.",
+      },
     ],
   },
   contact: {
-    tag: 'Команда',
-    title: 'Всегда на связи',
-    titleAccent: 'на связи',
-    description: 'В наши бизнес-процессы заложена тесная коммуникация с партнёрами. Горячая линия по работе с партнёрами работает каждый день с 9:00 до 21:00.',
-    blockTitle: 'Горячая линия по работе с партнёрами',
-    phone: '+7 (499) 226-22-49',
-    phoneHours: 'Ежедневно с 9:00 до 21:00',
-    email: 'info@zorge9.com',
-    telegram: 'https://t.me/stmichaelBroker',
+    tag: "Команда",
+    title: "Всегда на связи",
+    titleAccent: "на связи",
+    description:
+      "В наши бизнес-процессы заложена тесная коммуникация с партнёрами. Горячая линия по работе с партнёрами работает каждый день с 9:00 до 21:00.",
+    blockTitle: "Горячая линия по работе с партнёрами",
+    phone: "+7 (499) 226-22-49",
+    phoneHours: "Ежедневно с 9:00 до 21:00",
+    email: "info@zorge9.com",
+    telegram: "https://t.me/stmichaelBroker",
     manager: {
-      name: 'Ксения Цепляева',
-      role: 'Руководитель отдела по работе с партнёрами',
+      name: "Ксения Цепляева",
+      role: "Руководитель отдела по работе с партнёрами",
       // 2026-07-01: телефон отдела по работе с брокерами (был личный
       // мобильный Ксении +7 906 061-78-00).
-      phone: '+7 (499) 226-22-49',
+      phone: "+7 (499) 226-22-49",
     },
   },
 };
@@ -109,7 +204,7 @@ export class CmsService {
   // напрямую. Использует env AMO_ACCESS_TOKEN.
   private amo = new AmoCrmAdapter();
   private morekit = new MorekitAdapter();
-  constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
+  constructor(@Inject("PrismaClient") private prisma: PrismaClient) {}
 
   async getAllContent() {
     const rows = await this.prisma.siteContent.findMany();
@@ -128,10 +223,12 @@ export class CmsService {
   async upsertContent(key: string, value: any, updatedBy?: string) {
     let editorName: string | null = null;
     if (updatedBy) {
-      const editor = await this.prisma.broker.findUnique({
-        where: { id: updatedBy },
-        select: { fullName: true },
-      }).catch(() => null);
+      const editor = await this.prisma.broker
+        .findUnique({
+          where: { id: updatedBy },
+          select: { fullName: true },
+        })
+        .catch(() => null);
       editorName = editor?.fullName || null;
     }
     const result = await this.prisma.siteContent.upsert({
@@ -140,12 +237,17 @@ export class CmsService {
       create: { key, value, updatedBy },
     });
     // Revision пишем после upsert — если upsert упал, revision не появится.
-    await this.prisma.siteContentRevision.create({
-      data: { key, value, editorId: updatedBy || null, editorName },
-    }).catch((e) => {
-      // Если таблицы ещё нет (миграция не прошла) — не валим запрос.
-      console.error('[upsertContent] revision write failed:', e?.message || e);
-    });
+    await this.prisma.siteContentRevision
+      .create({
+        data: { key, value, editorId: updatedBy || null, editorName },
+      })
+      .catch((e) => {
+        // Если таблицы ещё нет (миграция не прошла) — не валим запрос.
+        console.error(
+          "[upsertContent] revision write failed:",
+          e?.message || e,
+        );
+      });
     return result;
   }
 
@@ -153,7 +255,7 @@ export class CmsService {
   async listRevisions(key: string) {
     return this.prisma.siteContentRevision.findMany({
       where: { key },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       take: 50,
     });
   }
@@ -161,8 +263,10 @@ export class CmsService {
   // Восстановить значение из revision. Создаёт ещё одну revision-запись
   // с пометкой что это restore (через editorName='restore from <id>').
   async restoreRevision(revisionId: string, updatedBy?: string) {
-    const rev = await this.prisma.siteContentRevision.findUnique({ where: { id: revisionId } });
-    if (!rev) throw new NotFoundException('Revision not found');
+    const rev = await this.prisma.siteContentRevision.findUnique({
+      where: { id: revisionId },
+    });
+    if (!rev) throw new NotFoundException("Revision not found");
     return this.upsertContent(rev.key, rev.value, updatedBy);
   }
 
@@ -174,7 +278,7 @@ export class CmsService {
     if (opts.onlyFuture) where.date = { gte: new Date() };
     return this.prisma.landingEvent.findMany({
       where,
-      orderBy: [{ date: 'asc' }, { sortOrder: 'asc' }],
+      orderBy: [{ date: "asc" }, { sortOrder: "asc" }],
     });
   }
 
@@ -188,7 +292,7 @@ export class CmsService {
     const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(input);
     if (hasTz) return new Date(input);
     const hasSeconds = /T\d{2}:\d{2}:\d{2}/.test(input);
-    return new Date(hasSeconds ? input + '+03:00' : input + ':00+03:00');
+    return new Date(hasSeconds ? input + "+03:00" : input + ":00+03:00");
   }
 
   async createEvent(data: any) {
@@ -211,8 +315,10 @@ export class CmsService {
     if (data.title !== undefined) patch.title = data.title;
     if (data.location !== undefined) patch.location = data.location || null;
     if (data.isOnline !== undefined) patch.isOnline = !!data.isOnline;
-    if (data.description !== undefined) patch.description = data.description || null;
-    if (data.sortOrder !== undefined) patch.sortOrder = Number(data.sortOrder) || 0;
+    if (data.description !== undefined)
+      patch.description = data.description || null;
+    if (data.sortOrder !== undefined)
+      patch.sortOrder = Number(data.sortOrder) || 0;
     if (data.isActive !== undefined) patch.isActive = !!data.isActive;
     return this.prisma.landingEvent.update({ where: { id }, data: patch });
   }
@@ -229,13 +335,13 @@ export class CmsService {
     if (onlyActive) where.isActive = true;
     return this.prisma.landingProject.findMany({
       where,
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
     });
   }
 
   async createProject(data: any) {
     if (!data.slug || !data.name || !data.description) {
-      throw new NotFoundException('slug, name, description обязательны');
+      throw new NotFoundException("slug, name, description обязательны");
     }
     return this.prisma.landingProject.create({
       data: {
@@ -258,23 +364,44 @@ export class CmsService {
 
   async updateProject(id: string, data: any) {
     const patch: any = {};
-    for (const k of ['slug', 'tag', 'name', 'subtitle', 'description', 'ctaText', 'ctaHref',
-                     'imageUrl', 'classType', 'address', 'district'] as const) {
+    for (const k of [
+      "slug",
+      "tag",
+      "name",
+      "subtitle",
+      "description",
+      "ctaText",
+      "ctaHref",
+      "imageUrl",
+      "classType",
+      "address",
+      "district",
+    ] as const) {
       if (data[k] !== undefined) patch[k] = data[k] || null;
     }
     if (patch.name === null) delete patch.name;
     if (patch.description === null) delete patch.description;
-    for (const k of ['totalUnits', 'floorsTotal', 'buildingsCount', 'readyQuarter', 'readyYear'] as const) {
-      if (data[k] !== undefined) patch[k] = data[k] === null ? null : Number(data[k]);
+    for (const k of [
+      "totalUnits",
+      "floorsTotal",
+      "buildingsCount",
+      "readyQuarter",
+      "readyYear",
+    ] as const) {
+      if (data[k] !== undefined)
+        patch[k] = data[k] === null ? null : Number(data[k]);
     }
     // commissionFrom/commissionTo — legacy-колонки. Новые ставки меняются
     // только через CommissionPolicy и здесь намеренно больше не записываются.
-    for (const k of ['pricePerSqmFrom'] as const) {
-      if (data[k] !== undefined) patch[k] = data[k] === null ? null : Number(data[k]);
+    for (const k of ["pricePerSqmFrom"] as const) {
+      if (data[k] !== undefined)
+        patch[k] = data[k] === null ? null : Number(data[k]);
     }
     if (data.gallery !== undefined) patch.gallery = data.gallery;
-    if (data.characteristics !== undefined) patch.characteristics = data.characteristics;
-    if (data.sortOrder !== undefined) patch.sortOrder = Number(data.sortOrder) || 0;
+    if (data.characteristics !== undefined)
+      patch.characteristics = data.characteristics;
+    if (data.sortOrder !== undefined)
+      patch.sortOrder = Number(data.sortOrder) || 0;
     if (data.isActive !== undefined) patch.isActive = !!data.isActive;
     return this.prisma.landingProject.update({ where: { id }, data: patch });
   }
@@ -291,7 +418,7 @@ export class CmsService {
     if (onlyActive) where.isActive = true;
     return this.prisma.landingNews.findMany({
       where,
-      orderBy: [{ publishedAt: 'desc' }, { sortOrder: 'asc' }],
+      orderBy: [{ publishedAt: "desc" }, { sortOrder: "asc" }],
     });
   }
 
@@ -312,11 +439,21 @@ export class CmsService {
 
   async updateNews(id: string, data: any) {
     const patch: any = {};
-    for (const k of ['title', 'source', 'excerpt', 'imageUrl', 'url'] as const) {
+    for (const k of [
+      "title",
+      "source",
+      "excerpt",
+      "imageUrl",
+      "url",
+    ] as const) {
       if (data[k] !== undefined) patch[k] = data[k] || null;
     }
-    if (data.publishedAt !== undefined) patch.publishedAt = data.publishedAt ? new Date(data.publishedAt) : new Date();
-    if (data.sortOrder !== undefined) patch.sortOrder = Number(data.sortOrder) || 0;
+    if (data.publishedAt !== undefined)
+      patch.publishedAt = data.publishedAt
+        ? new Date(data.publishedAt)
+        : new Date();
+    if (data.sortOrder !== undefined)
+      patch.sortOrder = Number(data.sortOrder) || 0;
     if (data.isActive !== undefined) patch.isActive = !!data.isActive;
     return this.prisma.landingNews.update({ where: { id }, data: patch });
   }
@@ -329,20 +466,33 @@ export class CmsService {
   // 2026-08-12: ручной/плановый синк новостей с stmichael.ru/news.
   // Та же логика, что в SchedulerService.handleStmNewsSync, вынесена сюда
   // чтобы не создавать циклическую зависимость CmsModule ↔ SchedulerModule.
-  async syncNewsFromStm(): Promise<{ created: number; updated: number; total: number }> {
+  async syncNewsFromStm(): Promise<{
+    created: number;
+    updated: number;
+    total: number;
+  }> {
     const html = await this.fetchStmNewsHtml();
     const items = this.parseStmNewsHtml(html);
     let created = 0;
     let updated = 0;
     for (const item of items) {
-      const existing = await this.prisma.landingNews.findFirst({ where: { url: item.url } });
+      const existing = await this.prisma.landingNews.findFirst({
+        where: { url: item.url },
+      });
       if (!existing) {
         await this.prisma.landingNews.create({ data: item });
         created++;
-      } else if (existing.title !== item.title || existing.imageUrl !== item.imageUrl) {
+      } else if (
+        existing.title !== item.title ||
+        existing.imageUrl !== item.imageUrl
+      ) {
         await this.prisma.landingNews.update({
           where: { id: existing.id },
-          data: { title: item.title, imageUrl: item.imageUrl, publishedAt: item.publishedAt },
+          data: {
+            title: item.title,
+            imageUrl: item.imageUrl,
+            publishedAt: item.publishedAt,
+          },
         });
         updated++;
       }
@@ -353,37 +503,60 @@ export class CmsService {
   private fetchStmNewsHtml(): Promise<string> {
     return new Promise((resolve, reject) => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const https = require('https');
+      const https = require("https");
       const req = https.get(
-        'https://stmichael.ru/news',
-        { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; STMBrokerBot/1.0)' }, timeout: 15000 },
+        "https://stmichael.ru/news",
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; STMBrokerBot/1.0)",
+          },
+          timeout: 15000,
+        },
         (res: any) => {
           const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-          res.on('error', reject);
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+          res.on("error", reject);
         },
       );
-      req.on('timeout', () => { req.destroy(); reject(new Error('stm-news: request timeout')); });
-      req.on('error', reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("stm-news: request timeout"));
+      });
+      req.on("error", reject);
     });
   }
 
   private parseStmNewsHtml(html: string): any[] {
     const MONTHS: Record<string, number> = {
-      'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4, 'мая': 5, 'июня': 6,
-      'июля': 7, 'августа': 8, 'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12,
+      января: 1,
+      февраля: 2,
+      марта: 3,
+      апреля: 4,
+      мая: 5,
+      июня: 6,
+      июля: 7,
+      августа: 8,
+      сентября: 9,
+      октября: 10,
+      ноября: 11,
+      декабря: 12,
     };
-    const cardRe = /<a\s[^>]*href="(\/news\/[^"]+)"[^>]*class="NewsCard_\w+">([\s\S]*?)(?=<a\s[^>]*href="\/news\/|<\/ul>|<\/section>|$)/g;
+    const cardRe =
+      /<a\s[^>]*href="(\/news\/[^"]+)"[^>]*class="NewsCard_\w+">([\s\S]*?)(?=<a\s[^>]*href="\/news\/|<\/ul>|<\/section>|$)/g;
     const items: any[] = [];
     let m: RegExpExecArray | null;
     while ((m = cardRe.exec(html)) !== null && items.length < 12) {
       const slug = m[1];
       const body = m[2];
       const url = `https://stmichael.ru${slug}`;
-      const imgM = body.match(/(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/);
+      const imgM = body.match(
+        /(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/,
+      );
       const imageUrl = imgM ? imgM[1] : null;
-      const dateM = body.match(/class="date_\w+"[^>]*>\s*(\d{1,2})\s+([а-яёА-ЯЁ]+)\s+(\d{4})/u);
+      const dateM = body.match(
+        /class="date_\w+"[^>]*>\s*(\d{1,2})\s+([а-яёА-ЯЁ]+)\s+(\d{4})/u,
+      );
       let publishedAt: Date = new Date();
       if (dateM) {
         const day = parseInt(dateM[1], 10);
@@ -393,10 +566,18 @@ export class CmsService {
       }
       const titleM = body.match(/class="title_\w+"[^>]*>([\s\S]*?)<\/div>/);
       const title = titleM
-        ? titleM[1].replace(/<[^>]+>/g, '').trim()
-        : slug.replace(/^\/news\//, '').replace(/-/g, ' ');
+        ? titleM[1].replace(/<[^>]+>/g, "").trim()
+        : slug.replace(/^\/news\//, "").replace(/-/g, " ");
       if (!title) continue;
-      items.push({ title, source: 'stmichael.ru', publishedAt, imageUrl, url, isActive: true, sortOrder: 0 });
+      items.push({
+        title,
+        source: "stmichael.ru",
+        publishedAt,
+        imageUrl,
+        url,
+        isActive: true,
+        sortOrder: 0,
+      });
     }
     return items;
   }
@@ -411,7 +592,7 @@ export class CmsService {
     }
     return this.prisma.landingPromo.findMany({
       where,
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
     });
   }
 
@@ -423,7 +604,7 @@ export class CmsService {
         description: data.description || null,
         tag: data.tag || null,
         imageUrl: data.imageUrl || null,
-        imagePosition: data.imagePosition || 'center',
+        imagePosition: data.imagePosition || "center",
         ctaText: data.ctaText || null,
         ctaHref: data.ctaHref || null,
         project: data.project || null,
@@ -436,12 +617,24 @@ export class CmsService {
 
   async updatePromo(id: string, data: any) {
     const patch: any = {};
-    for (const k of ['title', 'subtitle', 'description', 'tag', 'imageUrl', 'imagePosition', 'ctaText', 'ctaHref', 'project'] as const) {
+    for (const k of [
+      "title",
+      "subtitle",
+      "description",
+      "tag",
+      "imageUrl",
+      "imagePosition",
+      "ctaText",
+      "ctaHref",
+      "project",
+    ] as const) {
       if (data[k] !== undefined) patch[k] = data[k] || null;
     }
-    if (data.sortOrder !== undefined) patch.sortOrder = Number(data.sortOrder) || 0;
+    if (data.sortOrder !== undefined)
+      patch.sortOrder = Number(data.sortOrder) || 0;
     if (data.isActive !== undefined) patch.isActive = !!data.isActive;
-    if (data.expiresAt !== undefined) patch.expiresAt = data.expiresAt ? new Date(data.expiresAt) : null;
+    if (data.expiresAt !== undefined)
+      patch.expiresAt = data.expiresAt ? new Date(data.expiresAt) : null;
     return this.prisma.landingPromo.update({ where: { id }, data: patch });
   }
 
@@ -453,12 +646,21 @@ export class CmsService {
   // ─── Contact requests / event signups ────────────
 
   async createContactRequest(
-    data: { name: string; phone: string; email?: string; message?: string; source?: string; eventId?: string },
+    data: {
+      name: string;
+      phone: string;
+      email?: string;
+      message?: string;
+      source?: string;
+      eventId?: string;
+    },
     ip: string | null,
     userAgent: string | null,
   ) {
-    if (!data.name || data.name.trim().length < 2) throw new NotFoundException('name required');
-    if (!data.phone || data.phone.trim().length < 5) throw new NotFoundException('phone required');
+    if (!data.name || data.name.trim().length < 2)
+      throw new NotFoundException("name required");
+    if (!data.phone || data.phone.trim().length < 5)
+      throw new NotFoundException("phone required");
 
     const phone = data.phone.trim();
     const created = await this.prisma.contactRequest.create({
@@ -467,7 +669,7 @@ export class CmsService {
         phone,
         email: data.email?.trim() || null,
         message: data.message?.trim() || null,
-        source: data.source || 'landing-contact',
+        source: data.source || "landing-contact",
         eventId: data.eventId || null,
         ip,
         userAgent,
@@ -478,18 +680,21 @@ export class CmsService {
     // карточку и кладём в очередь колл-центра (isInBase=true), чтобы
     // оператор перезвонил. Сейчас включаем для broker-tour и
     // landing-contact (обе подразумевают что человек хочет общаться).
-    const callCenterSources = new Set(['broker-tour', 'landing-contact']);
-    if (callCenterSources.has(data.source || '')) {
+    const callCenterSources = new Set(["broker-tour", "landing-contact"]);
+    if (callCenterSources.has(data.source || "")) {
       try {
         await this.upsertBrokerFromLandingLead({
           fullName: data.name.trim(),
           phone,
           email: data.email?.trim() || null,
           note: data.message?.trim() || null,
-          source: data.source || 'landing-contact',
+          source: data.source || "landing-contact",
         });
       } catch (e: any) {
-        console.error('[createContactRequest] upsertBrokerFromLandingLead failed:', e?.message || e);
+        console.error(
+          "[createContactRequest] upsertBrokerFromLandingLead failed:",
+          e?.message || e,
+        );
       }
     }
 
@@ -508,11 +713,12 @@ export class CmsService {
     source: string;
   }) {
     // Нормализуем телефон до +7XXXXXXXXXX (как в основной БД).
-    const digits = (data.phone || '').replace(/\D/g, '');
+    const digits = (data.phone || "").replace(/\D/g, "");
     let phone = data.phone;
-    if (digits.length === 11 && digits[0] === '8') phone = '+7' + digits.slice(1);
-    else if (digits.length === 11 && digits[0] === '7') phone = '+' + digits;
-    else if (digits.length === 10) phone = '+7' + digits;
+    if (digits.length === 11 && digits[0] === "8")
+      phone = "+7" + digits.slice(1);
+    else if (digits.length === 11 && digits[0] === "7") phone = "+" + digits;
+    else if (digits.length === 10) phone = "+7" + digits;
 
     const existing = await this.prisma.broker.findUnique({ where: { phone } });
     if (existing) {
@@ -536,13 +742,15 @@ export class CmsService {
         fullName: data.fullName,
         phone,
         email: data.email,
-        role: 'BROKER',
-        status: 'PENDING',
-        funnelStage: 'NEW_BROKER',
-        source: (data.source === 'broker-tour' ? 'LANDING_BROKER_TOUR' : 'LANDING_FORM') as any,
-        category: 'WARM' as any, // явная заявка — точно тёплый
+        role: "BROKER",
+        status: "PENDING",
+        funnelStage: "NEW_BROKER",
+        source: (data.source === "broker-tour"
+          ? "LANDING_BROKER_TOUR"
+          : "LANDING_FORM") as any,
+        category: "WARM" as any, // явная заявка — точно тёплый
         isInBase: true,
-        baseSource: 'manual',
+        baseSource: "manual",
         // первое касание — сразу в очередь, оператор увидит сегодня
         nextCallAt: null,
       },
@@ -553,24 +761,180 @@ export class CmsService {
     // brokerId в нашей БД создан, синк может пройти позже.
     let amoLeadId: number | undefined;
     let amoContactId: number | undefined;
+    let durableCreateGateId: string | null = null;
+    let observedGateId: string | null = null;
     try {
+      amoContactId = await this.prisma.$transaction(
+        async (tx) => {
+          await acquireAmoBrokerContactAdvisoryXactLock(tx, created.id, phone);
+          const lockedBroker = await tx.broker.findUnique({
+            where: { id: created.id },
+            select: { amoContactId: true, phone: true, mergedIntoId: true },
+          });
+          if (!lockedBroker)
+            throw new Error("AMO_BROKER_CONTACT_LOCK_BROKER_MISSING");
+          if (
+            lockedBroker.mergedIntoId ||
+            normalizeAmoBrokerContactLockPhone(lockedBroker.phone) !==
+              normalizeAmoBrokerContactLockPhone(phone)
+          ) {
+            throw new Error("AMO_BROKER_CONTACT_LOCK_PHONE_DRIFT");
+          }
+          observedGateId = await getUnresolvedAmoBrokerContactCreateGate(
+            this.prisma,
+            lockedBroker.phone,
+          );
+          if (lockedBroker.amoContactId) {
+            if (observedGateId) {
+              const confirmed = await (this.amo as any).findContactByPhone(
+                phone,
+                { strict: true },
+              );
+              if (
+                !confirmed ||
+                Number(confirmed.id) !== Number(lockedBroker.amoContactId) ||
+                !isAmoBrokerContact(confirmed)
+              ) {
+                throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+              }
+            }
+            return Number(lockedBroker.amoContactId);
+          }
+
+          let contact = await (this.amo as any).findContactByPhone(phone, {
+            strict: true,
+          });
+          if (contact) {
+            if (observedGateId && !isAmoBrokerContact(contact)) {
+              throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+            }
+            if (!isAmoBrokerContact(contact)) {
+              await this.amo.promoteContactToBroker(contact.id);
+              contact = await reconcileExactAmoBrokerContact({
+                expectedContactId: Number(contact.id),
+                lookup: () =>
+                  (this.amo as any).findContactByPhone(phone, {
+                    strict: true,
+                  }),
+              });
+              if (!contact) {
+                throw new Error("AMO_BROKER_CONTACT_PROMOTION_NOT_RECONCILED");
+              }
+            }
+          } else {
+            if (observedGateId) return null;
+            durableCreateGateId = await armDurableAmoBrokerContactCreateGate(
+              this.prisma,
+              lockedBroker.phone,
+            );
+            let createError: unknown = null;
+            try {
+              contact = await this.amo.createContact({
+                name: data.fullName,
+                custom_fields_values: [
+                  {
+                    field_code: "PHONE",
+                    values: [{ value: phone, enum_code: "WORK" }],
+                  },
+                  ...(data.email
+                    ? [
+                        {
+                          field_code: "EMAIL" as const,
+                          values: [{ value: data.email, enum_code: "WORK" }],
+                        },
+                      ]
+                    : []),
+                  { field_id: 835415, values: [{ value: true }] },
+                ],
+              });
+            } catch (error) {
+              createError = error;
+            }
+            if (
+              createError &&
+              isDefinitiveAmoContactCreateRejection(createError)
+            ) {
+              await recordResolvedAmoBrokerContactCreate(
+                this.prisma,
+                lockedBroker.phone,
+                durableCreateGateId!,
+              );
+              durableCreateGateId = null;
+              throw createError;
+            }
+            const expectedContactId = Number.isSafeInteger(Number(contact?.id))
+              ? Number(contact.id)
+              : null;
+            try {
+              contact = await reconcileExactAmoBrokerContact({
+                expectedContactId,
+                lookup: () =>
+                  (this.amo as any).findContactByPhone(phone, {
+                    strict: true,
+                  }),
+              });
+            } catch {
+              contact = null;
+            }
+            if (!contact) {
+              return null;
+            }
+          }
+          if (!contact?.id) {
+            throw new Error("AMO_BROKER_CONTACT_CREATE_NOT_RECONCILED");
+          }
+          if (!lockedBroker.amoContactId) {
+            const linked = await tx.broker.updateMany({
+              where: {
+                id: created.id,
+                amoContactId: null,
+                mergedIntoId: null,
+              },
+              data: { amoContactId: BigInt(contact.id) as any },
+            });
+            if (linked.count !== 1) {
+              throw new Error("AMO_BROKER_CONTACT_LINK_CAS_MISSED");
+            }
+          }
+          return Number(contact.id);
+        },
+        {
+          isolationLevel: "Serializable",
+          maxWait: 5_000,
+          timeout: 120_000,
+        },
+      );
+      if (!amoContactId) {
+        throw new Error("AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED");
+      }
+      const gateToResolve = durableCreateGateId || observedGateId;
+      if (gateToResolve) {
+        await recordResolvedAmoBrokerContactCreate(
+          this.prisma,
+          phone,
+          gateToResolve,
+        );
+      }
       const amo = await this.amo.createBrokerLeadFromLanding({
         brokerName: data.fullName,
         brokerPhone: phone,
         brokerEmail: data.email,
-        source: data.source === 'broker-tour' ? 'LANDING_BROKER_TOUR' : 'LANDING_FORM',
+        source:
+          data.source === "broker-tour"
+            ? "LANDING_BROKER_TOUR"
+            : "LANDING_FORM",
         note: data.note,
+        existingContactId: amoContactId,
       });
       amoLeadId = amo?.leadId;
-      amoContactId = amo?.contactId;
-      if (amoContactId) {
-        await this.prisma.broker.update({
-          where: { id: created.id },
-          data: { amoContactId: BigInt(amoContactId) as any },
-        }).catch(() => {});
+      if (amo?.contactId && amo.contactId !== amoContactId) {
+        throw new Error("AMO_BROKER_CONTACT_LEAD_LINK_MISMATCH");
       }
     } catch (e: any) {
-      console.error('[upsertBrokerFromLandingLead] amo create failed:', e?.message || e);
+      console.error(
+        "[upsertBrokerFromLandingLead] amo create failed:",
+        e?.message || e,
+      );
     }
 
     // 2026-06-17: дублируем уведомление в Морикит — он создаст вторую задачу
@@ -579,44 +943,68 @@ export class CmsService {
     // на Ксении (PR #165), а задача Морикита уйдёт на текущего оператора КЦ.
     if (amoLeadId) {
       try {
-        const morekitUrl = await getSystemSetting(this.prisma, 'MOREKIT_WEBHOOK_URL');
+        const morekitUrl = await getSystemSetting(
+          this.prisma,
+          "MOREKIT_WEBHOOK_URL",
+        );
         if (morekitUrl) {
-          this.morekit.notifyFixation({
-            id: String(amoLeadId),
-            agency: '',
-            broker_id: amoContactId ? String(amoContactId) : '',
-            agent_name: data.fullName, // новый брокер сам же «агент»
-            agent_phone: morekitPhone(phone),
-            agent_mail: data.email || '',
-            budget: '0',
-            clients: [{ name: data.fullName, phone: morekitPhone(phone) }],
-            type: 'Брокер-тур',
-            lead_date: morekitLeadDate(),
-            project: data.source === 'broker-tour' ? 'Брокер-тур' : 'Заявка с лендинга',
-          }, morekitUrl).catch((e) => console.error('[upsertBrokerFromLandingLead] morekit notify error:', e?.message || e));
+          this.morekit
+            .notifyFixation(
+              {
+                id: String(amoLeadId),
+                agency: "",
+                broker_id: amoContactId ? String(amoContactId) : "",
+                agent_name: data.fullName, // новый брокер сам же «агент»
+                agent_phone: morekitPhone(phone),
+                agent_mail: data.email || "",
+                budget: "0",
+                clients: [{ name: data.fullName, phone: morekitPhone(phone) }],
+                type: "Брокер-тур",
+                lead_date: morekitLeadDate(),
+                project:
+                  data.source === "broker-tour"
+                    ? "Брокер-тур"
+                    : "Заявка с лендинга",
+              },
+              morekitUrl,
+            )
+            .catch((e) =>
+              console.error(
+                "[upsertBrokerFromLandingLead] morekit notify error:",
+                e?.message || e,
+              ),
+            );
         }
       } catch (e: any) {
-        console.error('[upsertBrokerFromLandingLead] morekit setup failed:', e?.message || e);
+        console.error(
+          "[upsertBrokerFromLandingLead] morekit setup failed:",
+          e?.message || e,
+        );
       }
     }
 
     return created.id;
   }
 
-  async listContactRequests(query: { page?: number; limit?: number; source?: string; processed?: string }) {
+  async listContactRequests(query: {
+    page?: number;
+    limit?: number;
+    source?: string;
+    processed?: string;
+  }) {
     const page = Number(query.page) || 1;
     const limit = Number(query.limit) || 20;
     const skip = (page - 1) * limit;
 
     const where: any = {};
     if (query.source) where.source = query.source;
-    if (query.processed === 'true') where.processedAt = { not: null };
-    else if (query.processed === 'false') where.processedAt = null;
+    if (query.processed === "true") where.processedAt = { not: null };
+    else if (query.processed === "false") where.processedAt = null;
 
     const [items, total] = await Promise.all([
       this.prisma.contactRequest.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: "desc" },
         skip,
         take: limit,
       }),
@@ -647,17 +1035,18 @@ export class CmsService {
           startDate: { lte: now },
           endDate: { gte: now },
         },
-        orderBy: [{ project: 'asc' }, { startDate: 'desc' }],
+        orderBy: [{ project: "asc" }, { startDate: "desc" }],
       }),
-      this.getContent('commission'),
+      this.getContent("commission"),
     ]);
     const byProject: Record<string, any> = {};
     for (const r of rows) {
       if (!byProject[r.project]) {
         const levels = Array.isArray(r.levels) ? (r.levels as any[]) : null;
-        const rates = r.mode === 'FLAT'
-          ? [Number(r.flatRate || 0)]
-          : (levels || []).map((level: any) => Number(level.rate));
+        const rates =
+          r.mode === "FLAT"
+            ? [Number(r.flatRate || 0)]
+            : (levels || []).map((level: any) => Number(level.rate));
         byProject[r.project] = {
           id: r.id,
           project: r.project,
@@ -670,7 +1059,7 @@ export class CmsService {
           displayNote: r.displayNote || null,
           startDate: r.startDate,
           endDate: r.endDate,
-          source: 'POLICY',
+          source: "POLICY",
         };
       }
     }
@@ -678,10 +1067,11 @@ export class CmsService {
     // Один и тот же fallback используется всеми публичными отображениями.
     // Он нужен только для чистой БД/аварийного случая, когда админ ещё не
     // создал политику; старые CMS-шкалы и LandingProject-комиссии не читаем.
-    for (const project of ['ZORGE9', 'SILVER_BOR']) {
+    for (const project of ["ZORGE9", "SILVER_BOR"]) {
       if (byProject[project]) continue;
-      const thresholds = [...(LEVEL_THRESHOLDS_BY_PROJECT[project] || [])]
-        .sort((a, b) => a.minSqm - b.minSqm);
+      const thresholds = [...(LEVEL_THRESHOLDS_BY_PROJECT[project] || [])].sort(
+        (a, b) => a.minSqm - b.minSqm,
+      );
       const levels = thresholds.map((threshold) => ({
         level: threshold.level,
         minSqm: threshold.minSqm,
@@ -691,7 +1081,7 @@ export class CmsService {
       byProject[project] = {
         id: null,
         project,
-        mode: 'PROGRESSIVE',
+        mode: "PROGRESSIVE",
         flatRate: null,
         levels,
         minRate: rates.length ? Math.min(...rates) : null,
@@ -700,11 +1090,11 @@ export class CmsService {
         displayNote: null,
         startDate: null,
         endDate: null,
-        source: 'FALLBACK',
+        source: "FALLBACK",
       };
     }
 
-    return ['ZORGE9', 'SILVER_BOR'].map((project) => byProject[project]);
+    return ["ZORGE9", "SILVER_BOR"].map((project) => byProject[project]);
   }
 
   // Seeds default content (idempotent — only inserts if missing)
@@ -723,7 +1113,9 @@ export class CmsService {
     // легитимные данные. Оставлять их не нужно.
 
     for (const key of KNOWN_KEYS) {
-      const exists = await this.prisma.siteContent.findUnique({ where: { key } });
+      const exists = await this.prisma.siteContent.findUnique({
+        where: { key },
+      });
       if (!exists) {
         await this.prisma.siteContent.create({
           data: { key, value: DEFAULT_CONTENT[key] },
@@ -735,24 +1127,32 @@ export class CmsService {
     // (+7 906 061-78-00) на общий телефон отдела (+7 499 226-22-49).
     // Идемпотентно: срабатывает только если старый номер до сих пор в БД.
     try {
-      const contactRow = await this.prisma.siteContent.findUnique({ where: { key: 'contact' } });
+      const contactRow = await this.prisma.siteContent.findUnique({
+        where: { key: "contact" },
+      });
       const contactValue = contactRow?.value as any;
       const currentPhone = contactValue?.manager?.phone;
-      const OLD_PHONE = '+7 (906) 061-78-00';
-      const NEW_PHONE = '+7 (499) 226-22-49';
+      const OLD_PHONE = "+7 (906) 061-78-00";
+      const NEW_PHONE = "+7 (499) 226-22-49";
       if (contactValue && currentPhone === OLD_PHONE) {
         const nextValue = {
           ...contactValue,
           manager: { ...(contactValue.manager || {}), phone: NEW_PHONE },
         };
         await this.prisma.siteContent.update({
-          where: { key: 'contact' },
+          where: { key: "contact" },
           data: { value: nextValue },
         });
-        console.log('[CMS migration] contact.manager.phone обновлён на', NEW_PHONE);
+        console.log(
+          "[CMS migration] contact.manager.phone обновлён на",
+          NEW_PHONE,
+        );
       }
     } catch (e: any) {
-      console.warn('[CMS migration] manager.phone migration failed:', e?.message || e);
+      console.warn(
+        "[CMS migration] manager.phone migration failed:",
+        e?.message || e,
+      );
     }
 
     const projectsCount = await this.prisma.landingProject.count();
@@ -760,23 +1160,23 @@ export class CmsService {
       await this.prisma.landingProject.createMany({
         data: [
           {
-            slug: 'zorge9',
-            tag: 'Приоритетный проект',
-            name: 'Зорге',
-            subtitle: '9',
+            slug: "zorge9",
+            tag: "Приоритетный проект",
+            name: "Зорге",
+            subtitle: "9",
             description:
-              'Апартаменты бизнес-класса у метро Полежаевская. 3 корпуса, архитектура в стиле Арт-Москва. От 270 000 р/м2.',
-            ctaText: 'Смотреть каталог',
+              "Апартаменты бизнес-класса у метро Полежаевская. 3 корпуса, архитектура в стиле Арт-Москва. От 270 000 р/м2.",
+            ctaText: "Смотреть каталог",
             sortOrder: 0,
           },
           {
-            slug: 'silver-bor',
-            tag: 'Новый проект',
-            name: 'Квартал',
-            subtitle: 'Серебряный Бор',
+            slug: "silver-bor",
+            tag: "Новый проект",
+            name: "Квартал",
+            subtitle: "Серебряный Бор",
             description:
-              'Жилой комплекс премиум-класса рядом с Серебряным Бором. Уникальная локация и инфраструктура.',
-            ctaText: 'Смотреть каталог',
+              "Жилой комплекс премиум-класса рядом с Серебряным Бором. Уникальная локация и инфраструктура.",
+            ctaText: "Смотреть каталог",
             sortOrder: 1,
           },
         ],
