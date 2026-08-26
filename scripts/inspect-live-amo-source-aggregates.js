@@ -86,6 +86,7 @@ const CONTACT_FIELDS = Object.freeze({
 const LEAD_FIELDS = Object.freeze({
   FROM_BROKER: 665195,
   UTM_SOURCE: 618551,
+  COMMENT_TO_REQUEST: 618547,
   MEETING_AT: 839185,
   DDU_AMOUNT: 833065,
   CONTRACT_DATE: 558353,
@@ -161,6 +162,28 @@ function customField(entity, fieldId) {
 function customValues(entity, fieldId) {
   const values = customField(entity, fieldId)?.values;
   return Array.isArray(values) ? values : [];
+}
+
+function validateScanObservers(value) {
+  const noop = () => undefined;
+  if (value === undefined) return { onContact: noop, onLead: noop };
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("Invalid scan observer callbacks");
+    }
+    const allowed = new Set(["onContact", "onLead"]);
+    if (Object.keys(value).some((key) => !allowed.has(key))) {
+      throw new TypeError("Invalid scan observer callbacks");
+    }
+    const onContact = value.onContact === undefined ? noop : value.onContact;
+    const onLead = value.onLead === undefined ? noop : value.onLead;
+    if (typeof onContact !== "function" || typeof onLead !== "function") {
+      throw new TypeError("Invalid scan observer callbacks");
+    }
+    return { onContact, onLead };
+  } catch {
+    throw new TypeError("Invalid scan observer callbacks");
+  }
 }
 
 function nonEmptyValue(value) {
@@ -970,7 +993,12 @@ async function paginate({
   throw new Error("amoCRM pagination exceeded safety bound");
 }
 
-async function scanLiveAmo(request, onPhase = () => undefined) {
+async function scanLiveAmo(
+  request,
+  onPhase = () => undefined,
+  scanObservers = undefined,
+) {
+  const observers = validateScanObservers(scanObservers);
   onPhase(FAILURE_PHASE.ACCOUNT);
   const account = await request("/api/v4/account");
   if (positiveInteger(account?.id) !== EXPECTED_ACCOUNT_ID) {
@@ -988,7 +1016,10 @@ async function scanLiveAmo(request, onPhase = () => undefined) {
     collection: "contacts",
     maxPages: MAX_CONTACT_PAGES,
     itemKey: (contact) => positiveInteger(contact?.id),
-    onItem: (contact) => ingestContact(state, contact),
+    onItem: async (contact) => {
+      ingestContact(state, contact);
+      await observers.onContact(contact);
+    },
   });
 
   for (const [pipelineLabel, pipelineId] of Object.entries(PIPELINES)) {
@@ -1003,7 +1034,10 @@ async function scanLiveAmo(request, onPhase = () => undefined) {
       collection: "leads",
       maxPages: MAX_PIPELINE_PAGES,
       itemKey: (lead) => positiveInteger(lead?.id),
-      onItem: (lead) => ingestLead(state, pipelineLabel, lead),
+      onItem: async (lead) => {
+        ingestLead(state, pipelineLabel, lead);
+        await observers.onLead(pipelineLabel, lead);
+      },
     });
   }
 
@@ -1025,23 +1059,34 @@ async function main() {
 
 module.exports = {
   AMO_ORIGIN,
+  CLIENT_PIPELINE_LABELS,
+  CONTACT_FIELDS,
   EXPECTED_ACCOUNT_ID,
+  LEAD_FIELDS,
+  MEETING_HELD_OR_LATER_STATUS,
   PIPELINES,
+  SALES_DEAL_OR_LATER_STATUS,
   buildDealReport,
   canonicalAmoUrl,
   classifyFailure,
   createGetOnlyRequester,
   createState,
+  customValues,
+  embeddedContactRelations,
   fieldCoverage,
   finalizeReport,
   hasStrictBrokerSource,
   ingestContact,
   ingestLead,
+  isTruthyCheckbox,
   normalizePhone,
+  normalizedDateKey,
   paginate,
   parseMoneyToCents,
   parseReferenceIds,
+  positiveInteger,
   scanLiveAmo,
+  validateScanObservers,
   validDateValue,
 };
 
