@@ -47,6 +47,16 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     ["FIXATION_AGENCY_MISSING", "fixation_agency_missing"],
     ["BROKER_AMO_CONTACT_MISSING", "broker_amo_contact_missing"],
   ];
+  const observedLegacyErrorClasses = [
+    "network_failure",
+    "fixation_agency_missing",
+    "broker_amo_contact_missing",
+  ];
+  const rawErrorByClass: Record<string, string> = {
+    network_failure: "fetch failed: ECONNRESET",
+    fixation_agency_missing: "FIXATION_AGENCY_MISSING",
+    broker_amo_contact_missing: "BROKER_AMO_CONTACT_MISSING",
+  };
 
   const queueRow = (overrides: Record<string, unknown> = {}) => ({
     id: "3fc34e89-8a22-4630-81d4-b3a87653d2cb",
@@ -85,18 +95,29 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     }),
   ];
 
-  const observedLegacyErrorCohort = () =>
-    fixedCohort(queueRow({ amoSyncError: "fetch failed: ECONNRESET" })).map(
-      (row, index) => ({
-        ...row,
-        amoSyncError:
-          index === 0
-            ? "fetch failed: ECONNRESET"
-            : index === repair.KNOWN_QUEUE_ROWS - 1
-              ? "FIXATION_AGENCY_MISSING"
-              : "BROKER_AMO_CONTACT_MISSING",
-      }),
+  const observedLegacyErrorCohort = (primaryErrorClass = "network_failure") => {
+    const remainingCounts: Record<string, number> = {
+      broker_amo_contact_missing: 10,
+      network_failure: 1,
+      fixation_agency_missing: 1,
+    };
+    remainingCounts[primaryErrorClass] -= 1;
+    const remainingErrors = observedLegacyErrorClasses.flatMap((errorClass) =>
+      Array.from(
+        { length: remainingCounts[errorClass] },
+        () => rawErrorByClass[errorClass],
+      ),
     );
+    return fixedCohort(
+      queueRow({ amoSyncError: rawErrorByClass[primaryErrorClass] }),
+    ).map((row, index) => ({
+      ...row,
+      amoSyncError:
+        index === 0
+          ? rawErrorByClass[primaryErrorClass]
+          : remainingErrors[index - 1],
+    }));
+  };
 
   const leadEnvelope = (
     id: number,
@@ -178,7 +199,6 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
   const validCompletionLedger = (gate: any, errorClass: string) => {
     const clientId = queueRow().id;
     const common = {
-      schemaVersion: 1,
       source: repair.APPLY_AUDIT_SOURCE,
       sourceSha: gate.sourceSha,
       reviewedRunId: gate.reviewedRunId,
@@ -187,6 +207,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       applySha256: gate.applySha256,
     };
     const rowPayload = {
+      schemaVersion: 2,
       ...common,
       clientId,
       amoLeadId: "32310587",
@@ -200,6 +221,13 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       requeued: false,
       amoMutation: false,
     };
+    const signedRowPayload = {
+      ...rowPayload,
+      rowAuditAttestation: repair.rowAuditAttestation(
+        rowPayload,
+        attestationKey,
+      ),
+    };
     return {
       completion: [
         {
@@ -208,6 +236,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
             gate.expectedCohortDigest,
           ),
           payload: {
+            schemaVersion: 1,
             ...common,
             queueRows: 12,
             linked: 1,
@@ -218,7 +247,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
           },
         },
       ],
-      rows: [{ entityId: clientId, payload: rowPayload }],
+      rows: [{ entityId: clientId, payload: signedRowPayload }],
     };
   };
 
@@ -592,13 +621,16 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       gate,
       "create_reconciliation_required",
     );
-    expect(repair.validateCompletionLedger(ledger, gate)).toMatchObject({
+    expect(
+      repair.validateCompletionLedger(ledger, gate, attestationKey),
+    ).toMatchObject({
       links: [{ clientId, amoLeadId: 32310587 }],
     });
     expect(() =>
       repair.validateCompletionLedger(
         { ...ledger, rows: [...ledger.rows, ...ledger.rows] },
         gate,
+        attestationKey,
       ),
     ).toThrow("amo fixation lead reconciliation failed");
     expect(() =>
@@ -616,6 +648,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
           ],
         },
         gate,
+        attestationKey,
       ),
     ).toThrow("amo fixation lead reconciliation failed");
     expect(() =>
@@ -633,6 +666,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
           ],
         },
         gate,
+        attestationKey,
       ),
     ).toThrow("amo fixation lead reconciliation failed");
   });
@@ -643,9 +677,71 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       const { report } = strongReport(queueRow({ amoSyncError }));
       const gate = repair.readExecutionGate(gateEnvironment(report));
       const ledger = validCompletionLedger(gate, errorClass);
-      expect(repair.validateCompletionLedger(ledger, gate)).toMatchObject({
+      expect(
+        repair.validateCompletionLedger(ledger, gate, attestationKey),
+      ).toMatchObject({
         links: [{ clientId: queueRow().id, amoLeadId: 32310587 }],
       });
+    },
+  );
+
+  it.each(observedLegacyErrorClasses)(
+    "authenticates the exact source snapshot and rejects every 10/1/1 class swap from %s",
+    (sourceErrorClass) => {
+      const rows = observedLegacyErrorCohort(sourceErrorClass);
+      const report = inspector.buildReport(
+        rows,
+        evidence([leadEnvelope(32310587)]),
+        metadata,
+        attestationKey,
+        aliasKey,
+      );
+      const gate = repair.readExecutionGate(gateEnvironment(report));
+      const ledger = validCompletionLedger(gate, sourceErrorClass);
+      expect(
+        repair.validateCompletionLedger(ledger, gate, attestationKey),
+      ).toMatchObject({
+        links: [{ clientId: queueRow().id, amoLeadId: 32310587 }],
+      });
+
+      for (const swappedErrorClass of observedLegacyErrorClasses.filter(
+        (errorClass) => errorClass !== sourceErrorClass,
+      )) {
+        const swappedLedger = {
+          ...ledger,
+          rows: [
+            {
+              ...ledger.rows[0],
+              payload: {
+                ...ledger.rows[0].payload,
+                errorClass: swappedErrorClass,
+              },
+            },
+          ],
+        };
+        expect(() =>
+          repair.validateCompletionLedger(swappedLedger, gate, attestationKey),
+        ).toThrow("amo fixation lead reconciliation failed");
+      }
+
+      const sourceHashSwap = {
+        ...ledger,
+        rows: [
+          {
+            ...ledger.rows[0],
+            payload: {
+              ...ledger.rows[0].payload,
+              sourceRowHash: "f".repeat(64),
+            },
+          },
+        ],
+      };
+      expect(() =>
+        repair.validateCompletionLedger(sourceHashSwap, gate, attestationKey),
+      ).toThrow("amo fixation lead reconciliation failed");
+      expect(() =>
+        repair.validateCompletionLedger(ledger, gate, Buffer.alloc(32, 0x77)),
+      ).toThrow("amo fixation lead reconciliation failed");
     },
   );
 
@@ -662,6 +758,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
         repair.validateCompletionLedger(
           validCompletionLedger(gate, errorClass),
           gate,
+          attestationKey,
         ),
       ).toThrow("amo fixation lead reconciliation failed");
     }
