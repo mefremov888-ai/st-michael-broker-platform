@@ -359,6 +359,84 @@ describe("loyalty production workflow safety", () => {
     expect(nginxExposure).toBeGreaterThan(readinessDecision);
   });
 
+  it("pins the running application images before mutable build tags are replaced", () => {
+    const provisionalCleanup = deployScript.indexOf(
+      'if [ "${ROLLBACK_CAPTURE_COMMITTED:-0}" != "1" ]; then',
+    );
+    const captureRunningImages = deployScript.indexOf(
+      "PREVIOUS_API_IMAGE=$(docker inspect",
+    );
+    const pinApiImage = deployScript.indexOf(
+      'docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"',
+    );
+    const pinWebImage = deployScript.indexOf(
+      'docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"',
+    );
+    const ownApiImageTag = deployScript.indexOf("ROLLBACK_API_TAG_CREATED=1");
+    const ownWebImageTag = deployScript.indexOf("ROLLBACK_WEB_TAG_CREATED=1");
+    const firstImageBuild = deployScript.indexOf("build api");
+    const secondImageBuild = deployScript.indexOf("build web");
+    const stageRollbackRecord = deployScript.indexOf(
+      'ROLLBACK_RECORD_STAGING=$(mktemp "$ROLLBACK_DIR/.release-',
+    );
+    const commitRollbackCapture = deployScript.indexOf(
+      "ROLLBACK_CAPTURE_COMMITTED=1",
+    );
+    const moveRollbackRecord = deployScript.indexOf(
+      'mv -- "$ROLLBACK_RECORD_STAGING" "$ROLLBACK_RECORD"',
+    );
+    const ownRollbackRecord = deployScript.indexOf("ROLLBACK_RECORD_CREATED=1");
+    const moveRollbackOverride = deployScript.indexOf(
+      'mv -- "$ROLLBACK_OVERRIDE_STAGING" "$ROLLBACK_OVERRIDE"',
+    );
+    const ownRollbackOverride = deployScript.indexOf(
+      "ROLLBACK_OVERRIDE_CREATED=1",
+    );
+
+    expect(provisionalCleanup).toBeGreaterThan(-1);
+    expect(captureRunningImages).toBeGreaterThan(provisionalCleanup);
+    expect(pinApiImage).toBeGreaterThan(captureRunningImages);
+    expect(pinWebImage).toBeGreaterThan(captureRunningImages);
+    expect(pinApiImage).toBeLessThan(firstImageBuild);
+    expect(pinWebImage).toBeLessThan(firstImageBuild);
+    expect(ownApiImageTag).toBeGreaterThan(pinApiImage);
+    expect(ownApiImageTag).toBeLessThan(firstImageBuild);
+    expect(ownWebImageTag).toBeGreaterThan(pinWebImage);
+    expect(ownWebImageTag).toBeLessThan(firstImageBuild);
+    expect(secondImageBuild).toBeGreaterThan(firstImageBuild);
+    expect(stageRollbackRecord).toBeGreaterThan(secondImageBuild);
+    expect(moveRollbackRecord).toBeGreaterThan(stageRollbackRecord);
+    expect(ownRollbackRecord).toBeGreaterThan(moveRollbackRecord);
+    expect(moveRollbackOverride).toBeGreaterThan(ownRollbackRecord);
+    expect(ownRollbackOverride).toBeGreaterThan(moveRollbackOverride);
+    expect(commitRollbackCapture).toBeGreaterThan(ownRollbackOverride);
+    expect(commitRollbackCapture).toBeGreaterThan(stageRollbackRecord);
+    expect(deployScript).toContain(
+      'docker image rm "$ROLLBACK_API_TAG" >/dev/null 2>&1 || true',
+    );
+    expect(deployScript).toContain(
+      'docker image rm "$ROLLBACK_WEB_TAG" >/dev/null 2>&1 || true',
+    );
+    expect(deployScript).toContain(
+      'mv -- "$ROLLBACK_RECORD_STAGING" "$ROLLBACK_RECORD"',
+    );
+    expect(deployScript).toContain(
+      'mv -- "$ROLLBACK_OVERRIDE_STAGING" "$ROLLBACK_OVERRIDE"',
+    );
+    expect(deployScript).toContain(
+      'if [ "${ROLLBACK_API_TAG_CREATED:-0}" = "1" ]; then',
+    );
+    expect(deployScript).toContain(
+      'if [ "${ROLLBACK_WEB_TAG_CREATED:-0}" = "1" ]; then',
+    );
+    expect(deployScript).toContain(
+      'if [ "${ROLLBACK_RECORD_CREATED:-0}" = "1" ]; then',
+    );
+    expect(deployScript).toContain(
+      'if [ "${ROLLBACK_OVERRIDE_CREATED:-0}" = "1" ]; then',
+    );
+  });
+
   it("keeps the production API typecheck inside its one-GiB heap budget", () => {
     const narrowSheetsImport = "googleapis/build/src/apis/sheets";
 
@@ -397,7 +475,7 @@ describe("loyalty production workflow safety", () => {
     const apiBuild = deployScript.indexOf("build api");
     const webBuild = deployScript.indexOf("build web");
     const rollbackMetadata = deployScript.indexOf(
-      "ROLLBACK_DIR=/var/backups/stmichael/releases",
+      'ROLLBACK_RECORD_STAGING=$(mktemp "$ROLLBACK_DIR/.release-',
     );
     const migrateDeploy = deployScript.indexOf("prisma migrate deploy");
     const rollout = deployScript.indexOf(
