@@ -1,7 +1,7 @@
 name: Retire one obsolete production rollback pair
 
 # One-purpose disk recovery for the loyalty release. The 20260821-121353
-# rollback pair has been superseded by two complete newer rollback pairs and
+# rollback pair has been superseded by five complete newer rollback pairs and
 # is not referenced by any container. This workflow removes only those two
 # exact Docker tags after an inspect-only run records their full image IDs and
 # metadata hashes. It never prunes, changes a database or volume, removes
@@ -30,12 +30,8 @@ on:
         description: Full sha256 web image ID printed by the latest inspect run
         required: false
         type: string
-      expected_target_api_repo_digest:
-        description: API repo digest or literal none printed by the latest inspect run
-        required: false
-        type: string
-      expected_target_web_repo_digest:
-        description: Web repo digest or literal none printed by the latest inspect run
+      expected_target_repo_digests_manifest:
+        description: API|web repo digests (or none) printed by inspect
         required: false
         type: string
       expected_release_record_sha256:
@@ -46,8 +42,16 @@ on:
         description: Rollback-override SHA-256 printed by the latest inspect run
         required: false
         type: string
-      expected_rollback_inventory_sha256:
-        description: Full rollback inventory SHA-256 printed by the latest inspect run
+      expected_full_rollback_inventory_sha256:
+        description: Full exact rollback inventory SHA-256 from inspect
+        required: false
+        type: string
+      expected_non_target_image_inventory_sha256:
+        description: Full non-target Docker image inventory hash from inspect
+        required: false
+        type: string
+      expected_runtime_evidence_manifest:
+        description: Fresh inspect runtime manifest printed as one exact value
         required: false
         type: string
 
@@ -75,11 +79,12 @@ jobs:
           CONFIRM_RETIREMENT: ${{ inputs.confirm_retirement }}
           EXPECTED_TARGET_API_IMAGE_ID: ${{ inputs.expected_target_api_image_id }}
           EXPECTED_TARGET_WEB_IMAGE_ID: ${{ inputs.expected_target_web_image_id }}
-          EXPECTED_TARGET_API_REPO_DIGEST: ${{ inputs.expected_target_api_repo_digest }}
-          EXPECTED_TARGET_WEB_REPO_DIGEST: ${{ inputs.expected_target_web_repo_digest }}
+          EXPECTED_TARGET_REPO_DIGESTS_MANIFEST: ${{ inputs.expected_target_repo_digests_manifest }}
           EXPECTED_RELEASE_RECORD_SHA256: ${{ inputs.expected_release_record_sha256 }}
           EXPECTED_ROLLBACK_OVERRIDE_SHA256: ${{ inputs.expected_rollback_override_sha256 }}
-          EXPECTED_ROLLBACK_INVENTORY_SHA256: ${{ inputs.expected_rollback_inventory_sha256 }}
+          EXPECTED_FULL_ROLLBACK_INVENTORY_SHA256: ${{ inputs.expected_full_rollback_inventory_sha256 }}
+          EXPECTED_NON_TARGET_IMAGE_INVENTORY_SHA256: ${{ inputs.expected_non_target_image_inventory_sha256 }}
+          EXPECTED_RUNTIME_EVIDENCE_MANIFEST: ${{ inputs.expected_runtime_evidence_manifest }}
           CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
           SSH_HOST: ${{ secrets.DEPLOY_HOST }}
           SSH_USER: ${{ secrets.DEPLOY_USER }}
@@ -99,22 +104,24 @@ jobs:
               test "$CONFIRM_RETIREMENT" = "false" || { echo "Inspect mode must not carry retirement confirmation"; exit 1; }
               test -z "$EXPECTED_TARGET_API_IMAGE_ID" \
                 -a -z "$EXPECTED_TARGET_WEB_IMAGE_ID" \
-                -a -z "$EXPECTED_TARGET_API_REPO_DIGEST" \
-                -a -z "$EXPECTED_TARGET_WEB_REPO_DIGEST" \
+                -a -z "$EXPECTED_TARGET_REPO_DIGESTS_MANIFEST" \
                 -a -z "$EXPECTED_RELEASE_RECORD_SHA256" \
                 -a -z "$EXPECTED_ROLLBACK_OVERRIDE_SHA256" \
-                -a -z "$EXPECTED_ROLLBACK_INVENTORY_SHA256" \
+                -a -z "$EXPECTED_FULL_ROLLBACK_INVENTORY_SHA256" \
+                -a -z "$EXPECTED_NON_TARGET_IMAGE_INVENTORY_SHA256" \
+                -a -z "$EXPECTED_RUNTIME_EVIDENCE_MANIFEST" \
                 || { echo "Inspect mode must not carry unverified retirement evidence"; exit 1; }
               ;;
             retire)
               test "$CONFIRM_RETIREMENT" = "true" || { echo "Explicit rollback retirement confirmation is required"; exit 1; }
               [[ "$EXPECTED_TARGET_API_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Expected API image ID is missing or invalid"; exit 1; }
               [[ "$EXPECTED_TARGET_WEB_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Expected web image ID is missing or invalid"; exit 1; }
-              [[ "$EXPECTED_TARGET_API_REPO_DIGEST" = "none" || "$EXPECTED_TARGET_API_REPO_DIGEST" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected API repo digest is missing or invalid"; exit 1; }
-              [[ "$EXPECTED_TARGET_WEB_REPO_DIGEST" = "none" || "$EXPECTED_TARGET_WEB_REPO_DIGEST" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected web repo digest is missing or invalid"; exit 1; }
+              [[ "$EXPECTED_TARGET_REPO_DIGESTS_MANIFEST" =~ ^(none|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64})\|(none|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64})$ ]] || { echo "Expected target repo-digests manifest is missing or invalid"; exit 1; }
               [[ "$EXPECTED_RELEASE_RECORD_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected release-record SHA-256 is missing or invalid"; exit 1; }
               [[ "$EXPECTED_ROLLBACK_OVERRIDE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected rollback-override SHA-256 is missing or invalid"; exit 1; }
-              [[ "$EXPECTED_ROLLBACK_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected rollback inventory SHA-256 is missing or invalid"; exit 1; }
+              [[ "$EXPECTED_FULL_ROLLBACK_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected full rollback inventory SHA-256 is missing or invalid"; exit 1; }
+              [[ "$EXPECTED_NON_TARGET_IMAGE_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected non-target image inventory SHA-256 is missing or invalid"; exit 1; }
+              [[ "$EXPECTED_RUNTIME_EVIDENCE_MANIFEST" =~ ^[0-9]{10}:[0-9]+(:[0-9a-f]{64}){9}$ ]] || { echo "Expected fresh runtime evidence manifest is missing or invalid"; exit 1; }
               ;;
             *) echo "Unsupported rollback retirement operation"; exit 1;;
           esac
@@ -142,7 +149,7 @@ jobs:
           test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
 
           ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
-            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_TARGET_API_REPO_DIGEST' '$EXPECTED_TARGET_WEB_REPO_DIGEST' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_ROLLBACK_INVENTORY_SHA256' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'" <<'REMOTE'
+            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH' '$EXPECTED_RETIREMENT_SHA' '$OPERATION' '$CONFIRM_RETIREMENT' '$EXPECTED_TARGET_API_IMAGE_ID' '$EXPECTED_TARGET_WEB_IMAGE_ID' '$EXPECTED_TARGET_REPO_DIGESTS_MANIFEST' '$EXPECTED_RELEASE_RECORD_SHA256' '$EXPECTED_ROLLBACK_OVERRIDE_SHA256' '$EXPECTED_FULL_ROLLBACK_INVENTORY_SHA256' '$EXPECTED_NON_TARGET_IMAGE_INVENTORY_SHA256' '$EXPECTED_RUNTIME_EVIDENCE_MANIFEST' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'" <<'REMOTE'
           set -euo pipefail
           export LC_ALL=C
           MIN_AVAILABLE_BYTES=8589934592
@@ -153,10 +160,10 @@ jobs:
           TARGET_API_PREFIX=dcac4b4619a4
           TARGET_WEB_PREFIX=82594645efc6
           TARGET_COMMIT=c690fa9b44b5c7d291247bd88343af94ba241dd0
-          NEWER_TIMESTAMPS=(20260821-151042 20260821-221026)
-          NEWER_API_PREFIXES=(ee0a02f547ca 3ee482ad303a)
-          NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e)
-          NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8)
+          NEWER_TIMESTAMPS=(20260821-151042 20260821-221026 20260825-145230 20260826-101612 20260826-142213)
+          NEWER_API_PREFIXES=(ee0a02f547ca 3ee482ad303a 24af61e598b6 3cd30e4b9e03 8997f496e2d2)
+          NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e 4e1262c7e783 dc06e1dca818 3ed296479876)
+          NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015)
           RELEASE_DIR=/var/backups/stmichael/releases
           RELEASE_RECORD="$RELEASE_DIR/release-$RELEASE_TIMESTAMP.txt"
           ROLLBACK_OVERRIDE="$RELEASE_DIR/rollback-$RELEASE_TIMESTAMP.yml"
@@ -169,17 +176,23 @@ jobs:
           confirm_retirement=$4
           expected_target_api_image_id=$5
           expected_target_web_image_id=$6
-          expected_target_api_repo_digest=$7
-          expected_target_web_repo_digest=$8
-          expected_release_record_sha256=$9
-          expected_rollback_override_sha256=${10}
-          expected_rollback_inventory_sha256=${11}
-          production_pg_system_identifier=${12}
-          production_min_broker_rows=${13}
+          expected_target_repo_digests_manifest=$7
+          expected_release_record_sha256=$8
+          expected_rollback_override_sha256=$9
+          expected_full_rollback_inventory_sha256=${10}
+          expected_non_target_image_inventory_sha256=${11}
+          expected_runtime_evidence_manifest=${12}
+          production_pg_system_identifier=${13}
+          production_min_broker_rows=${14}
 
-          for required_tool in awk df docker flock git grep id readlink sha256sum sort stat tr wc; do
+          for required_tool in awk curl date df docker flock git grep id readlink sha256sum sort stat systemctl tr wc xargs; do
             command -v "$required_tool" >/dev/null || { echo "Required retirement tool is missing"; exit 1; }
           done
+          test -z "${DOCKER_HOST:-}" -a -z "${DOCKER_CONTEXT:-}" || { echo "Inherited Docker host/context override is forbidden"; exit 1; }
+          test -S /var/run/docker.sock || { echo "Default Docker Unix socket is missing"; exit 1; }
+          export DOCKER_HOST=unix:///var/run/docker.sock
+          unset DOCKER_CONTEXT
+          test "$(docker context show)" = "default" || { echo "Docker client is not using the default context"; exit 1; }
           [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
           case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
           deploy_root=$(readlink -f -- "$deploy_path")
@@ -188,10 +201,22 @@ jobs:
           case "$operation" in inspect|retire) ;; *) echo "Unsupported rollback retirement operation on the production host"; exit 1;; esac
           case "$confirm_retirement" in true|false) ;; *) echo "Retirement confirmation is invalid on the production host"; exit 1;; esac
           if [ "$operation" = "inspect" ]; then
-            test -z "$expected_target_api_repo_digest" -a -z "$expected_target_web_repo_digest" || { echo "Inspect mode must not carry repo-digest evidence on the production host"; exit 1; }
+            test -z "$expected_target_api_image_id" \
+              -a -z "$expected_target_web_image_id" \
+              -a -z "$expected_target_repo_digests_manifest" \
+              -a -z "$expected_release_record_sha256" \
+              -a -z "$expected_rollback_override_sha256" \
+              -a -z "$expected_full_rollback_inventory_sha256" \
+              -a -z "$expected_non_target_image_inventory_sha256" \
+              -a -z "$expected_runtime_evidence_manifest" \
+              || { echo "Inspect mode must not carry retirement evidence on the production host"; exit 1; }
+            expected_target_api_repo_digest=
+            expected_target_web_repo_digest=
           else
-            [[ "$expected_target_api_repo_digest" = "none" || "$expected_target_api_repo_digest" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected API repo digest is invalid on the production host"; exit 1; }
-            [[ "$expected_target_web_repo_digest" = "none" || "$expected_target_web_repo_digest" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]] || { echo "Expected web repo digest is invalid on the production host"; exit 1; }
+            [[ "$expected_target_repo_digests_manifest" =~ ^(none|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64})\|(none|[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64})$ ]] || { echo "Expected target repo-digests manifest is invalid on the production host"; exit 1; }
+            expected_target_api_repo_digest=${expected_target_repo_digests_manifest%%|*}
+            expected_target_web_repo_digest=${expected_target_repo_digests_manifest#*|}
+            [[ "$expected_runtime_evidence_manifest" =~ ^[0-9]{10}:[0-9]+(:[0-9a-f]{64}){9}$ ]] || { echo "Expected runtime evidence manifest is invalid on the production host"; exit 1; }
           fi
           [[ "$production_pg_system_identifier" =~ ^[0-9]+$ ]] || { echo "Production database identity is invalid on the production host"; exit 1; }
           [[ "$production_min_broker_rows" =~ ^[1-9][0-9]*$ ]] || { echo "Production broker-row floor is invalid on the production host"; exit 1; }
@@ -264,14 +289,152 @@ jobs:
             awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2); found=1 } END { if (!found) exit 1 }' "$record"
           }
           rollback_tag_inventory() {
-            docker image ls --format '{{.Repository}}:{{.Tag}}' \
-              | awk '/^st-michael-rollback-(api|web):[0-9]{8}-[0-9]{6}$/ { print }' \
-              | sort
+            docker image ls --format '{{.Repository}}|{{.Tag}}' \
+              | awk -F'|' '$1 == "st-michael-rollback-api" || $1 == "st-michael-rollback-web" { print $1 ":" $2 }' \
+              | sort -u
+          }
+          full_non_target_image_inventory() {
+            local target_api_id=$1
+            local target_web_id=$2
+            docker image ls --all --no-trunc --digests --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.Digest}}' \
+              | awk -F'|' -v target_api_tag="$TARGET_API_TAG" -v target_web_tag="$TARGET_WEB_TAG" \
+                  -v target_api_id="$target_api_id" -v target_web_id="$target_web_id" \
+                  '($1 ":" $2) != target_api_tag && ($1 ":" $2) != target_web_tag && $3 != target_api_id && $3 != target_web_id { print }' \
+              | sort -u
+          }
+          assert_non_target_image_inventory_shape() {
+            local inventory=$1
+            local repository
+            local tag
+            local image_id
+            local digest
+            local extra
+            while IFS='|' read -r repository tag image_id digest extra; do
+              test -n "$repository" || continue
+              test -n "$tag" || { echo "Non-target image tag field is empty"; exit 1; }
+              [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Non-target image ID is invalid"; exit 1; }
+              [[ "$digest" = "<none>" || "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Non-target image digest is invalid"; exit 1; }
+              test -z "$extra" || { echo "Non-target image inventory field count is invalid"; exit 1; }
+            done <<< "$inventory"
           }
           tag_is_present() {
             local inventory=$1
             local tag=$2
             printf '%s\n' "$inventory" | grep -Fqx -- "$tag"
+          }
+          container_inventory() {
+            local scope=$1
+            local container_ids
+            local container_id
+            case "$scope" in
+              all) container_ids=$(docker ps -aq --no-trunc | sort) ;;
+              running) container_ids=$(docker ps -q --no-trunc | sort) ;;
+              *) echo "Unsupported container inventory scope"; exit 1 ;;
+            esac
+            while IFS= read -r container_id; do
+              test -n "$container_id" || continue
+              docker inspect --format '{{.Id}}|{{.Image}}|{{.Name}}|{{.State.Status}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.State.OOMKilled}}|{{.State.ExitCode}}' "$container_id"
+            done <<< "$container_ids" | sort
+          }
+          volume_inventory() {
+            local volume_names
+            local volume_name
+            volume_names=$(docker volume ls -q | sort)
+            while IFS= read -r volume_name; do
+              test -n "$volume_name" || continue
+              docker volume inspect --format '{{json .}}' "$volume_name"
+            done <<< "$volume_names" | sort
+          }
+          network_inventory() {
+            local network_ids
+            local network_id
+            network_ids=$(docker network ls -q --no-trunc | sort)
+            while IFS= read -r network_id; do
+              test -n "$network_id" || continue
+              docker network inspect --format '{{json .}}' "$network_id"
+            done <<< "$network_ids" | sort
+          }
+          deploy_worktree_sha256() {
+            local head_sha
+            local status_sha256
+            local tracked_diff_sha256
+            local untracked_sha256
+            local payload
+            test "$(git -C "$deploy_root" rev-parse --is-inside-work-tree)" = "true" || { echo "Deploy path is not a Git worktree"; exit 1; }
+            head_sha=$(GIT_OPTIONAL_LOCKS=0 git -C "$deploy_root" rev-parse HEAD)
+            [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Deploy worktree HEAD is invalid"; exit 1; }
+            status_sha256=$(GIT_OPTIONAL_LOCKS=0 git -C "$deploy_root" status --porcelain=v1 -z --untracked-files=all | sha256sum | awk '{print $1}')
+            tracked_diff_sha256=$(GIT_OPTIONAL_LOCKS=0 git -C "$deploy_root" diff --no-ext-diff --binary HEAD -- | sha256sum | awk '{print $1}')
+            untracked_sha256=$(
+              cd "$deploy_root"
+              GIT_OPTIONAL_LOCKS=0 git ls-files --others --exclude-standard -z \
+                | sort -z \
+                | xargs -0 -r sha256sum --zero -- \
+                | sha256sum \
+                | awk '{print $1}'
+            )
+            payload=$(printf 'head=%s\nstatus=%s\ntracked_diff=%s\nuntracked=%s\n' \
+              "$head_sha" "$status_sha256" "$tracked_diff_sha256" "$untracked_sha256")
+            printf '%s' "$payload" | sha256sum | awk '{print $1}'
+          }
+          assert_production_health() {
+            local container_name
+            local health_status
+            for container_name in st-michael-postgres st-michael-redis; do
+              health_status=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_name")
+              test "$health_status" = "healthy" || { echo "A stateful production container is not healthy"; exit 1; }
+            done
+            for container_name in st-michael-api st-michael-web st-michael-nginx; do
+              test "$(docker inspect --format '{{.State.Running}}' "$container_name")" = "true" || { echo "A production application container is not running"; exit 1; }
+            done
+            curl --disable --noproxy '*' --request GET --fail --silent --show-error --output /dev/null --max-time 10 \
+              --resolve broker.stmichael.ru:443:127.0.0.1 https://broker.stmichael.ru/api/health
+            curl --disable --noproxy '*' --request GET --fail --silent --show-error --output /dev/null --max-time 10 \
+              --resolve broker.stmichael.ru:443:127.0.0.1 https://broker.stmichael.ru/api/health/ready
+          }
+          docker_daemon_snapshot() {
+            local main_pid
+            local active_monotonic_usec
+            local system_uptime_seconds
+            local daemon_uptime_seconds
+            local daemon_payload
+            local daemon_sha256
+            main_pid=$(systemctl show docker.service --property=MainPID --value)
+            active_monotonic_usec=$(systemctl show docker.service --property=ActiveEnterTimestampMonotonic --value)
+            system_uptime_seconds=$(awk 'NR == 1 { print int($1) }' /proc/uptime)
+            [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || { echo "Docker daemon MainPID is invalid"; exit 1; }
+            [[ "$active_monotonic_usec" =~ ^[1-9][0-9]*$ ]] || { echo "Docker daemon active timestamp is invalid"; exit 1; }
+            [[ "$system_uptime_seconds" =~ ^[1-9][0-9]*$ ]] || { echo "System uptime is invalid"; exit 1; }
+            daemon_uptime_seconds=$((system_uptime_seconds - active_monotonic_usec / 1000000))
+            test "$daemon_uptime_seconds" -ge 900 || { echo "Docker daemon has not been stable for fifteen minutes"; exit 1; }
+            daemon_payload=$(printf 'server_id=%s\nserver_version=%s\ndriver=%s\ndocker_root=%s\nmain_pid=%s\nactive_monotonic_usec=%s\n' \
+              "$(docker info --format '{{.ID}}')" "$(docker version --format '{{.Server.Version}}')" \
+              "$(docker info --format '{{.Driver}}')" "$docker_root" "$main_pid" "$active_monotonic_usec")
+            daemon_sha256=$(printf '%s' "$daemon_payload" | sha256sum | awk '{print $1}')
+            [[ "$daemon_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Docker daemon identity hash is invalid"; exit 1; }
+            printf '%s:%s\n' "$daemon_uptime_seconds" "$daemon_sha256"
+          }
+          runtime_event_audit() {
+            local event_window_end
+            local event_window_start
+            local event_payload
+            local event_count
+            local risky_event_count
+            local action_type_payload
+            local action_type_sha256
+            local event_sha256
+            event_window_end=$(date -u +%s)
+            event_window_start=$((event_window_end - 900))
+            event_payload=$(docker events --since "$event_window_start" --until "$event_window_end" --format '{{.Type}}|{{.Action}}|{{.Actor.ID}}|{{index .Actor.Attributes "name"}}' | sort)
+            event_count=$(printf '%s\n' "$event_payload" | awk 'NF { count++ } END { print count + 0 }')
+            risky_event_count=$(printf '%s\n' "$event_payload" | awk -F'|' \
+              '$1 == "container" && (($2 ~ /^(restart|oom)$/) || ($2 ~ /^(create|destroy|start|stop|die|kill)$/ && $4 ~ /^st-michael-(postgres|redis|api|web|nginx|telegram)$/)) { count++ } END { print count + 0 }')
+            action_type_payload=$(printf '%s\n' "$event_payload" | awk -F'|' 'NF { print $1 "|" $2 }' | sort)
+            action_type_sha256=$(printf '%s' "$action_type_payload" | sha256sum | awk '{print $1}')
+            event_sha256=$(printf '%s' "$event_payload" | sha256sum | awk '{print $1}')
+            [[ "$action_type_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Runtime action/type audit hash is invalid"; exit 1; }
+            [[ "$event_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Runtime event audit hash is invalid"; exit 1; }
+            printf '%s:%s:%s:%s:%s:%s\n' "$event_window_start" "$event_window_end" "$event_count" "$risky_event_count" "$action_type_sha256" "$event_sha256"
           }
           assert_private_regular_file() {
             local path=$1
@@ -363,29 +526,32 @@ jobs:
 
           rollback_tags_before=$(rollback_tag_inventory)
           rollback_tag_count=$(printf '%s\n' "$rollback_tags_before" | awk 'NF { count++ } END { print count + 0 }')
-          case "$rollback_tag_count" in 4|5|6) ;; *) echo "Rollback tag inventory is outside the supported complete or partial state"; exit 1;; esac
-          while IFS= read -r rollback_tag; do
-            test -n "$rollback_tag" || continue
-            case "$rollback_tag" in
-              "$TARGET_API_TAG"|"$TARGET_WEB_TAG"|\
-              st-michael-rollback-api:20260821-151042|st-michael-rollback-web:20260821-151042|\
-              st-michael-rollback-api:20260821-221026|st-michael-rollback-web:20260821-221026) ;;
-              *) echo "Unexpected production rollback tag exists"; exit 1;;
-            esac
-          done <<< "$rollback_tags_before"
-
-          for newer_timestamp in "${NEWER_TIMESTAMPS[@]}"; do
-            tag_is_present "$rollback_tags_before" "st-michael-rollback-api:$newer_timestamp" || { echo "A retained API rollback tag is missing"; exit 1; }
-            tag_is_present "$rollback_tags_before" "st-michael-rollback-web:$newer_timestamp" || { echo "A retained web rollback tag is missing"; exit 1; }
-          done
-
+          expected_rollback_tags=$(
+            printf '%s\n' "$TARGET_API_TAG" "$TARGET_WEB_TAG"
+            for newer_timestamp in "${NEWER_TIMESTAMPS[@]}"; do
+              printf 'st-michael-rollback-api:%s\nst-michael-rollback-web:%s\n' "$newer_timestamp" "$newer_timestamp"
+            done
+          )
+          expected_rollback_tags=$(printf '%s\n' "$expected_rollback_tags" | sort)
+          expected_retained_tags=$(printf '%s\n' "$expected_rollback_tags" \
+            | awk -v target_api="$TARGET_API_TAG" -v target_web="$TARGET_WEB_TAG" '$0 != target_api && $0 != target_web { print }')
           target_api_present=false
           target_web_present=false
           if tag_is_present "$rollback_tags_before" "$TARGET_API_TAG"; then target_api_present=true; fi
           if tag_is_present "$rollback_tags_before" "$TARGET_WEB_TAG"; then target_web_present=true; fi
+          actual_retained_tags=$(printf '%s\n' "$rollback_tags_before" \
+            | awk -v target_api="$TARGET_API_TAG" -v target_web="$TARGET_WEB_TAG" '$0 != target_api && $0 != target_web { print }')
+          test "$actual_retained_tags" = "$expected_retained_tags" || { echo "Retained rollback tags differ from the exact ten-tag allowlist"; exit 1; }
+          case "$rollback_tag_count" in 10|11|12) ;; *) echo "Rollback inventory requires the exact retained set plus zero, one, or two target tags"; exit 1;; esac
+          expected_current_tags=$(
+            printf '%s\n' "$expected_retained_tags"
+            if [ "$target_api_present" = "true" ]; then printf '%s\n' "$TARGET_API_TAG"; fi
+            if [ "$target_web_present" = "true" ]; then printf '%s\n' "$TARGET_WEB_TAG"; fi
+          )
+          expected_current_tags=$(printf '%s\n' "$expected_current_tags" | sort)
+          test "$rollback_tags_before" = "$expected_current_tags" || { echo "Rollback inventory is not an exact inspectable state"; exit 1; }
           if [ "$operation" = "inspect" ]; then
             test "$confirm_retirement" = "false" || { echo "Inspect mode must not carry retirement confirmation on the production host"; exit 1; }
-            test "$target_api_present" = "true" -a "$target_web_present" = "true" -a "$rollback_tag_count" -eq 6 || { echo "Inspect mode requires the original complete rollback inventory"; exit 1; }
           else
             test "$confirm_retirement" = "true" || { echo "Retire mode requires explicit confirmation on the production host"; exit 1; }
           fi
@@ -401,13 +567,29 @@ jobs:
             test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "API rollback tag disagrees with its release record"; exit 1; }
             target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG")
           else
-            target_api_repo_digest=$expected_target_api_repo_digest
+            if [ "$operation" = "inspect" ]; then
+              target_api_repo_digest=none
+            else
+              target_api_repo_digest=$expected_target_api_repo_digest
+            fi
+            if docker image inspect "$target_api_id" >/dev/null 2>&1; then
+              echo "Missing target API tag still has a local image reference"
+              exit 1
+            fi
           fi
           if [ "$target_web_present" = "true" ]; then
             test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Web rollback tag disagrees with its release record"; exit 1; }
             target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")
           else
-            target_web_repo_digest=$expected_target_web_repo_digest
+            if [ "$operation" = "inspect" ]; then
+              target_web_repo_digest=none
+            else
+              target_web_repo_digest=$expected_target_web_repo_digest
+            fi
+            if docker image inspect "$target_web_id" >/dev/null 2>&1; then
+              echo "Missing target web tag still has a local image reference"
+              exit 1
+            fi
           fi
           assert_no_container_uses_image "$target_api_id"
           assert_no_container_uses_image "$target_web_id"
@@ -450,7 +632,7 @@ jobs:
             newer_overrides+=("$newer_override")
           done
 
-          rollback_inventory_payload=$(
+          full_rollback_inventory_payload=$(
             printf 'target_api=%s\ntarget_api_repo_digest=%s\ntarget_web=%s\ntarget_web_repo_digest=%s\ntarget_record=%s\ntarget_override=%s\n' \
               "$target_api_id" "$target_api_repo_digest" "$target_web_id" "$target_web_repo_digest" \
               "$release_record_sha_before" "$rollback_override_sha_before"
@@ -464,16 +646,77 @@ jobs:
                 "${NEWER_TIMESTAMPS[$newer_index]}" "${newer_override_hashes[$newer_index]}"
             done
           )
-          rollback_inventory_sha256=$(printf '%s' "$rollback_inventory_payload" | sha256sum | awk '{print $1}')
-          [[ "$rollback_inventory_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Rollback inventory SHA-256 is invalid"; exit 1; }
+          full_rollback_inventory_sha256=$(printf '%s' "$full_rollback_inventory_payload" | sha256sum | awk '{print $1}')
+          [[ "$full_rollback_inventory_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Full rollback inventory SHA-256 is invalid"; exit 1; }
+          non_target_image_inventory_before=$(full_non_target_image_inventory "$target_api_id" "$target_web_id")
+          assert_non_target_image_inventory_shape "$non_target_image_inventory_before"
+          non_target_image_inventory_sha256=$(printf '%s' "$non_target_image_inventory_before" | sha256sum | awk '{print $1}')
+          [[ "$non_target_image_inventory_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Non-target image inventory SHA-256 is invalid"; exit 1; }
           if [ "$operation" = "retire" ]; then
             test "$expected_target_api_image_id" = "$target_api_id" || { echo "Expected API image ID does not match the inspected rollback"; exit 1; }
             test "$expected_target_web_image_id" = "$target_web_id" || { echo "Expected web image ID does not match the inspected rollback"; exit 1; }
             test "$expected_target_api_repo_digest" = "$target_api_repo_digest" || { echo "Expected API repo digest does not match the inspected rollback"; exit 1; }
             test "$expected_target_web_repo_digest" = "$target_web_repo_digest" || { echo "Expected web repo digest does not match the inspected rollback"; exit 1; }
+            test "$target_api_repo_digest" = "none" -a "$target_web_repo_digest" = "none" || { echo "Target images retain repo-digest references and cannot be safely retired by tag"; exit 1; }
             test "$expected_release_record_sha256" = "$release_record_sha_before" || { echo "Expected release-record SHA-256 does not match"; exit 1; }
             test "$expected_rollback_override_sha256" = "$rollback_override_sha_before" || { echo "Expected rollback-override SHA-256 does not match"; exit 1; }
-            test "$expected_rollback_inventory_sha256" = "$rollback_inventory_sha256" || { echo "Expected rollback inventory SHA-256 does not match"; exit 1; }
+            test "$expected_full_rollback_inventory_sha256" = "$full_rollback_inventory_sha256" || { echo "Expected full rollback inventory SHA-256 does not match"; exit 1; }
+            test "$expected_non_target_image_inventory_sha256" = "$non_target_image_inventory_sha256" || { echo "Expected non-target image inventory SHA-256 does not match"; exit 1; }
+          fi
+
+          assert_production_health
+          running_container_inventory_before=$(container_inventory running)
+          all_container_inventory_before=$(container_inventory all)
+          volume_inventory_before=$(volume_inventory)
+          network_inventory_before=$(network_inventory)
+          running_container_inventory_sha256=$(printf '%s' "$running_container_inventory_before" | sha256sum | awk '{print $1}')
+          all_container_inventory_sha256=$(printf '%s' "$all_container_inventory_before" | sha256sum | awk '{print $1}')
+          volume_inventory_sha256=$(printf '%s' "$volume_inventory_before" | sha256sum | awk '{print $1}')
+          network_inventory_sha256=$(printf '%s' "$network_inventory_before" | sha256sum | awk '{print $1}')
+          deploy_worktree_sha256_before=$(deploy_worktree_sha256)
+          IFS=: read -r docker_daemon_uptime_seconds docker_daemon_identity_sha256 <<< "$(docker_daemon_snapshot)"
+          IFS=: read -r event_window_start event_window_end runtime_event_count risky_runtime_event_count runtime_action_type_sha256 runtime_event_actor_sha256 <<< "$(runtime_event_audit)"
+          for runtime_sha256 in "$running_container_inventory_sha256" "$all_container_inventory_sha256" "$volume_inventory_sha256" \
+            "$network_inventory_sha256" "$deploy_worktree_sha256_before" "$docker_daemon_identity_sha256" \
+            "$runtime_action_type_sha256" "$runtime_event_actor_sha256"; do
+            [[ "$runtime_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "A runtime inventory hash is invalid"; exit 1; }
+          done
+          test "$risky_runtime_event_count" -eq 0 || { echo "Recent lifecycle/OOM event for a production container blocks retirement"; exit 1; }
+          inspection_epoch=$(date -u +%s)
+          [[ "$inspection_epoch" =~ ^[0-9]{10}$ ]] || { echo "Inspection epoch is invalid"; exit 1; }
+
+          if [ "$operation" = "retire" ]; then
+            IFS=: read -r expected_inspection_epoch expected_daemon_uptime_seconds expected_manifest_full_rollback_sha256 \
+              expected_running_container_sha256 expected_all_container_sha256 expected_volume_sha256 expected_network_sha256 \
+              expected_deploy_worktree_sha256 expected_daemon_identity_sha256 expected_event_actor_sha256 expected_inspection_evidence_sha256 \
+              <<< "$expected_runtime_evidence_manifest"
+            evidence_age_seconds=$((inspection_epoch - expected_inspection_epoch))
+            test "$evidence_age_seconds" -ge 0 -a "$evidence_age_seconds" -le 900 || { echo "Inspect evidence is older than fifteen minutes or from the future"; exit 1; }
+            test "$docker_daemon_uptime_seconds" -ge "$expected_daemon_uptime_seconds" || { echo "Docker daemon restarted after inspect"; exit 1; }
+            test "$expected_manifest_full_rollback_sha256" = "$expected_full_rollback_inventory_sha256" || { echo "Runtime manifest rollback hash does not match its exact input"; exit 1; }
+            test "$expected_running_container_sha256" = "$running_container_inventory_sha256" || { echo "Running-container inventory changed since inspect"; exit 1; }
+            test "$expected_all_container_sha256" = "$all_container_inventory_sha256" || { echo "All-container inventory changed since inspect"; exit 1; }
+            test "$expected_volume_sha256" = "$volume_inventory_sha256" || { echo "Docker volume inventory changed since inspect"; exit 1; }
+            test "$expected_network_sha256" = "$network_inventory_sha256" || { echo "Docker network inventory changed since inspect"; exit 1; }
+            test "$expected_deploy_worktree_sha256" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed since inspect"; exit 1; }
+            test "$expected_daemon_identity_sha256" = "$docker_daemon_identity_sha256" || { echo "Docker daemon identity changed since inspect"; exit 1; }
+            expected_inspection_evidence_payload=$(printf 'epoch=%s\ndaemon_uptime=%s\ntarget_api=%s\ntarget_web=%s\ntarget_repo_digests=%s\nrecord=%s\noverride=%s\nfull_rollback=%s\nnon_target_images=%s\nrunning=%s\nall=%s\nvolumes=%s\nnetworks=%s\ndeploy=%s\ndaemon=%s\nevents=%s\n' \
+              "$expected_inspection_epoch" "$expected_daemon_uptime_seconds" "$expected_target_api_image_id" "$expected_target_web_image_id" \
+              "$expected_target_repo_digests_manifest" "$expected_release_record_sha256" "$expected_rollback_override_sha256" \
+              "$expected_full_rollback_inventory_sha256" "$expected_non_target_image_inventory_sha256" \
+              "$expected_running_container_sha256" "$expected_all_container_sha256" "$expected_volume_sha256" "$expected_network_sha256" \
+              "$expected_deploy_worktree_sha256" "$expected_daemon_identity_sha256" "$expected_event_actor_sha256")
+            test "$(printf '%s' "$expected_inspection_evidence_payload" | sha256sum | awk '{print $1}')" = "$expected_inspection_evidence_sha256" \
+              || { echo "Fresh inspect evidence manifest is internally inconsistent"; exit 1; }
+          else
+            inspection_evidence_payload=$(printf 'epoch=%s\ndaemon_uptime=%s\ntarget_api=%s\ntarget_web=%s\ntarget_repo_digests=%s\nrecord=%s\noverride=%s\nfull_rollback=%s\nnon_target_images=%s\nrunning=%s\nall=%s\nvolumes=%s\nnetworks=%s\ndeploy=%s\ndaemon=%s\nevents=%s\n' \
+              "$inspection_epoch" "$docker_daemon_uptime_seconds" "$target_api_id" "$target_web_id" \
+              "$target_api_repo_digest|$target_web_repo_digest" "$release_record_sha_before" "$rollback_override_sha_before" \
+              "$full_rollback_inventory_sha256" "$non_target_image_inventory_sha256" \
+              "$running_container_inventory_sha256" "$all_container_inventory_sha256" "$volume_inventory_sha256" "$network_inventory_sha256" \
+              "$deploy_worktree_sha256_before" "$docker_daemon_identity_sha256" "$runtime_event_actor_sha256")
+            inspection_evidence_sha256=$(printf '%s' "$inspection_evidence_payload" | sha256sum | awk '{print $1}')
+            runtime_evidence_manifest="$inspection_epoch:$docker_daemon_uptime_seconds:$full_rollback_inventory_sha256:$running_container_inventory_sha256:$all_container_inventory_sha256:$volume_inventory_sha256:$network_inventory_sha256:$deploy_worktree_sha256_before:$docker_daemon_identity_sha256:$runtime_event_actor_sha256:$inspection_evidence_sha256"
           fi
 
           root_before=$(available_bytes /)
@@ -486,8 +729,6 @@ jobs:
           require_uint "$release_context_before"
           require_uint "$docker_before"
           require_uint "$backup_before"
-          running_fingerprint_before=$(docker ps --no-trunc --format '{{.ID}} {{.Image}}' | sort | sha256sum | awk '{print $1}')
-          [[ "$running_fingerprint_before" =~ ^[0-9a-f]{64}$ ]] || { echo "Running-container fingerprint is invalid"; exit 1; }
 
           printf 'root_available_bytes_before=%s\n' "$root_before"
           printf 'deploy_available_bytes_before=%s\n' "$deploy_before"
@@ -501,9 +742,23 @@ jobs:
             printf 'target_api_repo_digest=%s\n' "$target_api_repo_digest"
             printf 'target_web_image_id=%s\n' "$target_web_id"
             printf 'target_web_repo_digest=%s\n' "$target_web_repo_digest"
+            printf 'target_repo_digests_manifest=%s|%s\n' "$target_api_repo_digest" "$target_web_repo_digest"
             printf 'release_record_sha256=%s\n' "$release_record_sha_before"
             printf 'rollback_override_sha256=%s\n' "$rollback_override_sha_before"
-            printf 'rollback_inventory_sha256=%s\n' "$rollback_inventory_sha256"
+            printf 'full_rollback_inventory_sha256=%s\n' "$full_rollback_inventory_sha256"
+            printf 'non_target_image_inventory_sha256=%s\n' "$non_target_image_inventory_sha256"
+            printf 'running_container_inventory_sha256=%s\n' "$running_container_inventory_sha256"
+            printf 'all_container_inventory_sha256=%s\n' "$all_container_inventory_sha256"
+            printf 'volume_inventory_sha256=%s\n' "$volume_inventory_sha256"
+            printf 'network_inventory_sha256=%s\n' "$network_inventory_sha256"
+            printf 'deploy_worktree_sha256=%s\n' "$deploy_worktree_sha256_before"
+            printf 'docker_daemon_uptime_seconds=%s\n' "$docker_daemon_uptime_seconds"
+            printf 'docker_daemon_identity_sha256=%s\n' "$docker_daemon_identity_sha256"
+            printf 'runtime_event_count=%s\n' "$runtime_event_count"
+            printf 'risky_runtime_event_count=%s\n' "$risky_runtime_event_count"
+            printf 'runtime_action_type_sha256=%s\n' "$runtime_action_type_sha256"
+            printf 'runtime_event_actor_sha256=%s\n' "$runtime_event_actor_sha256"
+            printf 'runtime_evidence_manifest=%s\n' "$runtime_evidence_manifest"
             echo "inspection_only=true"
             exit 0
           fi
@@ -511,23 +766,82 @@ jobs:
           # Close the normal preflight-to-mutation window if master advanced
           # while the read-only production evidence was being collected.
           assert_canonical_master
+          test "$(rollback_tag_inventory)" = "$rollback_tags_before" || { echo "Rollback tags changed during preflight"; exit 1; }
+          if [ "$target_api_present" = "true" ]; then
+            test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "Target API tag changed during preflight"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$TARGET_API_TAG")" = "$target_api_repo_digest" || { echo "Target API digest changed during preflight"; exit 1; }
+          elif docker image inspect "$target_api_id" >/dev/null 2>&1; then
+            echo "Missing target API tag regained a local image reference"
+            exit 1
+          fi
+          if [ "$target_web_present" = "true" ]; then
+            test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Target web tag changed during preflight"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")" = "$target_web_repo_digest" || { echo "Target web digest changed during preflight"; exit 1; }
+          elif docker image inspect "$target_web_id" >/dev/null 2>&1; then
+            echo "Missing target web tag regained a local image reference"
+            exit 1
+          fi
+          assert_exact_release_record_shape "$RELEASE_RECORD" "$TARGET_COMMIT"
+          assert_exact_rollback_override "$ROLLBACK_OVERRIDE" "$TARGET_API_TAG" "$TARGET_WEB_TAG"
+          test "$(sha256sum -- "$RELEASE_RECORD" | awk '{print $1}')" = "$release_record_sha_before" || { echo "Target release record changed during preflight"; exit 1; }
+          test "$(sha256sum -- "$ROLLBACK_OVERRIDE" | awk '{print $1}')" = "$rollback_override_sha_before" || { echo "Target rollback override changed during preflight"; exit 1; }
+          assert_no_container_uses_image "$target_api_id"
+          assert_no_container_uses_image "$target_web_id"
+          for newer_index in "${!NEWER_TIMESTAMPS[@]}"; do
+            newer_timestamp=${NEWER_TIMESTAMPS[$newer_index]}
+            newer_api_tag="st-michael-rollback-api:$newer_timestamp"
+            newer_web_tag="st-michael-rollback-web:$newer_timestamp"
+            assert_exact_release_record_shape "${newer_records[$newer_index]}" "${NEWER_TARGET_COMMITS[$newer_index]}"
+            assert_exact_rollback_override "${newer_overrides[$newer_index]}" "$newer_api_tag" "$newer_web_tag"
+            test "$(image_id_for_tag "$newer_api_tag")" = "${newer_api_ids[$newer_index]}" || { echo "A retained API image changed during preflight"; exit 1; }
+            test "$(image_id_for_tag "$newer_web_tag")" = "${newer_web_ids[$newer_index]}" || { echo "A retained web image changed during preflight"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$newer_api_tag")" = "${newer_api_repo_digests[$newer_index]}" || { echo "A retained API digest changed during preflight"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$newer_web_tag")" = "${newer_web_repo_digests[$newer_index]}" || { echo "A retained web digest changed during preflight"; exit 1; }
+            test "$(sha256sum -- "${newer_records[$newer_index]}" | awk '{print $1}')" = "${newer_record_hashes[$newer_index]}" || { echo "A retained release record changed during preflight"; exit 1; }
+            test "$(sha256sum -- "${newer_overrides[$newer_index]}" | awk '{print $1}')" = "${newer_override_hashes[$newer_index]}" || { echo "A retained rollback override changed during preflight"; exit 1; }
+          done
+          test "$(full_non_target_image_inventory "$target_api_id" "$target_web_id")" = "$non_target_image_inventory_before" || { echo "Non-target image inventory changed during preflight"; exit 1; }
+          test "$(container_inventory running)" = "$running_container_inventory_before" || { echo "Running containers changed during preflight"; exit 1; }
+          test "$(container_inventory all)" = "$all_container_inventory_before" || { echo "All containers changed during preflight"; exit 1; }
+          test "$(volume_inventory)" = "$volume_inventory_before" || { echo "Docker volumes changed during preflight"; exit 1; }
+          test "$(network_inventory)" = "$network_inventory_before" || { echo "Docker networks changed during preflight"; exit 1; }
+          test "$(deploy_worktree_sha256)" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed during preflight"; exit 1; }
+          IFS=: read -r docker_daemon_uptime_pre_mutation docker_daemon_identity_pre_mutation <<< "$(docker_daemon_snapshot)"
+          test "$docker_daemon_identity_pre_mutation" = "$docker_daemon_identity_sha256" || { echo "Docker daemon changed during preflight"; exit 1; }
+          IFS=: read -r pre_event_start pre_event_end pre_event_count pre_risky_event_count pre_action_type_sha256 pre_event_actor_sha256 <<< "$(runtime_event_audit)"
+          test "$pre_risky_event_count" -eq 0 || { echo "A recent production container event blocks retirement"; exit 1; }
+          assert_production_health
+          assert_canonical_master
+
           retired_count=0
           if [ "$target_api_present" = "true" ]; then
-            docker image rm --no-prune -- "$TARGET_API_TAG" >/dev/null
+            test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "Target API tag changed at mutation boundary"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$TARGET_API_TAG")" = "$target_api_repo_digest" || { echo "Target API digest changed at mutation boundary"; exit 1; }
+            assert_no_container_uses_image "$target_api_id"
+            docker image rm --no-prune -- "$target_api_id" >/dev/null
             retired_count=$((retired_count + 1))
           fi
           if [ "$target_web_present" = "true" ]; then
-            docker image rm --no-prune -- "$TARGET_WEB_TAG" >/dev/null
+            test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Target web tag changed at mutation boundary"; exit 1; }
+            test "$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")" = "$target_web_repo_digest" || { echo "Target web digest changed at mutation boundary"; exit 1; }
+            assert_no_container_uses_image "$target_web_id"
+            docker image rm --no-prune -- "$target_web_id" >/dev/null
             retired_count=$((retired_count + 1))
           fi
 
           rollback_tags_after=$(rollback_tag_inventory)
           rollback_tag_count_after=$(printf '%s\n' "$rollback_tags_after" | awk 'NF { count++ } END { print count + 0 }')
-          test "$rollback_tag_count_after" -eq 4 || { echo "Post-retirement rollback tag count is not four"; exit 1; }
+          test "$rollback_tag_count_after" -eq 10 || { echo "Post-retirement rollback tag count is not ten"; exit 1; }
+          test "$rollback_tags_after" = "$expected_retained_tags" || { echo "Post-retirement rollback tags differ from the exact retained allowlist"; exit 1; }
           if tag_is_present "$rollback_tags_after" "$TARGET_API_TAG" || tag_is_present "$rollback_tags_after" "$TARGET_WEB_TAG"; then
             echo "An approved obsolete rollback tag still exists after retirement"
             exit 1
           fi
+          non_target_image_inventory_after=$(full_non_target_image_inventory "$target_api_id" "$target_web_id")
+          assert_non_target_image_inventory_shape "$non_target_image_inventory_after"
+          test "$non_target_image_inventory_after" = "$non_target_image_inventory_before" || { echo "A non-target Docker image/tag/digest changed during retirement"; exit 1; }
+          test "$(printf '%s' "$non_target_image_inventory_after" | sha256sum | awk '{print $1}')" = "$non_target_image_inventory_sha256" \
+            || { echo "Post-retirement non-target image inventory hash changed"; exit 1; }
           all_image_ids_after=$(docker image ls --all --quiet --no-trunc | sort -u)
           if printf '%s\n' "$all_image_ids_after" | grep -Fqx -- "$target_api_id" \
             || printf '%s\n' "$all_image_ids_after" | grep -Fqx -- "$target_web_id"; then
@@ -553,8 +867,30 @@ jobs:
           assert_private_regular_file "$ROLLBACK_OVERRIDE" "$deploy_uid"
           test "$(sha256sum -- "$RELEASE_RECORD" | awk '{print $1}')" = "$release_record_sha_before" || { echo "Target release record changed during retirement"; exit 1; }
           test "$(sha256sum -- "$ROLLBACK_OVERRIDE" | awk '{print $1}')" = "$rollback_override_sha_before" || { echo "Target rollback override changed during retirement"; exit 1; }
-          running_fingerprint_after=$(docker ps --no-trunc --format '{{.ID}} {{.Image}}' | sort | sha256sum | awk '{print $1}')
-          test "$running_fingerprint_after" = "$running_fingerprint_before" || { echo "Running container set changed during rollback retirement"; exit 1; }
+          running_container_inventory_after=$(container_inventory running)
+          all_container_inventory_after=$(container_inventory all)
+          volume_inventory_after=$(volume_inventory)
+          network_inventory_after=$(network_inventory)
+          test "$running_container_inventory_after" = "$running_container_inventory_before" || { echo "Running-container inventory changed during retirement"; exit 1; }
+          test "$all_container_inventory_after" = "$all_container_inventory_before" || { echo "All-container inventory changed during retirement"; exit 1; }
+          test "$volume_inventory_after" = "$volume_inventory_before" || { echo "Docker volume inventory changed during retirement"; exit 1; }
+          test "$network_inventory_after" = "$network_inventory_before" || { echo "Docker network inventory changed during retirement"; exit 1; }
+          test "$(deploy_worktree_sha256)" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed during retirement"; exit 1; }
+          IFS=: read -r docker_daemon_uptime_after docker_daemon_identity_after <<< "$(docker_daemon_snapshot)"
+          test "$docker_daemon_identity_after" = "$docker_daemon_identity_sha256" || { echo "Docker daemon identity changed during retirement"; exit 1; }
+          IFS=: read -r post_event_start post_event_end post_event_count post_risky_event_count post_action_type_sha256 post_event_actor_sha256 <<< "$(runtime_event_audit)"
+          test "$post_risky_event_count" -eq 0 || { echo "A production container lifecycle/OOM event occurred during retirement"; exit 1; }
+          assert_production_health
+          post_actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT current_database()")
+          post_actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT system_identifier FROM pg_control_system()")
+          post_broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT COUNT(*) FROM public.brokers")
+          post_database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT pg_database_size(current_database())")
+          test "$post_actual_database" = "broker_platform" || { echo "Post-retirement production database name mismatch"; exit 1; }
+          test "$post_actual_system_identifier" = "$production_pg_system_identifier" || { echo "Post-retirement database system identifier mismatch"; exit 1; }
+          [[ "$post_broker_rows" =~ ^[0-9]+$ ]] && test "$post_broker_rows" -ge "$production_min_broker_rows" || { echo "Post-retirement broker-row invariant failed"; exit 1; }
+          [[ "$post_database_size_bytes" =~ ^[1-9][0-9]{0,17}$ ]] || { echo "Post-retirement database size is invalid"; exit 1; }
+          required_backup_available_bytes_after=$((MIN_AVAILABLE_BYTES + post_database_size_bytes + BACKUP_SIZE_OVERHEAD_BYTES))
+          test "$required_backup_available_bytes_after" -gt "$MIN_AVAILABLE_BYTES" || { echo "Post-retirement backup headroom calculation is invalid"; exit 1; }
 
           root_after=$(available_bytes /)
           deploy_after=$(available_bytes "$deploy_root")
@@ -573,12 +909,17 @@ jobs:
           printf 'release_context_available_bytes_after=%s\n' "$release_context_after"
           printf 'docker_root_available_bytes_after=%s\n' "$docker_after"
           printf 'backup_available_bytes_after=%s\n' "$backup_after"
+          printf 'required_backup_available_bytes_after=%s\n' "$required_backup_available_bytes_after"
+          printf 'post_runtime_event_count=%s\n' "$post_event_count"
+          printf 'post_risky_runtime_event_count=%s\n' "$post_risky_event_count"
+          printf 'post_runtime_action_type_sha256=%s\n' "$post_action_type_sha256"
+          printf 'post_runtime_event_actor_sha256=%s\n' "$post_event_actor_sha256"
 
           if [ "$root_after" -lt "$MIN_AVAILABLE_BYTES" ] \
             || [ "$deploy_after" -lt "$MIN_AVAILABLE_BYTES" ] \
             || [ "$release_context_after" -lt "$MIN_AVAILABLE_BYTES" ] \
             || [ "$docker_after" -lt "$MIN_AVAILABLE_BYTES" ] \
-            || [ "$backup_after" -lt "$required_backup_available_bytes" ]; then
+            || [ "$backup_after" -lt "$required_backup_available_bytes_after" ]; then
             echo "backup_reserve_threshold_satisfied=false"
             echo "Approved rollback retirement completed, but conservative production backup headroom is still insufficient" >&2
             exit 1
