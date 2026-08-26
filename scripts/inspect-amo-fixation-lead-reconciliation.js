@@ -97,6 +97,17 @@ const ERROR_CLASSES = Object.freeze([
   "other",
 ]);
 
+// These are the only historical queue states for which the exact signed
+// 12-row cohort may advise a database-only link to an independently observed
+// strong amoCRM lead. The error class is not itself proof that a lead exists:
+// the one-contact/one-strong/no-weak evidence gates below remain mandatory.
+const CAS_LINK_ELIGIBLE_ERROR_CLASSES = Object.freeze([
+  "create_reconciliation_required",
+  "network_failure",
+  "fixation_agency_missing",
+  "broker_amo_contact_missing",
+]);
+
 const FAILURE_PHASE = Object.freeze({
   ATTESTATION: "ATTESTATION",
   DATABASE: "DATABASE",
@@ -1026,6 +1037,10 @@ function classifySyncError(error) {
   return "other";
 }
 
+function isCasLinkEligibleErrorClass(errorClass) {
+  return CAS_LINK_ELIGIBLE_ERROR_CLASSES.includes(errorClass);
+}
+
 function effectiveBroker(row) {
   if (row?.responsibleBroker) {
     return { source: "responsible", broker: row.responsibleBroker };
@@ -1247,7 +1262,7 @@ function inspectQueueRow(row, evidenceByPhone, hashKey) {
       casLinkCandidate:
         resolution === "single_strong_candidate" &&
         storedLeadId === null &&
-        errorClass === "create_reconciliation_required",
+        isCasLinkEligibleErrorClass(errorClass),
       executablePayload: false,
       databaseMutationAuthorized: false,
       amoMutationAuthorized: false,
@@ -1574,6 +1589,7 @@ async function main() {
 module.exports = {
   AMO_ORIGIN,
   ATTEMPT_LIMIT,
+  CAS_LINK_ELIGIBLE_ERROR_CLASSES,
   COHORT_ATTESTATION_DOMAIN,
   EXPECTED_ACCOUNT_ID,
   KC_PIPELINE_ID,
@@ -1597,6 +1613,7 @@ module.exports = {
   contactHasExactPhone,
   createGetOnlyRequester,
   inspectQueueRow,
+  isCasLinkEligibleErrorClass,
   lookupExactClientContacts,
   normalizePhone,
   optionalStoredAmoLeadId,

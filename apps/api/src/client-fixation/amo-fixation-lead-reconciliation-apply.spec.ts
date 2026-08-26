@@ -38,6 +38,15 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
   };
   const attestationKey = Buffer.alloc(32, 0x31);
   const aliasKey = Buffer.alloc(32, 0x42);
+  const casLinkEligibleErrors: Array<[string, string]> = [
+    [
+      "AMO_CREATE_RECONCILIATION_REQUIRED: private payload",
+      "create_reconciliation_required",
+    ],
+    ["fetch failed: ECONNRESET", "network_failure"],
+    ["FIXATION_AGENCY_MISSING", "fixation_agency_missing"],
+    ["BROKER_AMO_CONTACT_MISSING", "broker_amo_contact_missing"],
+  ];
 
   const queueRow = (overrides: Record<string, unknown> = {}) => ({
     id: "3fc34e89-8a22-4630-81d4-b3a87653d2cb",
@@ -76,6 +85,19 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     }),
   ];
 
+  const observedLegacyErrorCohort = () =>
+    fixedCohort(queueRow({ amoSyncError: "fetch failed: ECONNRESET" })).map(
+      (row, index) => ({
+        ...row,
+        amoSyncError:
+          index === 0
+            ? "fetch failed: ECONNRESET"
+            : index === repair.KNOWN_QUEUE_ROWS - 1
+              ? "FIXATION_AGENCY_MISSING"
+              : "BROKER_AMO_CONTACT_MISSING",
+      }),
+    );
+
   const leadEnvelope = (
     id: number,
     overrides: Record<string, unknown> = {},
@@ -110,8 +132,8 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     },
   });
 
-  const strongReport = () => {
-    const rows = fixedCohort();
+  const strongReport = (primary = queueRow()) => {
+    const rows = fixedCohort(primary);
     const amoEvidence = evidence([leadEnvelope(32310587)]);
     return {
       rows,
@@ -126,8 +148,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     };
   };
 
-  const gateEnvironment = () => {
-    const { report } = strongReport();
+  const gateEnvironment = (report = strongReport().report) => {
     return {
       LEAD_RECONCILIATION_CONFIRMATION: repair.EXACT_CONFIRMATION,
       LEAD_RECONCILIATION_SOURCE_SHA: metadata.deployedGitSha,
@@ -151,6 +172,53 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
         report.aggregates.errorClass,
         repair.ERROR_CLASSES,
       ),
+    };
+  };
+
+  const validCompletionLedger = (gate: any, errorClass: string) => {
+    const clientId = queueRow().id;
+    const common = {
+      schemaVersion: 1,
+      source: repair.APPLY_AUDIT_SOURCE,
+      sourceSha: gate.sourceSha,
+      reviewedRunId: gate.reviewedRunId,
+      cohortDigest: gate.expectedCohortDigest,
+      inspectorSha256: gate.inspectorSha256,
+      applySha256: gate.applySha256,
+    };
+    const rowPayload = {
+      ...common,
+      clientId,
+      amoLeadId: "32310587",
+      resolution: "single_strong_candidate",
+      errorClass,
+      sourceRowHash: "e".repeat(64),
+      amoSyncAttempts: 10,
+      amoSyncLastAttemptAt: "2026-08-25T07:30:00.000Z",
+      attemptsPreserved: true,
+      lastAttemptPreserved: true,
+      requeued: false,
+      amoMutation: false,
+    };
+    return {
+      completion: [
+        {
+          entityId: repair.completionEntityId(
+            gate.sourceSha,
+            gate.expectedCohortDigest,
+          ),
+          payload: {
+            ...common,
+            queueRows: 12,
+            linked: 1,
+            blocked: 11,
+            requeued: 0,
+            amoMutations: 0,
+            links: [{ clientId, amoLeadId: "32310587" }],
+          },
+        },
+      ],
+      rows: [{ entityId: clientId, payload: rowPayload }],
     };
   };
 
@@ -232,7 +300,62 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     expect(plan.blocked).toHaveLength(11);
   });
 
-  it("blocks no-candidate, strong-plus-weak, two-strong and wrong-error rows", () => {
+  it.each(casLinkEligibleErrors)(
+    "links one exact strong lead for the signed legacy error class %s",
+    (amoSyncError, errorClass) => {
+      const { rows, amoEvidence, report } = strongReport(
+        queueRow({ amoSyncError }),
+      );
+      const gate = repair.readExecutionGate(gateEnvironment(report));
+      expect(repair.CAS_LINK_ELIGIBLE_ERROR_CLASSES).toEqual(
+        casLinkEligibleErrors.map(([, value]) => value),
+      );
+      expect(inspector.CAS_LINK_ELIGIBLE_ERROR_CLASSES).toEqual(
+        repair.CAS_LINK_ELIGIBLE_ERROR_CLASSES,
+      );
+      expect(() => repair.assertReportMatchesGate(report, gate)).not.toThrow();
+      const plan = repair.buildExecutionPlan(rows, amoEvidence, inspector);
+      expect(() => repair.assertExactPlan(plan, gate)).not.toThrow();
+      expect(plan.actionable).toHaveLength(1);
+      expect(plan.actionable[0]).toMatchObject({
+        resolution: "single_strong_candidate",
+        errorClass,
+        candidateLeadId: 32310587,
+        exactClientContactCount: 1,
+        strongCount: 1,
+        weakCount: 0,
+      });
+      expect(plan.blocked).toHaveLength(11);
+    },
+  );
+
+  it("matches the observed signed 10/1/1 legacy error manifest with zero requeue", () => {
+    const rows = observedLegacyErrorCohort();
+    const amoEvidence = evidence([leadEnvelope(32310587)]);
+    const report = inspector.buildReport(
+      rows,
+      amoEvidence,
+      metadata,
+      attestationKey,
+      aliasKey,
+    );
+    expect(report.aggregates.errorClass).toMatchObject({
+      broker_amo_contact_missing: 10,
+      network_failure: 1,
+      fixation_agency_missing: 1,
+      create_reconciliation_required: 0,
+    });
+    expect(report.aggregates.rowsWithCasLinkCandidate).toBe(1);
+    const gate = repair.readExecutionGate(gateEnvironment(report));
+    expect(gate.expected.errorClass).toEqual(report.aggregates.errorClass);
+    const plan = repair.buildExecutionPlan(rows, amoEvidence, inspector);
+    expect(() => repair.assertExactPlan(plan, gate)).not.toThrow();
+    expect(plan.actionable).toHaveLength(1);
+    expect(plan.actionable[0].errorClass).toBe("network_failure");
+    expect(repair.EXPECTED_REQUEUE_COUNT).toBe(0);
+  });
+
+  it("blocks no-candidate, strong-plus-weak and two-strong rows", () => {
     const noCandidateRows = fixedCohort();
     const noCandidate = repair.buildExecutionPlan(
       noCandidateRows,
@@ -266,18 +389,27 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     );
     expect(twoStrong.actionable).toHaveLength(0);
     expect(twoStrong.records[0].resolution).toBe("multiple_strong_candidates");
-
-    const wrongError = repair.buildExecutionPlan(
-      fixedCohort(queueRow({ amoSyncError: "AMO_TEMPORARY_UNAVAILABLE" })),
-      evidence([leadEnvelope(32310587)]),
-      inspector,
-    );
-    expect(wrongError.actionable).toHaveLength(0);
-    expect(wrongError.records[0]).toMatchObject({
-      resolution: "single_strong_candidate",
-      errorClass: "temporary_unavailable",
-    });
   });
+
+  it.each([
+    ["AMO_TEMPORARY_UNAVAILABLE", "temporary_unavailable"],
+    ["UNRECOGNIZED_LEGACY_FAILURE", "other"],
+  ])(
+    "blocks an unsafe or unknown error class even with exact strong evidence: %s",
+    (amoSyncError, errorClass) => {
+      const { rows, amoEvidence, report } = strongReport(
+        queueRow({ amoSyncError }),
+      );
+      expect(report.aggregates.rowsWithCasLinkCandidate).toBe(0);
+      const plan = repair.buildExecutionPlan(rows, amoEvidence, inspector);
+      expect(plan.actionable).toHaveLength(0);
+      expect(plan.records[0]).toMatchObject({
+        resolution: "single_strong_candidate",
+        errorClass,
+        eligible: false,
+      });
+    },
+  );
 
   it("fails closed when one strong lead is shared by two cohort rows", () => {
     const second = queueRow({
@@ -456,49 +588,10 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
   it("validates one exact completion ledger and rejects malformed or duplicate audits", () => {
     const gate = repair.readExecutionGate(gateEnvironment());
     const clientId = queueRow().id;
-    const common = {
-      schemaVersion: 1,
-      source: repair.APPLY_AUDIT_SOURCE,
-      sourceSha: gate.sourceSha,
-      reviewedRunId: gate.reviewedRunId,
-      cohortDigest: gate.expectedCohortDigest,
-      inspectorSha256: gate.inspectorSha256,
-      applySha256: gate.applySha256,
-    };
-    const rowPayload = {
-      ...common,
-      clientId,
-      amoLeadId: "32310587",
-      resolution: "single_strong_candidate",
-      errorClass: "create_reconciliation_required",
-      sourceRowHash: "e".repeat(64),
-      amoSyncAttempts: 10,
-      amoSyncLastAttemptAt: "2026-08-25T07:30:00.000Z",
-      attemptsPreserved: true,
-      lastAttemptPreserved: true,
-      requeued: false,
-      amoMutation: false,
-    };
-    const ledger = {
-      completion: [
-        {
-          entityId: repair.completionEntityId(
-            gate.sourceSha,
-            gate.expectedCohortDigest,
-          ),
-          payload: {
-            ...common,
-            queueRows: 12,
-            linked: 1,
-            blocked: 11,
-            requeued: 0,
-            amoMutations: 0,
-            links: [{ clientId, amoLeadId: "32310587" }],
-          },
-        },
-      ],
-      rows: [{ entityId: clientId, payload: rowPayload }],
-    };
+    const ledger = validCompletionLedger(
+      gate,
+      "create_reconciliation_required",
+    );
     expect(repair.validateCompletionLedger(ledger, gate)).toMatchObject({
       links: [{ clientId, amoLeadId: 32310587 }],
     });
@@ -542,6 +635,36 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
         gate,
       ),
     ).toThrow("amo fixation lead reconciliation failed");
+  });
+
+  it.each(casLinkEligibleErrors)(
+    "validates the exact audit ledger for linked legacy class %s",
+    (amoSyncError, errorClass) => {
+      const { report } = strongReport(queueRow({ amoSyncError }));
+      const gate = repair.readExecutionGate(gateEnvironment(report));
+      const ledger = validCompletionLedger(gate, errorClass);
+      expect(repair.validateCompletionLedger(ledger, gate)).toMatchObject({
+        links: [{ clientId: queueRow().id, amoLeadId: 32310587 }],
+      });
+    },
+  );
+
+  it("rejects unsafe, unknown and signed-manifest-mismatched audit classes", () => {
+    const gate = repair.readExecutionGate(gateEnvironment());
+    for (const errorClass of [
+      "temporary_unavailable",
+      "other",
+      // Allowed in another signed cohort, but absent from this gate's exact
+      // aggregate manifest and therefore invalid for this completion ledger.
+      "network_failure",
+    ]) {
+      expect(() =>
+        repair.validateCompletionLedger(
+          validCompletionLedger(gate, errorClass),
+          gate,
+        ),
+      ).toThrow("amo fixation lead reconciliation failed");
+    }
   });
 
   it("keeps failures and stdout bounded and PII-free", () => {

@@ -65,6 +65,21 @@ const ERROR_CLASSES = Object.freeze([
   "other",
 ]);
 
+// Link-only recovery is intentionally limited to the three error states found
+// in the exact signed legacy cohort plus reconciliation-required compatibility.
+// Positive amoCRM evidence, rather than the historical error text, remains the
+// authorization for a database CAS link.
+const CAS_LINK_ELIGIBLE_ERROR_CLASSES = Object.freeze([
+  "create_reconciliation_required",
+  "network_failure",
+  "fixation_agency_missing",
+  "broker_amo_contact_missing",
+]);
+
+function isCasLinkEligibleErrorClass(errorClass) {
+  return CAS_LINK_ELIGIBLE_ERROR_CLASSES.includes(errorClass);
+}
+
 const CLIENT_SELECT = Object.freeze({
   id: true,
   brokerId: true,
@@ -327,7 +342,10 @@ function loadInspectorModule(
   if (
     loaded.KNOWN_QUEUE_ROWS !== KNOWN_QUEUE_ROWS ||
     loaded.ATTEMPT_LIMIT !== ATTEMPT_LIMIT ||
-    loaded.AMO_ORIGIN !== "https://stmichael.amocrm.ru"
+    loaded.AMO_ORIGIN !== "https://stmichael.amocrm.ru" ||
+    JSON.stringify(loaded.CAS_LINK_ELIGIBLE_ERROR_CLASSES) !==
+      JSON.stringify(CAS_LINK_ELIGIBLE_ERROR_CLASSES) ||
+    typeof loaded.isCasLinkEligibleErrorClass !== "function"
   ) {
     fail("INSPECTOR_MODULE_CONSTANTS_INVALID");
   }
@@ -585,7 +603,7 @@ function buildExecutionPlan(queueRows, amoEvidence, inspector) {
     }
     const eligible =
       publicRecord.resolution === "single_strong_candidate" &&
-      publicRecord.errorClass === "create_reconciliation_required" &&
+      isCasLinkEligibleErrorClass(publicRecord.errorClass) &&
       row.amoLeadId === null &&
       publicRecord.advisory?.casLinkCandidate === true &&
       publicRecord.exactClientContacts?.count === 1 &&
@@ -646,7 +664,7 @@ function assertExactPlan(plan, gate) {
   for (const record of plan.actionable) {
     if (
       record.resolution !== "single_strong_candidate" ||
-      record.errorClass !== "create_reconciliation_required" ||
+      !isCasLinkEligibleErrorClass(record.errorClass) ||
       record.row.amoLeadId !== null ||
       record.exactClientContactCount !== 1 ||
       record.strongCount !== 1 ||
@@ -820,6 +838,9 @@ function validateCompletionLedger(ledger, gate) {
     fail("COMPLETION_AUDIT_DUPLICATE_LINK");
   }
   const rowByClient = new Map();
+  const linkedErrorClassCounts = Object.fromEntries(
+    ERROR_CLASSES.map((errorClass) => [errorClass, 0]),
+  );
   for (const audit of ledger.rows) {
     const rowPayload = audit?.payload;
     if (
@@ -852,7 +873,7 @@ function validateCompletionLedger(ledger, gate) {
       rowPayload.inspectorSha256 !== gate.inspectorSha256 ||
       rowPayload.applySha256 !== gate.applySha256 ||
       rowPayload.resolution !== "single_strong_candidate" ||
-      rowPayload.errorClass !== "create_reconciliation_required" ||
+      !isCasLinkEligibleErrorClass(rowPayload.errorClass) ||
       !/^[0-9a-f]{64}$/.test(String(rowPayload.sourceRowHash || "")) ||
       rowPayload.attemptsPreserved !== true ||
       rowPayload.lastAttemptPreserved !== true ||
@@ -868,6 +889,14 @@ function validateCompletionLedger(ledger, gate) {
     }
     if (rowByClient.has(rowPayload.clientId)) fail("ROW_AUDIT_DUPLICATE");
     rowByClient.set(rowPayload.clientId, rowPayload);
+    linkedErrorClassCounts[rowPayload.errorClass] += 1;
+  }
+  for (const errorClass of ERROR_CLASSES) {
+    if (
+      linkedErrorClassCounts[errorClass] > gate.expected.errorClass[errorClass]
+    ) {
+      fail("ROW_AUDIT_ERROR_CLASS_MANIFEST_MISMATCH");
+    }
   }
   for (const link of links) {
     const audit = rowByClient.get(link.clientId);
@@ -1439,6 +1468,7 @@ async function main() {
 module.exports = {
   ADVISORY_LOCK_DOMAIN,
   APPLY_AUDIT_SOURCE,
+  CAS_LINK_ELIGIBLE_ERROR_CLASSES,
   COMPLETION_ACTION,
   ERROR_CLASSES,
   EXACT_CONFIRMATION,
@@ -1463,6 +1493,7 @@ module.exports = {
   findRepairLedger,
   formatFixedManifest,
   lockClientWriters,
+  isCasLinkEligibleErrorClass,
   parseFixedManifest,
   planIdentity,
   readExecutionGate,
