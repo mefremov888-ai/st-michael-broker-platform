@@ -1401,11 +1401,25 @@ describe("loyalty production workflow safety", () => {
       "TARGET_COMMIT=c690fa9b44b5c7d291247bd88343af94ba241dd0",
     );
     expect(remoteBody).toContain(
-      "NEWER_TIMESTAMPS=(20260821-151042 20260821-221026 20260825-145230 20260826-101612 20260826-142213)",
+      "NEWER_TIMESTAMPS=(20260821-151042 20260821-221026 20260825-145230 20260825-160034 20260826-101612 20260826-142213)",
     );
     expect(remoteBody).toContain(
-      "NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015)",
+      "NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015)",
     );
+    expect(remoteBody).toContain(
+      "DUPLICATE_RETAINED_API_IMAGE_ID=sha256:24af61e598b6c4269017163476ccba26733d5b092f659e58c497687bb360ed0d",
+    );
+    expect(remoteBody).toContain(
+      "DUPLICATE_RETAINED_WEB_IMAGE_ID=sha256:4e1262c7e7831914cd1076c5a1542cdffa8828b36d1956c4fb247028268832f3",
+    );
+    for (const auditedArray of [
+      "NEWER_TIMESTAMPS",
+      "NEWER_API_PREFIXES",
+      "NEWER_WEB_PREFIXES",
+      "NEWER_TARGET_COMMITS",
+    ]) {
+      expect(remoteBody).toContain('test "${#' + auditedArray + '[@]}" -eq 6');
+    }
     expect(remoteBody).toContain(
       "exec 9>/tmp/st-michael-production-deploy.lock",
     );
@@ -1418,12 +1432,22 @@ describe("loyalty production workflow safety", () => {
       (remoteBody.match(/^\s*assert_canonical_master\s*$/gm) || []).length,
     ).toBeGreaterThanOrEqual(3);
 
-    expect(remoteBody).toContain('case "$rollback_tag_count" in 10|11|12)');
+    expect(remoteBody).toContain('case "$rollback_tag_count" in');
+    expect(remoteBody).toContain("12|13|14) ;;");
     expect(remoteBody).toContain(
-      'test "$actual_retained_tags" = "$expected_retained_tags"',
+      '[ "$actual_retained_tags" != "$expected_retained_tags" ]',
     );
     expect(remoteBody).toContain(
-      'test "$rollback_tags_before" = "$expected_current_tags"',
+      '[ "$rollback_tags_before" != "$expected_current_tags" ]',
+    );
+    expect(remoteBody).toContain("print_rollback_tag_diagnostics()");
+    expect(remoteBody).toContain("printf 'actual_rollback_tag_count=%s\\n'");
+    expect(remoteBody).toContain("printf 'actual_rollback_tag_list=%s\\n'");
+    expect(remoteBody).toContain(
+      "printf 'actual_rollback_redacted_tag_count=%s\\n'",
+    );
+    expect(remoteBody).not.toContain(
+      "printf 'actual_rollback_tag_inventory=%s\\n'",
     );
     expect(
       remoteBody.match(/target_(?:api|web)_repo_digest=none/g),
@@ -1448,9 +1472,11 @@ describe("loyalty production workflow safety", () => {
     );
     expect(remoteBody).toContain("image_has_prefix()");
     expect(remoteBody).toContain(
-      "NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e 4e1262c7e783 dc06e1dca818 3ed296479876)",
+      "NEWER_API_PREFIXES=(ee0a02f547ca 3ee482ad303a 24af61e598b6 24af61e598b6 3cd30e4b9e03 8997f496e2d2)",
     );
-    expect(remoteBody).not.toContain("e40d1ed4639f");
+    expect(remoteBody).toContain(
+      "NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e 4e1262c7e783 4e1262c7e783 dc06e1dca818 3ed296479876)",
+    );
     expect(remoteBody).toContain(
       'test "${image_id:7:12}" = "$expected_prefix"',
     );
@@ -1477,6 +1503,21 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain("repo_tags=$(docker image inspect");
     expect(remoteBody).toContain("repo_digests=$(docker image inspect");
     expect(remoteBody).toContain("validated_repo_digest_for_tag()");
+    expect(remoteBody).toContain(
+      "repo_tags=$(docker image inspect --format '{{range .RepoTags}}{{println .}}{{end}}' \"$tag\" | sort -u)",
+    );
+    expect(remoteBody).toContain("expected_retained_repo_tags()");
+    expect(remoteBody).toContain("api:20260825-145230|api:20260825-160034)");
+    expect(remoteBody).toContain("web:20260825-145230|web:20260825-160034)");
+    expect(remoteBody).toContain(
+      'test "$newer_api_id" = "$DUPLICATE_RETAINED_API_IMAGE_ID"',
+    );
+    expect(remoteBody).toContain(
+      'test "$newer_web_id" = "$DUPLICATE_RETAINED_WEB_IMAGE_ID"',
+    );
+    expect(remoteBody).toContain(
+      'validated_repo_digest_for_tag "$newer_api_tag" "$(expected_retained_repo_tags api "$newer_timestamp")"',
+    );
     expect(remoteBody).toContain(
       "grep -Eq '^\\[\"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}\"\\]$'",
     );
@@ -1642,7 +1683,7 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain(
       "rollback_tag_count_after=$(printf '%s\\n' \"$rollback_tags_after\"",
     );
-    expect(remoteBody).toContain('test "$rollback_tag_count_after" -eq 10');
+    expect(remoteBody).toContain('[ "$rollback_tag_count_after" -ne 12 ]');
     expect(remoteBody).toContain(
       "all_image_ids_after=$(docker image ls --all --quiet --no-trunc | sort -u)",
     );
@@ -1667,14 +1708,16 @@ describe("loyalty production workflow safety", () => {
       /(?:^|[;&|($]\s*)docker\s+image\s+(?!inspect\b|ls\b)/m,
     );
     expect(remoteCommandSurface).not.toMatch(
-      /\bdocker\s+(?:system|builder)\s+prune\b|\bdocker\s+(?:stop|restart|kill|rm|rmi|run|build|pull|push)\b/,
+      /\bdocker\s+(?:system|builder|container)\b|\bdocker\s+(?:stop|restart|kill|rm|rmi|run|build|pull|push)\b/,
     );
     expect(remoteCommandSurface).not.toMatch(
       /\bdocker\s+image\s+(?:prune|build|pull|push|tag|load|save|import)\b/,
     );
     expect(remoteCommandSurface).not.toMatch(
-      /\bdocker\s+(?:volume|network|container)\s+(?:create|rm|prune|connect|disconnect|stop|restart|kill|update|rename)\b/,
+      /(?:^|[;&|($]\s*)docker\s+(?:volume|network)\s+(?!(?:ls|inspect)\b)/m,
     );
+    expect(remoteBody.match(/\bdocker\s+context\s+show\b/g)).toHaveLength(1);
+    expect(remoteBody).not.toMatch(/\bdocker\s+context\s+(?!show\b)/);
     expect(remoteCommandSurface).not.toMatch(
       /docker(?:-compose|\s+compose)|\bcommand\s+docker\b/,
     );
@@ -1682,7 +1725,7 @@ describe("loyalty production workflow safety", () => {
       /\b(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=["']?docker["']?(?:[; \t]|$)|\$(?:\{)?docker_(?:bin|cmd|command)(?:\})?/im,
     );
     expect(remoteCommandSurface).not.toMatch(
-      /\b(?:eval|source|python|node|ruby|perl|pwsh|powershell)\b|(?:^|[;(&|\s])\.\s+\S+/m,
+      /\b(?:eval|source|bash|sh|python|node|ruby|perl|pwsh|powershell)\b|(?:^|[;(&|\s])\.\s+\S+/m,
     );
     expect(remoteCommandSurface.match(/\bsystemctl\s+/g)).toHaveLength(2);
     expect(remoteBody).not.toMatch(
@@ -1690,10 +1733,13 @@ describe("loyalty production workflow safety", () => {
     );
     expect(remoteCommandSurface.match(/\bcurl\s+/g)).toHaveLength(2);
     expect(remoteBody).not.toMatch(/--request\s+(?:POST|PUT|PATCH|DELETE)\b/);
+    expect(remoteBody).not.toMatch(
+      /--(?:data(?:-[a-z]+)?|upload-file|form(?:-string)?)\b/,
+    );
     expect(remoteCommandSurface.match(/\bxargs\s+/g)).toHaveLength(1);
     expect(remoteBody).toContain("xargs -0 -r sha256sum --zero --");
     expect(remoteBody).not.toMatch(
-      /\bgit\s+(?:reset|clean|checkout|switch|pull|push|commit|merge|rebase|tag|branch)\b/,
+      /\bgit\s+(?:reset|clean|checkout|switch|pull|push|commit|merge|rebase|tag|branch|apply|am|restore)\b/,
     );
     expect(remoteCommandSurface).not.toMatch(
       /\b(?:journalctl|prisma|pg_dump|pg_restore|sudo|cp|mv|rm|rmdir|truncate|unlink|shred|tee|touch|dd|install|mkdir|mktemp|mkfifo|fallocate|ln|chmod|chown|find|sed|tar|gzip|gunzip|bzip2|bunzip2|xz|unxz|zstd|unzstd|zip|unzip|7z|cpio|openssl|buildctl|sponge)\b|(?:^|\n)\s*service\s+/,
