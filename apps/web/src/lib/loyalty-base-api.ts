@@ -403,6 +403,40 @@ export interface LoyaltyMetricSource {
   sourceVersions: string[];
 }
 
+export interface LoyaltyActivityEvidence {
+  count: number | null;
+  loadedCount: number;
+  truncated: boolean | null;
+  limit: number | null;
+  availability: string;
+  exactness: string;
+  methodology: string;
+}
+
+export type LoyaltyActivityEvidenceCompleteness =
+  | "complete"
+  | "truncated"
+  | "unknown";
+
+export function loyaltyActivityEvidenceCompleteness(
+  evidence: LoyaltyActivityEvidence,
+): LoyaltyActivityEvidenceCompleteness {
+  if (
+    evidence.truncated === true ||
+    (evidence.count !== null && evidence.loadedCount < evidence.count)
+  ) {
+    return "truncated";
+  }
+  if (
+    evidence.truncated === false &&
+    evidence.count !== null &&
+    evidence.loadedCount === evidence.count
+  ) {
+    return "complete";
+  }
+  return "unknown";
+}
+
 export function hasLoyaltyActivityEvidence(
   source: LoyaltyMetricSource | null | undefined,
 ): boolean {
@@ -571,6 +605,7 @@ export interface LoyaltyRecord {
     effective?: boolean;
     superseded?: boolean;
   }>;
+  activityEvidence: LoyaltyActivityEvidence;
   recognitions: Array<{
     id: string;
     date: string;
@@ -1471,6 +1506,9 @@ export function normalizeLoyaltyRecord(
   );
   const activityItems = arrayValue(item.activities);
   const attributes = nonEmptyRecord(item.attributes) || {};
+  const activityEvidenceRaw =
+    nonEmptyRecord(item.activityEvidence) ||
+    nonEmptyRecord(attributes.activityEvidence);
   const attributeCrm = nonEmptyRecord(attributes.crm) || {};
   const crm = nonEmptyRecord(item.crm) || {};
   const phones = stringArray(pick(item, "phones", "phoneNumbers"));
@@ -1866,6 +1904,15 @@ export function normalizeLoyaltyRecord(
       pick(attributes, "history", "sourceHistory", "callHistory"),
       attributeCalls.length ? attributeCalls : sourceReportedRaw?.callBreakdown,
     ).map(normalizeHistory),
+    activityEvidence: {
+      count: nullableNumberValue(activityEvidenceRaw?.count),
+      loadedCount: activityItems.length,
+      truncated: booleanValue(activityEvidenceRaw?.truncated),
+      limit: nullableNumberValue(activityEvidenceRaw?.limit),
+      availability: stringValue(activityEvidenceRaw?.availability),
+      exactness: stringValue(activityEvidenceRaw?.exactness),
+      methodology: stringValue(activityEvidenceRaw?.methodology),
+    },
     recognitions: arrayValue(attributes.recognitions).map(normalizeRecognition),
     annaDetails: hasAnnaDetails ? annaDetails : null,
     provenance: arrayValue(

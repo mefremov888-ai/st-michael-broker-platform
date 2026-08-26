@@ -41,6 +41,7 @@ const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 const MAX_DECIMAL_18_2_CENTS = 999999999999999999n;
 const CANDIDATE_QUERY_BATCH_SIZE = 500;
 export const MAX_LOYALTY_EXPORT_ROWS = 50000;
+const OUR_ACTIVITY_EVIDENCE_LIMIT = 200;
 
 const REQUIRED_ACTIVITY_COVERAGE_TYPES = [
   "FIXATION",
@@ -5203,32 +5204,6 @@ export class LoyaltyBaseService {
     };
   }
 
-  private completeCalendarMonths(period: LoyaltyFilterPeriod): string[] | null {
-    const fromDate = period.fromIso.slice(0, 10);
-    const toDate = period.toIso.slice(0, 10);
-    const fromMonth = fromDate.slice(0, 7);
-    const toMonth = toDate.slice(0, 7);
-    const fromBounds = this.calendarMonthBounds(fromMonth);
-    const toBounds = this.calendarMonthBounds(toMonth);
-    if (
-      !fromBounds ||
-      !toBounds ||
-      fromDate !== fromBounds.from ||
-      toDate !== toBounds.to
-    ) {
-      return null;
-    }
-    const [fromYear, fromNumber] = fromMonth.split("-").map(Number);
-    const [toYear, toNumber] = toMonth.split("-").map(Number);
-    const first = fromYear * 12 + fromNumber - 1;
-    const last = toYear * 12 + toNumber - 1;
-    if (last < first || last - first > 60) return null;
-    return Array.from({ length: last - first + 1 }, (_, offset) => {
-      const index = first + offset;
-      return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}`;
-    });
-  }
-
   private exactActivityObservedThrough(item: any): Date | null {
     if (item?.metricSource?.kind !== "EXACT_ACTIVITIES") return null;
     const value = new Date(item.metricSource.observedThrough || "");
@@ -5328,47 +5303,10 @@ export class LoyaltyBaseService {
     item: any,
     period: LoyaltyFilterPeriod,
   ): number | null {
-    if (item.metricSource?.kind === "EXACT_ACTIVITIES") {
-      if (!this.exactActivityPeriodCovered(item, period)) return null;
-      if (!Array.isArray(record.activities)) {
-        return this.annaMetricValue(item, "deals") === 0 ? 0 : null;
-      }
-      return record.activities.filter((activity: any) => {
-        const occurredAt = dateOnly(activity.occurredAt);
-        return (
-          activity.type === "DEAL" &&
-          occurredAt !== null &&
-          occurredAt >= period.fromIso.slice(0, 10) &&
-          occurredAt <= period.toIso.slice(0, 10)
-        );
-      }).length;
-    }
-    const byMonth = item.sourceReportedMetrics?.dealsByMonth;
-    if (byMonth && typeof byMonth === "object" && !Array.isArray(byMonth)) {
-      const months = this.completeCalendarMonths(period);
-      if (!months) return null;
-      let total = 0;
-      for (const month of months) {
-        if (!Object.prototype.hasOwnProperty.call(byMonth, month)) return null;
-        const count = finiteNumber(byMonth[month]);
-        if (count === null || count < 0) return null;
-        total += count;
-      }
-      return total;
-    }
-    const lifetimeDeals = finiteNumber(item.sourceReportedMetrics?.deals);
-    if (lifetimeDeals === null || lifetimeDeals < 0) return null;
-    if (lifetimeDeals === 0) return 0;
-    const lastDealAt = dateOnly(item.sourceReportedMetrics?.lastDealAt);
-    if (!lastDealAt) return null;
-    const from = period.fromIso.slice(0, 10);
-    const to = period.toIso.slice(0, 10);
-    // lastDealAt is the most recent lifetime deal. If it predates the period,
-    // no deal can exist inside it. If it is inside, we can prove presence but
-    // not the full period count, so expose the lower bound of one only.
-    if (lastDealAt < from) return 0;
-    if (lastDealAt <= to) return 1;
-    return null;
+    const metrics = this.annaPeriodMetrics(record, item, period);
+    return metrics.availability === "EXACT"
+      ? finiteNumber(metrics.deals)
+      : null;
   }
 
   private annaActivityPresence(
@@ -5377,38 +5315,46 @@ export class LoyaltyBaseService {
     type: string,
     period?: LoyaltyFilterPeriod,
   ): boolean | null {
+    if (period) {
+      if (
+        item.metricSource?.kind !== "EXACT_ACTIVITIES" ||
+        !this.exactActivityPeriodCovered(item, period)
+      ) {
+        return null;
+      }
+      if (Array.isArray(record?.activities)) {
+        return record.activities.some((activity: any) => {
+          if (activity.type !== type) return false;
+          const occurredAt = dateOnly(activity.occurredAt);
+          return (
+            occurredAt !== null &&
+            occurredAt >= period.fromIso.slice(0, 10) &&
+            occurredAt <= period.toIso.slice(0, 10)
+          );
+        });
+      }
+      const fields: Record<string, string> = {
+        FIXATION: "fixations",
+        MEETING: "meetings",
+        DEAL: "deals",
+        BROKER_TOUR: "brokerTours",
+        CALL: "calls",
+      };
+      const total = fields[type]
+        ? this.annaMetricValue(item, fields[type])
+        : null;
+      return total === 0 ? false : null;
+    }
     if (
       Array.isArray(record?.activities) &&
       item.metricSource?.kind === "EXACT_ACTIVITIES"
     ) {
       const present = record.activities.some((activity: any) => {
         if (activity.type !== type) return false;
-        if (!period) return true;
-        const occurredAt = dateOnly(activity.occurredAt);
-        return (
-          occurredAt !== null &&
-          occurredAt >= period.fromIso.slice(0, 10) &&
-          occurredAt <= period.toIso.slice(0, 10)
-        );
+        return true;
       });
       if (present) return true;
-      if (period && !this.exactActivityPeriodCovered(item, period)) return null;
       return false;
-    }
-    if (type === "CALL" && period) {
-      const observedThrough = this.exactActivityObservedThrough(item);
-      return this.callPresenceInPeriod(
-        this.annaCalls(item, record),
-        item.metricSource?.kind === "EXACT_ACTIVITIES"
-          ? this.annaMetricValue(item, "calls")
-          : finiteNumber(item.sourceReportedMetrics?.calls),
-        period,
-        observedThrough,
-      );
-    }
-    if (type === "DEAL" && period) {
-      const count = this.annaDealsInPeriod(record, item, period);
-      return count === null ? null : count > 0;
     }
     const fields: Record<string, [string, string]> = {
       FIXATION: ["fixations", "lastFixationAt"],
@@ -5422,20 +5368,10 @@ export class LoyaltyBaseService {
     const total = this.annaMetricValue(item, mapping[0]);
     if (total === null) return null;
     if (item.metricSource?.kind === "EXACT_ACTIVITIES") {
-      if (period && !this.exactActivityPeriodCovered(item, period)) return null;
       if (total === 0) return false;
-      if (!period) return true;
-      return null;
+      return true;
     }
-    if (!period) return total > 0 ? true : total === 0 ? false : null;
-    if (total === 0) return false;
-    if (total < 0) return null;
-    const last = dateOnly(item.sourceReportedMetrics?.[mapping[1]]);
-    if (!last) return null;
-    return last >= period.fromIso.slice(0, 10) &&
-      last <= period.toIso.slice(0, 10)
-      ? true
-      : null;
+    return total > 0 ? true : total === 0 ? false : null;
   }
 
   private unavailablePeriodMetrics(period?: LoyaltyFilterPeriod) {
@@ -5777,9 +5713,9 @@ export class LoyaltyBaseService {
     const exactCallCount =
       item.metricSource?.kind === "EXACT_ACTIVITIES" ? callCount : null;
     const exactObservedThrough = this.exactActivityObservedThrough(item);
-    const fixations = this.annaMetricValue(item, "fixations");
-    const meetings = this.annaMetricValue(item, "meetings");
-    const deals = this.annaMetricValue(item, "deals");
+    const lifetimeFixations = this.annaMetricValue(item, "fixations");
+    const lifetimeMeetings = this.annaMetricValue(item, "meetings");
+    const lifetimeDeals = this.annaMetricValue(item, "deals");
     const brokerTours = this.annaMetricValue(item, "brokerTours");
     const bt = this.annaBrokerTour(item, entityType);
     const assignee = String(attributes.assignee || "").trim();
@@ -5806,6 +5742,15 @@ export class LoyaltyBaseService {
       item,
       filter.activityPeriod,
     );
+    const filteredFixations = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics.fixations)
+      : lifetimeFixations;
+    const filteredMeetings = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics.meetings)
+      : lifetimeMeetings;
+    const filteredDeals = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics.deals)
+      : lifetimeDeals;
     item.lastCallAt = latestCall
       ? latestCall.occurredAt || this.callSortKey(latestCall) || null
       : null;
@@ -5889,7 +5834,7 @@ export class LoyaltyBaseService {
         return false;
       if (
         filter.segment === "BT_WITHOUT_FIXATION" &&
-        !(bt === true && fixations === 0)
+        !(bt === true && lifetimeFixations === 0)
       )
         return false;
       if (
@@ -5980,32 +5925,28 @@ export class LoyaltyBaseService {
       return false;
     if (
       filter.dealCount.min !== undefined &&
-      (deals === null || deals < filter.dealCount.min)
+      (filteredDeals === null || filteredDeals < filter.dealCount.min)
     )
       return false;
     if (
       filter.dealCount.max !== undefined &&
-      (deals === null || deals > filter.dealCount.max)
+      (filteredDeals === null || filteredDeals > filter.dealCount.max)
     )
       return false;
     if (filter.dealsInPeriod !== undefined) {
-      const count = this.annaDealsInPeriod(
-        record,
-        item,
-        filter.activityPeriod!,
-      );
-      if (count === null || count > 0 !== filter.dealsInPeriod) return false;
+      if (filteredDeals === null || filteredDeals > 0 !== filter.dealsInPeriod)
+        return false;
     }
     if (filter.bt !== undefined && (bt === null || bt !== filter.bt))
       return false;
     if (
       filter.meetings.min !== undefined &&
-      (meetings === null || meetings < filter.meetings.min)
+      (filteredMeetings === null || filteredMeetings < filter.meetings.min)
     )
       return false;
     if (
       filter.meetings.max !== undefined &&
-      (meetings === null || meetings > filter.meetings.max)
+      (filteredMeetings === null || filteredMeetings > filter.meetings.max)
     )
       return false;
     if (
@@ -6085,8 +6026,8 @@ export class LoyaltyBaseService {
         ),
         statuses: statusCodes,
         bt,
-        fixations,
-        meetings,
+        fixations: filteredFixations,
+        meetings: filteredMeetings,
         callPresence: filter.callPeriod
           ? this.callPresenceInPeriod(
               calls,
@@ -6096,7 +6037,7 @@ export class LoyaltyBaseService {
             )
           : null,
         assignees,
-        deals,
+        deals: filteredDeals,
       })
     )
       return false;
@@ -6112,9 +6053,9 @@ export class LoyaltyBaseService {
             )
           : null,
         bt,
-        fixations,
-        meetings,
-        deals,
+        fixations: filteredFixations,
+        meetings: filteredMeetings,
+        deals: filteredDeals,
         assignee: assignees[0] || "",
         stage,
         projectsOnSite: projectStatus,
@@ -7904,7 +7845,7 @@ export class LoyaltyBaseService {
   private ourAgencyEvidence(
     relationMetrics: ReturnType<LoyaltyBaseService["ourAgencyRelationMetrics"]>,
   ) {
-    const limit = 200;
+    const limit = OUR_ACTIVITY_EVIDENCE_LIMIT;
     const categoriesKnown = [
       relationMetrics.fixations,
       relationMetrics.meetings,
@@ -7988,10 +7929,12 @@ export class LoyaltyBaseService {
         String(left.occurredAt || ""),
       ),
     );
+    const items = rows.slice(0, limit);
+    const count = categoriesKnown ? rows.length : null;
     return {
-      items: rows.slice(0, limit),
-      count: categoriesKnown ? rows.length : null,
-      truncated: categoriesKnown ? rows.length > limit : null,
+      items,
+      count,
+      truncated: count === null ? null : count > items.length,
       limit,
       availability: categoriesKnown ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
       exactness: categoriesKnown ? "APPROXIMATE" : "UNKNOWN",
@@ -8001,7 +7944,7 @@ export class LoyaltyBaseService {
   }
 
   private ourBrokerEvidence(item: any) {
-    const limit = 300;
+    const limit = OUR_ACTIVITY_EVIDENCE_LIMIT;
     const rows: any[] = [
       ...(Array.isArray(item.clients) ? item.clients : []).map((row: any) => ({
         id: `LOCAL_CLIENT:${String(row.id)}`,
@@ -8076,10 +8019,11 @@ export class LoyaltyBaseService {
     const count = known
       ? counts.reduce((sum, value) => sum + (value || 0), 0)
       : null;
+    const items = rows.slice(0, limit);
     return {
-      items: rows.slice(0, limit),
+      items,
       count,
-      truncated: count === null ? null : count > limit,
+      truncated: count === null ? null : count > items.length,
       limit,
       availability: known ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
       exactness: known ? "APPROXIMATE" : "UNKNOWN",
@@ -9579,7 +9523,7 @@ export class LoyaltyBaseService {
           clients: {
             where: { fixationStatus: "FIXED" },
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-            take: 200,
+            take: OUR_ACTIVITY_EVIDENCE_LIMIT,
             select: {
               id: true,
               createdAt: true,
@@ -9590,7 +9534,7 @@ export class LoyaltyBaseService {
           meetings: {
             where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
             orderBy: [{ date: "desc" }, { id: "desc" }],
-            take: 200,
+            take: OUR_ACTIVITY_EVIDENCE_LIMIT,
             select: {
               id: true,
               date: true,
@@ -9602,7 +9546,7 @@ export class LoyaltyBaseService {
           deals: {
             where: this.ourConfirmedDealWhere(),
             orderBy: [{ signedAt: "desc" }, { id: "desc" }],
-            take: 200,
+            take: OUR_ACTIVITY_EVIDENCE_LIMIT,
             select: {
               id: true,
               signedAt: true,

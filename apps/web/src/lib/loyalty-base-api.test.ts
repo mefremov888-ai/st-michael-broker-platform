@@ -12,6 +12,7 @@ import {
   getActiveLoyaltyLinks,
   formatRubles,
   hasLoyaltyActivityEvidence,
+  loyaltyActivityEvidenceCompleteness,
   loyaltyLeaderMode,
   loyaltyMetricsForDisplay,
   normalizeActiveLinks,
@@ -795,6 +796,120 @@ test("normalizes ANNA list/detail fields returned by the service", () => {
   );
   assert.equal(detail.name, "Тестовый брокер");
   assert.equal(detail.history.length, 1);
+});
+
+test("preserves activity evidence completeness metadata from raw activity rows", () => {
+  const complete = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "complete-history",
+        entityType: "BROKER",
+        displayName: "Complete history",
+        activities: [],
+        activityEvidence: {
+          count: 0,
+          truncated: false,
+          limit: 200,
+          availability: "LOCAL_PRELIMINARY",
+          exactness: "APPROXIMATE",
+          methodology: "Current local rows",
+        },
+      },
+    },
+    "brokers",
+  );
+  assert.deepEqual(complete.activityEvidence, {
+    count: 0,
+    loadedCount: 0,
+    truncated: false,
+    limit: 200,
+    availability: "LOCAL_PRELIMINARY",
+    exactness: "APPROXIMATE",
+    methodology: "Current local rows",
+  });
+  assert.equal(
+    loyaltyActivityEvidenceCompleteness(complete.activityEvidence),
+    "complete",
+  );
+
+  const partial = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "partial-history",
+        entityType: "BROKER",
+        displayName: "Partial history",
+        activities: Array.from({ length: 200 }, (_, index) => ({
+          id: `activity-${index}`,
+          type: "FIXATION",
+          occurredAt: "2026-08-01T10:00:00.000Z",
+        })),
+        attributes: {
+          activityEvidence: {
+            count: 450,
+            truncated: true,
+            limit: 200,
+            availability: "LOCAL_PRELIMINARY",
+            exactness: "APPROXIMATE",
+            methodology: "Bounded local rows",
+          },
+        },
+      },
+    },
+    "brokers",
+  );
+  assert.equal(partial.activityEvidence.count, 450);
+  assert.equal(partial.activityEvidence.loadedCount, 200);
+  assert.equal(partial.activityEvidence.truncated, true);
+  assert.equal(partial.activityEvidence.methodology, "Bounded local rows");
+  assert.equal(
+    loyaltyActivityEvidenceCompleteness(partial.activityEvidence),
+    "truncated",
+  );
+
+  const unknown = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "unknown-history",
+        entityType: "BROKER",
+        displayName: "Unknown history",
+        activities: [
+          {
+            id: "activity-1",
+            type: "FIXATION",
+            occurredAt: "2026-08-01T10:00:00.000Z",
+          },
+        ],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(unknown.activityEvidence.loadedCount, 1);
+  assert.equal(unknown.activityEvidence.count, null);
+  assert.equal(unknown.activityEvidence.truncated, null);
+  assert.equal(
+    loyaltyActivityEvidenceCompleteness(unknown.activityEvidence),
+    "unknown",
+  );
+});
+
+test("renders explicit complete, truncated or unknown history status with methodology", () => {
+  const detail = readFileSync(
+    new URL(
+      "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  assert.match(detail, /evidence=\{record\.activityEvidence\}/);
+  assert.match(detail, /data-activity-evidence-completeness/);
+  assert.match(detail, /loyaltyActivityEvidenceCompleteness\(evidence\)/);
+  assert.match(detail, /Методика формирования истории/);
+  assert.match(detail, /Полнота истории не подтверждена/);
+  assert.doesNotMatch(
+    detail,
+    /Подтверждённые event-level события пока не переданы/,
+  );
 });
 
 test("retains, deduplicates and displays every backend computed status in order", () => {
