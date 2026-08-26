@@ -1,11 +1,14 @@
 import type {
   LoyaltyAgencyStatus,
+  LoyaltyBaseKey,
   LoyaltyBrokerStatus,
   LoyaltyCallResult,
   LoyaltyCallScenario,
   LoyaltyCanonicalFilter,
+  LoyaltyColumnFilters,
   LoyaltyDataQuality,
   LoyaltyEntityType,
+  LoyaltySegment,
   LoyaltySortField,
 } from "./loyalty-base-api";
 
@@ -163,9 +166,11 @@ const boolean = (value: TriState) =>
   value === "" ? undefined : value === "true";
 
 export function toCanonicalFilter(
-  state: LoyaltyFilterFormState,
+  unsafeState: LoyaltyFilterFormState,
   entityType: LoyaltyEntityType,
+  base: LoyaltyBaseKey,
 ): LoyaltyCanonicalFilter {
+  const state = sanitizeLoyaltyFilterState(base, entityType, unsafeState);
   const common: LoyaltyCanonicalFilter = {
     includeLowSignal: state.includeLowSignal,
     callPeriod:
@@ -268,3 +273,191 @@ export const AGENCY_SCENARIOS: ReadonlyArray<
   ["HAS_MEETINGS", "Есть встречи"],
   ["NO_MEETINGS", "Нет встреч"],
 ];
+
+export type LoyaltyArchiveMode = LoyaltyFilterFormState["archived"];
+
+export interface LoyaltyFilterCapabilities {
+  hasAmo: boolean;
+  dataQuality: boolean;
+  agencySize: boolean;
+  websitePresent: boolean;
+  projectsOnSite: boolean;
+  archivedModes: ReadonlyArray<LoyaltyArchiveMode>;
+  scenarios: ReadonlyArray<readonly [LoyaltyCallScenario, string]>;
+  segments: ReadonlyArray<LoyaltySegment>;
+}
+
+const ALL_ARCHIVE_MODES: ReadonlyArray<LoyaltyArchiveMode> = [
+  "exclude",
+  "only",
+  "include",
+];
+const OUR_AGENCY_ARCHIVE_MODES: ReadonlyArray<LoyaltyArchiveMode> = [
+  "exclude",
+  "include",
+];
+const BROKER_SEGMENTS: ReadonlyArray<LoyaltySegment> = [
+  "NOT_CALLED_CURRENT_MONTH",
+  "NEW_BROKER",
+  "BT_WITHOUT_FIXATION",
+  "BIRTHDAY_TODAY",
+];
+const OUR_AGENCY_SCENARIOS = AGENCY_SCENARIOS.filter(
+  ([scenario]) => scenario !== "SITE_PLACED" && scenario !== "SITE_NOT_PLACED",
+);
+const TRI_STATES: ReadonlyArray<TriState> = ["", "true", "false"];
+const DATA_QUALITY_VALUES: ReadonlyArray<
+  LoyaltyFilterFormState["dataQuality"]
+> = ["", "FULL", "NEEDS_COMPLETION", "NOT_FOUND_IN_CRM", "CONFLICT"];
+
+/**
+ * UI capability contract for one concrete base/entity pair. The API remains
+ * fail-closed; this matrix prevents the UI from constructing predicates which
+ * the selected authoritative model cannot answer.
+ */
+export function loyaltyFilterCapabilities(
+  base: LoyaltyBaseKey,
+  entityType: LoyaltyEntityType,
+): LoyaltyFilterCapabilities {
+  const ourAgency = base === "ours" && entityType === "agencies";
+  const agencyWithSourceFields = entityType === "agencies" && !ourAgency;
+  return {
+    hasAmo: !ourAgency,
+    dataQuality: !ourAgency,
+    agencySize: agencyWithSourceFields,
+    websitePresent: agencyWithSourceFields,
+    projectsOnSite: agencyWithSourceFields,
+    archivedModes: ourAgency ? OUR_AGENCY_ARCHIVE_MODES : ALL_ARCHIVE_MODES,
+    scenarios:
+      entityType === "brokers"
+        ? BROKER_SCENARIOS
+        : ourAgency
+          ? OUR_AGENCY_SCENARIOS
+          : AGENCY_SCENARIOS,
+    segments: entityType === "brokers" ? BROKER_SEGMENTS : [],
+  };
+}
+
+/**
+ * Sanitizes both live UI state and untrusted saved-view state. Unsupported or
+ * unknown values are cleared rather than converted into a negative predicate.
+ * The original object is retained when no change is required.
+ */
+export function sanitizeLoyaltyFilterState(
+  base: LoyaltyBaseKey,
+  entityType: LoyaltyEntityType,
+  state: LoyaltyFilterFormState,
+): LoyaltyFilterFormState {
+  const capabilities = loyaltyFilterCapabilities(base, entityType);
+  const patch: Partial<LoyaltyFilterFormState> = {};
+  const scenarioAllowed =
+    state.scenario === "" ||
+    capabilities.scenarios.some(([scenario]) => scenario === state.scenario);
+
+  if (
+    (!capabilities.hasAmo && state.hasAmo !== "") ||
+    (capabilities.hasAmo && !TRI_STATES.includes(state.hasAmo))
+  ) {
+    patch.hasAmo = "";
+  }
+  if (
+    (!capabilities.dataQuality && state.dataQuality !== "") ||
+    (capabilities.dataQuality &&
+      !DATA_QUALITY_VALUES.includes(state.dataQuality))
+  ) {
+    patch.dataQuality = "";
+  }
+  if (!capabilities.archivedModes.includes(state.archived)) {
+    patch.archived = "exclude";
+  }
+  if (!scenarioAllowed) patch.scenario = "";
+  if (!capabilities.agencySize && state.agencySize !== "") {
+    patch.agencySize = "";
+  }
+  if (!capabilities.websitePresent && state.websitePresent !== "") {
+    patch.websitePresent = "";
+  }
+  if (!capabilities.projectsOnSite && state.projectsOnSite !== "") {
+    patch.projectsOnSite = "";
+  }
+
+  return Object.keys(patch).length ? { ...state, ...patch } : state;
+}
+
+export function sanitizeLoyaltySegment(
+  base: LoyaltyBaseKey,
+  entityType: LoyaltyEntityType,
+  segment: LoyaltySegment | "",
+): LoyaltySegment | "" {
+  const allowed = loyaltyFilterCapabilities(base, entityType).segments;
+  return allowed.includes(segment as LoyaltySegment) ? segment : "";
+}
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value && typeof value === "object" && !Array.isArray(value));
+
+const objectRecord = (value: unknown): Record<string, unknown> =>
+  isObjectRecord(value) ? value : {};
+
+const formStateFromSavedView = (
+  value: Record<string, unknown>,
+): LoyaltyFilterFormState => {
+  const defaults = emptyLoyaltyFilters();
+  const candidate = { ...defaults } as Record<string, unknown>;
+  for (const key of Object.keys(defaults) as Array<
+    keyof LoyaltyFilterFormState
+  >) {
+    const saved = value[key];
+    if (
+      (typeof defaults[key] === "string" && typeof saved === "string") ||
+      (typeof defaults[key] === "boolean" && typeof saved === "boolean")
+    ) {
+      candidate[key] = saved;
+    }
+  }
+
+  // Search terms may contain phone numbers, emails or names and are
+  // intentionally never restored from a personal or shared saved view.
+  candidate.search = "";
+  return candidate as unknown as LoyaltyFilterFormState;
+};
+
+export interface RestoredLoyaltySavedView {
+  filters: LoyaltyFilterFormState;
+  columns: LoyaltyColumnFilters;
+  segment: LoyaltySegment | "";
+}
+
+/**
+ * Restores the UI envelope used by current saved views and the legacy flat
+ * shape. Values are treated as untrusted JSON: wrong primitive types fall
+ * back to defaults, PII-bearing search is discarded, and unsupported filters
+ * are removed through the same capability matrix as live form state.
+ */
+export function restoreLoyaltySavedView(
+  base: LoyaltyBaseKey,
+  entityType: LoyaltyEntityType,
+  snapshot: Record<string, unknown>,
+): RestoredLoyaltySavedView {
+  const ui = objectRecord(snapshot.ui);
+  const savedFilters = isObjectRecord(ui.filters) ? ui.filters : snapshot;
+  const filters = sanitizeLoyaltyFilterState(
+    base,
+    entityType,
+    formStateFromSavedView(savedFilters),
+  );
+  const columns = (
+    isObjectRecord(ui.columns) ? ui.columns : objectRecord(snapshot.columns)
+  ) as LoyaltyColumnFilters;
+  const segment = sanitizeLoyaltySegment(
+    base,
+    entityType,
+    typeof ui.segment === "string"
+      ? (ui.segment as LoyaltySegment | "")
+      : typeof snapshot.segment === "string"
+        ? (snapshot.segment as LoyaltySegment | "")
+        : "",
+  );
+
+  return { filters, columns, segment };
+}

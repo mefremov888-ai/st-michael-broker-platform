@@ -4,6 +4,13 @@ The Google Sheets and amoCRM endpoints are read-only attestations. They never
 publish source rows and persist only bounded counts, timestamps, hashes and safe
 error codes.
 
+For amoCRM, "complete traversal" means only that the configured contacts,
+companies and leads entity collections were paged to their terminal response
+within the declared bounds. It is an entity inventory, not full historical
+coverage. The UI therefore calls this a "full entity traversal" and must never
+label it as "full coverage". It does not scan a historical event ledger or call
+source and cannot confirm fixation, meeting, deal-history or call KPI values.
+
 ## Memory and completeness bounds
 
 - Google metadata is checked before any values request. The four required tabs

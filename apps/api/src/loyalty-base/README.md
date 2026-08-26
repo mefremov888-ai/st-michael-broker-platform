@@ -210,6 +210,14 @@ authoritative field for the selected OUR broker/agency model fails with HTTP
 selection use the same check and never turn an unsupported predicate into an
 empty result.
 
+The V2 UI uses the same base/entity capability boundary before applying or
+restoring a saved view. In particular, OUR agencies do not offer amo linkage,
+data-quality, agency-size, website/site-placement, `SITE_PLACED` /
+`SITE_NOT_PLACED`, archive-only or broker-segment predicates. Unsupported saved
+values are cleared, while `archived=exclude` and `archived=include` remain
+available. The API rejection remains authoritative if any client bypasses the
+UI.
+
 ```json
 {
   "page": 1,

@@ -59,6 +59,8 @@ import {
   emptyLoyaltyFilters,
   formatLoyaltyMetricExplanation,
   loyaltyMetricPeriodLabel,
+  restoreLoyaltySavedView,
+  sanitizeLoyaltyFilterState,
   toCanonicalFilter,
   type LoyaltyFilterFormState,
   type LoyaltyMetricExplanation,
@@ -863,7 +865,10 @@ export function LoyaltyBaseWorkspaceV2() {
     };
   }, [currentUserId, currentUserRole, hasAccess]);
   const setDraft = (next: LoyaltyFilterFormState) =>
-    setDrafts((current) => ({ ...current, [key]: next }));
+    setDrafts((current) => ({
+      ...current,
+      [key]: sanitizeLoyaltyFilterState(base, entityType, next),
+    }));
   const resetContext = useCallback(
     (
       nextBase: LoyaltyBaseKey,
@@ -928,7 +933,7 @@ export function LoyaltyBaseWorkspaceV2() {
         segment,
         sortBy: filters.sortBy,
         sortOrder: filters.sortOrder,
-        filter: toCanonicalFilter(filters, entityType),
+        filter: toCanonicalFilter(filters, entityType, base),
         columns,
       });
       if (request === listRequest.current) setList(next);
@@ -1031,7 +1036,9 @@ export function LoyaltyBaseWorkspaceV2() {
     };
   }, [base, canReadAll, detailId, entityType, list]);
   const applyFilters = () => {
-    setApplied((current) => ({ ...current, [key]: { ...draft } }));
+    const next = sanitizeLoyaltyFilterState(base, entityType, draft);
+    setDrafts((current) => ({ ...current, [key]: next }));
+    setApplied((current) => ({ ...current, [key]: next }));
     setSegmentState((current) => ({ ...current, [key]: "" }));
     setPage(1);
   };
@@ -1276,7 +1283,7 @@ export function LoyaltyBaseWorkspaceV2() {
         segment: segment || undefined,
         sortBy: filters.sortBy,
         sortOrder: filters.sortOrder,
-        filter: toCanonicalFilter(filters, entityType),
+        filter: toCanonicalFilter(filters, entityType, base),
         columns,
       });
       downloadBlob(result.blob, result.filename);
@@ -1295,7 +1302,7 @@ export function LoyaltyBaseWorkspaceV2() {
     archived: filters.archived,
     sortBy: filters.sortBy,
     sortOrder: filters.sortOrder,
-    filter: toCanonicalFilter(filters, entityType),
+    filter: toCanonicalFilter(filters, entityType, base),
     columns,
     segment: segment || undefined,
     ui: {
@@ -1305,28 +1312,10 @@ export function LoyaltyBaseWorkspaceV2() {
     },
   };
   const applySavedView = (snapshot: Record<string, unknown>) => {
-    const ui =
-      snapshot.ui &&
-      typeof snapshot.ui === "object" &&
-      !Array.isArray(snapshot.ui)
-        ? (snapshot.ui as Record<string, unknown>)
-        : {};
-    const savedFilters =
-      ui.filters && typeof ui.filters === "object" && !Array.isArray(ui.filters)
-        ? (ui.filters as Partial<LoyaltyFilterFormState>)
-        : (snapshot as Partial<LoyaltyFilterFormState>);
-    const nextFilters = { ...emptyLoyaltyFilters(), ...savedFilters };
-    const savedColumns =
-      ui.columns && typeof ui.columns === "object" && !Array.isArray(ui.columns)
-        ? (ui.columns as LoyaltyColumnFilters)
-        : snapshot.columns &&
-            typeof snapshot.columns === "object" &&
-            !Array.isArray(snapshot.columns)
-          ? (snapshot.columns as LoyaltyColumnFilters)
-          : {};
-    const savedSegment = String(ui.segment ?? snapshot.segment ?? "") as
-      | LoyaltySegment
-      | "";
+    const restored = restoreLoyaltySavedView(base, entityType, snapshot);
+    const nextFilters = restored.filters;
+    const savedColumns = restored.columns;
+    const savedSegment = restored.segment;
     setDrafts((current) => ({ ...current, [key]: nextFilters }));
     setApplied((current) => ({ ...current, [key]: nextFilters }));
     setColumnDrafts((current) => ({ ...current, [key]: savedColumns }));
@@ -2134,7 +2123,7 @@ export function LoyaltyBaseWorkspaceV2() {
             archived: filters.archived,
             sortBy: filters.sortBy,
             sortOrder: filters.sortOrder,
-            filter: toCanonicalFilter(filters, entityType),
+            filter: toCanonicalFilter(filters, entityType, base),
             columns,
             segment: segment || undefined,
           }}

@@ -8,8 +8,8 @@ import {
   type LoyaltyFacets,
 } from "@/lib/loyalty-base-api";
 import {
-  AGENCY_SCENARIOS,
-  BROKER_SCENARIOS,
+  loyaltyFilterCapabilities,
+  sanitizeLoyaltyFilterState,
   type LoyaltyFilterFormState,
 } from "@/lib/loyalty-ui-model";
 import type {
@@ -134,12 +134,20 @@ export function LoyaltyFilterPanel({
   const update = <K extends keyof LoyaltyFilterFormState>(
     key: K,
     value: LoyaltyFilterFormState[K],
-  ) => onChange({ ...draft, [key]: value });
+  ) =>
+    onChange(
+      sanitizeLoyaltyFilterState(base, entityType, {
+        ...draft,
+        [key]: value,
+      }),
+    );
   const isBroker = entityType === "brokers";
   const callResults = getLoyaltyCallResultOptions(entityType);
-  const scenarios = isBroker ? BROKER_SCENARIOS : AGENCY_SCENARIOS;
+  const capabilities = loyaltyFilterCapabilities(base, entityType);
+  const scenarios = capabilities.scenarios;
   const statusOptions = isBroker ? BROKER_STATUSES : AGENCY_PARTNERSHIP;
   const unavailableForOurAgency = base === "ours" && !isBroker;
+  const unavailableTitle = "Нет авторитетного поля в модели Нашей базы";
 
   return (
     <details className="card group" open>
@@ -160,9 +168,10 @@ export function LoyaltyFilterPanel({
       >
         {unavailableForOurAgency && (
           <p className="rounded-lg bg-warning/10 p-3 text-xs text-warning">
-            В «Нашей базе» нет полей размера агентства, сайта и размещения
-            проектов. Эти фильтры отключены: неизвестные значения не считаются
-            отрицательными.
+            Для агентств «Нашей базы» нет авторитетных полей связи с amoCRM,
+            качества данных, размера, сайта и размещения проектов. Сценарии
+            размещения и режим «Только архив» также недоступны. Эти условия
+            очищаются: неизвестные значения не считаются отрицательными.
           </p>
         )}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -202,6 +211,8 @@ export function LoyaltyFilterPanel({
             <TriSelect
               value={draft.hasAmo}
               onChange={(value) => update("hasAmo", value)}
+              disabled={!capabilities.hasAmo}
+              title={!capabilities.hasAmo ? unavailableTitle : undefined}
               any="Любая"
               yes="Связана"
               no="Не связана"
@@ -415,11 +426,9 @@ export function LoyaltyFilterPanel({
                 <select
                   className="input"
                   value={draft.agencySize}
-                  disabled={unavailableForOurAgency}
+                  disabled={!capabilities.agencySize}
                   title={
-                    unavailableForOurAgency
-                      ? "Нет авторитетного поля в модели Нашей базы"
-                      : undefined
+                    !capabilities.agencySize ? unavailableTitle : undefined
                   }
                   onChange={(event) =>
                     update(
@@ -457,11 +466,9 @@ export function LoyaltyFilterPanel({
                 <select
                   className="input"
                   value={draft.projectsOnSite}
-                  disabled={unavailableForOurAgency}
+                  disabled={!capabilities.projectsOnSite}
                   title={
-                    unavailableForOurAgency
-                      ? "Нет авторитетного поля в модели Нашей базы"
-                      : undefined
+                    !capabilities.projectsOnSite ? unavailableTitle : undefined
                   }
                   onChange={(event) =>
                     update(
@@ -481,11 +488,9 @@ export function LoyaltyFilterPanel({
                 <TriSelect
                   value={draft.websitePresent}
                   onChange={(value) => update("websitePresent", value)}
-                  disabled={unavailableForOurAgency}
+                  disabled={!capabilities.websitePresent}
                   title={
-                    unavailableForOurAgency
-                      ? "Нет авторитетного поля в модели Нашей базы"
-                      : undefined
+                    !capabilities.websitePresent ? unavailableTitle : undefined
                   }
                 />
               </Field>
@@ -520,6 +525,8 @@ export function LoyaltyFilterPanel({
             <select
               className="input"
               value={draft.dataQuality}
+              disabled={!capabilities.dataQuality}
+              title={!capabilities.dataQuality ? unavailableTitle : undefined}
               onChange={(event) =>
                 update(
                   "dataQuality",
@@ -705,7 +712,9 @@ export function LoyaltyFilterPanel({
               }
             >
               <option value="exclude">Только активные</option>
-              <option value="only">Только архив</option>
+              {capabilities.archivedModes.includes("only") && (
+                <option value="only">Только архив</option>
+              )}
               <option value="include">Активные и архив</option>
             </select>
           </Field>

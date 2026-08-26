@@ -3658,52 +3658,53 @@ describe("LoyaltyBaseService", () => {
     },
   );
 
-  it("keeps unsupported-filter rejection identical for list/search/export/selection", async () => {
-    const prisma = prismaMock();
-    const service = new LoyaltyBaseService(prisma);
-    const unsupported = { partnershipStatuses: ["VIP_PARTNER"] };
-    const actions = [
-      () =>
-        service.list(
-          "ours",
-          "BROKER",
-          {} as any,
-          undefined,
-          unsupported as any,
-        ),
-      () =>
-        service.search("ours", "BROKER", {
-          search: "",
-          filter: unsupported,
-        } as any),
-      () =>
-        service.exportCsv(
-          "ours",
-          "BROKER",
-          { search: "", filter: unsupported } as any,
-          "admin-1",
-        ),
-      () =>
-        service.resolveSelection("ours", "BROKER", {
-          search: "",
-          filter: unsupported,
-        } as any),
-    ];
+  it.each([
+    [
+      "BROKER",
+      {},
+      { partnershipStatuses: ["VIP_PARTNER"] },
+      ["partnershipStatuses"],
+    ],
+    ["AGENCY", { hasAmo: true }, {}, ["hasAmo"]],
+    ["AGENCY", { archived: "only" }, {}, ["archived"]],
+    ["AGENCY", {}, { dataQuality: ["FULL"] }, ["dataQuality"]],
+    ["AGENCY", {}, { scenario: "SITE_PLACED" }, ["scenario"]],
+  ] as const)(
+    "keeps unsupported OUR %s filter rejection identical for list/search/export/selection: %j / %j",
+    async (entityType, flat, canonical, expectedFields) => {
+      const prisma = prismaMock();
+      const service = new LoyaltyBaseService(prisma);
+      const request = { search: "", ...flat, filter: canonical };
+      const actions = [
+        () =>
+          service.list(
+            "ours",
+            entityType,
+            flat as any,
+            undefined,
+            canonical as any,
+          ),
+        () => service.search("ours", entityType, request as any),
+        () => service.exportCsv("ours", entityType, request as any, "admin-1"),
+        () => service.resolveSelection("ours", entityType, request as any),
+      ];
 
-    for (const action of actions) {
-      const error = await action().catch((caught) => caught);
-      expect(error).toBeInstanceOf(BadRequestException);
-      expect(error.getStatus()).toBe(400);
-      expect(error.getResponse()).toMatchObject({
-        code: "LOYALTY_FILTER_UNAVAILABLE",
-        base: "ours",
-        entityType: "BROKER",
-        fields: ["partnershipStatuses"],
-      });
-    }
-    expect(prisma.broker.findMany).not.toHaveBeenCalled();
-    expect(prisma.auditLog.create).not.toHaveBeenCalled();
-  });
+      for (const action of actions) {
+        const error = await action().catch((caught) => caught);
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect(error.getStatus()).toBe(400);
+        expect(error.getResponse()).toMatchObject({
+          code: "LOYALTY_FILTER_UNAVAILABLE",
+          base: "ours",
+          entityType,
+          fields: expectedFields,
+        });
+      }
+      expect(prisma.broker.findMany).not.toHaveBeenCalled();
+      expect(prisma.agency.findMany).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    },
+  );
 
   it("reads saved calls and engagement events across all four canonical targets", async () => {
     const prisma = prismaMock();
