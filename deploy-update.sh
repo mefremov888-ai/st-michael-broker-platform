@@ -46,6 +46,18 @@ fi
 
 ENV_STAGING_FILE=""
 RELEASE_CONTEXT=""
+ROLLBACK_DIR=/var/backups/stmichael/releases
+ROLLBACK_CAPTURE_COMMITTED=0
+ROLLBACK_RECORD=""
+ROLLBACK_OVERRIDE=""
+ROLLBACK_RECORD_STAGING=""
+ROLLBACK_OVERRIDE_STAGING=""
+ROLLBACK_API_TAG=""
+ROLLBACK_WEB_TAG=""
+ROLLBACK_RECORD_CREATED=0
+ROLLBACK_OVERRIDE_CREATED=0
+ROLLBACK_API_TAG_CREATED=0
+ROLLBACK_WEB_TAG_CREATED=0
 cleanup_temporary_files() {
     case "${ENV_STAGING_FILE:-}" in
         "$(pwd)"/.env.staging.*) rm -f -- "$ENV_STAGING_FILE" ;;
@@ -57,6 +69,42 @@ cleanup_temporary_files() {
         "") ;;
         *) echo "Refusing to remove unexpected release context: $RELEASE_CONTEXT" >&2 ;;
     esac
+    case "${ROLLBACK_RECORD_STAGING:-}" in
+        "$ROLLBACK_DIR"/.release-*.tmp.*) rm -f -- "$ROLLBACK_RECORD_STAGING" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected rollback record staging path: $ROLLBACK_RECORD_STAGING" >&2 ;;
+    esac
+    case "${ROLLBACK_OVERRIDE_STAGING:-}" in
+        "$ROLLBACK_DIR"/.rollback-*.tmp.*) rm -f -- "$ROLLBACK_OVERRIDE_STAGING" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected rollback override staging path: $ROLLBACK_OVERRIDE_STAGING" >&2 ;;
+    esac
+    if [ "${ROLLBACK_CAPTURE_COMMITTED:-0}" != "1" ]; then
+        if [ "${ROLLBACK_RECORD_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_RECORD:-}" in
+                "$ROLLBACK_DIR"/release-*.txt) rm -f -- "$ROLLBACK_RECORD" ;;
+                *) echo "Refusing to remove unexpected rollback record path: $ROLLBACK_RECORD" >&2 ;;
+            esac
+        fi
+        if [ "${ROLLBACK_OVERRIDE_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_OVERRIDE:-}" in
+                "$ROLLBACK_DIR"/rollback-*.yml) rm -f -- "$ROLLBACK_OVERRIDE" ;;
+                *) echo "Refusing to remove unexpected rollback override path: $ROLLBACK_OVERRIDE" >&2 ;;
+            esac
+        fi
+        if [ "${ROLLBACK_API_TAG_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_API_TAG:-}" in
+                st-michael-rollback-api:[0-9]*-[0-9]*) docker image rm "$ROLLBACK_API_TAG" >/dev/null 2>&1 || true ;;
+                *) echo "Refusing to remove unexpected rollback API tag: $ROLLBACK_API_TAG" >&2 ;;
+            esac
+        fi
+        if [ "${ROLLBACK_WEB_TAG_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_WEB_TAG:-}" in
+                st-michael-rollback-web:[0-9]*-[0-9]*) docker image rm "$ROLLBACK_WEB_TAG" >/dev/null 2>&1 || true ;;
+                *) echo "Refusing to remove unexpected rollback web tag: $ROLLBACK_WEB_TAG" >&2 ;;
+            esac
+        fi
+    fi
 }
 trap cleanup_temporary_files EXIT
 
@@ -620,6 +668,54 @@ fail_after_rollout() {
     rollback_application || true
     exit 1
 }
+# Pin the images used by the still-running containers before either mutable
+# Compose image tag is rebuilt. BuildKit may collect the now-untagged previous
+# image as soon as a successful build replaces `latest`; capturing it after both
+# builds therefore cannot provide a reliable rollback target (production run
+# 32950095327 failed this way before migrations or rollout). The EXIT trap removes
+# these provisional tags if a build fails before the record is committed.
+sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ROLLBACK_DIR"
+RELEASE_TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+if ! printf '%s' "$RELEASE_TIMESTAMP" | grep -Eq '^[0-9]{8}-[0-9]{6}$'; then
+    echo "    ✗ Cannot create a safe rollback release timestamp."
+    exit 1
+fi
+ROLLBACK_RECORD="$ROLLBACK_DIR/release-$RELEASE_TIMESTAMP.txt"
+ROLLBACK_OVERRIDE="$ROLLBACK_DIR/rollback-$RELEASE_TIMESTAMP.yml"
+ROLLBACK_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
+ROLLBACK_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
+for ROLLBACK_PATH in "$ROLLBACK_RECORD" "$ROLLBACK_OVERRIDE"; do
+    if [ -e "$ROLLBACK_PATH" ] || [ -L "$ROLLBACK_PATH" ]; then
+        echo "    ✗ Refusing to overwrite an existing rollback record."
+        exit 1
+    fi
+done
+for ROLLBACK_TAG in "$ROLLBACK_API_TAG" "$ROLLBACK_WEB_TAG"; do
+    if docker image inspect "$ROLLBACK_TAG" >/dev/null 2>&1; then
+        echo "    ✗ Refusing to overwrite an existing rollback image tag."
+        exit 1
+    fi
+done
+PREVIOUS_API_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-api 2>/dev/null || true)
+PREVIOUS_WEB_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-web 2>/dev/null || true)
+PREVIOUS_NGINX_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-nginx 2>/dev/null || true)
+for PREVIOUS_IMAGE in "$PREVIOUS_API_IMAGE" "$PREVIOUS_WEB_IMAGE" "$PREVIOUS_NGINX_IMAGE"; do
+    if ! printf '%s' "$PREVIOUS_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        echo "    ✗ Cannot capture a valid previous application image for fast rollback."
+        exit 1
+    fi
+done
+docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
+ROLLBACK_API_TAG_CREATED=1
+docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
+ROLLBACK_WEB_TAG_CREATED=1
+if [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")" != "$PREVIOUS_API_IMAGE" ] \
+    || [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")" != "$PREVIOUS_WEB_IMAGE" ]; then
+    echo "    ✗ Rollback image tags do not resolve to the running application images."
+    exit 1
+fi
+echo "    ✓ Previous API/web images are pinned before rebuild."
+
 # 2026-06-25: строим api и web ПО ОЧЕРЕДИ, не параллельно. При пустом
 # buildkit кеше параллельный `npm install` для api + web суммарно жрёт
 # >2 ГБ RAM → OOM-killer убивает процесс → SSH сессия рвётся без exit
@@ -631,34 +727,24 @@ target_compose --project-directory "$RELEASE_CONTEXT" \
 target_compose --project-directory "$RELEASE_CONTEXT" \
     -f "$RELEASE_CONTEXT/docker-compose.yml" build web
 
-# Only successful builds earn a rollback record. A compilation failure leaves
-# the running containers, live .env, rollback tags and release history untouched.
-ROLLBACK_DIR=/var/backups/stmichael/releases
-sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ROLLBACK_DIR"
-RELEASE_TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-ROLLBACK_RECORD="$ROLLBACK_DIR/release-$RELEASE_TIMESTAMP.txt"
-ROLLBACK_OVERRIDE="$ROLLBACK_DIR/rollback-$RELEASE_TIMESTAMP.yml"
-ROLLBACK_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
-ROLLBACK_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
-PREVIOUS_API_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-api 2>/dev/null || true)
-PREVIOUS_WEB_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-web 2>/dev/null || true)
-PREVIOUS_NGINX_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-nginx 2>/dev/null || true)
-for PREVIOUS_IMAGE in "$PREVIOUS_API_IMAGE" "$PREVIOUS_WEB_IMAGE" "$PREVIOUS_NGINX_IMAGE"; do
-    if ! printf '%s' "$PREVIOUS_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
-        echo "    ✗ Cannot capture a valid previous application image for fast rollback."
-        exit 1
-    fi
-done
-docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
-docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
+# A successful pair of builds commits the already-pinned images to an atomic
+# rollback record. Until both files are in place, the EXIT trap removes the
+# provisional tags and any partial metadata.
+if [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")" != "$PREVIOUS_API_IMAGE" ] \
+    || [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")" != "$PREVIOUS_WEB_IMAGE" ]; then
+    echo "    ✗ A pinned rollback image disappeared during the rebuild."
+    exit 1
+fi
+ROLLBACK_RECORD_STAGING=$(mktemp "$ROLLBACK_DIR/.release-$RELEASE_TIMESTAMP.tmp.XXXXXX")
 {
     echo "previous_commit=$PREVIOUS_DEPLOY_SHA"
     echo "target_commit=$EXPECTED_DEPLOY_SHA"
     echo "previous_api_image=$PREVIOUS_API_IMAGE"
     echo "previous_web_image=$PREVIOUS_WEB_IMAGE"
     echo "previous_nginx_image=$PREVIOUS_NGINX_IMAGE"
-} > "$ROLLBACK_RECORD"
-chmod 600 "$ROLLBACK_RECORD"
+} > "$ROLLBACK_RECORD_STAGING"
+chmod 600 "$ROLLBACK_RECORD_STAGING"
+ROLLBACK_OVERRIDE_STAGING=$(mktemp "$ROLLBACK_DIR/.rollback-$RELEASE_TIMESTAMP.tmp.XXXXXX")
 {
     echo "services:"
     echo "  api:"
@@ -666,8 +752,15 @@ chmod 600 "$ROLLBACK_RECORD"
     echo '    entrypoint: ["/bin/sh", "-c", "exec node apps/api/dist/main.js"]'
     echo "  web:"
     echo "    image: \"$ROLLBACK_WEB_TAG\""
-} > "$ROLLBACK_OVERRIDE"
-chmod 600 "$ROLLBACK_OVERRIDE"
+} > "$ROLLBACK_OVERRIDE_STAGING"
+chmod 600 "$ROLLBACK_OVERRIDE_STAGING"
+mv -- "$ROLLBACK_RECORD_STAGING" "$ROLLBACK_RECORD"
+ROLLBACK_RECORD_CREATED=1
+ROLLBACK_RECORD_STAGING=""
+mv -- "$ROLLBACK_OVERRIDE_STAGING" "$ROLLBACK_OVERRIDE"
+ROLLBACK_OVERRIDE_CREATED=1
+ROLLBACK_OVERRIDE_STAGING=""
+ROLLBACK_CAPTURE_COMMITTED=1
 echo "    rollback metadata: $ROLLBACK_RECORD"
 echo "    rollback override: $ROLLBACK_OVERRIDE"
 
