@@ -588,6 +588,12 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     expect(transactionBody).toContain("await createRowAudit(");
     expect(transactionBody).toContain("await createCompletionAudit(");
     expect(transactionBody!.indexOf("await lockClientWriters(")).toBeLessThan(
+      transactionBody!.indexOf("await acquireRepairAdvisoryLock("),
+    );
+    expect(
+      transactionBody!.indexOf("await acquireRepairAdvisoryLock("),
+    ).toBeLessThan(transactionBody!.indexOf("await findRepairLedger("));
+    expect(transactionBody!.indexOf("await lockClientWriters(")).toBeLessThan(
       transactionBody!.indexOf("await loadExactCohort("),
     );
     expect(transactionBody!.indexOf("await lockClientWriters(")).toBeLessThan(
@@ -608,6 +614,22 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     expect(idempotentBody!.indexOf("collectAmoEvidence(")).toBeLessThan(
       idempotentBody!.indexOf("prisma.$transaction("),
     );
+    const idempotentTransaction = idempotentBody!.slice(
+      idempotentBody!.indexOf("prisma.$transaction("),
+    );
+    expect(
+      idempotentTransaction.indexOf("await lockClientWriters("),
+    ).toBeLessThan(
+      idempotentTransaction.indexOf("await acquireRepairAdvisoryLock("),
+    );
+    expect(
+      idempotentTransaction.indexOf("await acquireRepairAdvisoryLock("),
+    ).toBeLessThan(idempotentTransaction.indexOf("await findRepairLedger("));
+    expect(
+      idempotentTransaction.indexOf("await lockClientWriters("),
+    ).toBeLessThan(
+      idempotentTransaction.indexOf("transaction.client.findMany("),
+    );
     expect(applySource).not.toContain("FOR UPDATE");
     expect(applySource.match(/prisma\.\$transaction\s*\(/g) || []).toHaveLength(
       2,
@@ -619,8 +641,11 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     expect(executeRaw.mock.calls[0][0].join(" ")).toBe(
       "LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE",
     );
-    expect(applySource).toContain("Commit-time invariant only");
-    expect(applySource).toContain("does not claim permanent uniqueness");
+    expect(applySource).toContain("commit-time");
+    expect(applySource).toContain("invariant only");
+    expect(applySource).toContain("transaction's first SQL statement");
+    expect(applySource).toContain("latest committed client state");
+    expect(applySource).toContain("permanent uniqueness after commit");
   });
 
   it("delegates all amo access to the exact inspector GET requester and fails on HTTP errors", async () => {

@@ -882,10 +882,12 @@ async function lockClientWriters(transaction) {
   if (!transaction || typeof transaction.$executeRaw !== "function") {
     fail("CLIENT_TABLE_LOCK_TRANSACTION_INVALID");
   }
-  // Commit-time invariant only: every INSERT/UPDATE/DELETE takes ROW EXCLUSIVE,
-  // which conflicts with this mode. Existing writers finish before our stable
-  // occupancy check; new writers wait until commit. amoLeadId is intentionally
-  // non-unique, so this repair does not claim permanent uniqueness after commit.
+  // This must be the transaction's first SQL statement. Serializable takes its
+  // snapshot only after this lock has waited for existing writers, so all later
+  // reads observe the latest committed client state. Every INSERT/UPDATE/DELETE
+  // takes ROW EXCLUSIVE and new writers wait until commit. This is a commit-time
+  // invariant only: amoLeadId is intentionally non-unique, so this repair does
+  // not claim permanent uniqueness after commit.
   await transaction.$executeRaw`LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE`;
 }
 
@@ -1136,8 +1138,8 @@ async function tryCompletedNoop({ prisma, inspector, requestGet, gate }) {
 
   return prisma.$transaction(
     async (transaction) => {
-      await acquireRepairAdvisoryLock(transaction, gate);
       await lockClientWriters(transaction);
+      await acquireRepairAdvisoryLock(transaction, gate);
       const ledger = await findRepairLedger(transaction, gate);
       const completed = validateCompletionLedger(ledger, gate);
       const rows = await transaction.client.findMany({
@@ -1274,8 +1276,8 @@ async function executeFirstApply({
   return prisma.$transaction(
     async (transaction) => {
       activeFailurePhase = FAILURE_PHASE.TRANSACTION_LOCK;
-      await acquireRepairAdvisoryLock(transaction, gate);
       await lockClientWriters(transaction);
+      await acquireRepairAdvisoryLock(transaction, gate);
       const ledger = await findRepairLedger(transaction, gate);
       if (ledger.completion.length !== 0 || ledger.rows.length !== 0) {
         fail("AUDIT_LEDGER_CHANGED_DURING_APPLY");
