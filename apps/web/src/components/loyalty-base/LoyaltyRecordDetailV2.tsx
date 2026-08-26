@@ -28,6 +28,7 @@ import {
   formatRubles,
   getLoyaltyCallResultOptions,
   getAnnaLoyaltyChanges,
+  loyaltyActivityEvidenceCompleteness,
   updateAnnaLoyaltyRecord,
   type LoyaltyBaseKey,
   type LoyaltyCallResult,
@@ -345,91 +346,139 @@ function ActivityMetrics({ record }: { record: LoyaltyRecord }) {
     </div>
   );
 }
+function ActivityEvidenceCompleteness({
+  evidence,
+}: {
+  evidence: LoyaltyRecord["activityEvidence"];
+}) {
+  const completeness = loyaltyActivityEvidenceCompleteness(evidence);
+  const limit =
+    evidence.limit === null ? "" : ` Лимит сервера: ${evidence.limit}.`;
+  const summary =
+    completeness === "complete"
+      ? `История загружена полностью: ${evidence.loadedCount} из ${evidence.count} событий.`
+      : completeness === "truncated"
+        ? evidence.count === null
+          ? `История загружена частично: получено ${evidence.loadedCount} событий; общее количество неизвестно.${limit}`
+          : `История загружена частично: ${evidence.loadedCount} из ${evidence.count} событий.${limit}`
+        : `Полнота истории не подтверждена. Загружено событий: ${evidence.loadedCount}.`;
+  return (
+    <aside
+      className="rounded-xl border border-border bg-surface-secondary p-3 text-sm"
+      data-activity-evidence-completeness={completeness}
+    >
+      <p>{summary}</p>
+      {(evidence.availability || evidence.exactness) && (
+        <p className="mt-1 text-xs text-text-muted">
+          {[evidence.availability, evidence.exactness]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+      )}
+      {evidence.methodology && (
+        <details className="mt-2 text-xs text-text-muted">
+          <summary className="cursor-pointer">
+            Методика формирования истории
+          </summary>
+          <p className="mt-1 whitespace-pre-wrap">{evidence.methodology}</p>
+        </details>
+      )}
+    </aside>
+  );
+}
+
 function Timeline({
   items,
   empty,
   entityType,
+  evidence,
   onCorrect,
   canCorrect,
 }: {
   items: LoyaltyRecord["history"];
   empty: string;
   entityType: LoyaltyRecord["entityType"];
+  evidence?: LoyaltyRecord["activityEvidence"];
   onCorrect?: (item: LoyaltyRecord["history"][number]) => void;
   canCorrect?: (item: LoyaltyRecord["history"][number]) => boolean;
 }) {
-  if (!items.length)
-    return (
-      <p className="rounded-xl border border-dashed border-border p-5 text-sm text-text-muted">
-        {empty}
-      </p>
-    );
   return (
-    <ol className="space-y-2">
-      {items.map((item, index) => (
-        <li
-          key={item.id || `${item.type}-${index}`}
-          className="rounded-xl border border-border p-3 text-sm"
-        >
-          <div className="flex flex-wrap justify-between gap-2">
-            <b>{item.title || item.type || "Событие"}</b>
-            <span className="text-xs text-text-muted">
-              {date(item.occurredAt)}
-            </span>
-          </div>
-          {item.description && (
-            <p className="mt-1 whitespace-pre-wrap text-text-muted">
-              {item.description}
-            </p>
-          )}
-          {item.result && (
-            <LoyaltyCallResultBadge
-              result={item.result}
-              entityType={entityType}
-              className="mt-2"
-            />
-          )}
-          {(item.campaignName ||
-            item.employeeName ||
-            item.nextStep ||
-            item.nextActionAt) && (
-            <p className="mt-2 text-xs text-text-muted">
-              {[
-                item.campaignName && `Кампания: ${item.campaignName}`,
-                item.employeeName && `Сотрудник: ${item.employeeName}`,
-                item.nextStep && `Следующий шаг: ${item.nextStep}`,
-                item.nextActionAt && `Срок: ${date(item.nextActionAt)}`,
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </p>
-          )}
-          {item.correctionReason && (
-            <p className="mt-1 text-xs text-warning">
-              Причина исправления: {item.correctionReason}
-            </p>
-          )}
-          {item.superseded && (
-            <span className="mt-2 inline-flex rounded-full bg-surface-secondary px-2 py-1 text-xs text-text-muted">
-              Заменено исправлением
-            </span>
-          )}
-          {onCorrect &&
-            (!canCorrect || canCorrect(item)) &&
-            item.assignmentId &&
-            item.id &&
-            item.effective !== false && (
-              <button
-                className="mt-2 text-xs underline"
-                type="button"
-                onClick={() => onCorrect(item)}
-              >
-                Исправить результат звонка
-              </button>
-            )}
-        </li>
-      ))}
-    </ol>
+    <div className="space-y-3">
+      {evidence !== undefined && (
+        <ActivityEvidenceCompleteness evidence={evidence} />
+      )}
+      {!items.length ? (
+        <p className="rounded-xl border border-dashed border-border p-5 text-sm text-text-muted">
+          {empty}
+        </p>
+      ) : (
+        <ol className="space-y-2">
+          {items.map((item, index) => (
+            <li
+              key={item.id || `${item.type}-${index}`}
+              className="rounded-xl border border-border p-3 text-sm"
+            >
+              <div className="flex flex-wrap justify-between gap-2">
+                <b>{item.title || item.type || "Событие"}</b>
+                <span className="text-xs text-text-muted">
+                  {date(item.occurredAt)}
+                </span>
+              </div>
+              {item.description && (
+                <p className="mt-1 whitespace-pre-wrap text-text-muted">
+                  {item.description}
+                </p>
+              )}
+              {item.result && (
+                <LoyaltyCallResultBadge
+                  result={item.result}
+                  entityType={entityType}
+                  className="mt-2"
+                />
+              )}
+              {(item.campaignName ||
+                item.employeeName ||
+                item.nextStep ||
+                item.nextActionAt) && (
+                <p className="mt-2 text-xs text-text-muted">
+                  {[
+                    item.campaignName && `Кампания: ${item.campaignName}`,
+                    item.employeeName && `Сотрудник: ${item.employeeName}`,
+                    item.nextStep && `Следующий шаг: ${item.nextStep}`,
+                    item.nextActionAt && `Срок: ${date(item.nextActionAt)}`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              )}
+              {item.correctionReason && (
+                <p className="mt-1 text-xs text-warning">
+                  Причина исправления: {item.correctionReason}
+                </p>
+              )}
+              {item.superseded && (
+                <span className="mt-2 inline-flex rounded-full bg-surface-secondary px-2 py-1 text-xs text-text-muted">
+                  Заменено исправлением
+                </span>
+              )}
+              {onCorrect &&
+                (!canCorrect || canCorrect(item)) &&
+                item.assignmentId &&
+                item.id &&
+                item.effective !== false && (
+                  <button
+                    className="mt-2 text-xs underline"
+                    type="button"
+                    onClick={() => onCorrect(item)}
+                  >
+                    Исправить результат звонка
+                  </button>
+                )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
   );
 }
 
@@ -2227,7 +2276,8 @@ function DetailBody({
           <Timeline
             items={activities}
             entityType={record.entityType}
-            empty="Подтверждённые event-level события пока не переданы. Агрегаты не выданы за точные события."
+            evidence={record.activityEvidence}
+            empty="События-основания в ответе отсутствуют."
           />
         </div>
       )}

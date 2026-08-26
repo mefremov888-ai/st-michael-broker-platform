@@ -28,6 +28,59 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     values: [{ value, ...(enumId ? { enum_id: enumId } : {}) }],
   });
 
+  const streamResponse = (
+    raw: Uint8Array,
+    options: {
+      contentLength?: string | null;
+      contentEncoding?: string | null;
+      readError?: Error;
+      chunkSize?: number;
+    } = {},
+  ) => {
+    let offset = 0;
+    const cancel = jest.fn(async () => undefined);
+    const releaseLock = jest.fn();
+    const read = jest.fn(async () => {
+      if (options.readError) throw options.readError;
+      if (offset >= raw.byteLength) return { done: true, value: undefined };
+      const chunkSize = Math.max(1, options.chunkSize ?? raw.byteLength);
+      const end = Math.min(offset + chunkSize, raw.byteLength);
+      const value = raw.subarray(offset, end);
+      offset = end;
+      return { done: false, value };
+    });
+    const headers = new Map<string, string>();
+    const contentLength =
+      options.contentLength === undefined
+        ? String(raw.byteLength)
+        : options.contentLength;
+    if (contentLength !== null) headers.set("content-length", contentLength);
+    if (options.contentEncoding) {
+      headers.set("content-encoding", options.contentEncoding);
+    }
+    return {
+      response: {
+        status: 200,
+        ok: true,
+        headers: {
+          get: (name: string) => headers.get(name.toLowerCase()) ?? null,
+        },
+        body: {
+          cancel,
+          getReader: () => ({ read, cancel, releaseLock }),
+        },
+      },
+      cancel,
+      read,
+      releaseLock,
+    };
+  };
+
+  const jsonStreamResponse = (
+    payload: unknown,
+    options: Parameters<typeof streamResponse>[1] = {},
+  ) => streamResponse(Buffer.from(JSON.stringify(payload), "utf8"), options);
+
   it("emits only allowlisted PII-safe failure codes", async () => {
     const expectedCodesByMessage = new Map([
       ["Invalid contact record", "INVALID_CONTACT_RECORD"],
@@ -44,8 +97,23 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
       ["fetch is unavailable", "FETCH_UNAVAILABLE"],
       ["amoCRM request failed", "AMO_REQUEST_FAILED"],
       ["amoCRM request rejected", "AMO_REQUEST_REJECTED"],
+      [
+        "amoCRM response content length is invalid",
+        "AMO_INVALID_CONTENT_LENGTH",
+      ],
+      [
+        "amoCRM response body exceeded safety bound",
+        "AMO_RESPONSE_BODY_SAFETY_BOUND_EXCEEDED",
+      ],
+      ["amoCRM response body is unavailable", "AMO_RESPONSE_BODY_UNAVAILABLE"],
+      ["amoCRM response body read failed", "AMO_RESPONSE_BODY_READ_FAILED"],
       ["amoCRM returned invalid JSON", "AMO_INVALID_JSON"],
+      ["Malformed amoCRM response", "MALFORMED_AMO_RESPONSE"],
       ["Malformed amoCRM page", "MALFORMED_AMO_PAGE"],
+      [
+        "amoCRM page exceeded item safety bound",
+        "AMO_PAGE_ITEM_SAFETY_BOUND_EXCEEDED",
+      ],
       ["amoCRM pagination loop detected", "AMO_PAGINATION_LOOP"],
       [
         "amoCRM pagination exceeded safety bound",
@@ -200,7 +268,8 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     expect(script).not.toMatch(
       /process\.env\.(?:AMO_SUBDOMAIN|AMO_API_DOMAIN)/,
     );
-    expect(script).not.toMatch(/response\.(?:text|arrayBuffer|blob)\s*\(/);
+    expect(script).not.toMatch(/response\.(?:json|text|arrayBuffer|blob)\s*\(/);
+    expect(script).toContain("const MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024");
     expect(script).not.toMatch(/console\.(?:log|info|warn|error)/);
     expect(script.match(/process\.stdout\.write\s*\(/g) || []).toHaveLength(1);
     expect(script.match(/process\.stderr\.write\s*\(/g) || []).toHaveLength(1);
@@ -208,11 +277,7 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     const requests: Array<{ url: URL; options: any }> = [];
     const fakeFetch = jest.fn(async (url: URL, options: any) => {
       requests.push({ url, options });
-      return {
-        status: 200,
-        ok: true,
-        json: async () => ({ id: 28552900 }),
-      };
+      return jsonStreamResponse({ id: 28552900 }).response;
     });
     const request = inspector.createGetOnlyRequester(
       "fixture-access-token",
@@ -235,6 +300,156 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     expect(() =>
       inspector.canonicalAmoUrl("https://example.test/api/v4/account"),
     ).toThrow("Unsafe amoCRM path");
+  });
+
+  it("bounds JSON response bodies and normalizes all body failures", async () => {
+    const split = jsonStreamResponse(
+      { id: 28552900 },
+      { chunkSize: 2, contentEncoding: "identity" },
+    );
+    const splitRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => split.response,
+    );
+    await expect(splitRequest("/api/v4/account")).resolves.toEqual({
+      id: 28552900,
+    });
+    expect(split.read.mock.calls.length).toBeGreaterThan(2);
+    expect(split.releaseLock).toHaveBeenCalledTimes(1);
+
+    const invalidLength = jsonStreamResponse(
+      { id: 28552900 },
+      { contentLength: "sensitive-invalid-length" },
+    );
+    const invalidLengthRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => invalidLength.response,
+    );
+    await expect(invalidLengthRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM response content length is invalid",
+    );
+    expect(invalidLength.read).not.toHaveBeenCalled();
+    expect(invalidLength.cancel).toHaveBeenCalledTimes(1);
+
+    let declaredOverflowSignal: AbortSignal | undefined;
+    const declaredOverflow = jsonStreamResponse(
+      { id: 28552900 },
+      { contentLength: String(inspector.MAX_RESPONSE_BODY_BYTES + 1) },
+    );
+    const declaredOverflowRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async (_url: URL, requestOptions: any) => {
+        declaredOverflowSignal = requestOptions.signal;
+        return declaredOverflow.response;
+      },
+    );
+    await expect(declaredOverflowRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM response body exceeded safety bound",
+    );
+    expect(declaredOverflow.read).not.toHaveBeenCalled();
+    expect(declaredOverflow.cancel).toHaveBeenCalledTimes(1);
+    expect(declaredOverflowSignal?.aborted).toBe(true);
+
+    const mismatchedLength = jsonStreamResponse(
+      { id: 28552900 },
+      { contentLength: "1" },
+    );
+    const mismatchedLengthRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => mismatchedLength.response,
+    );
+    await expect(mismatchedLengthRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM response content length is invalid",
+    );
+
+    let overflowSignal: AbortSignal | undefined;
+    const overflow = streamResponse(
+      new Uint8Array(inspector.MAX_RESPONSE_BODY_BYTES + 1),
+      { contentLength: null },
+    );
+    const overflowRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async (_url: URL, requestOptions: any) => {
+        overflowSignal = requestOptions.signal;
+        return overflow.response;
+      },
+    );
+    await expect(overflowRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM response body exceeded safety bound",
+    );
+    expect(overflow.cancel).toHaveBeenCalledTimes(1);
+    expect(overflowSignal?.aborted).toBe(true);
+
+    const arrayPayload = jsonStreamResponse([{ id: 28552900 }]);
+    const arrayRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => arrayPayload.response,
+    );
+    await expect(arrayRequest("/api/v4/account")).rejects.toThrow(
+      "Malformed amoCRM response",
+    );
+
+    const missingBodyRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => ({
+        status: 200,
+        ok: true,
+        headers: { get: () => null },
+      }),
+    );
+    await expect(missingBodyRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM response body is unavailable",
+    );
+
+    const readFailure = streamResponse(new Uint8Array([123]), {
+      contentLength: null,
+      readError: new Error(
+        "Bearer sensitive-token private@example.test +7 999 123-45-67",
+      ),
+    });
+    const readFailureRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => readFailure.response,
+    );
+    await expect(readFailureRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM response body read failed",
+    );
+    expect(
+      inspector.classifyFailure(new Error("amoCRM response body read failed")),
+    ).toBe("AMO_RESPONSE_BODY_READ_FAILED");
+  });
+
+  it("cancels unread HTTP error bodies before retrying or rejecting", async () => {
+    const retryable = jsonStreamResponse({ error: "rate-limited" });
+    const rejected = jsonStreamResponse({ error: "forbidden" });
+    const success = jsonStreamResponse({ id: 28552900 });
+    let retrySignal: AbortSignal | undefined;
+    const retryFetch = jest
+      .fn()
+      .mockImplementationOnce(async (_url: URL, options: any) => {
+        retrySignal = options.signal;
+        return { ...retryable.response, status: 429, ok: false };
+      })
+      .mockImplementationOnce(async () => success.response);
+    const request = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      retryFetch,
+    );
+
+    await expect(request("/api/v4/account")).resolves.toEqual({ id: 28552900 });
+    expect(retryable.read).not.toHaveBeenCalled();
+    expect(retryable.cancel).toHaveBeenCalledTimes(1);
+    expect(retrySignal?.aborted).toBe(true);
+
+    const rejectedRequest = inspector.createGetOnlyRequester(
+      "fixture-access-token",
+      async () => ({ ...rejected.response, status: 403, ok: false }),
+    );
+    await expect(rejectedRequest("/api/v4/account")).rejects.toThrow(
+      "amoCRM request rejected",
+    );
+    expect(rejected.read).not.toHaveBeenCalled();
+    expect(rejected.cancel).toHaveBeenCalledTimes(1);
   });
 
   it("fails a complete scan on malformed pages, duplicate rows, or loops", async () => {
@@ -263,6 +478,40 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     await expect(
       inspector.paginate({
         request: async () => ({ _embedded: {}, _links: {} }),
+        pathname: "/api/v4/contacts",
+        baseQuery: {},
+        collection: "contacts",
+        maxPages: 1,
+        itemKey: (item: any) => item.id,
+        onItem: async () => undefined,
+      }),
+    ).rejects.toThrow("Malformed amoCRM page");
+
+    await expect(
+      inspector.paginate({
+        request: async () => ({
+          _embedded: {
+            contacts: Array.from({ length: 251 }, (_, index) => ({
+              id: index + 1,
+            })),
+          },
+          _links: {},
+        }),
+        pathname: "/api/v4/contacts",
+        baseQuery: {},
+        collection: "contacts",
+        maxPages: 1,
+        itemKey: (item: any) => item.id,
+        onItem: async () => undefined,
+      }),
+    ).rejects.toThrow("amoCRM page exceeded item safety bound");
+
+    await expect(
+      inspector.paginate({
+        request: async () => ({
+          _embedded: { contacts: [] },
+          _links: { next: "sensitive-next-url" },
+        }),
         pathname: "/api/v4/contacts",
         baseQuery: {},
         collection: "contacts",

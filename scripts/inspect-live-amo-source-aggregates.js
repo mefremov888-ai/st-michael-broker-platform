@@ -13,6 +13,7 @@
 const AMO_ORIGIN = "https://stmichael.amocrm.ru";
 const EXPECTED_ACCOUNT_ID = 28552900;
 const PAGE_LIMIT = 250;
+const MAX_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 20_000;
 const REQUEST_ATTEMPTS = 4;
 const MIN_REQUEST_INTERVAL_MS = 180;
@@ -34,8 +35,20 @@ const FAILURE_CODE_BY_MESSAGE = new Map([
   ["fetch is unavailable", "FETCH_UNAVAILABLE"],
   ["amoCRM request failed", "AMO_REQUEST_FAILED"],
   ["amoCRM request rejected", "AMO_REQUEST_REJECTED"],
+  ["amoCRM response content length is invalid", "AMO_INVALID_CONTENT_LENGTH"],
+  [
+    "amoCRM response body exceeded safety bound",
+    "AMO_RESPONSE_BODY_SAFETY_BOUND_EXCEEDED",
+  ],
+  ["amoCRM response body is unavailable", "AMO_RESPONSE_BODY_UNAVAILABLE"],
+  ["amoCRM response body read failed", "AMO_RESPONSE_BODY_READ_FAILED"],
   ["amoCRM returned invalid JSON", "AMO_INVALID_JSON"],
+  ["Malformed amoCRM response", "MALFORMED_AMO_RESPONSE"],
   ["Malformed amoCRM page", "MALFORMED_AMO_PAGE"],
+  [
+    "amoCRM page exceeded item safety bound",
+    "AMO_PAGE_ITEM_SAFETY_BOUND_EXCEEDED",
+  ],
   ["amoCRM pagination loop detected", "AMO_PAGINATION_LOOP"],
   [
     "amoCRM pagination exceeded safety bound",
@@ -86,6 +99,7 @@ const CONTACT_FIELDS = Object.freeze({
 const LEAD_FIELDS = Object.freeze({
   FROM_BROKER: 665195,
   UTM_SOURCE: 618551,
+  COMMENT_TO_REQUEST: 618547,
   MEETING_AT: 839185,
   DDU_AMOUNT: 833065,
   CONTRACT_DATE: 558353,
@@ -161,6 +175,28 @@ function customField(entity, fieldId) {
 function customValues(entity, fieldId) {
   const values = customField(entity, fieldId)?.values;
   return Array.isArray(values) ? values : [];
+}
+
+function validateScanObservers(value) {
+  const noop = () => undefined;
+  if (value === undefined) return { onContact: noop, onLead: noop };
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("Invalid scan observer callbacks");
+    }
+    const allowed = new Set(["onContact", "onLead"]);
+    if (Object.keys(value).some((key) => !allowed.has(key))) {
+      throw new TypeError("Invalid scan observer callbacks");
+    }
+    const onContact = value.onContact === undefined ? noop : value.onContact;
+    const onLead = value.onLead === undefined ? noop : value.onLead;
+    if (typeof onContact !== "function" || typeof onLead !== "function") {
+      throw new TypeError("Invalid scan observer callbacks");
+    }
+    return { onContact, onLead };
+  } catch {
+    throw new TypeError("Invalid scan observer callbacks");
+  }
 }
 
 function nonEmptyValue(value) {
@@ -869,6 +905,193 @@ function canonicalAmoUrl(pathname, query = {}) {
   return url;
 }
 
+function isJsonRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function responseHeader(response, name) {
+  let headers;
+  try {
+    headers = response?.headers;
+  } catch {
+    throw new Error("Malformed amoCRM response");
+  }
+  if (headers === undefined || headers === null) return null;
+  if (typeof headers.get !== "function") {
+    throw new Error("Malformed amoCRM response");
+  }
+  let value;
+  try {
+    value = headers.get(name);
+  } catch {
+    throw new Error("Malformed amoCRM response");
+  }
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw new Error("Malformed amoCRM response");
+  }
+  return value;
+}
+
+function responseBody(response) {
+  try {
+    return response?.body;
+  } catch {
+    throw new Error("Malformed amoCRM response");
+  }
+}
+
+function responseContentLength(response) {
+  const rawLength = responseHeader(response, "content-length");
+  if (rawLength === null) return { declaredBytes: null, verifyExact: false };
+  const normalizedLength = rawLength.trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(normalizedLength)) {
+    throw new Error("amoCRM response content length is invalid");
+  }
+  const declaredBytes = Number(normalizedLength);
+  if (!Number.isSafeInteger(declaredBytes)) {
+    throw new Error("amoCRM response content length is invalid");
+  }
+  if (declaredBytes > MAX_RESPONSE_BODY_BYTES) {
+    throw new Error("amoCRM response body exceeded safety bound");
+  }
+  const contentEncoding = responseHeader(response, "content-encoding");
+  return {
+    declaredBytes,
+    // Fetch implementations may expose a compressed Content-Length while
+    // yielding decoded bytes. The actual decoded stream is always capped; an
+    // exact length comparison is safe only for identity/no encoding.
+    verifyExact:
+      contentEncoding === null ||
+      contentEncoding.trim().toLowerCase() === "identity",
+  };
+}
+
+function abortResponseBody(body, reader, controller) {
+  try {
+    controller.abort();
+  } catch {
+    // The fixed failure emitted by the caller remains authoritative.
+  }
+  try {
+    const cancellation = reader?.cancel
+      ? reader.cancel()
+      : typeof body?.cancel === "function"
+        ? body.cancel()
+        : null;
+    if (cancellation && typeof cancellation.catch === "function") {
+      cancellation.catch(() => undefined);
+    }
+  } catch {
+    // Cancellation is best effort after the request has already been aborted.
+  }
+}
+
+async function readBoundedJsonResponse(response, controller) {
+  let body;
+  try {
+    body = responseBody(response);
+  } catch (error) {
+    abortResponseBody(null, null, controller);
+    throw error;
+  }
+  let lengthMetadata;
+  try {
+    lengthMetadata = responseContentLength(response);
+  } catch (error) {
+    abortResponseBody(body, null, controller);
+    throw error;
+  }
+
+  if (!body || typeof body.getReader !== "function") {
+    abortResponseBody(body, null, controller);
+    throw new Error("amoCRM response body is unavailable");
+  }
+
+  let reader;
+  try {
+    reader = body.getReader();
+  } catch {
+    abortResponseBody(body, null, controller);
+    throw new Error("amoCRM response body read failed");
+  }
+  if (!reader || typeof reader.read !== "function") {
+    abortResponseBody(body, reader, controller);
+    throw new Error("amoCRM response body read failed");
+  }
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const textChunks = [];
+  let bytesRead = 0;
+  try {
+    while (true) {
+      let result;
+      try {
+        result = await reader.read();
+      } catch {
+        abortResponseBody(body, reader, controller);
+        throw new Error("amoCRM response body read failed");
+      }
+      let done;
+      let value;
+      try {
+        if (!isJsonRecord(result) || typeof result.done !== "boolean") {
+          throw new Error("amoCRM response body read failed");
+        }
+        done = result.done;
+        value = result.value;
+      } catch {
+        abortResponseBody(body, reader, controller);
+        throw new Error("amoCRM response body read failed");
+      }
+      if (done) break;
+      if (!(value instanceof Uint8Array)) {
+        abortResponseBody(body, reader, controller);
+        throw new Error("amoCRM response body read failed");
+      }
+      bytesRead += value.byteLength;
+      if (bytesRead > MAX_RESPONSE_BODY_BYTES) {
+        abortResponseBody(body, reader, controller);
+        throw new Error("amoCRM response body exceeded safety bound");
+      }
+      try {
+        textChunks.push(decoder.decode(value, { stream: true }));
+      } catch {
+        abortResponseBody(body, reader, controller);
+        throw new Error("amoCRM returned invalid JSON");
+      }
+    }
+    if (
+      lengthMetadata.verifyExact &&
+      bytesRead !== lengthMetadata.declaredBytes
+    ) {
+      throw new Error("amoCRM response content length is invalid");
+    }
+    try {
+      textChunks.push(decoder.decode());
+    } catch {
+      throw new Error("amoCRM returned invalid JSON");
+    }
+  } finally {
+    try {
+      reader.releaseLock?.();
+    } catch {
+      // Releasing a completed/aborted reader is best effort.
+    }
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(textChunks.join(""));
+  } catch {
+    throw new Error("amoCRM returned invalid JSON");
+  }
+  if (!isJsonRecord(payload)) {
+    throw new Error("Malformed amoCRM response");
+  }
+  return payload;
+}
+
 function createGetOnlyRequester(accessToken, fetchImpl = globalThis.fetch) {
   if (typeof accessToken !== "string" || !accessToken.trim()) {
     throw new Error("amoCRM access token is missing");
@@ -885,7 +1108,11 @@ function createGetOnlyRequester(accessToken, fetchImpl = globalThis.fetch) {
       if (waitForRateLimit > 0) await sleep(waitForRateLimit);
       lastRequestStartedAt = Date.now();
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      let requestTimedOut = false;
+      const timeout = setTimeout(() => {
+        requestTimedOut = true;
+        controller.abort();
+      }, REQUEST_TIMEOUT_MS);
       let response;
       try {
         response = await fetchImpl(url, {
@@ -910,6 +1137,7 @@ function createGetOnlyRequester(accessToken, fetchImpl = globalThis.fetch) {
       }
       if (response.status === 429 || response.status >= 500) {
         clearTimeout(timeout);
+        abortResponseBody(responseBody(response), null, controller);
         if (attempt === REQUEST_ATTEMPTS)
           throw new Error("amoCRM request failed");
         await sleep(400 * 2 ** (attempt - 1));
@@ -917,20 +1145,21 @@ function createGetOnlyRequester(accessToken, fetchImpl = globalThis.fetch) {
       }
       if (!response.ok) {
         clearTimeout(timeout);
+        abortResponseBody(responseBody(response), null, controller);
         throw new Error("amoCRM request rejected");
       }
       try {
-        const payload = await response.json();
+        const payload = await readBoundedJsonResponse(response, controller);
         clearTimeout(timeout);
         return payload;
-      } catch {
-        const timedOut = controller.signal.aborted;
+      } catch (error) {
         clearTimeout(timeout);
-        if (timedOut && attempt < REQUEST_ATTEMPTS) {
+        if (requestTimedOut && attempt < REQUEST_ATTEMPTS) {
           await sleep(400 * 2 ** (attempt - 1));
           continue;
         }
-        throw new Error("amoCRM returned invalid JSON");
+        if (requestTimedOut) throw new Error("amoCRM request failed");
+        throw error;
       }
     }
     throw new Error("amoCRM request failed");
@@ -956,6 +1185,17 @@ async function paginate({
     if (payload === null) return;
     const items = payload?._embedded?.[collection];
     if (!Array.isArray(items)) throw new Error("Malformed amoCRM page");
+    if (items.length > PAGE_LIMIT) {
+      throw new Error("amoCRM page exceeded item safety bound");
+    }
+    const links = payload?._links;
+    if (links !== undefined && !isJsonRecord(links)) {
+      throw new Error("Malformed amoCRM page");
+    }
+    const next = links?.next;
+    if (next !== undefined && next !== null && !isJsonRecord(next)) {
+      throw new Error("Malformed amoCRM page");
+    }
     for (const item of items) {
       const key = itemKey(item);
       if (!key || seen.has(key))
@@ -963,14 +1203,19 @@ async function paginate({
       seen.add(key);
       await onItem(item);
     }
-    const hasNext = Boolean(payload?._links?.next);
+    const hasNext = next !== undefined && next !== null;
     if (!hasNext) return;
     if (items.length === 0) throw new Error("amoCRM pagination loop detected");
   }
   throw new Error("amoCRM pagination exceeded safety bound");
 }
 
-async function scanLiveAmo(request, onPhase = () => undefined) {
+async function scanLiveAmo(
+  request,
+  onPhase = () => undefined,
+  scanObservers = undefined,
+) {
+  const observers = validateScanObservers(scanObservers);
   onPhase(FAILURE_PHASE.ACCOUNT);
   const account = await request("/api/v4/account");
   if (positiveInteger(account?.id) !== EXPECTED_ACCOUNT_ID) {
@@ -988,7 +1233,10 @@ async function scanLiveAmo(request, onPhase = () => undefined) {
     collection: "contacts",
     maxPages: MAX_CONTACT_PAGES,
     itemKey: (contact) => positiveInteger(contact?.id),
-    onItem: (contact) => ingestContact(state, contact),
+    onItem: async (contact) => {
+      ingestContact(state, contact);
+      await observers.onContact(contact);
+    },
   });
 
   for (const [pipelineLabel, pipelineId] of Object.entries(PIPELINES)) {
@@ -1003,7 +1251,10 @@ async function scanLiveAmo(request, onPhase = () => undefined) {
       collection: "leads",
       maxPages: MAX_PIPELINE_PAGES,
       itemKey: (lead) => positiveInteger(lead?.id),
-      onItem: (lead) => ingestLead(state, pipelineLabel, lead),
+      onItem: async (lead) => {
+        ingestLead(state, pipelineLabel, lead);
+        await observers.onLead(pipelineLabel, lead);
+      },
     });
   }
 
@@ -1025,23 +1276,36 @@ async function main() {
 
 module.exports = {
   AMO_ORIGIN,
+  CLIENT_PIPELINE_LABELS,
+  CONTACT_FIELDS,
   EXPECTED_ACCOUNT_ID,
+  LEAD_FIELDS,
+  MAX_RESPONSE_BODY_BYTES,
+  MEETING_HELD_OR_LATER_STATUS,
   PIPELINES,
+  SALES_DEAL_OR_LATER_STATUS,
   buildDealReport,
   canonicalAmoUrl,
   classifyFailure,
   createGetOnlyRequester,
   createState,
+  customValues,
+  embeddedContactRelations,
   fieldCoverage,
   finalizeReport,
   hasStrictBrokerSource,
   ingestContact,
   ingestLead,
+  isTruthyCheckbox,
   normalizePhone,
+  normalizedDateKey,
   paginate,
   parseMoneyToCents,
   parseReferenceIds,
+  positiveInteger,
+  readBoundedJsonResponse,
   scanLiveAmo,
+  validateScanObservers,
   validDateValue,
 };
 

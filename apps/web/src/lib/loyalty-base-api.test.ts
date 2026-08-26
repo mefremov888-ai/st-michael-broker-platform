@@ -12,6 +12,7 @@ import {
   getActiveLoyaltyLinks,
   formatRubles,
   hasLoyaltyActivityEvidence,
+  loyaltyActivityEvidenceCompleteness,
   loyaltyLeaderMode,
   loyaltyMetricsForDisplay,
   normalizeActiveLinks,
@@ -28,7 +29,10 @@ import {
 import {
   emptyLoyaltyFilters,
   formatLoyaltyMetricExplanation,
+  loyaltyFilterCapabilities,
   loyaltyMetricPeriodLabel,
+  restoreLoyaltySavedView,
+  sanitizeLoyaltyFilterState,
   toCanonicalFilter,
 } from "./loyalty-ui-model";
 import {
@@ -179,9 +183,7 @@ test("resolves context labels and fails visibly neutral for unknown or cross-con
 test("uses the shared accessible call-result badge on every V2 result surface", () => {
   const source = (relativePath: string) =>
     readFileSync(new URL(relativePath, import.meta.url), "utf8");
-  const badge = source(
-    "../components/loyalty-base/LoyaltyCallResultBadge.tsx",
-  );
+  const badge = source("../components/loyalty-base/LoyaltyCallResultBadge.tsx");
   const consumers = [
     "../components/loyalty-base/LoyaltyFilterPanel.tsx",
     "../components/loyalty-base/LoyaltyQueuePanel.tsx",
@@ -267,7 +269,7 @@ test("builds independent canonical filters for brokers and agencies", () => {
   broker.activityTo = "2026-06-30";
   broker.meetingsMin = "2";
   broker.meetingsMax = "5";
-  const brokerFilter = toCanonicalFilter(broker, "brokers");
+  const brokerFilter = toCanonicalFilter(broker, "brokers", "anna");
   assert.deepEqual(brokerFilter.specializations, ["Вторичка"]);
   assert.deepEqual(brokerFilter.geography, ["REGION"]);
   assert.deepEqual(brokerFilter.brokerStatuses, ["TOP_SELLER"]);
@@ -286,7 +288,7 @@ test("builds independent canonical filters for brokers and agencies", () => {
   agency.specialTermsProposed = "true";
   agency.dataQuality = "NEEDS_COMPLETION";
   agency.specialization = "Вторичка";
-  const agencyFilter = toCanonicalFilter(agency, "agencies");
+  const agencyFilter = toCanonicalFilter(agency, "agencies", "anna");
   assert.deepEqual(agencyFilter.brokerStatuses, ["VIP_PARTNER"]);
   assert.equal(agencyFilter.partnershipStatuses, undefined);
   assert.deepEqual(agencyFilter.agencySizes, ["Крупное"]);
@@ -295,6 +297,162 @@ test("builds independent canonical filters for brokers and agencies", () => {
   assert.deepEqual(agencyFilter.dataQuality, ["NEEDS_COMPLETION"]);
   assert.equal(agencyFilter.specializations, undefined);
   assert.equal(agencyFilter.includeLowSignal, true);
+});
+
+test("defines authoritative filter capabilities for every base/entity pair", () => {
+  const ourAgency = loyaltyFilterCapabilities("ours", "agencies");
+  assert.equal(ourAgency.hasAmo, false);
+  assert.equal(ourAgency.dataQuality, false);
+  assert.equal(ourAgency.agencySize, false);
+  assert.equal(ourAgency.websitePresent, false);
+  assert.equal(ourAgency.projectsOnSite, false);
+  assert.deepEqual(ourAgency.archivedModes, ["exclude", "include"]);
+  assert.equal(
+    ourAgency.scenarios.some(([value]) => value === "SITE_PLACED"),
+    false,
+  );
+  assert.equal(
+    ourAgency.scenarios.some(([value]) => value === "SITE_NOT_PLACED"),
+    false,
+  );
+  assert.equal(
+    ourAgency.scenarios.some(([value]) => value === "HAS_DEALS"),
+    true,
+  );
+  assert.deepEqual(ourAgency.segments, []);
+
+  const annaAgency = loyaltyFilterCapabilities("anna", "agencies");
+  assert.equal(annaAgency.hasAmo, true);
+  assert.equal(annaAgency.dataQuality, true);
+  assert.equal(annaAgency.agencySize, true);
+  assert.deepEqual(annaAgency.archivedModes, ["exclude", "only", "include"]);
+  assert.equal(
+    annaAgency.scenarios.some(([value]) => value === "SITE_PLACED"),
+    true,
+  );
+
+  const ourBroker = loyaltyFilterCapabilities("ours", "brokers");
+  assert.equal(ourBroker.hasAmo, true);
+  assert.equal(ourBroker.dataQuality, true);
+  assert.equal(ourBroker.agencySize, false);
+  assert.equal(ourBroker.websitePresent, false);
+  assert.equal(ourBroker.projectsOnSite, false);
+  assert.equal(ourBroker.segments.includes("NEW_BROKER"), true);
+});
+
+test("clears unsupported OUR agency predicates before building an API filter", () => {
+  const unsafe = emptyLoyaltyFilters();
+  unsafe.hasAmo = "false";
+  unsafe.dataQuality = "FULL";
+  unsafe.agencySize = "Крупное";
+  unsafe.websitePresent = "false";
+  unsafe.projectsOnSite = "NO";
+  unsafe.archived = "only";
+  unsafe.scenario = "SITE_NOT_PLACED";
+
+  const safe = sanitizeLoyaltyFilterState("ours", "agencies", unsafe);
+  assert.equal(safe.hasAmo, "");
+  assert.equal(safe.dataQuality, "");
+  assert.equal(safe.agencySize, "");
+  assert.equal(safe.websitePresent, "");
+  assert.equal(safe.projectsOnSite, "");
+  assert.equal(safe.archived, "exclude");
+  assert.equal(safe.scenario, "");
+  assert.equal(unsafe.hasAmo, "false");
+  assert.equal(unsafe.archived, "only");
+  assert.equal(sanitizeLoyaltyFilterState("ours", "agencies", safe), safe);
+
+  const canonical = toCanonicalFilter(unsafe, "agencies", "ours");
+  assert.equal(canonical.dataQuality, undefined);
+  assert.equal(canonical.agencySizes, undefined);
+  assert.equal(canonical.websitePresent, undefined);
+  assert.equal(canonical.projectsOnSite, undefined);
+  assert.equal(canonical.scenario, undefined);
+});
+
+test("sanitizes untrusted saved views with the current filter capability matrix", () => {
+  const restored = restoreLoyaltySavedView("ours", "agencies", {
+    archived: "only",
+    ui: {
+      filters: {
+        search: "+79990000001",
+        includeLowSignal: "not-a-boolean",
+        hasAmo: "true",
+        dataQuality: "FULL",
+        agencySize: "Крупное",
+        websitePresent: "true",
+        projectsOnSite: "YES",
+        archived: "only",
+        scenario: "SITE_PLACED",
+        individualTerms: "true",
+        bt: "garbage",
+        dealsInPeriod: "garbage",
+        meetings: "garbage",
+        rewardPresent: "garbage",
+        status: "garbage",
+        geography: "garbage",
+        lastCallResult: "garbage",
+        dealsMin: "-2",
+        activityFrom: "2026-02-31",
+        sortBy: "garbage",
+        sortOrder: "garbage",
+      },
+      columns: {
+        activity: "HAS_MEETINGS",
+        deals: "garbage",
+        calls: "garbage",
+        statusStage: "garbage",
+      },
+      segment: "NEW_BROKER",
+    },
+  });
+
+  assert.equal(restored.filters.search, "");
+  assert.equal(restored.filters.includeLowSignal, false);
+  assert.equal(restored.filters.hasAmo, "");
+  assert.equal(restored.filters.dataQuality, "");
+  assert.equal(restored.filters.agencySize, "");
+  assert.equal(restored.filters.websitePresent, "");
+  assert.equal(restored.filters.projectsOnSite, "");
+  assert.equal(restored.filters.archived, "exclude");
+  assert.equal(restored.filters.scenario, "");
+  assert.equal(restored.filters.individualTerms, "true");
+  assert.equal(restored.filters.bt, "");
+  assert.equal(restored.filters.dealsInPeriod, "");
+  assert.equal(restored.filters.meetings, "");
+  assert.equal(restored.filters.rewardPresent, "");
+  assert.equal(restored.filters.status, "");
+  assert.equal(restored.filters.geography, "");
+  assert.equal(restored.filters.lastCallResult, "");
+  assert.equal(restored.filters.dealsMin, "");
+  assert.equal(restored.filters.activityFrom, "");
+  assert.equal(restored.filters.sortBy, "name");
+  assert.equal(restored.filters.sortOrder, "asc");
+  assert.deepEqual(restored.columns, { activity: "HAS_MEETINGS" });
+  assert.equal(restored.segment, "");
+
+  const canonical = toCanonicalFilter(restored.filters, "agencies", "ours");
+  assert.equal(canonical.bt, undefined);
+  assert.equal(canonical.dealsInPeriod, undefined);
+  assert.equal(canonical.meetings, undefined);
+  assert.equal(canonical.rewardPresent, undefined);
+
+  const emptyEnvelope = restoreLoyaltySavedView("ours", "agencies", {
+    archived: "only",
+    ui: { filters: {} },
+  });
+  assert.equal(emptyEnvelope.filters.archived, "exclude");
+});
+
+test("retains the supported HAS_DEALS scenario for OUR agencies", () => {
+  const filters = emptyLoyaltyFilters();
+  filters.scenario = "HAS_DEALS";
+  const safe = sanitizeLoyaltyFilterState("ours", "agencies", filters);
+  assert.equal(safe.scenario, "HAS_DEALS");
+  assert.equal(
+    toCanonicalFilter(filters, "agencies", "ours").scenario,
+    "HAS_DEALS",
+  );
 });
 
 test("round-trips browser-local date and datetime controls without a timezone shift", () => {
@@ -688,6 +846,120 @@ test("normalizes ANNA list/detail fields returned by the service", () => {
   assert.equal(detail.history.length, 1);
 });
 
+test("preserves activity evidence completeness metadata from raw activity rows", () => {
+  const complete = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "complete-history",
+        entityType: "BROKER",
+        displayName: "Complete history",
+        activities: [],
+        activityEvidence: {
+          count: 0,
+          truncated: false,
+          limit: 200,
+          availability: "LOCAL_PRELIMINARY",
+          exactness: "APPROXIMATE",
+          methodology: "Current local rows",
+        },
+      },
+    },
+    "brokers",
+  );
+  assert.deepEqual(complete.activityEvidence, {
+    count: 0,
+    loadedCount: 0,
+    truncated: false,
+    limit: 200,
+    availability: "LOCAL_PRELIMINARY",
+    exactness: "APPROXIMATE",
+    methodology: "Current local rows",
+  });
+  assert.equal(
+    loyaltyActivityEvidenceCompleteness(complete.activityEvidence),
+    "complete",
+  );
+
+  const partial = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "partial-history",
+        entityType: "BROKER",
+        displayName: "Partial history",
+        activities: Array.from({ length: 200 }, (_, index) => ({
+          id: `activity-${index}`,
+          type: "FIXATION",
+          occurredAt: "2026-08-01T10:00:00.000Z",
+        })),
+        attributes: {
+          activityEvidence: {
+            count: 450,
+            truncated: true,
+            limit: 200,
+            availability: "LOCAL_PRELIMINARY",
+            exactness: "APPROXIMATE",
+            methodology: "Bounded local rows",
+          },
+        },
+      },
+    },
+    "brokers",
+  );
+  assert.equal(partial.activityEvidence.count, 450);
+  assert.equal(partial.activityEvidence.loadedCount, 200);
+  assert.equal(partial.activityEvidence.truncated, true);
+  assert.equal(partial.activityEvidence.methodology, "Bounded local rows");
+  assert.equal(
+    loyaltyActivityEvidenceCompleteness(partial.activityEvidence),
+    "truncated",
+  );
+
+  const unknown = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "unknown-history",
+        entityType: "BROKER",
+        displayName: "Unknown history",
+        activities: [
+          {
+            id: "activity-1",
+            type: "FIXATION",
+            occurredAt: "2026-08-01T10:00:00.000Z",
+          },
+        ],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(unknown.activityEvidence.loadedCount, 1);
+  assert.equal(unknown.activityEvidence.count, null);
+  assert.equal(unknown.activityEvidence.truncated, null);
+  assert.equal(
+    loyaltyActivityEvidenceCompleteness(unknown.activityEvidence),
+    "unknown",
+  );
+});
+
+test("renders explicit complete, truncated or unknown history status with methodology", () => {
+  const detail = readFileSync(
+    new URL(
+      "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  assert.match(detail, /evidence=\{record\.activityEvidence\}/);
+  assert.match(detail, /data-activity-evidence-completeness/);
+  assert.match(detail, /loyaltyActivityEvidenceCompleteness\(evidence\)/);
+  assert.match(detail, /Методика формирования истории/);
+  assert.match(detail, /Полнота истории не подтверждена/);
+  assert.doesNotMatch(
+    detail,
+    /Подтверждённые event-level события пока не переданы/,
+  );
+});
+
 test("retains, deduplicates and displays every backend computed status in order", () => {
   const record = normalizeLoyaltyDetail(
     {
@@ -748,15 +1020,9 @@ test("falls back to the legacy scalar status when computedStatuses is absent", (
 test("keeps V2 table, detail, filter and legend on the shared multi-status contract", () => {
   const source = (relativePath: string) =>
     readFileSync(new URL(relativePath, import.meta.url), "utf8");
-  const table = source(
-    "../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx",
-  );
-  const detail = source(
-    "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
-  );
-  const badges = source(
-    "../components/loyalty-base/LoyaltyStatusBadges.tsx",
-  );
+  const table = source("../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx");
+  const detail = source("../components/loyalty-base/LoyaltyRecordDetailV2.tsx");
+  const badges = source("../components/loyalty-base/LoyaltyStatusBadges.tsx");
   const legend = source("../components/loyalty-base/LoyaltyStatusLegend.tsx");
   const filters = source("../components/loyalty-base/LoyaltyFilterPanel.tsx");
 
@@ -770,6 +1036,19 @@ test("keeps V2 table, detail, filter and legend on the shared multi-status contr
   assert.match(filters, /loyaltyStatusLabel\(value\)/);
   assert.match(filters, /<LoyaltyStatusBadge/);
   assert.match(filters, /status=\{draft\.status\}/);
+});
+
+test("labels the amo dry-run as an entity traversal rather than event coverage", () => {
+  const syncPanel = readFileSync(
+    new URL("../components/loyalty-base/LoyaltySyncPanel.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(syncPanel, /amoCRM · полный обход сущностей/);
+  assert.match(syncPanel, /Полный обход сущностей не/);
+  assert.match(syncPanel, /подтверждает историю событий/);
+  assert.match(syncPanel, /Проверить перечень сущностей/);
+  assert.doesNotMatch(syncPanel, /полное покрытие/i);
 });
 
 test("keeps source-reported row metrics separate from exact lifetime metrics", () => {

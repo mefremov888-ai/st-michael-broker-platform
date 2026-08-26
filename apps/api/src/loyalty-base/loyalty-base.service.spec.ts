@@ -2446,7 +2446,7 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
-  it("keeps partial month evidence unknown and applies only safe lifetime deductions", () => {
+  it("keeps selected-period evidence unknown without exact activity coverage", () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
     const partialAugust = {
@@ -2495,7 +2495,7 @@ describe("LoyaltyBaseService", () => {
     ).toBeNull();
     expect(
       (service as any).annaDealsInPeriod({}, monthlyItem, fullAugust),
-    ).toBe(3);
+    ).toBeNull();
     expect(
       (service as any).annaDealsInPeriod({}, monthlyItem, september),
     ).toBeNull();
@@ -2520,7 +2520,7 @@ describe("LoyaltyBaseService", () => {
         },
         fullAugust,
       ),
-    ).toBe(0);
+    ).toBeNull();
     expect(
       (service as any).annaDealsInPeriod(
         {},
@@ -2530,7 +2530,7 @@ describe("LoyaltyBaseService", () => {
         },
         fullAugust,
       ),
-    ).toBe(1);
+    ).toBeNull();
     expect(
       (service as any).annaDealsInPeriod(
         {},
@@ -2540,7 +2540,7 @@ describe("LoyaltyBaseService", () => {
         },
         fullAugust,
       ),
-    ).toBe(0);
+    ).toBeNull();
     expect(
       (service as any).annaActivityPresence(
         {},
@@ -2563,7 +2563,7 @@ describe("LoyaltyBaseService", () => {
         "FIXATION",
         fullAugust,
       ),
-    ).toBe(false);
+    ).toBeNull();
     expect(
       (service as any).annaActivityPresence(
         {},
@@ -2575,7 +2575,7 @@ describe("LoyaltyBaseService", () => {
         "CALL",
         fullAugust,
       ),
-    ).toBe(false);
+    ).toBeNull();
   });
 
   it("does not return exact selected-period zeroes beyond observedThrough", () => {
@@ -2613,6 +2613,181 @@ describe("LoyaltyBaseService", () => {
         new Date("2026-08-15T23:59:59.999Z"),
       ),
     ).toBeNull();
+  });
+
+  it("uses only exact covered period metrics for Anna activity filters", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const activityPeriod = { from: "2026-08-01", to: "2026-08-31" };
+    const filter = (query: any = {}, canonical: any = {}) =>
+      (service as any).normalizeListFilter(
+        { archived: "exclude", page: 1, pageSize: 30, ...query },
+        { activityPeriod, ...canonical },
+      );
+    const matches = (
+      record: any,
+      item: any,
+      query: any = {},
+      canonical: any = {},
+    ) =>
+      (service as any).matchesAnnaRecord(
+        record,
+        { id: "anna-broker", displayName: "Anna broker", ...item },
+        "BROKER",
+        filter(query, canonical),
+      );
+    const sourceOnly = {
+      attributes: {},
+      contactPoints: [],
+      metrics: {
+        fixations: null,
+        meetings: null,
+        deals: null,
+        brokerTours: null,
+        calls: null,
+      },
+      sourceReportedMetrics: {
+        fixations: 17,
+        meetings: 9,
+        deals: 4,
+        brokerTours: 1,
+        calls: 0,
+        brokerTourVisited: true,
+      },
+      metricSource: { kind: "UNAVAILABLE", exactness: "UNKNOWN" },
+    };
+
+    expect(
+      matches({}, sourceOnly, { columns: { activity: "HAS_FIXATIONS" } }),
+    ).toBe(false);
+    expect(matches({}, sourceOnly, {}, { meetings: { min: 1 } })).toBe(false);
+    expect(matches({}, sourceOnly, {}, { dealsInPeriod: false })).toBe(false);
+    expect(matches({}, sourceOnly, {}, { scenario: "NO_MEETINGS" })).toBe(
+      false,
+    );
+
+    const exactItem = {
+      attributes: {},
+      contactPoints: [],
+      metrics: {
+        fixations: 1,
+        meetings: 1,
+        deals: 1,
+        brokerTours: 0,
+        calls: 0,
+      },
+      sourceReportedMetrics: { brokerTourVisited: false },
+      metricSource: {
+        kind: "EXACT_ACTIVITIES",
+        exactness: "EXACT",
+        observedThrough: "2026-09-01T00:00:00.000Z",
+      },
+    };
+    const outsideRecord = {
+      activities: [
+        { type: "FIXATION", occurredAt: "2026-07-10T10:00:00.000Z" },
+        { type: "MEETING", occurredAt: "2026-07-11T10:00:00.000Z" },
+        { type: "DEAL", occurredAt: "2026-07-12T10:00:00.000Z" },
+      ],
+    };
+    expect(
+      matches(outsideRecord, exactItem, {
+        columns: { activity: "HAS_FIXATIONS" },
+      }),
+    ).toBe(false);
+    expect(
+      matches(outsideRecord, exactItem, {}, { meetings: { min: 1 } }),
+    ).toBe(false);
+    expect(matches(outsideRecord, exactItem, {}, { dealsInPeriod: true })).toBe(
+      false,
+    );
+    expect(
+      matches(outsideRecord, exactItem, {
+        columns: { activity: "NO_FIXATIONS" },
+      }),
+    ).toBe(true);
+
+    const insideRecord = {
+      activities: [
+        { type: "FIXATION", occurredAt: "2026-08-10T10:00:00.000Z" },
+        { type: "MEETING", occurredAt: "2026-08-11T10:00:00.000Z" },
+        {
+          type: "DEAL",
+          occurredAt: "2026-08-12T10:00:00.000Z",
+          amount: "100.00",
+        },
+      ],
+    };
+    expect(
+      matches(insideRecord, exactItem, {
+        columns: { activity: "HAS_FIXATIONS" },
+      }),
+    ).toBe(true);
+    expect(matches(insideRecord, exactItem, {}, { meetings: { min: 1 } })).toBe(
+      true,
+    );
+    expect(matches(insideRecord, exactItem, {}, { dealsInPeriod: true })).toBe(
+      true,
+    );
+
+    const notObserved = {
+      ...exactItem,
+      metrics: {
+        fixations: 0,
+        meetings: 0,
+        deals: 0,
+        brokerTours: 0,
+        calls: 0,
+      },
+      metricSource: {
+        ...exactItem.metricSource,
+        observedThrough: "2026-08-15T23:59:59.999Z",
+      },
+    };
+    expect(
+      matches({ activities: [] }, notObserved, {
+        columns: { activity: "NO_FIXATIONS" },
+      }),
+    ).toBe(false);
+    expect(
+      matches({ activities: [] }, notObserved, {}, { scenario: "NO_MEETINGS" }),
+    ).toBe(false);
+    expect(
+      matches({ activities: [] }, notObserved, {}, { dealsInPeriod: false }),
+    ).toBe(false);
+
+    const noPeriodFilter = (service as any).normalizeListFilter(
+      {
+        archived: "exclude",
+        page: 1,
+        pageSize: 30,
+        columns: { activity: "HAS_FIXATIONS" },
+      },
+      {},
+    );
+    expect(
+      (service as any).matchesAnnaRecord(
+        {},
+        {
+          id: "source-only-no-period",
+          displayName: "Source-only no period",
+          ...sourceOnly,
+        },
+        "BROKER",
+        noPeriodFilter,
+      ),
+    ).toBe(true);
+
+    expect(
+      matches(
+        outsideRecord,
+        {
+          ...exactItem,
+          metrics: { ...exactItem.metrics, brokerTours: 1 },
+          sourceReportedMetrics: { brokerTourVisited: true },
+        },
+        { segment: "BT_WITHOUT_FIXATION" },
+      ),
+    ).toBe(false);
   });
 
   it("does not treat an empty legacy call breakdown as proof of no call", async () => {
@@ -3452,6 +3627,57 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
+  it("uses Moscow calendar boundaries for exact Anna activity timestamps", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const period = (service as any).parseOptionalFilterPeriod(
+      { from: "2026-08-01", to: "2026-08-31" },
+      "activityPeriod",
+    );
+    const item = {
+      metricSource: {
+        kind: "EXACT_ACTIVITIES",
+        observedThrough: "2026-09-02T00:00:00.000Z",
+      },
+    };
+    const record = {
+      activities: [
+        {
+          type: "FIXATION",
+          occurredAt: new Date("2026-07-31T20:59:59.999Z"),
+        },
+        {
+          type: "FIXATION",
+          occurredAt: new Date("2026-07-31T21:00:00.000Z"),
+        },
+        {
+          type: "DEAL",
+          occurredAt: new Date("2026-08-31T20:59:59.999Z"),
+          amount: "100.00",
+        },
+        {
+          type: "DEAL",
+          occurredAt: new Date("2026-08-31T21:00:00.000Z"),
+          amount: "900.00",
+        },
+      ],
+    };
+
+    expect((service as any).annaPeriodMetrics(record, item, period)).toEqual({
+      period: { from: "2026-08-01", to: "2026-08-31" },
+      availability: "EXACT",
+      fixations: 1,
+      meetings: 0,
+      deals: 1,
+      dealAmount: "100.00",
+      lastFixationAt: "2026-08-01",
+      lastMeetingAt: null,
+      lastDealAt: "2026-08-31",
+    });
+    expect(
+      (service as any).annaActivityPresence(record, item, "FIXATION", period),
+    ).toBe(true);
+  });
+
   it("streams a BOM CSV, neutralizes formulas, masks contacts and audits only counts", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
@@ -3658,52 +3884,53 @@ describe("LoyaltyBaseService", () => {
     },
   );
 
-  it("keeps unsupported-filter rejection identical for list/search/export/selection", async () => {
-    const prisma = prismaMock();
-    const service = new LoyaltyBaseService(prisma);
-    const unsupported = { partnershipStatuses: ["VIP_PARTNER"] };
-    const actions = [
-      () =>
-        service.list(
-          "ours",
-          "BROKER",
-          {} as any,
-          undefined,
-          unsupported as any,
-        ),
-      () =>
-        service.search("ours", "BROKER", {
-          search: "",
-          filter: unsupported,
-        } as any),
-      () =>
-        service.exportCsv(
-          "ours",
-          "BROKER",
-          { search: "", filter: unsupported } as any,
-          "admin-1",
-        ),
-      () =>
-        service.resolveSelection("ours", "BROKER", {
-          search: "",
-          filter: unsupported,
-        } as any),
-    ];
+  it.each([
+    [
+      "BROKER",
+      {},
+      { partnershipStatuses: ["VIP_PARTNER"] },
+      ["partnershipStatuses"],
+    ],
+    ["AGENCY", { hasAmo: true }, {}, ["hasAmo"]],
+    ["AGENCY", { archived: "only" }, {}, ["archived"]],
+    ["AGENCY", {}, { dataQuality: ["FULL"] }, ["dataQuality"]],
+    ["AGENCY", {}, { scenario: "SITE_PLACED" }, ["scenario"]],
+  ] as const)(
+    "keeps unsupported OUR %s filter rejection identical for list/search/export/selection: %j / %j",
+    async (entityType, flat, canonical, expectedFields) => {
+      const prisma = prismaMock();
+      const service = new LoyaltyBaseService(prisma);
+      const request = { search: "", ...flat, filter: canonical };
+      const actions = [
+        () =>
+          service.list(
+            "ours",
+            entityType,
+            flat as any,
+            undefined,
+            canonical as any,
+          ),
+        () => service.search("ours", entityType, request as any),
+        () => service.exportCsv("ours", entityType, request as any, "admin-1"),
+        () => service.resolveSelection("ours", entityType, request as any),
+      ];
 
-    for (const action of actions) {
-      const error = await action().catch((caught) => caught);
-      expect(error).toBeInstanceOf(BadRequestException);
-      expect(error.getStatus()).toBe(400);
-      expect(error.getResponse()).toMatchObject({
-        code: "LOYALTY_FILTER_UNAVAILABLE",
-        base: "ours",
-        entityType: "BROKER",
-        fields: ["partnershipStatuses"],
-      });
-    }
-    expect(prisma.broker.findMany).not.toHaveBeenCalled();
-    expect(prisma.auditLog.create).not.toHaveBeenCalled();
-  });
+      for (const action of actions) {
+        const error = await action().catch((caught) => caught);
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect(error.getStatus()).toBe(400);
+        expect(error.getResponse()).toMatchObject({
+          code: "LOYALTY_FILTER_UNAVAILABLE",
+          base: "ours",
+          entityType,
+          fields: expectedFields,
+        });
+      }
+      expect(prisma.broker.findMany).not.toHaveBeenCalled();
+      expect(prisma.agency.findMany).not.toHaveBeenCalled();
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    },
+  );
 
   it("reads saved calls and engagement events across all four canonical targets", async () => {
     const prisma = prismaMock();
@@ -4330,6 +4557,44 @@ describe("LoyaltyBaseService", () => {
     for (const [args] of prisma.client.groupBy.mock.calls) {
       expect(args.where.brokerId.in.length).toBeLessThanOrEqual(500);
     }
+  });
+
+  it("marks OUR broker activity evidence truncated when only 200 of 250 rows are loaded", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const clients = Array.from({ length: 200 }, (_, index) => ({
+      id: `client-${index}`,
+      createdAt: new Date(
+        `2026-08-${String((index % 28) + 1).padStart(2, "0")}T10:00:00.000Z`,
+      ),
+      fixationStatus: "FIXED",
+      amoLeadId: index + 1,
+    }));
+
+    const partial = (service as any).ourBrokerEvidence({
+      clients,
+      meetings: [],
+      deals: [],
+      _count: { clients: 250, meetings: 0, deals: 0 },
+    });
+    expect(partial).toMatchObject({
+      count: 250,
+      truncated: true,
+      limit: 200,
+    });
+    expect(partial.items).toHaveLength(200);
+
+    const complete = (service as any).ourBrokerEvidence({
+      clients: [],
+      meetings: [],
+      deals: [],
+      _count: { clients: 0, meetings: 0, deals: 0 },
+    });
+    expect(complete).toMatchObject({
+      count: 0,
+      truncated: false,
+      limit: 200,
+      items: [],
+    });
   });
 
   it("deduplicates current relation rows for OUR agency list/detail and exposes bounded PII-free evidence", async () => {

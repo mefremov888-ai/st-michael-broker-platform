@@ -210,6 +210,14 @@ authoritative field for the selected OUR broker/agency model fails with HTTP
 selection use the same check and never turn an unsupported predicate into an
 empty result.
 
+The V2 UI uses the same base/entity capability boundary before applying or
+restoring a saved view. In particular, OUR agencies do not offer amo linkage,
+data-quality, agency-size, website/site-placement, `SITE_PLACED` /
+`SITE_NOT_PLACED`, archive-only or broker-segment predicates. Unsupported saved
+values are cleared, while `archived=exclude` and `archived=include` remain
+available. The API rejection remains authoritative if any client bypasses the
+UI.
+
 ```json
 {
   "page": 1,
@@ -294,8 +302,8 @@ Each row also has `periodMetrics` with the requested `{ from, to }`,
 `availability`, counts/amount and last dates. It is `EXACT` only when Anna has
 INCLUDED event rows for the active snapshot; otherwise every metric is `null`
 and availability is `UNAVAILABLE`. Lifetime totals are never relabelled as
-selected-period values. OUR currently reports period metrics as unavailable
-until a separately verified aggregate query is introduced.
+selected-period values. OUR computes bounded local aggregates and labels them
+`LOCAL_PRELIMINARY` / `APPROXIMATE`; they are not presented as exact CRM history.
 
 Status precedence is deterministic. Brokers use `DORMANT → TOP_SELLER →
 SELLER → OFFERING → FIXATING → BROKER_TOUR → NEW` (BT may also be a secondary

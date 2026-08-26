@@ -22,7 +22,7 @@ import {
 const sourceLabel = (source: LoyaltySyncSource) =>
   source === "GOOGLE_SHEETS"
     ? "Google Sheets · 4 вкладки"
-    : "amoCRM · полное покрытие";
+    : "amoCRM · полный обход сущностей";
 
 const formatDate = (value: string | null) => {
   if (!value) return "Нет данных";
@@ -151,8 +151,9 @@ export function LoyaltySyncPanel({ onClose }: { onClose: () => void }) {
         <div className="rounded-xl border border-border p-4">
           <h3 className="font-semibold">amoCRM</h3>
           <p className="mt-1 text-xs text-text-muted">
-            Последовательно читает контакты, компании и сделки. Частичный ответ
-            не считается успешным.
+            Последовательно читает доступные контакты, компании и сделки.
+            Частичный перечень не считается успешным. Полный обход сущностей не
+            подтверждает историю событий, звонков или точность KPI.
           </p>
           <label className="mt-3 block text-sm">
             <span className="mb-1 block text-text-muted">
@@ -181,7 +182,7 @@ export function LoyaltySyncPanel({ onClose }: { onClose: () => void }) {
             ) : (
               <RefreshCcw className="h-4 w-4" />
             )}{" "}
-            Проверить полное покрытие
+            Проверить перечень сущностей
           </button>
         </div>
       </div>
