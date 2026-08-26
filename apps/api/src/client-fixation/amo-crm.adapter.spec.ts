@@ -288,4 +288,41 @@ describe("AmoCrmAdapter broker contact safety", () => {
     ).rejects.toThrow("amoCRM 503 /leads");
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ["omitted", undefined, undefined],
+    ["omitted with fromBroker=false", undefined, false],
+    ["zero", 0, true],
+    ["negative", -1, true],
+    ["fractional", 7.5, true],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1, true],
+  ])(
+    "fails closed before any amo request when a broker contact id is %s",
+    async (_label, brokerAmoContactId, fromBroker) => {
+      global.fetch = jest.fn();
+      const adapter = new AmoCrmAdapter();
+      const findClientContact = jest.spyOn(adapter, "findContactByPhone");
+      const createClientContact = jest.spyOn(adapter, "createContact");
+      const createLead = jest.spyOn(adapter, "createLead");
+      const data: any = {
+        clientPhone: "+79990000031",
+        clientName: "Client",
+        brokerPhone: "+79990000032",
+        brokerAmoContactId,
+        agencyName: "Agency",
+        agencyInn: "7700000000",
+        comment: "",
+        project: "ZORGE9",
+      };
+      if (fromBroker !== undefined) data.fromBroker = fromBroker;
+
+      await expect(
+        adapter.createFixationRequest(data),
+      ).rejects.toThrow("BROKER_AMO_CONTACT_MISSING");
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(findClientContact).not.toHaveBeenCalled();
+      expect(createClientContact).not.toHaveBeenCalled();
+      expect(createLead).not.toHaveBeenCalled();
+    },
+  );
 });

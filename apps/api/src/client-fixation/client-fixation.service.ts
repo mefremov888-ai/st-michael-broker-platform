@@ -47,6 +47,17 @@ import {
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
 
+function requireBrokerAmoContactId(value: unknown): number {
+  const contactId =
+    typeof value === "number" || typeof value === "bigint"
+      ? Number(value)
+      : Number.NaN;
+  if (!Number.isSafeInteger(contactId) || contactId <= 0) {
+    throw new Error("BROKER_AMO_CONTACT_MISSING");
+  }
+  return contactId;
+}
+
 @Injectable()
 export class ClientFixationService {
   // 2026-06-04: прямой webhook в Morekit (без посредничества Salesbot).
@@ -119,20 +130,23 @@ export class ClientFixationService {
       responsibleBroker = candidate;
     }
 
-    // Never create a client-only amo lead. For a fresh/imported broker the
-    // contact is resolved by that broker's own id and phone before any Client
-    // row is persisted. A transient amo failure is therefore safe to retry.
+    // Resolve the responsible broker before any path can create an amo lead.
+    // If provisioning is temporarily unavailable, the fixation is still saved
+    // locally, but the resolved id remains null and every lead-create path below
+    // fails closed with a safe pre-POST queue error. The scheduler may retry only
+    // after the broker has a verified amo contact.
+    let resolvedResponsibleBrokerAmoContactId: number | null = null;
     try {
       responsibleBroker = await this.ensureBrokerAmoContact(
         responsibleBroker.id,
       );
-    } catch (e: any) {
-      console.error(
-        "[fixClient] responsible broker amo sync failed (non-blocking):",
-        e?.message || e,
+      resolvedResponsibleBrokerAmoContactId = requireBrokerAmoContactId(
+        responsibleBroker.amoContactId,
       );
-      // AMO sync failure is non-blocking: the fixation is saved to DB and the
-      // scheduler retries failed leads via handleAmoFailedRetry.
+    } catch {
+      console.error(
+        "[fixClient] responsible broker amo contact unavailable; lead creation is blocked and queued",
+      );
     }
 
     // 2026-06-09: блок полей формы фиксации, общий для всех 4 веток create.
@@ -449,6 +463,9 @@ export class ClientFixationService {
       let amoSyncError: string | null = null;
       let createdAmoLeadId: number | null = null;
       try {
+        const brokerAmoContactId = requireBrokerAmoContactId(
+          resolvedResponsibleBrokerAmoContactId,
+        );
         // 2026-06-19: используем responsibleBroker (для координатора — выбранный
         // реальный брокер, для обычного брокера — он сам).
         const resultLead = await this.amoCrmAdapter.createFixationRequest({
@@ -458,9 +475,7 @@ export class ClientFixationService {
           clientRegion: data.clientRegion,
           presentationSent: data.presentationSent,
           brokerPhone: responsibleBroker.phone,
-          brokerAmoContactId: responsibleBroker.amoContactId
-            ? Number(responsibleBroker.amoContactId)
-            : undefined,
+          brokerAmoContactId,
           agencyName: agency.name,
           agencyInn: agency.inn,
           comment: fullComment,
@@ -839,6 +854,9 @@ export class ClientFixationService {
     let amoSyncError: string | null = null;
     let createdAmoLeadId: number | null = null;
     try {
+      const brokerAmoContactId = requireBrokerAmoContactId(
+        resolvedResponsibleBrokerAmoContactId,
+      );
       // 2026-06-19: responsibleBroker — для координатора выбранный реальный,
       // для обычного брокера = он сам.
       const resultLead = await this.amoCrmAdapter.createFixationRequest({
@@ -848,9 +866,7 @@ export class ClientFixationService {
         clientRegion: data.clientRegion,
         presentationSent: data.presentationSent,
         brokerPhone: responsibleBroker.phone,
-        brokerAmoContactId: responsibleBroker.amoContactId
-          ? Number(responsibleBroker.amoContactId)
-          : undefined,
+        brokerAmoContactId,
         agencyName: agency.name,
         agencyInn: agency.inn,
         comment: refixFullComment,

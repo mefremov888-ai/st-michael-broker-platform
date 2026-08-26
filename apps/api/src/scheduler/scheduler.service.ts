@@ -41,6 +41,14 @@ import {
 
 const OPS_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
+function safePositiveAmoContactId(value: unknown): number | null {
+  const contactId =
+    typeof value === 'number' || typeof value === 'bigint'
+      ? Number(value)
+      : Number.NaN;
+  return Number.isSafeInteger(contactId) && contactId > 0 ? contactId : null;
+}
+
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
@@ -1124,6 +1132,9 @@ export class SchedulerService {
       let leadCreateAttempted = false;
       try {
         const retryBroker = client.responsibleBroker ?? client.broker;
+        const brokerAmoContactId = safePositiveAmoContactId(
+          retryBroker?.amoContactId,
+        );
         const clientId = String(client.id);
         const brokerId = retryBroker?.id ? String(retryBroker.id) : 'unknown';
         let retryVerdict: any = null;
@@ -1162,7 +1173,7 @@ export class SchedulerService {
           throw new Error('Fixation agency was not found; retry cannot continue');
         }
 
-        if (!retryBroker?.amoContactId) {
+        if (!brokerAmoContactId) {
           const nextAttempts = Number(client.amoSyncAttempts || 0) + 1;
           await this.prisma.client.update({
             where: { id: client.id },
@@ -1221,7 +1232,7 @@ export class SchedulerService {
           clientName: client.fullName,
           clientRegion: client.clientRegion || undefined,
           brokerPhone: retryBroker.phone,
-          brokerAmoContactId: Number(retryBroker.amoContactId),
+          brokerAmoContactId,
           agencyName: agency.name,
           agencyInn: agency.inn,
           comment: client.comment || '',
@@ -1292,7 +1303,7 @@ export class SchedulerService {
             this.morekit.notifyFixation({
               id: String(createdAmoLeadId),
               agency: agency.name,
-              broker_id: String(retryBroker.amoContactId),
+              broker_id: String(brokerAmoContactId),
               agent_name: retryBroker.fullName,
               agent_phone: morekitPhone(retryBroker.phone),
               agent_mail: retryBroker.email || '',

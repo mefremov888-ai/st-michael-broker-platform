@@ -1368,7 +1368,7 @@ export class AmoCrmAdapter {
     clientRegion?: string; // правка 2026-05-22: регион клиента (REGION=589265)
     presentationSent?: boolean; // правка 2026-05-22: «Отправлена презентация» на контакт клиента
     brokerPhone: string;
-    brokerAmoContactId?: number; // правка 2026-05-22: привязка брокера-агента как 2-го контакта лида
+    brokerAmoContactId: number; // required invariant; linked as the lead's second contact
     agencyName: string;
     agencyInn: string;
     comment: string;
@@ -1393,6 +1393,18 @@ export class AmoCrmAdapter {
     previousLeadId?: number;
     previousLeadInfo?: string;
   }): Promise<AmoLead> {
+    // Every `createFixationRequest` path represents a broker fixation, including
+    // reuse/link flows. `fromBroker` only controls an amo custom-field marker; it
+    // must never become a bypass that permits a client-only lead. Reject a
+    // missing or malformed broker contact before the client lookup/contact
+    // upsert and, critically, before either POST /leads path.
+    if (
+      !Number.isSafeInteger(data.brokerAmoContactId) ||
+      data.brokerAmoContactId <= 0
+    ) {
+      throw new Error("BROKER_AMO_CONTACT_MISSING");
+    }
+
     // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
     const clientCustomFields: any[] = [
       {

@@ -828,6 +828,47 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     ).toBe(false);
   });
 
+  it.each([BigInt(-1), BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1)])(
+    "never calls the lead adapter for an invalid broker amo contact id (%s)",
+    async (invalidContactId) => {
+      const candidate = {
+        id: "client-invalid-broker-contact",
+        fixationAgencyId: "agency-1",
+        amoSyncAttempts: 1,
+        phone: "+79990000016",
+        email: null,
+        fullName: "Client",
+        comment: null,
+        project: "ZORGE9",
+        amount: null,
+        propertyType: null,
+        broker: {
+          id: "broker-invalid-contact",
+          fullName: "Broker",
+          phone: "+79990000017",
+          email: null,
+          amoContactId: invalidContactId,
+        },
+        responsibleBroker: null,
+      };
+      const { service, prisma, createFixationRequest } = createService(candidate);
+
+      await service.handleAmoFailedRetry();
+
+      expect(createFixationRequest).not.toHaveBeenCalled();
+      expect(prisma.client.updateMany).not.toHaveBeenCalled();
+      expect(prisma.client.update).toHaveBeenCalledWith({
+        where: { id: candidate.id },
+        data: expect.objectContaining({
+          amoSyncError:
+            "Responsible broker is not linked to an amoCRM contact; retry deferred",
+          amoSyncAttempts: { increment: 1 },
+          amoSyncLastAttemptAt: expect.any(Date),
+        }),
+      });
+    },
+  );
+
   it("records a missing agency failure and alerts when the retry reaches dead-letter", async () => {
     const candidate = {
       id: "client-with-private-id",
