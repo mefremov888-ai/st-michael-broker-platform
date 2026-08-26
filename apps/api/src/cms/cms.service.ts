@@ -805,6 +805,9 @@ export class CmsService {
             strict: true,
           });
           if (contact) {
+            if (observedGateId && !isAmoBrokerContact(contact)) {
+              throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+            }
             if (!isAmoBrokerContact(contact)) {
               await this.amo.promoteContactToBroker(contact.id);
               contact = await reconcileExactAmoBrokerContact({

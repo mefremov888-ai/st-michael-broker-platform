@@ -1052,6 +1052,24 @@ function extractCreatedContactId(payload, expectedRequestId = null) {
   return positiveInteger(contacts[0]?.id);
 }
 
+function validateMutationRequest(
+  planModule,
+  { method, contactId = null, body },
+) {
+  const url = canonicalMutationUrl(planModule.AMO_ORIGIN, method, contactId);
+  let wireBody;
+  try {
+    wireBody = JSON.stringify(method === "POST" ? [body] : body);
+  } catch {
+    fail("AMO_MUTATION_BODY_JSON_INVALID");
+  }
+  const bodyBytes = Buffer.byteLength(wireBody, "utf8");
+  if (bodyBytes <= 0 || bodyBytes > MAX_MUTATION_REQUEST_BYTES) {
+    fail("AMO_MUTATION_BODY_SIZE_INVALID");
+  }
+  return { url, wireBody };
+}
+
 function createOneShotMutationRequester(
   accessToken,
   planModule,
@@ -1063,14 +1081,11 @@ function createOneShotMutationRequester(
   if (typeof fetchImpl !== "function") fail("FETCH_UNAVAILABLE");
   const token = accessToken.trim();
   return async ({ method, contactId = null, body }) => {
-    const url = canonicalMutationUrl(planModule.AMO_ORIGIN, method, contactId);
-    const wireBody = JSON.stringify(method === "POST" ? [body] : body);
-    if (
-      Buffer.byteLength(wireBody, "utf8") <= 0 ||
-      Buffer.byteLength(wireBody, "utf8") > MAX_MUTATION_REQUEST_BYTES
-    ) {
-      fail("AMO_MUTATION_BODY_SIZE_INVALID");
-    }
+    const { url, wireBody } = validateMutationRequest(planModule, {
+      method,
+      contactId,
+      body,
+    });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), MUTATION_TIMEOUT_MS);
     let response;
@@ -1219,14 +1234,17 @@ async function provisionAmoContact({
     if (!/^provision_[0-9a-f]{32}$/.test(requestId)) {
       fail("AMO_CREATE_REQUEST_ID_INVALID");
     }
-    await beforeCreateMutation();
-    const mutation = await mutateOnce({
+    const mutationRequest = {
       method: "POST",
       body: {
         ...buildBrokerCreatePayload(broker),
         request_id: requestId,
       },
-    });
+    };
+    // Every deterministic local failure must happen before the durable ARM.
+    validateMutationRequest(planModule, mutationRequest);
+    await beforeCreateMutation();
+    const mutation = await mutateOnce(mutationRequest);
     onCreateMutationOutcome(mutation);
     if (!mutation?.accepted && !mutation?.uncertain) {
       fail("AMO_CREATE_REJECTED");
@@ -2182,6 +2200,7 @@ module.exports = {
   reconcileUniqueBrokerContact,
   reportManifest,
   safeFailureCode,
+  validateMutationRequest,
 };
 
 if (require.main === module) {

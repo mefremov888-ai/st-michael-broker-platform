@@ -225,6 +225,7 @@ jobs:
           AMO_CLIENT_ID: ${{ secrets.AMO_CLIENT_ID }}
           AMO_CLIENT_SECRET: ${{ secrets.AMO_CLIENT_SECRET }}
           AMO_REFRESH_TOKEN: ${{ secrets.AMO_REFRESH_TOKEN }}
+          BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}
           MANGO_API_KEY: ${{ secrets.MANGO_API_KEY }}
           MANGO_API_SALT: ${{ secrets.MANGO_API_SALT }}
           MANGO_API_URL: ${{ secrets.MANGO_API_URL }}
@@ -299,6 +300,7 @@ jobs:
           # только в зашифрованный stdin SSH и не попадают в argv процесса.
           forwarded_names=(
             AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN
+            BROKER_CONTACT_GATE_HMAC_KEY
             MANGO_API_KEY MANGO_API_SALT MANGO_API_URL MANGO_CALLBACK_URL MANGO_OUTBOUND_LINE
             SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE
             DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON

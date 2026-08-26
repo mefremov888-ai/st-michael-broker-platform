@@ -175,6 +175,35 @@ describe("shared amo broker-contact advisory lock", () => {
     });
   });
 
+  it("leaves an observed gate open when the only exact contact is unflagged", async () => {
+    const { service, prisma, amo, fullBroker } = authHarness();
+    const gateId = "44444444-4444-4444-8444-444444444444";
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+        payload: { gateVersion: 1, gateId },
+      },
+    ]);
+    amo.findContactByPhone.mockResolvedValue({
+      id: 2200,
+      custom_fields_values: [{ field_id: 835415, values: [{ value: false }] }],
+    });
+
+    await expect(service.syncBrokerProfileToAmo(fullBroker.id)).rejects.toThrow(
+      "AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED",
+    );
+    expect(amo.createContact).not.toHaveBeenCalled();
+    expect(amo.promoteContactToBroker).not.toHaveBeenCalled();
+    expect(prisma.broker.updateMany).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: "AMO_BROKER_CONTACT_CREATE_RESOLVED",
+        }),
+      }),
+    );
+  });
+
   it("AuthService promotes one exact unflagged contact and reconciles before CAS", async () => {
     const { service, prisma, amo, fullBroker } = authHarness();
     amo.findContactByPhone

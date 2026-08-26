@@ -1150,6 +1150,9 @@ export class AuthService {
             { strict: true },
           );
           if (existing) {
+            if (observedGateId && !isAmoBrokerContact(existing)) {
+              throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+            }
             if (isAmoBrokerContact(existing)) {
               await this.amo.updateContact(existing.id, payload);
             } else {

@@ -527,6 +527,59 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(beforeCreateMutation).not.toHaveBeenCalled();
   });
 
+  it("rejects an oversized local POST before ARM and permits a later valid attempt", async () => {
+    const source = broker({ id: "oversized-local-body" });
+    const beforeCreateMutation = jest.fn();
+    const mutateOnce = jest.fn();
+    const baseRecord = {
+      broker: source,
+      queueRows: [],
+      phones: [source.phone],
+      candidateContactId: null,
+      resolution: "create_contact_candidate",
+    };
+    await expect(
+      provisioner.provisionAmoContact({
+        record: baseRecord,
+        broker: { ...source, fullName: "x".repeat(129 * 1024) },
+        requestGet: jest.fn().mockResolvedValue(contactsPage([])),
+        mutateOnce,
+        planModule: inspector,
+        sleepImpl: jest.fn(),
+        requestIdFactory: () => requestId,
+        beforeCreateMutation,
+      }),
+    ).rejects.toMatchObject({ code: "AMO_MUTATION_BODY_SIZE_INVALID" });
+    expect(beforeCreateMutation).not.toHaveBeenCalled();
+    expect(mutateOnce).not.toHaveBeenCalled();
+
+    const requestGet = jest
+      .fn()
+      .mockResolvedValueOnce(contactsPage([]))
+      .mockResolvedValueOnce(
+        contactsPage([amoContact(778, source.phone, true)]),
+      );
+    mutateOnce.mockResolvedValue({
+      accepted: true,
+      uncertain: false,
+      responseContactId: 778,
+    });
+    await expect(
+      provisioner.provisionAmoContact({
+        record: baseRecord,
+        broker: source,
+        requestGet,
+        mutateOnce,
+        planModule: inspector,
+        sleepImpl: jest.fn(),
+        requestIdFactory: () => requestId,
+        beforeCreateMutation,
+      }),
+    ).resolves.toBe(778);
+    expect(beforeCreateMutation).toHaveBeenCalledTimes(1);
+    expect(mutateOnce).toHaveBeenCalledTimes(1);
+  });
+
   it("recovers a lost create response only through exact GET and never sends a second POST", async () => {
     const source = broker({ id: "create", phone: "+79990000003" });
     const row = queueRow("q-create", source);
@@ -994,6 +1047,43 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(script).toContain('method: "PATCH"');
     expect(script).toContain('isolationLevel: "Serializable"');
     expect(script).toContain("pg_advisory_xact_lock");
+  });
+
+  it("fails closed on an unflagged recovery contact in all three runtime paths", () => {
+    for (const relativePath of [
+      "apps/api/src/auth/auth.service.ts",
+      "apps/api/src/client-fixation/client-fixation.service.ts",
+      "apps/api/src/cms/cms.service.ts",
+    ]) {
+      const source = readFileSync(
+        resolve(repositoryRoot, relativePath),
+        "utf8",
+      );
+      expect(source).toContain("observedGateId && !isAmoBrokerContact");
+      expect(source).toContain("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+    }
+  });
+
+  it("forwards the dedicated gate secret through both deploy allowlists", () => {
+    const deployWorkflow = readFileSync(
+      resolve(repositoryRoot, ".github/workflows/deploy.yml"),
+      "utf8",
+    );
+    const deployScript = readFileSync(
+      resolve(repositoryRoot, "deploy-update.sh"),
+      "utf8",
+    );
+    expect(deployWorkflow).toContain(
+      "BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}",
+    );
+    const forwarded = deployWorkflow.slice(
+      deployWorkflow.indexOf("forwarded_names=("),
+      deployWorkflow.indexOf(")", deployWorkflow.indexOf("forwarded_names=(")),
+    );
+    expect(forwarded).toContain("BROKER_CONTACT_GATE_HMAC_KEY");
+    expect(deployScript).toMatch(
+      /AMO_REFRESH_TOKEN \\\s+BROKER_CONTACT_GATE_HMAC_KEY \\/,
+    );
   });
 
   it("has a syntactically valid exact-SHA, two-file, secret-backed exclusive-lock workflow with all 26 gates and no deploy", () => {

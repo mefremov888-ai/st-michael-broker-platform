@@ -1585,6 +1585,9 @@ export class ClientFixationService {
             { strict: true },
           );
           if (amoContact) {
+            if (observedGateId && !isAmoBrokerContact(amoContact)) {
+              throw new Error("AMO_BROKER_CONTACT_GATE_NOT_CONFIRMED");
+            }
             // Promotion is mandatory for an exact unflagged contact. Enrichment
             // of a contact already marked as broker remains best effort.
             const wasBrokerContact = isAmoBrokerContact(amoContact);
