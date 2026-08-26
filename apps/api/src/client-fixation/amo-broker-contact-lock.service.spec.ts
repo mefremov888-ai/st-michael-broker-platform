@@ -4,6 +4,7 @@ import { AmoCrmAdapter as SourceAmoCrmAdapter } from "../../../../packages/integ
 import {
   AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
   amoBrokerContactAdvisoryLockKey,
+  amoBrokerContactGateDigest,
   reconcileExactAmoBrokerContact,
 } from "../common/amo-broker-contact-lock";
 
@@ -168,7 +169,7 @@ describe("shared amo broker-contact advisory lock", () => {
       expect(prisma.auditLog.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
-          entityId: fullBroker.id,
+          entityId: amoBrokerContactGateDigest(fullBroker.phone),
         }),
       });
       expect(prisma.broker.update).not.toHaveBeenCalled();

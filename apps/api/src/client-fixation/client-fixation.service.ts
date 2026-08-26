@@ -1189,7 +1189,7 @@ export class ClientFixationService {
             custom_fields_values: brokerToAmoContactFields(broker, agency),
           } as any;
 
-          const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(tx, brokerId);
+          const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(this.prisma, broker.phone);
           let amoContact = await (this.amoCrmAdapter as any).findContactByPhone(broker.phone, { strict: true });
           if (amoContact) {
             // Promotion is mandatory for an exact unflagged contact. Enrichment
@@ -1231,7 +1231,7 @@ export class ClientFixationService {
               return { ...broker, reconciliationRequired: true };
             }
 
-            await armDurableAmoBrokerContactCreateGate(this.prisma, brokerId);
+            await armDurableAmoBrokerContactCreateGate(this.prisma, broker.phone);
             durableCreateGateArmed = true;
             let createError: unknown = null;
             try {
@@ -1240,6 +1240,8 @@ export class ClientFixationService {
               createError = error;
             }
             if (createError && isDefinitiveAmoContactCreateRejection(createError)) {
+              await recordResolvedAmoBrokerContactCreate(this.prisma, broker.phone);
+              durableCreateGateArmed = false;
               throw createError;
             }
             const expectedContactId = Number.isSafeInteger(Number(amoContact?.id)) ? Number(amoContact.id) : null;
@@ -1274,7 +1276,7 @@ export class ClientFixationService {
             throw new Error('AMO_BROKER_CONTACT_LINK_CAS_MISSED');
           }
           if (unresolvedCreate) {
-            await recordResolvedAmoBrokerContactCreate(tx, brokerId);
+            await recordResolvedAmoBrokerContactCreate(this.prisma, broker.phone);
           }
           return { ...broker, amoContactId: BigInt(amoContact.id) };
         },
@@ -1289,7 +1291,7 @@ export class ClientFixationService {
           throw new Error('AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED');
         }
         if (durableCreateGateArmed) {
-          await recordResolvedAmoBrokerContactCreate(this.prisma, brokerId);
+          await recordResolvedAmoBrokerContactCreate(this.prisma, lockSource.phone);
         }
         return result;
       });

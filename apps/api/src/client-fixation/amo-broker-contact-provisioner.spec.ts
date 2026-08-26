@@ -463,6 +463,63 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(fetchLost).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [400, false],
+    [401, false],
+    [403, false],
+    [404, false],
+    [422, false],
+    [429, true],
+    [503, true],
+  ])(
+    "classifies one-shot POST HTTP %s uncertainty as %s",
+    async (status, uncertain) => {
+      const fetchOnce = jest.fn().mockResolvedValue({
+        ok: false,
+        status,
+        headers: { get: () => "0" },
+        text: async () => "",
+      });
+      const request = provisioner.createOneShotMutationRequester(
+        "token",
+        inspector,
+        fetchOnce,
+      );
+      await expect(
+        request({ method: "POST", body: { request_id: requestId } }),
+      ).resolves.toEqual({
+        accepted: false,
+        uncertain,
+        responseContactId: null,
+      });
+      expect(fetchOnce).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("validates the local create request id before arming a durable gate", async () => {
+    const source = broker({ id: "invalid-request-id" });
+    const beforeCreateMutation = jest.fn();
+    await expect(
+      provisioner.provisionAmoContact({
+        record: {
+          broker: source,
+          queueRows: [],
+          phones: [source.phone],
+          candidateContactId: null,
+          resolution: "create_contact_candidate",
+        },
+        broker: source,
+        requestGet: jest.fn().mockResolvedValue(contactsPage([])),
+        mutateOnce: jest.fn(),
+        planModule: inspector,
+        sleepImpl: jest.fn(),
+        requestIdFactory: () => "invalid",
+        beforeCreateMutation,
+      }),
+    ).rejects.toMatchObject({ code: "AMO_CREATE_REQUEST_ID_INVALID" });
+    expect(beforeCreateMutation).not.toHaveBeenCalled();
+  });
+
   it("recovers a lost create response only through exact GET and never sends a second POST", async () => {
     const source = broker({ id: "create", phone: "+79990000003" });
     const row = queueRow("q-create", source);
@@ -768,15 +825,21 @@ describe("production-safe amo broker-contact provisioner", () => {
       },
       client: { findMany: jest.fn().mockResolvedValue([directQueue(row)]) },
       auditLog: {
-        findFirst: jest.fn(async () => (marker ? { action: marker } : null)),
-        create: jest.fn(async ({ data }: any) => {
-          marker = data.action;
-          return data;
-        }),
+        // Deliberately stale long-transaction view: it can never observe the
+        // externally committed phone gate.
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn(),
       },
     };
+    const authoritativeAuditLog = {
+      findFirst: jest.fn(async () => (marker ? { action: marker } : null)),
+      create: jest.fn(async ({ data }: any) => {
+        marker = data.action;
+        return data;
+      }),
+    };
     const prisma = {
-      auditLog: tx.auditLog,
+      auditLog: authoritativeAuditLog,
       $transaction: jest.fn(async (callback: any) => callback(tx)),
     };
     const requestGet = jest.fn().mockResolvedValue(contactsPage([]));
@@ -800,9 +863,9 @@ describe("production-safe amo broker-contact provisioner", () => {
       }),
     ).rejects.toMatchObject({ code: "AMO_POST_MUTATION_NOT_RECONCILED" });
     expect(mutateOnce).toHaveBeenCalledTimes(1);
-    expect(tx.auditLog.create.mock.invocationCallOrder[0]).toBeLessThan(
-      mutateOnce.mock.invocationCallOrder[0],
-    );
+    expect(
+      authoritativeAuditLog.create.mock.invocationCallOrder[0],
+    ).toBeLessThan(mutateOnce.mock.invocationCallOrder[0]);
     expect(requestGet).toHaveBeenCalledTimes(7);
     expect(marker).toBe(provisioner.AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION);
     expect(tx.broker.update).not.toHaveBeenCalled();

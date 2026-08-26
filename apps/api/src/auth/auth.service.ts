@@ -996,7 +996,7 @@ export class AuthService {
         if (amoContactId) {
           await this.amo.updateContact(Number(amoContactId), payload);
         } else if (broker.phone) {
-          const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(tx, brokerId);
+          const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(this.prisma, broker.phone);
           // The shared DB lock serializes this exact find -> optional POST ->
           // local link flow with fixation sync and the production provisioner.
           let existing = await (this.amo as any).findContactByPhone(broker.phone, { strict: true });
@@ -1026,7 +1026,7 @@ export class AuthService {
                 reconciliationRequired: true,
               };
             }
-            await armDurableAmoBrokerContactCreateGate(this.prisma, brokerId);
+            await armDurableAmoBrokerContactCreateGate(this.prisma, broker.phone);
             durableCreateGateArmed = true;
             let createError: unknown = null;
             try {
@@ -1035,6 +1035,8 @@ export class AuthService {
               createError = error;
             }
             if (createError && isDefinitiveAmoContactCreateRejection(createError)) {
+              await recordResolvedAmoBrokerContactCreate(this.prisma, broker.phone);
+              durableCreateGateArmed = false;
               throw createError;
             }
             const expectedContactId = Number.isSafeInteger(Number(existing?.id)) ? Number(existing.id) : null;
@@ -1071,7 +1073,7 @@ export class AuthService {
               throw new Error('AMO_BROKER_CONTACT_LINK_CAS_MISSED');
             }
             if (unresolvedCreate) {
-              await recordResolvedAmoBrokerContactCreate(tx, brokerId);
+              await recordResolvedAmoBrokerContactCreate(this.prisma, broker.phone);
             }
           }
         }
@@ -1092,7 +1094,7 @@ export class AuthService {
       throw new Error('AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED');
     }
     if (durableCreateGateArmed) {
-      await recordResolvedAmoBrokerContactCreate(this.prisma, brokerId);
+      await recordResolvedAmoBrokerContactCreate(this.prisma, exists.phone);
     }
     const { primaryAgency, amoContactId } = lockedContact;
 

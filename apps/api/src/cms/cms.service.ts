@@ -666,7 +666,7 @@ export class CmsService {
             throw new Error('AMO_BROKER_CONTACT_LOCK_PHONE_DRIFT');
           }
           if (lockedBroker.amoContactId) return Number(lockedBroker.amoContactId);
-          const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(tx, created.id);
+          const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(this.prisma, lockedBroker.phone);
 
           let contact = await (this.amo as any).findContactByPhone(phone, {
             strict: true,
@@ -687,7 +687,7 @@ export class CmsService {
             }
           } else {
             if (unresolvedCreate) return null;
-            await armDurableAmoBrokerContactCreateGate(this.prisma, created.id);
+            await armDurableAmoBrokerContactCreateGate(this.prisma, lockedBroker.phone);
             durableCreateGateArmed = true;
             let createError: unknown = null;
             try {
@@ -713,6 +713,8 @@ export class CmsService {
               createError = error;
             }
             if (createError && isDefinitiveAmoContactCreateRejection(createError)) {
+              await recordResolvedAmoBrokerContactCreate(this.prisma, lockedBroker.phone);
+              durableCreateGateArmed = false;
               throw createError;
             }
             const expectedContactId = Number.isSafeInteger(Number(contact?.id)) ? Number(contact.id) : null;
@@ -747,7 +749,7 @@ export class CmsService {
               throw new Error('AMO_BROKER_CONTACT_LINK_CAS_MISSED');
             }
             if (unresolvedCreate) {
-              await recordResolvedAmoBrokerContactCreate(tx, created.id);
+              await recordResolvedAmoBrokerContactCreate(this.prisma, lockedBroker.phone);
             }
           }
           return Number(contact.id);
@@ -762,7 +764,7 @@ export class CmsService {
         throw new Error('AMO_BROKER_CONTACT_RECONCILIATION_REQUIRED');
       }
       if (durableCreateGateArmed) {
-        await recordResolvedAmoBrokerContactCreate(this.prisma, created.id);
+        await recordResolvedAmoBrokerContactCreate(this.prisma, phone);
       }
       const amo = await this.amo.createBrokerLeadFromLanding({
         brokerName: data.fullName,

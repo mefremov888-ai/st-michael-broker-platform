@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 /**
  * Cross-process lock domain for broker-contact GET -> POST -> DB-link flows.
@@ -16,6 +16,26 @@ export const AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION =
   "AMO_BROKER_CONTACT_CREATE_UNCERTAIN";
 export const AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION =
   "AMO_BROKER_CONTACT_CREATE_RESOLVED";
+const AMO_BROKER_CONTACT_GATE_ENTITY = "AmoBrokerContactPhone";
+const AMO_BROKER_CONTACT_GATE_DIGEST_DOMAIN =
+  "st-michael:amo-broker-contact-gate:v1";
+
+export function amoBrokerContactGateDigest(phone: unknown): string {
+  const secret =
+    process.env.BROKER_CONTACT_GATE_HMAC_KEY ||
+    process.env.JWT_SECRET ||
+    (process.env.NODE_ENV === "test"
+      ? "test-only-broker-contact-gate-key-32-bytes"
+      : "");
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("AMO_BROKER_CONTACT_GATE_HMAC_KEY_INVALID");
+  }
+  return createHmac("sha256", secret)
+    .update(AMO_BROKER_CONTACT_GATE_DIGEST_DOMAIN, "utf8")
+    .update("\0", "utf8")
+    .update(normalizeAmoBrokerContactLockPhone(phone), "utf8")
+    .digest("hex");
+}
 
 export function isAmoBrokerContact(contact: any): boolean {
   const fields = Array.isArray(contact?.custom_fields_values)
@@ -72,13 +92,13 @@ export async function reconcileExactAmoBrokerContact({
 }
 
 export async function hasUnresolvedAmoBrokerContactCreate(
-  transaction: any,
-  brokerId: string,
+  database: any,
+  phone: unknown,
 ): Promise<boolean> {
-  const latest = await transaction.auditLog.findFirst({
+  const latest = await database.auditLog.findFirst({
     where: {
-      entity: "Broker",
-      entityId: brokerId,
+      entity: AMO_BROKER_CONTACT_GATE_ENTITY,
+      entityId: amoBrokerContactGateDigest(phone),
       action: {
         in: [
           AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
@@ -94,26 +114,19 @@ export async function hasUnresolvedAmoBrokerContactCreate(
 
 export async function recordUncertainAmoBrokerContactCreate(
   transaction: any,
-  brokerId: string,
+  phone: unknown,
 ): Promise<void> {
   await transaction.auditLog.create({
     data: {
       userId: null,
       action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
-      entity: "Broker",
-      entityId: brokerId,
+      entity: AMO_BROKER_CONTACT_GATE_ENTITY,
+      entityId: amoBrokerContactGateDigest(phone),
       payload: {
         reason: "AMBIGUOUS_POST_RESULT",
         automaticRetryBlocked: true,
       },
     },
-  });
-  // The row write is intentional: a Serializable transaction that waited on
-  // the advisory lock with an older snapshot must fail before it can miss the
-  // newly committed durable marker and send another POST.
-  await transaction.broker.update({
-    where: { id: brokerId },
-    data: { updatedAt: new Date() },
   });
 }
 
@@ -125,14 +138,14 @@ export async function recordUncertainAmoBrokerContactCreate(
  */
 export async function armDurableAmoBrokerContactCreateGate(
   database: any,
-  brokerId: string,
+  phone: unknown,
 ): Promise<void> {
   await database.auditLog.create({
     data: {
       userId: null,
       action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
-      entity: "Broker",
-      entityId: brokerId,
+      entity: AMO_BROKER_CONTACT_GATE_ENTITY,
+      entityId: amoBrokerContactGateDigest(phone),
       payload: {
         reason: "PRE_MUTATION_DURABLE_GATE",
         automaticRetryBlocked: true,
@@ -142,15 +155,15 @@ export async function armDurableAmoBrokerContactCreateGate(
 }
 
 export async function recordResolvedAmoBrokerContactCreate(
-  transaction: any,
-  brokerId: string,
+  database: any,
+  phone: unknown,
 ): Promise<void> {
-  await transaction.auditLog.create({
+  await database.auditLog.create({
     data: {
       userId: null,
       action: AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION,
-      entity: "Broker",
-      entityId: brokerId,
+      entity: AMO_BROKER_CONTACT_GATE_ENTITY,
+      entityId: amoBrokerContactGateDigest(phone),
       payload: {
         automaticRetryBlocked: false,
       },
