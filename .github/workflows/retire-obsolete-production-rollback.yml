@@ -244,10 +244,18 @@ jobs:
           require_uint() {
             [[ "$1" =~ ^[0-9]+$ ]] || { echo "Disk metric is not an unsigned integer"; exit 1; }
           }
+          inspect_stage_failed() {
+            local stage=$1
+            [[ "$stage" =~ ^[a-z0-9_.:-]+$ ]] || stage=invalid_stage
+            printf 'inspect_stage_failed=%s\n' "$stage" >&2
+          }
           image_id_for_tag() {
             local image_id
-            image_id=$(docker image inspect --format '{{.Id}}' "$1")
-            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Rollback image ID is invalid"; exit 1; }
+            if ! image_id=$(docker image inspect --format '{{.Id}}' "$1"); then
+              echo "Rollback image ID lookup failed" >&2
+              return 1
+            fi
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Rollback image ID is invalid" >&2; return 1; }
             printf '%s\n' "$image_id"
           }
           image_has_prefix() {
@@ -260,29 +268,88 @@ jobs:
           validated_repo_digest_for_tag() {
             local tag=$1
             local expected_repo_tags=${2:-$tag}
+            local diagnostic_stage=${3:-rollback_image}
             local repo_tags
             local repo_digests
             local repo_digest
+            local repo_digest_image_id
+            local tag_image_id
             local expected_tag
             local expected_tag_count=0
+            local actual_tag_count
+            local expected_tag_sha256
+            local actual_tag_sha256
+            local actual_digest_count
+            local actual_digest_sha256
+            [[ "$diagnostic_stage" =~ ^[a-z0-9_.:-]+$ ]] || { echo "Rollback image diagnostic stage is invalid" >&2; return 1; }
             while IFS= read -r expected_tag; do
               test -n "$expected_tag" || continue
-              [[ "$expected_tag" =~ ^st-michael-rollback-(api|web):[0-9]{8}-[0-9]{6}$ ]] || { echo "Expected rollback repo-tag topology is invalid"; exit 1; }
+              [[ "$expected_tag" =~ ^st-michael-rollback-(api|web):[0-9]{8}-[0-9]{6}$ ]] || { echo "Expected rollback repo-tag topology is invalid" >&2; return 1; }
               expected_tag_count=$((expected_tag_count + 1))
             done <<< "$expected_repo_tags"
-            test "$expected_tag_count" -ge 1 -a "$expected_tag_count" -le 2 || { echo "Expected rollback repo-tag topology has an invalid size"; exit 1; }
-            expected_repo_tags=$(printf '%s\n' "$expected_repo_tags" | sort -u)
-            repo_tags=$(docker image inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$tag" | sort -u)
-            test "$repo_tags" = "$expected_repo_tags" || { echo "Rollback image repo-tag topology differs from the exact audit"; exit 1; }
-            repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' "$tag")
+            test "$expected_tag_count" -ge 1 -a "$expected_tag_count" -le 2 || { echo "Expected rollback repo-tag topology has an invalid size" >&2; return 1; }
+            if ! expected_repo_tags=$(printf '%s\n' "$expected_repo_tags" | awk 'NF' | sort -u); then
+              echo "Expected rollback repo-tag normalization failed" >&2
+              return 1
+            fi
+            if ! repo_tags=$(docker image inspect --format '{{range .RepoTags}}{{println .}}{{end}}' "$tag" | awk 'NF' | sort -u); then
+              echo "Rollback image repo-tag lookup failed" >&2
+              return 1
+            fi
+            if [ "$repo_tags" != "$expected_repo_tags" ]; then
+              if ! actual_tag_count=$(printf '%s\n' "$repo_tags" | awk 'NF { count++ } END { print count + 0 }'); then
+                echo "Rollback image repo-tag count failed" >&2
+                return 1
+              fi
+              if ! expected_tag_sha256=$(printf '%s' "$expected_repo_tags" | sha256sum | awk '{print $1}'); then
+                echo "Expected rollback repo-tag hash failed" >&2
+                return 1
+              fi
+              if ! actual_tag_sha256=$(printf '%s' "$repo_tags" | sha256sum | awk '{print $1}'); then
+                echo "Rollback image repo-tag hash failed" >&2
+                return 1
+              fi
+              printf 'rollback_repo_tag_stage=%s\n' "$diagnostic_stage" >&2
+              printf 'rollback_repo_tag_expected_count=%s\n' "$expected_tag_count" >&2
+              printf 'rollback_repo_tag_actual_count=%s\n' "$actual_tag_count" >&2
+              printf 'rollback_repo_tag_expected_sha256=%s\n' "$expected_tag_sha256" >&2
+              printf 'rollback_repo_tag_actual_sha256=%s\n' "$actual_tag_sha256" >&2
+              echo "Rollback image repo-tag topology differs from the exact audit" >&2
+              return 1
+            fi
+            if ! repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' "$tag"); then
+              echo "Rollback image repo-digest lookup failed" >&2
+              return 1
+            fi
             case "$repo_digests" in
               null|"[]") printf 'none\n' ;;
               *)
-                printf '%s\n' "$repo_digests" | grep -Eq '^\["[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}"\]$' \
-                  || { echo "Rollback image has an unexpected digest reference"; exit 1; }
+                if ! printf '%s\n' "$repo_digests" | grep -Eq '^\["[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}"\]$'; then
+                  if ! actual_digest_count=$(printf '%s' "$repo_digests" | awk -F'@sha256:' '{ count += NF - 1 } END { print count + 0 }'); then
+                    echo "Rollback image repo-digest count failed" >&2
+                    return 1
+                  fi
+                  if ! actual_digest_sha256=$(printf '%s' "$repo_digests" | sha256sum | awk '{print $1}'); then
+                    echo "Rollback image repo-digest hash failed" >&2
+                    return 1
+                  fi
+                  printf 'rollback_repo_digest_stage=%s\n' "$diagnostic_stage" >&2
+                  printf 'rollback_repo_digest_actual_count=%s\n' "$actual_digest_count" >&2
+                  printf 'rollback_repo_digest_actual_sha256=%s\n' "$actual_digest_sha256" >&2
+                  echo "Rollback image has an unexpected digest reference" >&2
+                  return 1
+                fi
                 repo_digest=${repo_digests:2:${#repo_digests}-4}
-                test "$(image_id_for_tag "$repo_digest")" = "$(image_id_for_tag "$tag")" \
-                  || { echo "Rollback digest does not resolve to the inspected image"; exit 1; }
+                if ! repo_digest_image_id=$(image_id_for_tag "$repo_digest"); then
+                  inspect_stage_failed "${diagnostic_stage}.repo_digest_image_id"
+                  return 1
+                fi
+                if ! tag_image_id=$(image_id_for_tag "$tag"); then
+                  inspect_stage_failed "${diagnostic_stage}.tag_image_id"
+                  return 1
+                fi
+                test "$repo_digest_image_id" = "$tag_image_id" \
+                  || { echo "Rollback digest does not resolve to the inspected image" >&2; return 1; }
                 printf '%s\n' "$repo_digest"
                 ;;
             esac
@@ -302,7 +369,10 @@ jobs:
           record_value() {
             local key=$1
             local record=$2
-            awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2); found=1 } END { if (!found) exit 1 }' "$record"
+            if ! awk -F= -v key="$key" '$1 == key { print substr($0, length(key) + 2); found=1 } END { if (!found) exit 1 }' "$record"; then
+              echo "Rollback release record key lookup failed" >&2
+              return 1
+            fi
           }
           rollback_tag_inventory() {
             docker image ls --format '{{.Repository}}|{{.Tag}}' \
@@ -352,7 +422,7 @@ jobs:
                 ;;
               api:*) printf 'st-michael-rollback-api:%s\n' "$timestamp" ;;
               web:*) printf 'st-michael-rollback-web:%s\n' "$timestamp" ;;
-              *) echo "Unsupported retained rollback component"; exit 1 ;;
+              *) echo "Unsupported retained rollback component" >&2; return 1 ;;
             esac
           }
           print_rollback_tag_diagnostics() {
@@ -415,9 +485,9 @@ jobs:
             local tracked_diff_sha256
             local untracked_sha256
             local payload
-            test "$(git -C "$deploy_root" rev-parse --is-inside-work-tree)" = "true" || { echo "Deploy path is not a Git worktree"; exit 1; }
+            test "$(git -C "$deploy_root" rev-parse --is-inside-work-tree)" = "true" || { echo "Deploy path is not a Git worktree" >&2; return 1; }
             head_sha=$(GIT_OPTIONAL_LOCKS=0 git -C "$deploy_root" rev-parse HEAD)
-            [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Deploy worktree HEAD is invalid"; exit 1; }
+            [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Deploy worktree HEAD is invalid" >&2; return 1; }
             status_sha256=$(GIT_OPTIONAL_LOCKS=0 git -C "$deploy_root" status --porcelain=v1 -z --untracked-files=all | sha256sum | awk '{print $1}')
             tracked_diff_sha256=$(GIT_OPTIONAL_LOCKS=0 git -C "$deploy_root" diff --no-ext-diff --binary HEAD -- | sha256sum | awk '{print $1}')
             untracked_sha256=$(
@@ -457,16 +527,16 @@ jobs:
             main_pid=$(systemctl show docker.service --property=MainPID --value)
             active_monotonic_usec=$(systemctl show docker.service --property=ActiveEnterTimestampMonotonic --value)
             system_uptime_seconds=$(awk 'NR == 1 { print int($1) }' /proc/uptime)
-            [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || { echo "Docker daemon MainPID is invalid"; exit 1; }
-            [[ "$active_monotonic_usec" =~ ^[1-9][0-9]*$ ]] || { echo "Docker daemon active timestamp is invalid"; exit 1; }
-            [[ "$system_uptime_seconds" =~ ^[1-9][0-9]*$ ]] || { echo "System uptime is invalid"; exit 1; }
+            [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || { echo "Docker daemon MainPID is invalid" >&2; return 1; }
+            [[ "$active_monotonic_usec" =~ ^[1-9][0-9]*$ ]] || { echo "Docker daemon active timestamp is invalid" >&2; return 1; }
+            [[ "$system_uptime_seconds" =~ ^[1-9][0-9]*$ ]] || { echo "System uptime is invalid" >&2; return 1; }
             daemon_uptime_seconds=$((system_uptime_seconds - active_monotonic_usec / 1000000))
-            test "$daemon_uptime_seconds" -ge 900 || { echo "Docker daemon has not been stable for fifteen minutes"; exit 1; }
+            test "$daemon_uptime_seconds" -ge 900 || { echo "Docker daemon has not been stable for fifteen minutes" >&2; return 1; }
             daemon_payload=$(printf 'server_id=%s\nserver_version=%s\ndriver=%s\ndocker_root=%s\nmain_pid=%s\nactive_monotonic_usec=%s\n' \
               "$(docker info --format '{{.ID}}')" "$(docker version --format '{{.Server.Version}}')" \
               "$(docker info --format '{{.Driver}}')" "$docker_root" "$main_pid" "$active_monotonic_usec")
             daemon_sha256=$(printf '%s' "$daemon_payload" | sha256sum | awk '{print $1}')
-            [[ "$daemon_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Docker daemon identity hash is invalid"; exit 1; }
+            [[ "$daemon_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Docker daemon identity hash is invalid" >&2; return 1; }
             printf '%s:%s\n' "$daemon_uptime_seconds" "$daemon_sha256"
           }
           runtime_event_audit() {
@@ -487,8 +557,8 @@ jobs:
             action_type_payload=$(printf '%s\n' "$event_payload" | awk -F'|' 'NF { print $1 "|" $2 }' | sort)
             action_type_sha256=$(printf '%s' "$action_type_payload" | sha256sum | awk '{print $1}')
             event_sha256=$(printf '%s' "$event_payload" | sha256sum | awk '{print $1}')
-            [[ "$action_type_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Runtime action/type audit hash is invalid"; exit 1; }
-            [[ "$event_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Runtime event audit hash is invalid"; exit 1; }
+            [[ "$action_type_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Runtime action/type audit hash is invalid" >&2; return 1; }
+            [[ "$event_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Runtime event audit hash is invalid" >&2; return 1; }
             printf '%s:%s:%s:%s:%s:%s\n' "$event_window_start" "$event_window_end" "$event_count" "$risky_event_count" "$action_type_sha256" "$event_sha256"
           }
           assert_private_regular_file() {
@@ -503,6 +573,7 @@ jobs:
             local expected_target_commit=$2
             local key
             local key_count
+            local target_commit
             local previous_commit
             local previous_nginx_image
             test "$(wc -l < "$record" | tr -d '[:space:]')" = "5" || { echo "Rollback release record has an unexpected line count"; exit 1; }
@@ -510,10 +581,20 @@ jobs:
               key_count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$record")
               test "$key_count" = "1" || { echo "Rollback release record key set is invalid"; exit 1; }
             done
-            test "$(record_value target_commit "$record")" = "$expected_target_commit" || { echo "Rollback release record target commit mismatch"; exit 1; }
-            previous_commit=$(record_value previous_commit "$record")
+            if ! target_commit=$(record_value target_commit "$record"); then
+              inspect_stage_failed "release_record.target_commit"
+              return 1
+            fi
+            test "$target_commit" = "$expected_target_commit" || { echo "Rollback release record target commit mismatch"; exit 1; }
+            if ! previous_commit=$(record_value previous_commit "$record"); then
+              inspect_stage_failed "release_record.previous_commit"
+              return 1
+            fi
             [[ "$previous_commit" = "unknown" || "$previous_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "Rollback release record previous commit is invalid"; exit 1; }
-            previous_nginx_image=$(record_value previous_nginx_image "$record")
+            if ! previous_nginx_image=$(record_value previous_nginx_image "$record"); then
+              inspect_stage_failed "release_record.previous_nginx_image"
+              return 1
+            fi
             [[ "$previous_nginx_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Rollback release record nginx image ID is invalid"; exit 1; }
           }
           assert_exact_rollback_override() {
@@ -628,16 +709,29 @@ jobs:
             test "$confirm_retirement" = "true" || { echo "Retire mode requires explicit confirmation on the production host"; exit 1; }
           fi
 
-          target_api_id=$(record_value previous_api_image "$RELEASE_RECORD")
-          target_web_id=$(record_value previous_web_image "$RELEASE_RECORD")
+          if ! target_api_id=$(record_value previous_api_image "$RELEASE_RECORD"); then
+            inspect_stage_failed "target_api.release_record"
+            exit 1
+          fi
+          if ! target_web_id=$(record_value previous_web_image "$RELEASE_RECORD"); then
+            inspect_stage_failed "target_web.release_record"
+            exit 1
+          fi
           [[ "$target_api_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Target API image ID in the release record is invalid"; exit 1; }
           [[ "$target_web_id" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Target web image ID in the release record is invalid"; exit 1; }
           image_has_prefix "$target_api_id" "$TARGET_API_PREFIX" || { echo "Target API rollback image does not match the prior read-only audit"; exit 1; }
           image_has_prefix "$target_web_id" "$TARGET_WEB_PREFIX" || { echo "Target web rollback image does not match the prior read-only audit"; exit 1; }
           test "$target_api_id" != "$target_web_id" || { echo "Rollback API and web unexpectedly resolve to the same image"; exit 1; }
           if [ "$target_api_present" = "true" ]; then
-            test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "API rollback tag disagrees with its release record"; exit 1; }
-            target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG")
+            if ! current_target_api_id=$(image_id_for_tag "$TARGET_API_TAG"); then
+              inspect_stage_failed "target_api.image_id"
+              exit 1
+            fi
+            test "$current_target_api_id" = "$target_api_id" || { echo "API rollback tag disagrees with its release record"; exit 1; }
+            if ! target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG" "$TARGET_API_TAG" "target_api"); then
+              inspect_stage_failed "target_api.topology"
+              exit 1
+            fi
           else
             if [ "$operation" = "inspect" ]; then
               target_api_repo_digest=none
@@ -650,8 +744,15 @@ jobs:
             fi
           fi
           if [ "$target_web_present" = "true" ]; then
-            test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Web rollback tag disagrees with its release record"; exit 1; }
-            target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")
+            if ! current_target_web_id=$(image_id_for_tag "$TARGET_WEB_TAG"); then
+              inspect_stage_failed "target_web.image_id"
+              exit 1
+            fi
+            test "$current_target_web_id" = "$target_web_id" || { echo "Web rollback tag disagrees with its release record"; exit 1; }
+            if ! target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG" "$TARGET_WEB_TAG" "target_web"); then
+              inspect_stage_failed "target_web.topology"
+              exit 1
+            fi
           else
             if [ "$operation" = "inspect" ]; then
               target_web_repo_digest=none
@@ -684,8 +785,14 @@ jobs:
             assert_private_regular_file "$newer_override" "$deploy_uid"
             assert_exact_release_record_shape "$newer_record" "${NEWER_TARGET_COMMITS[$newer_index]}"
             assert_exact_rollback_override "$newer_override" "$newer_api_tag" "$newer_web_tag"
-            newer_api_id=$(image_id_for_tag "$newer_api_tag")
-            newer_web_id=$(image_id_for_tag "$newer_web_tag")
+            if ! newer_api_id=$(image_id_for_tag "$newer_api_tag"); then
+              inspect_stage_failed "retained_api_${newer_timestamp}.image_id"
+              exit 1
+            fi
+            if ! newer_web_id=$(image_id_for_tag "$newer_web_tag"); then
+              inspect_stage_failed "retained_web_${newer_timestamp}.image_id"
+              exit 1
+            fi
             image_has_prefix "$newer_api_id" "${NEWER_API_PREFIXES[$newer_index]}" || { echo "A retained API rollback does not match the prior read-only audit"; exit 1; }
             image_has_prefix "$newer_web_id" "${NEWER_WEB_PREFIXES[$newer_index]}" || { echo "A retained web rollback does not match the prior read-only audit"; exit 1; }
             case "$newer_timestamp" in
@@ -694,10 +801,32 @@ jobs:
                 test "$newer_web_id" = "$DUPLICATE_RETAINED_WEB_IMAGE_ID" || { echo "A duplicate retained web image ID differs from the confirmed audit"; exit 1; }
                 ;;
             esac
-            test "$(record_value previous_api_image "$newer_record")" = "$newer_api_id" || { echo "A retained API rollback disagrees with its release record"; exit 1; }
-            test "$(record_value previous_web_image "$newer_record")" = "$newer_web_id" || { echo "A retained web rollback disagrees with its release record"; exit 1; }
-            newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag" "$(expected_retained_repo_tags api "$newer_timestamp")")
-            newer_web_repo_digest=$(validated_repo_digest_for_tag "$newer_web_tag" "$(expected_retained_repo_tags web "$newer_timestamp")")
+            if ! newer_record_api_id=$(record_value previous_api_image "$newer_record"); then
+              inspect_stage_failed "retained_api_${newer_timestamp}.release_record"
+              exit 1
+            fi
+            if ! newer_record_web_id=$(record_value previous_web_image "$newer_record"); then
+              inspect_stage_failed "retained_web_${newer_timestamp}.release_record"
+              exit 1
+            fi
+            test "$newer_record_api_id" = "$newer_api_id" || { echo "A retained API rollback disagrees with its release record"; exit 1; }
+            test "$newer_record_web_id" = "$newer_web_id" || { echo "A retained web rollback disagrees with its release record"; exit 1; }
+            if ! expected_newer_api_repo_tags=$(expected_retained_repo_tags api "$newer_timestamp"); then
+              inspect_stage_failed "retained_api_${newer_timestamp}.expected_topology"
+              exit 1
+            fi
+            if ! expected_newer_web_repo_tags=$(expected_retained_repo_tags web "$newer_timestamp"); then
+              inspect_stage_failed "retained_web_${newer_timestamp}.expected_topology"
+              exit 1
+            fi
+            if ! newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag" "$expected_newer_api_repo_tags" "retained_api_${newer_timestamp}"); then
+              inspect_stage_failed "retained_api_${newer_timestamp}.topology"
+              exit 1
+            fi
+            if ! newer_web_repo_digest=$(validated_repo_digest_for_tag "$newer_web_tag" "$expected_newer_web_repo_tags" "retained_web_${newer_timestamp}"); then
+              inspect_stage_failed "retained_web_${newer_timestamp}.topology"
+              exit 1
+            fi
             test "$newer_api_id" != "$target_api_id" -a "$newer_api_id" != "$target_web_id" || { echo "A retained API rollback resolves to a retirement image"; exit 1; }
             test "$newer_web_id" != "$target_api_id" -a "$newer_web_id" != "$target_web_id" || { echo "A retained web rollback resolves to a retirement image"; exit 1; }
             newer_api_ids+=("$newer_api_id")
@@ -751,9 +880,20 @@ jobs:
           all_container_inventory_sha256=$(printf '%s' "$all_container_inventory_before" | sha256sum | awk '{print $1}')
           volume_inventory_sha256=$(printf '%s' "$volume_inventory_before" | sha256sum | awk '{print $1}')
           network_inventory_sha256=$(printf '%s' "$network_inventory_before" | sha256sum | awk '{print $1}')
-          deploy_worktree_sha256_before=$(deploy_worktree_sha256)
-          IFS=: read -r docker_daemon_uptime_seconds docker_daemon_identity_sha256 <<< "$(docker_daemon_snapshot)"
-          IFS=: read -r event_window_start event_window_end runtime_event_count risky_runtime_event_count runtime_action_type_sha256 runtime_event_actor_sha256 <<< "$(runtime_event_audit)"
+          if ! deploy_worktree_sha256_before=$(deploy_worktree_sha256); then
+            inspect_stage_failed "runtime.deploy_worktree"
+            exit 1
+          fi
+          if ! docker_daemon_snapshot_before=$(docker_daemon_snapshot); then
+            inspect_stage_failed "runtime.docker_daemon"
+            exit 1
+          fi
+          IFS=: read -r docker_daemon_uptime_seconds docker_daemon_identity_sha256 <<< "$docker_daemon_snapshot_before"
+          if ! runtime_audit_before=$(runtime_event_audit); then
+            inspect_stage_failed "runtime.events"
+            exit 1
+          fi
+          IFS=: read -r event_window_start event_window_end runtime_event_count risky_runtime_event_count runtime_action_type_sha256 runtime_event_actor_sha256 <<< "$runtime_audit_before"
           for runtime_sha256 in "$running_container_inventory_sha256" "$all_container_inventory_sha256" "$volume_inventory_sha256" \
             "$network_inventory_sha256" "$deploy_worktree_sha256_before" "$docker_daemon_identity_sha256" \
             "$runtime_action_type_sha256" "$runtime_event_actor_sha256"; do
@@ -856,15 +996,31 @@ jobs:
             exit 1
           fi
           if [ "$target_api_present" = "true" ]; then
-            test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "Target API tag changed during preflight"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$TARGET_API_TAG")" = "$target_api_repo_digest" || { echo "Target API digest changed during preflight"; exit 1; }
+            if ! preflight_target_api_id=$(image_id_for_tag "$TARGET_API_TAG"); then
+              inspect_stage_failed "preflight.target_api.image_id"
+              exit 1
+            fi
+            test "$preflight_target_api_id" = "$target_api_id" || { echo "Target API tag changed during preflight"; exit 1; }
+            if ! preflight_target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG" "$TARGET_API_TAG" "preflight.target_api"); then
+              inspect_stage_failed "preflight.target_api.topology"
+              exit 1
+            fi
+            test "$preflight_target_api_repo_digest" = "$target_api_repo_digest" || { echo "Target API digest changed during preflight"; exit 1; }
           elif docker image inspect "$target_api_id" >/dev/null 2>&1; then
             echo "Missing target API tag regained a local image reference"
             exit 1
           fi
           if [ "$target_web_present" = "true" ]; then
-            test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Target web tag changed during preflight"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")" = "$target_web_repo_digest" || { echo "Target web digest changed during preflight"; exit 1; }
+            if ! preflight_target_web_id=$(image_id_for_tag "$TARGET_WEB_TAG"); then
+              inspect_stage_failed "preflight.target_web.image_id"
+              exit 1
+            fi
+            test "$preflight_target_web_id" = "$target_web_id" || { echo "Target web tag changed during preflight"; exit 1; }
+            if ! preflight_target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG" "$TARGET_WEB_TAG" "preflight.target_web"); then
+              inspect_stage_failed "preflight.target_web.topology"
+              exit 1
+            fi
+            test "$preflight_target_web_repo_digest" = "$target_web_repo_digest" || { echo "Target web digest changed during preflight"; exit 1; }
           elif docker image inspect "$target_web_id" >/dev/null 2>&1; then
             echo "Missing target web tag regained a local image reference"
             exit 1
@@ -881,10 +1037,34 @@ jobs:
             newer_web_tag="st-michael-rollback-web:$newer_timestamp"
             assert_exact_release_record_shape "${newer_records[$newer_index]}" "${NEWER_TARGET_COMMITS[$newer_index]}"
             assert_exact_rollback_override "${newer_overrides[$newer_index]}" "$newer_api_tag" "$newer_web_tag"
-            test "$(image_id_for_tag "$newer_api_tag")" = "${newer_api_ids[$newer_index]}" || { echo "A retained API image changed during preflight"; exit 1; }
-            test "$(image_id_for_tag "$newer_web_tag")" = "${newer_web_ids[$newer_index]}" || { echo "A retained web image changed during preflight"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$newer_api_tag" "$(expected_retained_repo_tags api "$newer_timestamp")")" = "${newer_api_repo_digests[$newer_index]}" || { echo "A retained API digest changed during preflight"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$newer_web_tag" "$(expected_retained_repo_tags web "$newer_timestamp")")" = "${newer_web_repo_digests[$newer_index]}" || { echo "A retained web digest changed during preflight"; exit 1; }
+            if ! preflight_newer_api_id=$(image_id_for_tag "$newer_api_tag"); then
+              inspect_stage_failed "preflight.retained_api_${newer_timestamp}.image_id"
+              exit 1
+            fi
+            if ! preflight_newer_web_id=$(image_id_for_tag "$newer_web_tag"); then
+              inspect_stage_failed "preflight.retained_web_${newer_timestamp}.image_id"
+              exit 1
+            fi
+            test "$preflight_newer_api_id" = "${newer_api_ids[$newer_index]}" || { echo "A retained API image changed during preflight"; exit 1; }
+            test "$preflight_newer_web_id" = "${newer_web_ids[$newer_index]}" || { echo "A retained web image changed during preflight"; exit 1; }
+            if ! preflight_expected_newer_api_repo_tags=$(expected_retained_repo_tags api "$newer_timestamp"); then
+              inspect_stage_failed "preflight.retained_api_${newer_timestamp}.expected_topology"
+              exit 1
+            fi
+            if ! preflight_expected_newer_web_repo_tags=$(expected_retained_repo_tags web "$newer_timestamp"); then
+              inspect_stage_failed "preflight.retained_web_${newer_timestamp}.expected_topology"
+              exit 1
+            fi
+            if ! preflight_newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag" "$preflight_expected_newer_api_repo_tags" "preflight.retained_api_${newer_timestamp}"); then
+              inspect_stage_failed "preflight.retained_api_${newer_timestamp}.topology"
+              exit 1
+            fi
+            if ! preflight_newer_web_repo_digest=$(validated_repo_digest_for_tag "$newer_web_tag" "$preflight_expected_newer_web_repo_tags" "preflight.retained_web_${newer_timestamp}"); then
+              inspect_stage_failed "preflight.retained_web_${newer_timestamp}.topology"
+              exit 1
+            fi
+            test "$preflight_newer_api_repo_digest" = "${newer_api_repo_digests[$newer_index]}" || { echo "A retained API digest changed during preflight"; exit 1; }
+            test "$preflight_newer_web_repo_digest" = "${newer_web_repo_digests[$newer_index]}" || { echo "A retained web digest changed during preflight"; exit 1; }
             test "$(sha256sum -- "${newer_records[$newer_index]}" | awk '{print $1}')" = "${newer_record_hashes[$newer_index]}" || { echo "A retained release record changed during preflight"; exit 1; }
             test "$(sha256sum -- "${newer_overrides[$newer_index]}" | awk '{print $1}')" = "${newer_override_hashes[$newer_index]}" || { echo "A retained rollback override changed during preflight"; exit 1; }
           done
@@ -893,25 +1073,53 @@ jobs:
           test "$(container_inventory all)" = "$all_container_inventory_before" || { echo "All containers changed during preflight"; exit 1; }
           test "$(volume_inventory)" = "$volume_inventory_before" || { echo "Docker volumes changed during preflight"; exit 1; }
           test "$(network_inventory)" = "$network_inventory_before" || { echo "Docker networks changed during preflight"; exit 1; }
-          test "$(deploy_worktree_sha256)" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed during preflight"; exit 1; }
-          IFS=: read -r docker_daemon_uptime_pre_mutation docker_daemon_identity_pre_mutation <<< "$(docker_daemon_snapshot)"
+          if ! deploy_worktree_sha256_pre_mutation=$(deploy_worktree_sha256); then
+            inspect_stage_failed "pre_mutation.deploy_worktree"
+            exit 1
+          fi
+          test "$deploy_worktree_sha256_pre_mutation" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed during preflight"; exit 1; }
+          if ! docker_daemon_snapshot_pre_mutation=$(docker_daemon_snapshot); then
+            inspect_stage_failed "pre_mutation.docker_daemon"
+            exit 1
+          fi
+          IFS=: read -r docker_daemon_uptime_pre_mutation docker_daemon_identity_pre_mutation <<< "$docker_daemon_snapshot_pre_mutation"
           test "$docker_daemon_identity_pre_mutation" = "$docker_daemon_identity_sha256" || { echo "Docker daemon changed during preflight"; exit 1; }
-          IFS=: read -r pre_event_start pre_event_end pre_event_count pre_risky_event_count pre_action_type_sha256 pre_event_actor_sha256 <<< "$(runtime_event_audit)"
+          if ! runtime_audit_pre_mutation=$(runtime_event_audit); then
+            inspect_stage_failed "pre_mutation.events"
+            exit 1
+          fi
+          IFS=: read -r pre_event_start pre_event_end pre_event_count pre_risky_event_count pre_action_type_sha256 pre_event_actor_sha256 <<< "$runtime_audit_pre_mutation"
           test "$pre_risky_event_count" -eq 0 || { echo "A recent production container event blocks retirement"; exit 1; }
           assert_production_health
           assert_canonical_master
 
           retired_count=0
           if [ "$target_api_present" = "true" ]; then
-            test "$(image_id_for_tag "$TARGET_API_TAG")" = "$target_api_id" || { echo "Target API tag changed at mutation boundary"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$TARGET_API_TAG")" = "$target_api_repo_digest" || { echo "Target API digest changed at mutation boundary"; exit 1; }
+            if ! boundary_target_api_id=$(image_id_for_tag "$TARGET_API_TAG"); then
+              inspect_stage_failed "mutation_boundary.target_api.image_id"
+              exit 1
+            fi
+            test "$boundary_target_api_id" = "$target_api_id" || { echo "Target API tag changed at mutation boundary"; exit 1; }
+            if ! boundary_target_api_repo_digest=$(validated_repo_digest_for_tag "$TARGET_API_TAG" "$TARGET_API_TAG" "mutation_boundary.target_api"); then
+              inspect_stage_failed "mutation_boundary.target_api.topology"
+              exit 1
+            fi
+            test "$boundary_target_api_repo_digest" = "$target_api_repo_digest" || { echo "Target API digest changed at mutation boundary"; exit 1; }
             assert_no_container_uses_image "$target_api_id"
             docker image rm --no-prune -- "$target_api_id" >/dev/null
             retired_count=$((retired_count + 1))
           fi
           if [ "$target_web_present" = "true" ]; then
-            test "$(image_id_for_tag "$TARGET_WEB_TAG")" = "$target_web_id" || { echo "Target web tag changed at mutation boundary"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$TARGET_WEB_TAG")" = "$target_web_repo_digest" || { echo "Target web digest changed at mutation boundary"; exit 1; }
+            if ! boundary_target_web_id=$(image_id_for_tag "$TARGET_WEB_TAG"); then
+              inspect_stage_failed "mutation_boundary.target_web.image_id"
+              exit 1
+            fi
+            test "$boundary_target_web_id" = "$target_web_id" || { echo "Target web tag changed at mutation boundary"; exit 1; }
+            if ! boundary_target_web_repo_digest=$(validated_repo_digest_for_tag "$TARGET_WEB_TAG" "$TARGET_WEB_TAG" "mutation_boundary.target_web"); then
+              inspect_stage_failed "mutation_boundary.target_web.topology"
+              exit 1
+            fi
+            test "$boundary_target_web_repo_digest" = "$target_web_repo_digest" || { echo "Target web digest changed at mutation boundary"; exit 1; }
             assert_no_container_uses_image "$target_web_id"
             docker image rm --no-prune -- "$target_web_id" >/dev/null
             retired_count=$((retired_count + 1))
@@ -950,10 +1158,34 @@ jobs:
             newer_web_tag="st-michael-rollback-web:$newer_timestamp"
             tag_is_present "$rollback_tags_after" "$newer_api_tag" || { echo "A retained API rollback tag disappeared"; exit 1; }
             tag_is_present "$rollback_tags_after" "$newer_web_tag" || { echo "A retained web rollback tag disappeared"; exit 1; }
-            test "$(image_id_for_tag "$newer_api_tag")" = "${newer_api_ids[$newer_index]}" || { echo "A retained API rollback image ID changed"; exit 1; }
-            test "$(image_id_for_tag "$newer_web_tag")" = "${newer_web_ids[$newer_index]}" || { echo "A retained web rollback image ID changed"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$newer_api_tag" "$(expected_retained_repo_tags api "$newer_timestamp")")" = "${newer_api_repo_digests[$newer_index]}" || { echo "A retained API rollback digest reference changed"; exit 1; }
-            test "$(validated_repo_digest_for_tag "$newer_web_tag" "$(expected_retained_repo_tags web "$newer_timestamp")")" = "${newer_web_repo_digests[$newer_index]}" || { echo "A retained web rollback digest reference changed"; exit 1; }
+            if ! post_newer_api_id=$(image_id_for_tag "$newer_api_tag"); then
+              inspect_stage_failed "post_mutation.retained_api_${newer_timestamp}.image_id"
+              exit 1
+            fi
+            if ! post_newer_web_id=$(image_id_for_tag "$newer_web_tag"); then
+              inspect_stage_failed "post_mutation.retained_web_${newer_timestamp}.image_id"
+              exit 1
+            fi
+            test "$post_newer_api_id" = "${newer_api_ids[$newer_index]}" || { echo "A retained API rollback image ID changed"; exit 1; }
+            test "$post_newer_web_id" = "${newer_web_ids[$newer_index]}" || { echo "A retained web rollback image ID changed"; exit 1; }
+            if ! post_expected_newer_api_repo_tags=$(expected_retained_repo_tags api "$newer_timestamp"); then
+              inspect_stage_failed "post_mutation.retained_api_${newer_timestamp}.expected_topology"
+              exit 1
+            fi
+            if ! post_expected_newer_web_repo_tags=$(expected_retained_repo_tags web "$newer_timestamp"); then
+              inspect_stage_failed "post_mutation.retained_web_${newer_timestamp}.expected_topology"
+              exit 1
+            fi
+            if ! post_newer_api_repo_digest=$(validated_repo_digest_for_tag "$newer_api_tag" "$post_expected_newer_api_repo_tags" "post_mutation.retained_api_${newer_timestamp}"); then
+              inspect_stage_failed "post_mutation.retained_api_${newer_timestamp}.topology"
+              exit 1
+            fi
+            if ! post_newer_web_repo_digest=$(validated_repo_digest_for_tag "$newer_web_tag" "$post_expected_newer_web_repo_tags" "post_mutation.retained_web_${newer_timestamp}"); then
+              inspect_stage_failed "post_mutation.retained_web_${newer_timestamp}.topology"
+              exit 1
+            fi
+            test "$post_newer_api_repo_digest" = "${newer_api_repo_digests[$newer_index]}" || { echo "A retained API rollback digest reference changed"; exit 1; }
+            test "$post_newer_web_repo_digest" = "${newer_web_repo_digests[$newer_index]}" || { echo "A retained web rollback digest reference changed"; exit 1; }
             assert_private_regular_file "${newer_records[$newer_index]}" "$deploy_uid"
             assert_private_regular_file "${newer_overrides[$newer_index]}" "$deploy_uid"
             test "$(sha256sum -- "${newer_records[$newer_index]}" | awk '{print $1}')" = "${newer_record_hashes[$newer_index]}" || { echo "A retained release record changed"; exit 1; }
@@ -971,10 +1203,22 @@ jobs:
           test "$all_container_inventory_after" = "$all_container_inventory_before" || { echo "All-container inventory changed during retirement"; exit 1; }
           test "$volume_inventory_after" = "$volume_inventory_before" || { echo "Docker volume inventory changed during retirement"; exit 1; }
           test "$network_inventory_after" = "$network_inventory_before" || { echo "Docker network inventory changed during retirement"; exit 1; }
-          test "$(deploy_worktree_sha256)" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed during retirement"; exit 1; }
-          IFS=: read -r docker_daemon_uptime_after docker_daemon_identity_after <<< "$(docker_daemon_snapshot)"
+          if ! deploy_worktree_sha256_after=$(deploy_worktree_sha256); then
+            inspect_stage_failed "post_mutation.deploy_worktree"
+            exit 1
+          fi
+          test "$deploy_worktree_sha256_after" = "$deploy_worktree_sha256_before" || { echo "Deploy worktree changed during retirement"; exit 1; }
+          if ! docker_daemon_snapshot_after=$(docker_daemon_snapshot); then
+            inspect_stage_failed "post_mutation.docker_daemon"
+            exit 1
+          fi
+          IFS=: read -r docker_daemon_uptime_after docker_daemon_identity_after <<< "$docker_daemon_snapshot_after"
           test "$docker_daemon_identity_after" = "$docker_daemon_identity_sha256" || { echo "Docker daemon identity changed during retirement"; exit 1; }
-          IFS=: read -r post_event_start post_event_end post_event_count post_risky_event_count post_action_type_sha256 post_event_actor_sha256 <<< "$(runtime_event_audit)"
+          if ! runtime_audit_after=$(runtime_event_audit); then
+            inspect_stage_failed "post_mutation.events"
+            exit 1
+          fi
+          IFS=: read -r post_event_start post_event_end post_event_count post_risky_event_count post_action_type_sha256 post_event_actor_sha256 <<< "$runtime_audit_after"
           test "$post_risky_event_count" -eq 0 || { echo "A production container lifecycle/OOM event occurred during retirement"; exit 1; }
           assert_production_health
           post_actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT current_database()")
