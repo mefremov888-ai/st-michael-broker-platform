@@ -46,6 +46,7 @@ fi
 
 ENV_STAGING_FILE=""
 RELEASE_CONTEXT=""
+ROLLBACK_RECOVERY_CONTEXT=""
 ROLLBACK_DIR=/var/backups/stmichael/releases
 ROLLBACK_CAPTURE_COMMITTED=0
 ROLLBACK_RECORD=""
@@ -68,6 +69,11 @@ cleanup_temporary_files() {
         /tmp/st-michael-release.*) rm -rf -- "$RELEASE_CONTEXT" ;;
         "") ;;
         *) echo "Refusing to remove unexpected release context: $RELEASE_CONTEXT" >&2 ;;
+    esac
+    case "${ROLLBACK_RECOVERY_CONTEXT:-}" in
+        /tmp/st-michael-rollback-recovery.*) rm -rf -- "$ROLLBACK_RECOVERY_CONTEXT" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected rollback recovery context: $ROLLBACK_RECOVERY_CONTEXT" >&2 ;;
     esac
     case "${ROLLBACK_RECORD_STAGING:-}" in
         "$ROLLBACK_DIR"/.release-*.tmp.*) rm -f -- "$ROLLBACK_RECORD_STAGING" ;;
@@ -705,13 +711,84 @@ for PREVIOUS_IMAGE in "$PREVIOUS_API_IMAGE" "$PREVIOUS_WEB_IMAGE" "$PREVIOUS_NGI
         exit 1
     fi
 done
-docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
+
+prepare_rollback_recovery_context() {
+    if [ -n "$ROLLBACK_RECOVERY_CONTEXT" ]; then
+        return 0
+    fi
+    if ! git cat-file -e "$PREVIOUS_DEPLOY_SHA^{commit}" \
+        || ! git merge-base --is-ancestor "$PREVIOUS_DEPLOY_SHA" "$EXPECTED_DEPLOY_SHA"; then
+        echo "    ✗ Previous deployed SHA is not a trusted ancestor of the target release."
+        return 1
+    fi
+    ROLLBACK_RECOVERY_CONTEXT=$(mktemp -d /tmp/st-michael-rollback-recovery.XXXXXX)
+    # Export only the trusted previous Git tree. Never copy the live container
+    # configuration: it contains runtime environment variables and secrets.
+    git archive --format=tar "$PREVIOUS_DEPLOY_SHA" \
+        | tar -x -C "$ROLLBACK_RECOVERY_CONTEXT"
+    test -f "$ROLLBACK_RECOVERY_CONTEXT/docker/Dockerfile.api" \
+        -a -f "$ROLLBACK_RECOVERY_CONTEXT/docker/Dockerfile.web" \
+        -a -f "$ROLLBACK_RECOVERY_CONTEXT/package-lock.json" || {
+        echo "    ✗ Trusted previous release tree is incomplete; refusing rollback recovery."
+        return 1
+    }
+}
+
+pin_or_recover_rollback_image() {
+    local service="$1"
+    local running_image="$2"
+    local rollback_tag="$3"
+    local dockerfile
+    case "$service" in
+        api|web) dockerfile="docker/Dockerfile.$service" ;;
+        *)
+            echo "    ✗ Unsupported rollback recovery service."
+            return 1
+            ;;
+    esac
+
+    if docker image inspect "$running_image" >/dev/null 2>&1; then
+        docker tag "$running_image" "$rollback_tag"
+        return 0
+    fi
+
+    echo "    Running $service image metadata is absent; rebuilding rollback from the exact previous Git SHA."
+    prepare_rollback_recovery_context
+    docker build --pull=false \
+        --file "$ROLLBACK_RECOVERY_CONTEXT/$dockerfile" \
+        --label "org.opencontainers.image.revision=$PREVIOUS_DEPLOY_SHA" \
+        --label "com.stmichael.rollback.recovered=true" \
+        --tag "$rollback_tag" \
+        "$ROLLBACK_RECOVERY_CONTEXT"
+    test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$rollback_tag")" \
+        = "$PREVIOUS_DEPLOY_SHA" \
+        && test "$(docker image inspect --format '{{index .Config.Labels "com.stmichael.rollback.recovered"}}' "$rollback_tag")" \
+        = "true" || {
+        echo "    ✗ Recovered rollback image lacks exact-source attestation."
+        return 1
+    }
+}
+
 ROLLBACK_API_TAG_CREATED=1
-docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
+pin_or_recover_rollback_image api "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
 ROLLBACK_WEB_TAG_CREATED=1
-if [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")" != "$PREVIOUS_API_IMAGE" ] \
-    || [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")" != "$PREVIOUS_WEB_IMAGE" ]; then
-    echo "    ✗ Rollback image tags do not resolve to the running application images."
+pin_or_recover_rollback_image web "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
+ROLLBACK_API_IMAGE=$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")
+ROLLBACK_WEB_IMAGE=$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")
+for ROLLBACK_IMAGE in "$ROLLBACK_API_IMAGE" "$ROLLBACK_WEB_IMAGE"; do
+    if ! printf '%s' "$ROLLBACK_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        echo "    ✗ Rollback image tag does not resolve to a valid image."
+        exit 1
+    fi
+done
+if docker image inspect "$PREVIOUS_API_IMAGE" >/dev/null 2>&1 \
+    && [ "$ROLLBACK_API_IMAGE" != "$PREVIOUS_API_IMAGE" ]; then
+    echo "    ✗ Rollback API tag does not resolve to the running image."
+    exit 1
+fi
+if docker image inspect "$PREVIOUS_WEB_IMAGE" >/dev/null 2>&1 \
+    && [ "$ROLLBACK_WEB_IMAGE" != "$PREVIOUS_WEB_IMAGE" ]; then
+    echo "    ✗ Rollback web tag does not resolve to the running image."
     exit 1
 fi
 echo "    ✓ Previous API/web images are pinned before rebuild."
@@ -730,8 +807,8 @@ target_compose --project-directory "$RELEASE_CONTEXT" \
 # A successful pair of builds commits the already-pinned images to an atomic
 # rollback record. Until both files are in place, the EXIT trap removes the
 # provisional tags and any partial metadata.
-if [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")" != "$PREVIOUS_API_IMAGE" ] \
-    || [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")" != "$PREVIOUS_WEB_IMAGE" ]; then
+if [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")" != "$ROLLBACK_API_IMAGE" ] \
+    || [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")" != "$ROLLBACK_WEB_IMAGE" ]; then
     echo "    ✗ A pinned rollback image disappeared during the rebuild."
     exit 1
 fi
@@ -739,8 +816,8 @@ ROLLBACK_RECORD_STAGING=$(mktemp "$ROLLBACK_DIR/.release-$RELEASE_TIMESTAMP.tmp.
 {
     echo "previous_commit=$PREVIOUS_DEPLOY_SHA"
     echo "target_commit=$EXPECTED_DEPLOY_SHA"
-    echo "previous_api_image=$PREVIOUS_API_IMAGE"
-    echo "previous_web_image=$PREVIOUS_WEB_IMAGE"
+    echo "previous_api_image=$ROLLBACK_API_IMAGE"
+    echo "previous_web_image=$ROLLBACK_WEB_IMAGE"
     echo "previous_nginx_image=$PREVIOUS_NGINX_IMAGE"
 } > "$ROLLBACK_RECORD_STAGING"
 chmod 600 "$ROLLBACK_RECORD_STAGING"
