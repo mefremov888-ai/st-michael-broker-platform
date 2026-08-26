@@ -1045,16 +1045,94 @@ describe("production-safe amo broker-contact provisioner", () => {
     );
   });
 
-  it("classifies database uniqueness and serialization failures without details", () => {
-    expect(provisioner.safeFailureCode({ code: "P2002", meta: "PII" })).toBe(
-      "DATABASE_UNIQUE_CONSTRAINT",
+  it.each([
+    ["P2002", "DATABASE_UNIQUE_CONSTRAINT"],
+    ["P2010", "DATABASE_RAW_QUERY_FAILED"],
+    ["P2024", "DATABASE_POOL_TIMEOUT"],
+    ["P2028", "DATABASE_TRANSACTION_FAILED"],
+    ["P2034", "DATABASE_SERIALIZATION_CONFLICT"],
+  ])("classifies Prisma %s without reading its details", (code, expected) => {
+    expect(
+      provisioner.safeFailureCode({
+        code,
+        message: "Ivan +79991112233 broker@example.test",
+        meta: { target: "private-field" },
+        stack: "private-stack",
+      }),
+    ).toBe(expected);
+  });
+
+  it.each([
+    ["amoCRM access token is missing", "AMO_ACCESS_TOKEN_MISSING"],
+    ["fetch is unavailable", "FETCH_UNAVAILABLE"],
+    ["Unsafe amoCRM path", "UNSAFE_AMO_PATH"],
+    ["Unsafe amoCRM query", "UNSAFE_AMO_QUERY"],
+    ["Unsafe amoCRM URL", "UNSAFE_AMO_URL"],
+    ["amoCRM request failed", "AMO_REQUEST_FAILED"],
+    ["amoCRM request rejected", "AMO_REQUEST_REJECTED"],
+    ["amoCRM response size is invalid", "AMO_RESPONSE_SIZE_INVALID"],
+    ["amoCRM response exceeded size limit", "AMO_RESPONSE_SIZE_LIMIT_EXCEEDED"],
+    ["amoCRM returned invalid JSON", "AMO_INVALID_JSON"],
+    ["Unexpected amoCRM account", "UNEXPECTED_AMO_ACCOUNT"],
+    ["Malformed amoCRM contacts page", "MALFORMED_AMO_CONTACTS_PAGE"],
+    ["Invalid amoCRM contact record", "INVALID_AMO_CONTACT_RECORD"],
+    [
+      "amoCRM contacts pagination loop detected",
+      "AMO_CONTACTS_PAGINATION_LOOP",
+    ],
+    [
+      "amoCRM contacts pagination exceeded safety bound",
+      "AMO_CONTACTS_PAGINATION_SAFETY_BOUND_EXCEEDED",
+    ],
+  ])("classifies the exact safe GET error %s", (message, expected) => {
+    const error = Object.assign(new Error(message), {
+      cause: "Ivan +79991112233 broker@example.test",
+      response: { body: "private-response" },
+    });
+    expect(provisioner.safeFailureCode(error, inspector.classifyFailure)).toBe(
+      expected,
     );
-    expect(provisioner.safeFailureCode({ code: "P2034", message: "PII" })).toBe(
-      "DATABASE_SERIALIZATION_CONFLICT",
-    );
-    expect(provisioner.safeFailureCode(new Error("PII"))).toBe(
-      "UNCLASSIFIED_FAILURE",
-    );
+  });
+
+  it("fails closed for non-allowlisted codes and enriched messages", () => {
+    expect(
+      provisioner.safeFailureCode(
+        {
+          code: "P9999",
+          message: "amoCRM request failed: +79991112233",
+          stack: "private-stack",
+        },
+        inspector.classifyFailure,
+      ),
+    ).toBe("UNCLASSIFIED_FAILURE");
+    expect(
+      provisioner.safeFailureCode(
+        new Error("amoCRM request failed: PII"),
+        inspector.classifyFailure,
+      ),
+    ).toBe("UNCLASSIFIED_FAILURE");
+  });
+
+  it("keeps failure stages bounded and rejects arbitrary report text", () => {
+    expect(Object.values(provisioner.FAILURE_STAGE)).toEqual([
+      "NOT_APPLICABLE",
+      "GLOBAL_ALREADY_LINKED_DATABASE",
+      "GLOBAL_ALREADY_LINKED_AMO",
+      "GLOBAL_ACTIONABLE_DATABASE",
+      "GLOBAL_ACTIONABLE_AMO",
+      "GLOBAL_ACTIONABLE_GATE",
+      "ALREADY_LINKED_GATE_RECONCILIATION",
+      "ACTIONABLE_LOCKED_EXECUTION",
+      "FINAL_POSTCONDITION",
+    ]);
+    for (const stage of Object.values(provisioner.FAILURE_STAGE)) {
+      expect(provisioner.safeFailureStage(stage)).toBe(stage);
+    }
+    expect(
+      provisioner.safeFailureStage(
+        "Ivan +79991112233 broker@example.test private-stack",
+      ),
+    ).toBe("NOT_APPLICABLE");
   });
 
   it("emits only a classified failure when confirmation contains PII", () => {
@@ -1069,6 +1147,7 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain('"failureCode":"CONFIRMATION_REQUIRED"');
+    expect(result.stdout).toContain('"failureStage":"NOT_APPLICABLE"');
     expect(result.stdout).not.toContain(rawSecret);
     expect(result.stdout).not.toContain("79991112233");
     expect(result.stdout).not.toContain("broker@example.test");
