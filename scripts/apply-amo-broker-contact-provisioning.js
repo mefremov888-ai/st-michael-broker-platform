@@ -241,7 +241,22 @@ const FAILURE_PHASE = Object.freeze({
   REPORT: "REPORT",
 });
 
+const FAILURE_STAGE = Object.freeze({
+  NOT_APPLICABLE: "NOT_APPLICABLE",
+  GLOBAL_ALREADY_LINKED_DATABASE: "GLOBAL_ALREADY_LINKED_DATABASE",
+  GLOBAL_ALREADY_LINKED_AMO: "GLOBAL_ALREADY_LINKED_AMO",
+  GLOBAL_ACTIONABLE_DATABASE: "GLOBAL_ACTIONABLE_DATABASE",
+  GLOBAL_ACTIONABLE_AMO: "GLOBAL_ACTIONABLE_AMO",
+  GLOBAL_ACTIONABLE_GATE: "GLOBAL_ACTIONABLE_GATE",
+  ALREADY_LINKED_GATE_RECONCILIATION: "ALREADY_LINKED_GATE_RECONCILIATION",
+  ACTIONABLE_LOCKED_EXECUTION: "ACTIONABLE_LOCKED_EXECUTION",
+  FINAL_POSTCONDITION: "FINAL_POSTCONDITION",
+});
+const SAFE_FAILURE_STAGES = new Set(Object.values(FAILURE_STAGE));
+
 let activeFailurePhase = FAILURE_PHASE.GATE;
+let activeFailureStage = FAILURE_STAGE.NOT_APPLICABLE;
+let activeAmoFailureClassifier = null;
 const safeProgress = {
   groupsLinked: 0,
   groupsPromoted: 0,
@@ -260,7 +275,41 @@ function fail(code) {
   throw new ProvisioningFailure(code);
 }
 
-function safeFailureCode(error) {
+// Only fixed codes emitted by the pinned GET-only inspector classifier may
+// cross the PII-safe report boundary. Arbitrary messages, response bodies,
+// URLs, causes and stacks remain unreported.
+const SAFE_AMO_GET_FAILURE_CODES = new Set([
+  "AMO_ACCESS_TOKEN_MISSING",
+  "FETCH_UNAVAILABLE",
+  "UNSAFE_AMO_PATH",
+  "UNSAFE_AMO_QUERY",
+  "UNSAFE_AMO_URL",
+  "AMO_REQUEST_FAILED",
+  "AMO_REQUEST_REJECTED",
+  "AMO_RESPONSE_SIZE_INVALID",
+  "AMO_RESPONSE_SIZE_LIMIT_EXCEEDED",
+  "AMO_INVALID_JSON",
+  "UNEXPECTED_AMO_ACCOUNT",
+  "MALFORMED_AMO_CONTACTS_PAGE",
+  "INVALID_AMO_CONTACT_RECORD",
+  "AMO_CONTACTS_PAGINATION_LOOP",
+  "AMO_CONTACTS_PAGINATION_SAFETY_BOUND_EXCEEDED",
+]);
+
+// Prisma messages and meta may contain SQL, connection details or row values;
+// classify only this narrow allowlist of public error codes.
+const PRISMA_FAILURE_CODE_BY_CODE = new Map([
+  ["P2002", "DATABASE_UNIQUE_CONSTRAINT"],
+  ["P2010", "DATABASE_RAW_QUERY_FAILED"],
+  ["P2024", "DATABASE_POOL_TIMEOUT"],
+  ["P2028", "DATABASE_TRANSACTION_FAILED"],
+  ["P2034", "DATABASE_SERIALIZATION_CONFLICT"],
+]);
+
+function safeFailureCode(
+  error,
+  amoFailureClassifier = activeAmoFailureClassifier,
+) {
   try {
     if (
       error instanceof ProvisioningFailure &&
@@ -270,13 +319,23 @@ function safeFailureCode(error) {
       return error.code;
     }
     if (error && typeof error === "object") {
-      if (error.code === "P2002") return "DATABASE_UNIQUE_CONSTRAINT";
-      if (error.code === "P2034") return "DATABASE_SERIALIZATION_CONFLICT";
+      const prismaFailureCode = PRISMA_FAILURE_CODE_BY_CODE.get(error.code);
+      if (prismaFailureCode) return prismaFailureCode;
+    }
+    if (typeof amoFailureClassifier === "function") {
+      const amoFailureCode = amoFailureClassifier(error);
+      if (SAFE_AMO_GET_FAILURE_CODES.has(amoFailureCode)) {
+        return amoFailureCode;
+      }
     }
   } catch {
     return "UNCLASSIFIED_FAILURE";
   }
   return "UNCLASSIFIED_FAILURE";
+}
+
+function safeFailureStage(value) {
+  return SAFE_FAILURE_STAGES.has(value) ? value : FAILURE_STAGE.NOT_APPLICABLE;
 }
 
 function writeSafeEvent(event) {
@@ -295,6 +354,7 @@ function writeSafeEvent(event) {
     "queueRows",
     "effectiveBrokerGroups",
     "failurePhase",
+    "failureStage",
     "failureCode",
   ]);
   if (
@@ -458,6 +518,7 @@ function loadPlanModule(
     "assertExpectedAccount",
     "buildCohortAttestation",
     "buildProvisioningReport",
+    "classifyFailure",
     "createGetOnlyRequester",
     "lookupExactContacts",
     "normalizePhone",
@@ -1472,6 +1533,7 @@ async function assertAlreadyLinkedRecord(
   requestGet,
   planModule,
 ) {
+  activeFailureStage = FAILURE_STAGE.GLOBAL_ALREADY_LINKED_DATABASE;
   const state = await readCurrentGroupState(prisma, record);
   const linkedContactId = positiveInteger(record.broker.amoContactId);
   if (
@@ -1497,6 +1559,7 @@ async function assertAlreadyLinkedRecord(
   if (owners.size !== 1 || !owners.has(String(record.broker.id))) {
     fail("ALREADY_LINKED_CONTACT_OWNERSHIP_DRIFT");
   }
+  activeFailureStage = FAILURE_STAGE.GLOBAL_ALREADY_LINKED_AMO;
   const lookups = await lookupPhones(record.phones, requestGet, planModule);
   const contacts = collectExactContacts(record.phones, lookups);
   if (
@@ -1932,8 +1995,10 @@ async function assertDatabasePoolSupportsDurableGate(prisma) {
 
 async function main() {
   activeFailurePhase = FAILURE_PHASE.GATE;
+  activeFailureStage = FAILURE_STAGE.NOT_APPLICABLE;
   const gate = readExecutionGate();
   const planModule = loadPlanModule(undefined, gate.inspectorSha256);
+  activeAmoFailureClassifier = planModule.classifyFailure;
   let cohortAttestationKey;
   try {
     cohortAttestationKey = planModule.readCohortAttestationKeyFile(
@@ -1953,18 +2018,21 @@ async function main() {
 
   try {
     activeFailurePhase = FAILURE_PHASE.DATABASE;
+    activeFailureStage = FAILURE_STAGE.NOT_APPLICABLE;
     amoBrokerContactGateDigest("+70000000000");
     await assertProductionDatabase(prisma);
     await assertDatabasePoolSupportsDurableGate(prisma);
     const { queueRows, allBrokers } = await loadProductionState(prisma);
 
     activeFailurePhase = FAILURE_PHASE.ACCOUNT;
+    activeFailureStage = FAILURE_STAGE.NOT_APPLICABLE;
     const requestGet = planModule.createGetOnlyRequester(
       process.env.AMO_ACCESS_TOKEN,
     );
     await planModule.assertExpectedAccount(requestGet);
 
     activeFailurePhase = FAILURE_PHASE.PLAN;
+    activeFailureStage = FAILURE_STAGE.NOT_APPLICABLE;
     const lookups = new Map();
     for (const phone of planModule.requiredLookupPhones(
       queueRows,
@@ -2023,7 +2091,9 @@ async function main() {
           positiveInteger(record.broker.amoContactId),
         );
       } else if (ACTIONABLE_RESOLUTIONS.has(record.resolution)) {
+        activeFailureStage = FAILURE_STAGE.GLOBAL_ACTIONABLE_DATABASE;
         await assertDatabasePreflight(prisma, record, planModule);
+        activeFailureStage = FAILURE_STAGE.GLOBAL_ACTIONABLE_AMO;
         const preflightLookups = await lookupPhones(
           record.phones,
           requestGet,
@@ -2033,6 +2103,7 @@ async function main() {
           record.phones,
           preflightLookups,
         );
+        activeFailureStage = FAILURE_STAGE.GLOBAL_ACTIONABLE_GATE;
         const recoveryGateId =
           record.resolution === "create_contact_candidate"
             ? await hasUnresolvedAmoBrokerContactCreate(
@@ -2048,6 +2119,7 @@ async function main() {
             fail("AMO_CREATE_GATE_PREFLIGHT_AMBIGUOUS");
           }
         } else {
+          activeFailureStage = FAILURE_STAGE.GLOBAL_ACTIONABLE_AMO;
           assertAmoPrecondition(record, preflightContacts);
         }
       }
@@ -2060,6 +2132,7 @@ async function main() {
     for (const record of records.filter(
       (candidate) => candidate.resolution === "already_linked",
     )) {
+      activeFailureStage = FAILURE_STAGE.ALREADY_LINKED_GATE_RECONCILIATION;
       await reconcileAlreadyLinkedCreateGate({
         prisma,
         record,
@@ -2092,6 +2165,7 @@ async function main() {
       });
 
       activeFailurePhase = FAILURE_PHASE.PREFLIGHT;
+      activeFailureStage = FAILURE_STAGE.ACTIONABLE_LOCKED_EXECUTION;
       const contactId = await provisionAndLinkBrokerContact({
         prisma,
         record,
@@ -2119,6 +2193,7 @@ async function main() {
     }
 
     activeFailurePhase = FAILURE_PHASE.PREFLIGHT;
+    activeFailureStage = FAILURE_STAGE.FINAL_POSTCONDITION;
     await assertFinalPostcondition({
       prisma,
       records,
@@ -2128,6 +2203,7 @@ async function main() {
     });
 
     activeFailurePhase = FAILURE_PHASE.REPORT;
+    activeFailureStage = FAILURE_STAGE.NOT_APPLICABLE;
     writeSafeEvent({
       event: "broker_contact_provisioning_succeeded",
       schemaVersion: 1,
@@ -2155,6 +2231,7 @@ module.exports = {
   BROKER_OWNER_SELECT,
   BROKER_PROVISION_SELECT,
   EXACT_CONFIRMATION,
+  FAILURE_STAGE,
   HISTORICAL_COUNT_EVIDENCE_RUN_ID,
   QUEUE_CAS_SELECT,
   QUEUE_ROW_SELECT,
@@ -2200,6 +2277,7 @@ module.exports = {
   reconcileUniqueBrokerContact,
   reportManifest,
   safeFailureCode,
+  safeFailureStage,
   validateMutationRequest,
 };
 
@@ -2208,6 +2286,7 @@ if (require.main === module) {
     writeSafeEvent({
       event: "broker_contact_provisioning_failed",
       failurePhase: activeFailurePhase,
+      failureStage: safeFailureStage(activeFailureStage),
       failureCode: safeFailureCode(error),
       groupsLinked: safeProgress.groupsLinked,
       groupsPromoted: safeProgress.groupsPromoted,
