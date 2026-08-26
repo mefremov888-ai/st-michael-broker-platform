@@ -327,10 +327,15 @@ function classifyGroup(group, evidenceByPhone, agenciesById, brokerEvidence) {
   if (!group.normalizedPhone) {
     return { resolution: "blocked_invalid_phone", reason: "invalid_phone" };
   }
-  const evidence = evidenceByPhone.get(group.normalizedPhone) || {
-    exactContactIds: [],
-    leads: [],
-  };
+  if (
+    !evidenceByPhone ||
+    typeof evidenceByPhone.has !== "function" ||
+    typeof evidenceByPhone.get !== "function" ||
+    !evidenceByPhone.has(group.normalizedPhone)
+  ) {
+    fail("AMO_EVIDENCE_MISSING");
+  }
+  const evidence = evidenceByPhone.get(group.normalizedPhone);
   if (
     !Array.isArray(evidence.exactContactIds) ||
     !Array.isArray(evidence.leads)

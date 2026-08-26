@@ -885,12 +885,11 @@ async function collectGroupEvidence(item, requestGet) {
     item.group.rows,
     requestGet,
   );
-  return (
-    result.byPhone.get(item.group.normalizedPhone) || {
-      exactContactIds: [],
-      leads: [],
-    }
-  );
+  planModule.assertCompleteAmoEvidence(item.group.rows, result);
+  if (!result.byPhone.has(item.group.normalizedPhone)) {
+    fail("AMO_EVIDENCE_MISSING");
+  }
+  return result.byPhone.get(item.group.normalizedPhone);
 }
 
 async function pollEvidence(item, requestGet, accept) {

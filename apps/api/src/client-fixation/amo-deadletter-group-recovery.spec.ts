@@ -18,6 +18,9 @@ describe("signed amo deadletter phone-group recovery", () => {
     return loaded.exports as any;
   };
   const core = load("scripts/amo-deadletter-group-recovery-core.js");
+  const legacyInspector = load(
+    "scripts/inspect-amo-fixation-lead-reconciliation.js",
+  );
   const planModule = load(
     "scripts/inspect-amo-deadletter-group-recovery-plan.js",
   );
@@ -180,6 +183,142 @@ describe("signed amo deadletter phone-group recovery", () => {
     expect(JSON.stringify(plan.publicReport)).not.toContain("Private Client");
     expect(JSON.stringify(plan.publicReport)).not.toContain("private-");
     expect(JSON.stringify(plan.publicReport)).not.toContain("+7999");
+  });
+
+  it("fails closed instead of treating missing phone evidence as no contacts", () => {
+    const items = rows();
+    const incomplete = evidence(items);
+    incomplete.delete(core.normalizePhone(items[0].phone));
+    expect(() => build(items, incomplete)).toThrow("AMO_EVIDENCE_MISSING");
+  });
+
+  it("collects complete evidence for a valid +77 phone through the real collector", async () => {
+    const items = rows();
+    const validDoubleSevenPhone = "+77990000001";
+    const clientContactId = 700_001;
+    const activeLeadId = 600_001;
+    items[11].phone = validDoubleSevenPhone;
+    const owners = items.map((item) => ({
+      id: item.broker.id,
+      amoContactId: item.broker.amoContactId,
+    }));
+    const prisma = {
+      client: { findMany: jest.fn().mockResolvedValue(items) },
+      agency: {
+        findMany: jest.fn().mockResolvedValue([agency("agency-1")]),
+      },
+      broker: {
+        findMany: jest.fn(async (args: any) => {
+          const selectedIds = (args?.where?.amoContactId?.in || []).map(Number);
+          return selectedIds.includes(clientContactId) ? [] : owners;
+        }),
+      },
+    };
+    const contactQueries: string[] = [];
+    const request = jest.fn(async (path: string, query?: any) => {
+      if (path === "/api/v4/contacts") {
+        contactQueries.push(String(query?.query));
+        return {
+          _embedded: {
+            contacts:
+              query?.query === "7990000001"
+                ? [
+                    {
+                      id: clientContactId,
+                      custom_fields_values: [
+                        {
+                          field_id: planModule.CONTACT_PHONE_FIELD_ID,
+                          field_code: "PHONE",
+                          values: [{ value: validDoubleSevenPhone }],
+                        },
+                      ],
+                    },
+                  ]
+                : [],
+          },
+          _links: {},
+        };
+      }
+      if (path === `/api/v4/contacts/${clientContactId}`) {
+        return {
+          id: clientContactId,
+          custom_fields_values: [
+            {
+              field_id: planModule.CONTACT_PHONE_FIELD_ID,
+              field_code: "PHONE",
+              values: [{ value: validDoubleSevenPhone }],
+            },
+          ],
+          ...(query?.with === "leads"
+            ? { _embedded: { leads: [{ id: activeLeadId }] } }
+            : {}),
+        };
+      }
+      if (path === `/api/v4/leads/${activeLeadId}`) {
+        return {
+          id: activeLeadId,
+          pipeline_id: 7_600_542,
+          status_id: 62_907_350,
+          created_at: 1_787_642_871,
+          custom_fields_values: [],
+          _embedded: { contacts: [{ id: clientContactId }] },
+        };
+      }
+      const contactId = Number(path.split("/").pop());
+      const source = items.find(
+        (item) => Number(item.broker.amoContactId) === contactId,
+      );
+      if (!source) throw new Error("unexpected contact request");
+      return {
+        id: contactId,
+        custom_fields_values: [
+          {
+            field_id: planModule.CONTACT_PHONE_FIELD_ID,
+            field_code: "PHONE",
+            values: [{ value: source.broker.phone }],
+          },
+          {
+            field_id: planModule.CONTACT_BROKER_FIELD_ID,
+            values: [{ value: true }],
+          },
+        ],
+      };
+    });
+
+    const plan = await planModule.collectPlan({
+      prisma,
+      request,
+      metadata,
+      attestationKey: key,
+      reportKey: Buffer.alloc(32, 0x42),
+    });
+
+    expect(core.normalizePhone(validDoubleSevenPhone)).toBe(
+      validDoubleSevenPhone,
+    );
+    expect(legacyInspector.normalizePhone(validDoubleSevenPhone)).toBe(
+      validDoubleSevenPhone,
+    );
+    expect(contactQueries).toHaveLength(9);
+    expect(contactQueries).toContain("7990000001");
+    expect(plan.manifest).toMatchObject({
+      queueRows: 12,
+      phoneGroups: 9,
+      createGroups: 8,
+      blockedGroups: 1,
+      maxLeadPosts: 8,
+    });
+    expect(
+      plan.classifications.find(
+        (item: any) => item.group.normalizedPhone === validDoubleSevenPhone,
+      ),
+    ).toMatchObject({
+      resolution: "blocked_active_or_unknown_lead",
+      evidence: {
+        exactContactIds: [clientContactId],
+        leads: [{ leadId: activeLeadId, statusId: 62_907_350 }],
+      },
+    });
   });
 
   it("binds private source values into HMAC without emitting them", () => {

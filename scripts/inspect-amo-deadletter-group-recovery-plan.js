@@ -242,6 +242,44 @@ async function enrichClientContactRoleEvidence(prisma, amoEvidence, request) {
   }
 }
 
+function assertCompleteAmoEvidence(rows, amoEvidence) {
+  if (
+    !amoEvidence?.byPhone ||
+    typeof amoEvidence.byPhone.get !== "function" ||
+    typeof amoEvidence.byPhone.has !== "function" ||
+    typeof amoEvidence.byPhone.keys !== "function" ||
+    !Number.isSafeInteger(amoEvidence.byPhone.size)
+  ) {
+    core.fail("AMO_EVIDENCE_INVALID");
+  }
+  const expectedPhones = [
+    ...new Set(
+      rows.map((row) => core.normalizePhone(row?.phone)).filter(Boolean),
+    ),
+  ].sort();
+  const actualPhones = [...amoEvidence.byPhone.keys()].sort();
+  if (
+    amoEvidence?.stats?.normalizedPhones !== expectedPhones.length ||
+    actualPhones.length !== expectedPhones.length ||
+    actualPhones.some((phone, index) => phone !== expectedPhones[index])
+  ) {
+    core.fail("AMO_EVIDENCE_PHONE_SET_INCOMPLETE");
+  }
+  for (const phone of expectedPhones) {
+    if (legacyInspector.normalizePhone(phone) !== phone) {
+      core.fail("AMO_PHONE_NORMALIZATION_DIVERGED");
+    }
+    const evidence = amoEvidence.byPhone.get(phone);
+    if (
+      !evidence ||
+      !Array.isArray(evidence.exactContactIds) ||
+      !Array.isArray(evidence.leads)
+    ) {
+      core.fail("AMO_EVIDENCE_INVALID");
+    }
+  }
+}
+
 async function collectPlan({
   prisma,
   request,
@@ -253,6 +291,7 @@ async function collectPlan({
   // Reuse the already reviewed exhaustive contact/lead traversal. It fails on
   // pagination bounds, reverse-link drift and malformed selected evidence.
   const amoEvidence = await legacyInspector.collectAmoEvidence(rows, request);
+  assertCompleteAmoEvidence(rows, amoEvidence);
   await enrichClientContactRoleEvidence(prisma, amoEvidence, request);
   const [agenciesById, brokerEvidence] = await Promise.all([
     loadAgencies(prisma, rows),
@@ -325,6 +364,7 @@ module.exports = {
   CONTACT_BROKER_FIELD_ID,
   CONTACT_PHONE_FIELD_ID,
   QUEUE_SELECT,
+  assertCompleteAmoEvidence,
   collectBrokerEvidence,
   enrichClientContactRoleEvidence,
   collectPlan,
