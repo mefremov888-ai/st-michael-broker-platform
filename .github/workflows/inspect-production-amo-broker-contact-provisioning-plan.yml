@@ -46,6 +46,7 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}
         run: |
           set -euo pipefail
           test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Inspector is restricted to the canonical repository"; exit 1; }
@@ -65,7 +66,7 @@ jobs:
           inspector_sha=$(sha256sum -- "$inspector_path" | awk '{print $1}')
           [[ "$inspector_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
 
-          for required_tool in curl gh jq; do
+          for required_tool in curl gh jq sha256sum tar wc; do
             command -v "$required_tool" >/dev/null || { echo "Required source-attestation tool is missing"; exit 1; }
           done
           health_body=$(curl --fail --silent --show-error --max-time 15 --proto '=https' --tlsv1.2 "$HEALTH_URL")
@@ -88,10 +89,29 @@ jobs:
           ssh_root=$(mktemp -d "$runner_temp/st-michael-amo-broker-contact-provisioning.XXXXXX")
           known_hosts="$ssh_root/known_hosts"
           private_key="$ssh_root/deploy-key"
-          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          payload_root="$ssh_root/payload"
+          payload_archive="$ssh_root/cohort-attested-inspector.tar"
+          payload_inspector="$payload_root/inspector.js"
+          attestation_key_file="$payload_root/attestation.key"
+          payload_manifest="$payload_root/manifest"
+          trap 'rm -f -- "$known_hosts" "$private_key" "$payload_inspector" "$attestation_key_file" "$payload_manifest" "$payload_archive"; rmdir -- "$payload_root" 2>/dev/null || true; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
           umask 077
+          mkdir -- "$payload_root"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
           chmod 600 "$private_key"
+          printf '%s' "$COHORT_ATTESTATION_KEY" > "$attestation_key_file"
+          unset COHORT_ATTESTATION_KEY
+          attestation_key_bytes=$(wc -c < "$attestation_key_file")
+          test "$attestation_key_bytes" -ge 32 || { echo "Cohort attestation key is missing or shorter than 32 bytes"; exit 1; }
+          attestation_key_sha=$(sha256sum -- "$attestation_key_file" | awk '{print $1}')
+          [[ "$attestation_key_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid cohort attestation key hash"; exit 1; }
+          cp -- "$inspector_path" "$payload_inspector"
+          printf 'inspector_sha256=%s\ndeployed_git_sha=%s\nattestation_key_sha256=%s\n' \
+            "$inspector_sha" "$deployed_sha" "$attestation_key_sha" > "$payload_manifest"
+          chmod 600 "$payload_inspector" "$attestation_key_file" "$payload_manifest"
+          tar --format=ustar -C "$payload_root" -cf "$payload_archive" inspector.js attestation.key manifest
+          payload_sha=$(sha256sum -- "$payload_archive" | awk '{print $1}')
+          [[ "$payload_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid cohort-attested payload hash"; exit 1; }
           timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
           chmod 600 "$known_hosts"
           mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
@@ -99,7 +119,7 @@ jobs:
           test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
 
           # The delimiter contains characters outside the base64 alphabet, so
-          # exact source bytes cannot terminate the streamed payload early.
+          # exact payload bytes cannot terminate the streamed archive early.
           {
             cat <<'REMOTE_PREFIX'
           set -euo pipefail
@@ -109,7 +129,7 @@ jobs:
           expected_deployed_sha=$3
           canonical_origin=https://github.com/sereganikitin/st-michael-broker-platform.git
 
-          for required_tool in base64 docker flock git readlink; do
+          for required_tool in base64 docker flock git mktemp readlink sed sha256sum tar; do
             command -v "$required_tool" >/dev/null || { echo "Required inspector tool is missing"; exit 1; }
           done
           [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
@@ -138,29 +158,71 @@ jobs:
           container_sha=$(docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')
           test "$container_sha" = "$production_sha" || { echo "Production API image and checkout differ"; exit 1; }
 
-          base64 -d <<'PII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD' | docker exec -i st-michael-api sh -c '
+          payload_archive=$(mktemp /tmp/st-michael-amo-broker-contact-provisioning.XXXXXX)
+          cleanup_payload() { rm -f -- "$payload_archive"; }
+          trap cleanup_payload EXIT HUP INT TERM
+          base64 -d > "$payload_archive" <<'PII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD'
+          REMOTE_PREFIX
+            base64 -w 0 -- "$payload_archive"
+            printf '\nPII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD\n'
+            printf 'expected_payload_sha=%s\n' "$payload_sha"
+            cat <<'REMOTE_SUFFIX'
+          [[ "$expected_payload_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid cohort-attested payload hash"; exit 1; }
+          actual_payload_sha=$(sha256sum "$payload_archive")
+          actual_payload_sha=${actual_payload_sha%% *}
+          test "$actual_payload_sha" = "$expected_payload_sha" || { echo "Cohort-attested payload hash mismatch"; exit 1; }
+          mapfile -t payload_entries < <(tar -tf "$payload_archive")
+          test "${#payload_entries[@]}" -eq 3 || { echo "Unexpected cohort-attested payload"; exit 1; }
+          test "${payload_entries[0]}" = "inspector.js" || { echo "Unexpected inspector payload entry"; exit 1; }
+          test "${payload_entries[1]}" = "attestation.key" || { echo "Unexpected attestation payload entry"; exit 1; }
+          test "${payload_entries[2]}" = "manifest" || { echo "Unexpected manifest payload entry"; exit 1; }
+          payload_script_sha=$(tar -xOf "$payload_archive" manifest | sed -n 's/^inspector_sha256=//p')
+          payload_deployed_sha=$(tar -xOf "$payload_archive" manifest | sed -n 's/^deployed_git_sha=//p')
+          test "$payload_script_sha" = "$expected_script_sha" || { echo "Payload inspector SHA differs from reviewed source"; exit 1; }
+          test "$payload_deployed_sha" = "$expected_deployed_sha" || { echo "Payload deployed SHA differs from production attestation"; exit 1; }
+
+          docker exec -i st-michael-api sh -c '
             set -eu
-            expected_script_sha=$1
-            case "$expected_script_sha" in ""|*[!0-9a-f]*) exit 1;; esac
-            test "${#expected_script_sha}" -eq 64
-            for required_tool in mktemp node rm sha256sum; do
+            for required_tool in mktemp node rm sed sha256sum tar wc; do
               command -v "$required_tool" >/dev/null || exit 1
             done
             test -n "${DATABASE_URL:-}"
             test -n "${AMO_ACCESS_TOKEN:-}"
             umask 077
-            inspector=$(mktemp /app/scripts/.inspect-amo-broker-contact-provisioning.XXXXXX)
-            cleanup() { rm -f -- "$inspector"; }
+            payload_root=$(mktemp -d /app/scripts/.inspect-amo-broker-contact-provisioning.XXXXXX)
+            inspector="$payload_root/inspector.js"
+            attestation_key_file="$payload_root/attestation.key"
+            manifest="$payload_root/manifest"
+            cleanup() { rm -f -- "$inspector" "$attestation_key_file" "$manifest"; rmdir -- "$payload_root" 2>/dev/null || true; }
             trap cleanup EXIT HUP INT TERM
-            cat > "$inspector"
+            tar -xf - -C "$payload_root"
+            test -f "$inspector" -a ! -L "$inspector"
+            test -f "$attestation_key_file" -a ! -L "$attestation_key_file"
+            test -f "$manifest" -a ! -L "$manifest"
+            test "$(wc -l < "$manifest")" -eq 3
+            expected_script_sha=$(sed -n "s/^inspector_sha256=//p" "$manifest")
+            expected_deployed_sha=$(sed -n "s/^deployed_git_sha=//p" "$manifest")
+            expected_key_sha=$(sed -n "s/^attestation_key_sha256=//p" "$manifest")
+            case "$expected_script_sha" in ""|*[!0-9a-f]*) exit 1;; esac
+            case "$expected_deployed_sha" in ""|*[!0-9a-f]*) exit 1;; esac
+            case "$expected_key_sha" in ""|*[!0-9a-f]*) exit 1;; esac
+            test "${#expected_script_sha}" -eq 64
+            test "${#expected_deployed_sha}" -eq 40
+            test "${#expected_key_sha}" -eq 64
             actual_script_sha=$(sha256sum "$inspector")
             actual_script_sha=${actual_script_sha%% *}
             test "$actual_script_sha" = "$expected_script_sha"
+            actual_key_sha=$(sha256sum "$attestation_key_file")
+            actual_key_sha=${actual_key_sha%% *}
+            test "$actual_key_sha" = "$expected_key_sha"
+            test "$(wc -c < "$attestation_key_file")" -ge 32
+            export BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file"
+            export BROKER_CONTACT_INSPECTOR_SHA256="$expected_script_sha"
+            export BROKER_CONTACT_DEPLOYED_GIT_SHA="$expected_deployed_sha"
             BROKER_CONTACT_PROVISIONING_PLAN=1 node "$inspector"
-          ' inspector "$expected_script_sha"
-          REMOTE_PREFIX
-            base64 -w 0 -- "$inspector_path"
-            printf '\nPII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD\n'
+            unset BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE BROKER_CONTACT_INSPECTOR_SHA256 BROKER_CONTACT_DEPLOYED_GIT_SHA
+          ' < "$payload_archive"
+          REMOTE_SUFFIX
           } | timeout --foreground 18m ssh -T -i "$private_key" -p "$SSH_PORT" \
             -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
             -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \

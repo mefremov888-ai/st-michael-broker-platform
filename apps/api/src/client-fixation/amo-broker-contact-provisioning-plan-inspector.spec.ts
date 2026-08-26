@@ -1,6 +1,14 @@
 import { spawnSync } from "child_process";
-import { existsSync, readFileSync } from "fs";
-import { dirname, resolve } from "path";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
+import { tmpdir } from "os";
+import { dirname, join, resolve } from "path";
 import { parse } from "yaml";
 
 describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
@@ -21,6 +29,18 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
   loadedScript.paths = NodeModule._nodeModulePaths(dirname(scriptPath));
   loadedScript._compile(script, scriptPath);
   const inspector = loadedScript.exports as {
+    buildCohortAttestation: (
+      rows: any[],
+      brokers: any[],
+      lookups: Map<string, any>,
+      key: Buffer | string,
+      inspectorSha256: string,
+      deployedGitSha: string,
+    ) => {
+      digest: string;
+      inspectorSha256: string;
+      deployedGitSha: string;
+    };
     buildProvisioningReport: (
       rows: any[],
       brokers: any[],
@@ -35,6 +55,7 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
       generatedAt?: Date,
       hashKey?: Buffer,
     ) => any;
+    readCohortAttestationKeyFile: (path: string) => Buffer;
     lookupExactBrokerContacts: (
       request: any,
       phone: string,
@@ -73,6 +94,12 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
       { field_id: 835415, values: [{ value: brokerFlag }] },
     ],
   });
+  const attestationKey = Buffer.from(
+    "production-cohort-key-32-bytes-minimum",
+    "utf8",
+  );
+  const inspectorSha256 = "a".repeat(64);
+  const deployedGitSha = "b".repeat(40);
 
   it("keeps the original broker-only lookup contract while exposing exact unflagged contacts only to the new in-memory plan", async () => {
     const response = {
@@ -288,6 +315,231 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
     expect(original.records[0].resolution).toBe("no_exact_broker_contact");
   });
 
+  it("builds a deterministic attestation from canonical raw cohort state regardless of input ordering", () => {
+    const firstBroker = broker({
+      id: "broker-identity-first",
+      phone: "+7 (999) 000-00-01",
+      phones: [{ phone: "8 999 000 00 11" }],
+    });
+    const secondBroker = broker({
+      id: "broker-identity-second",
+      phone: "+79990000002",
+      phones: [{ phone: "+7 999 000 00 12" }],
+    });
+    const rows = [
+      row("queue-identity-first", firstBroker),
+      row("queue-identity-second", null, {
+        broker: secondBroker,
+        responsibleBroker: secondBroker,
+        amoLeadId: BigInt(331122),
+      }),
+    ];
+    const lookups = new Map([
+      [
+        "+79990000001",
+        {
+          contacts: [
+            { contactId: 102, brokerFlag: false },
+            { contactId: 101, brokerFlag: true },
+          ],
+        },
+      ],
+      ["+79990000002", { contacts: [{ contactId: 202, brokerFlag: true }] }],
+    ]);
+
+    const first = inspector.buildCohortAttestation(
+      rows,
+      [firstBroker, secondBroker],
+      lookups,
+      attestationKey,
+      inspectorSha256,
+      deployedGitSha,
+    );
+    const reordered = inspector.buildCohortAttestation(
+      [...rows].reverse(),
+      [secondBroker, firstBroker],
+      new Map(
+        [...lookups.entries()]
+          .reverse()
+          .map(([phone, lookup]) => [
+            phone,
+            { contacts: [...lookup.contacts].reverse() },
+          ]),
+      ),
+      attestationKey,
+      inspectorSha256,
+      deployedGitSha,
+    );
+
+    expect(reordered).toEqual(first);
+    expect(first).toEqual({
+      digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      inspectorSha256,
+      deployedGitSha,
+    });
+    expect(Object.keys(first).sort()).toEqual([
+      "deployedGitSha",
+      "digest",
+      "inspectorSha256",
+    ]);
+  });
+
+  it("changes the attestation for same-count identity swaps and for either bound SHA", () => {
+    const firstBroker = broker({
+      id: "same-count-broker-first",
+      phone: "+79990000001",
+    });
+    const secondBroker = broker({
+      id: "same-count-broker-second",
+      phone: "+79990000002",
+    });
+    const rows = [
+      row("same-count-queue-first", firstBroker),
+      row("same-count-queue-second", secondBroker),
+    ];
+    const originalLookups = new Map([
+      ["+79990000001", { contacts: [{ contactId: 101, brokerFlag: true }] }],
+      ["+79990000002", { contacts: [{ contactId: 202, brokerFlag: false }] }],
+    ]);
+    const swappedLookups = new Map([
+      ["+79990000001", { contacts: [{ contactId: 202, brokerFlag: false }] }],
+      ["+79990000002", { contacts: [{ contactId: 101, brokerFlag: true }] }],
+    ]);
+    const attest = (
+      queueRows = rows,
+      lookups = originalLookups,
+      sourceSha = inspectorSha256,
+      deployedSha = deployedGitSha,
+    ) =>
+      inspector.buildCohortAttestation(
+        queueRows,
+        [firstBroker, secondBroker],
+        lookups,
+        attestationKey,
+        sourceSha,
+        deployedSha,
+      ).digest;
+    const original = attest();
+
+    expect(attest(rows, swappedLookups)).not.toBe(original);
+    expect(
+      attest([
+        row("same-count-queue-first", secondBroker),
+        row("same-count-queue-second", firstBroker),
+      ]),
+    ).not.toBe(original);
+    expect(attest(rows, originalLookups, "c".repeat(64))).not.toBe(original);
+    expect(
+      attest(rows, originalLookups, inspectorSha256, "d".repeat(40)),
+    ).not.toBe(original);
+  });
+
+  it("requires a 32-byte key and exact lowercase SHA forms without emitting source identities or the key", () => {
+    const rawBrokerId = "attestation-private-broker-4c797756";
+    const rawQueueId = "attestation-private-queue-39c68ab2";
+    const rawPhone = "+79995554433";
+    const rawContactId = 987654321;
+    const secretKey = "attestation-secret-that-must-never-be-output";
+    const effective = broker({ id: rawBrokerId, phone: rawPhone });
+    const rows = [row(rawQueueId, effective)];
+    const brokers = [effective];
+    const lookups = new Map([
+      [
+        rawPhone,
+        { contacts: [{ contactId: rawContactId, brokerFlag: false }] },
+      ],
+    ]);
+    const attestation = inspector.buildCohortAttestation(
+      rows,
+      brokers,
+      lookups,
+      secretKey,
+      inspectorSha256,
+      deployedGitSha,
+    );
+    const serialized = JSON.stringify(attestation);
+
+    for (const privateValue of [
+      rawBrokerId,
+      rawQueueId,
+      rawPhone,
+      String(rawContactId),
+      secretKey,
+    ]) {
+      expect(serialized).not.toContain(privateValue);
+    }
+    expect(() =>
+      inspector.buildCohortAttestation(
+        rows,
+        brokers,
+        lookups,
+        Buffer.alloc(31),
+        inspectorSha256,
+        deployedGitSha,
+      ),
+    ).toThrow("Cohort attestation key is invalid");
+    expect(() =>
+      inspector.buildCohortAttestation(
+        rows,
+        brokers,
+        lookups,
+        attestationKey,
+        "A".repeat(64),
+        deployedGitSha,
+      ),
+    ).toThrow("Inspector source SHA is invalid");
+    expect(() =>
+      inspector.buildCohortAttestation(
+        rows,
+        brokers,
+        lookups,
+        attestationKey,
+        inspectorSha256,
+        "b".repeat(39),
+      ),
+    ).toThrow("Deployed Git SHA is invalid");
+  });
+
+  it("fails provisioning-plan main before database or amo access when production attestation configuration is missing", () => {
+    const execution = spawnSync(process.execPath, [scriptPath], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        BROKER_CONTACT_PROVISIONING_PLAN: "1",
+        BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE: "",
+        BROKER_CONTACT_INSPECTOR_SHA256: inspectorSha256,
+        BROKER_CONTACT_DEPLOYED_GIT_SHA: deployedGitSha,
+        DATABASE_URL: "contains-private-database-location",
+        AMO_ACCESS_TOKEN: "contains-private-amo-token",
+      },
+    });
+
+    expect(execution.status).toBe(1);
+    expect(execution.stdout).toBe("");
+    expect(execution.stderr).toBe(
+      "PII-safe broker link repair-plan inspector failed; failure_phase=ATTESTATION; failure_code=COHORT_ATTESTATION_KEY_FILE_INVALID\n",
+    );
+    expect(execution.stderr).not.toContain("contains-private");
+  });
+
+  it("reads the secret-backed attestation key as exact file bytes without shell trimming", () => {
+    const temporaryDirectory = mkdtempSync(
+      join(tmpdir(), "st-michael-cohort-attestation-"),
+    );
+    const keyPath = join(temporaryDirectory, "attestation.key");
+    const exactKey = Buffer.concat([
+      Buffer.from("0123456789abcdef0123456789abcdef", "utf8"),
+      Buffer.from("\n\n", "utf8"),
+    ]);
+    try {
+      writeFileSync(keyPath, exactKey, { mode: 0o600 });
+      expect(inspector.readCohortAttestationKeyFile(keyPath)).toEqual(exactKey);
+    } finally {
+      if (existsSync(keyPath)) unlinkSync(keyPath);
+      rmdirSync(temporaryDirectory);
+    }
+  });
+
   it("runs only the explicit read-only mode from exact master source", () => {
     const parsed = parse(workflow) as any;
     const shell = parsed.jobs.inspect.steps[1].run as string;
@@ -306,12 +558,20 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
     const remoteMarker = "cat <<'REMOTE_PREFIX'\n";
     const remoteStart = shell.indexOf(remoteMarker) + remoteMarker.length;
     const remoteEnd = shell.indexOf("\nREMOTE_PREFIX", remoteStart);
+    const remoteSuffixMarker = "cat <<'REMOTE_SUFFIX'\n";
+    const remoteSuffixStart =
+      shell.indexOf(remoteSuffixMarker, remoteEnd) + remoteSuffixMarker.length;
+    const remoteSuffixEnd = shell.indexOf("\nREMOTE_SUFFIX", remoteSuffixStart);
     expect(remoteStart).toBeGreaterThan(remoteMarker.length);
     expect(remoteEnd).toBeGreaterThan(remoteStart);
+    expect(remoteSuffixStart).toBeGreaterThan(remoteEnd);
+    expect(remoteSuffixEnd).toBeGreaterThan(remoteSuffixStart);
     const generatedRemoteShell = `${shell.slice(
       remoteStart,
       remoteEnd,
-    )}\nY29uc29sZS5sb2coInNhZmUiKTs=\nPII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD\n`;
+    )}\nY29uc29sZS5sb2coInNhZmUiKTs=\nPII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD\nexpected_payload_sha=${"c".repeat(
+      64,
+    )}\n${shell.slice(remoteSuffixStart, remoteSuffixEnd)}\n`;
     const remoteSyntax = spawnSync(bash, ["-n"], {
       input: generatedRemoteShell,
       encoding: "utf8",
@@ -333,9 +593,53 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
     expect(workflow).toContain(
       'BROKER_CONTACT_PROVISIONING_PLAN=1 node "$inspector"',
     );
+    expect(workflow).toContain(
+      "COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}",
+    );
+    expect(workflow).toContain(
+      'printf \'%s\' "$COHORT_ATTESTATION_KEY" > "$attestation_key_file"',
+    );
+    expect(workflow).toContain("unset COHORT_ATTESTATION_KEY");
+    expect(workflow).toContain('test "$attestation_key_bytes" -ge 32');
+    expect(workflow).toContain(
+      'attestation_key_sha=$(sha256sum -- "$attestation_key_file"',
+    );
+    expect(workflow).toContain('test "$actual_key_sha" = "$expected_key_sha"');
+    expect(workflow).toContain(
+      'test "$payload_script_sha" = "$expected_script_sha"',
+    );
+    expect(workflow).toContain(
+      'test "$payload_deployed_sha" = "$expected_deployed_sha"',
+    );
+    expect(workflow).toContain(
+      'export BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file"',
+    );
+    expect(workflow).not.toContain(
+      "BROKER_CONTACT_COHORT_ATTESTATION_KEY=$(cat",
+    );
+    expect(workflow).toContain(
+      'export BROKER_CONTACT_INSPECTOR_SHA256="$expected_script_sha"',
+    );
+    expect(workflow).toContain(
+      'export BROKER_CONTACT_DEPLOYED_GIT_SHA="$expected_deployed_sha"',
+    );
+    expect(workflow).toContain("trap cleanup_payload EXIT HUP INT TERM");
+    expect(workflow).not.toMatch(
+      /bash -s --[^\n]*COHORT_ATTESTATION_KEY|ssh[^\n]*COHORT_ATTESTATION_KEY/,
+    );
+    expect(workflow).not.toMatch(/bash -s --[^\n]*payload_sha/);
+    expect(workflow).not.toMatch(
+      /(?:echo|printf)[^\n]*(?:\$\{?BROKER_CONTACT_COHORT_ATTESTATION_KEY|\$\{?COHORT_ATTESTATION_KEY)(?![^\n]*attestation_key_file)/,
+    );
     expect(workflow).toContain("PII_SAFE_BROKER_CONTACT_PROVISIONING_PAYLOAD");
     expect(workflow).not.toMatch(/--apply|prisma|POST|PATCH|PUT|DELETE/);
     expect(script).toContain('method: "GET"');
+    expect(script).toContain(
+      "process.env.BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE",
+    );
+    expect(script).toContain("cohortAttestationKey(readFileSync(pathValue))");
+    expect(script).toContain("process.env.BROKER_CONTACT_INSPECTOR_SHA256");
+    expect(script).toContain("process.env.BROKER_CONTACT_DEPLOYED_GIT_SHA");
     expect(script).not.toMatch(
       /prisma(?:\.[A-Za-z_$][\w$]*)+\.(?:create|createMany|update|updateMany|upsert|delete|deleteMany)\s*\(/,
     );

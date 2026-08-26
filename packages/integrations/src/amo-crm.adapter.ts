@@ -17,6 +17,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // лид (см. code-review PR #288).
 const AMO_REQUEST_TIMEOUT_MS = 15_000;
 const AMO_READONLY_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const AMO_EXACT_CONTACT_PAGE_LIMIT = 250;
+const AMO_EXACT_CONTACT_MAX_PAGES = 20;
 
 // Fictional redacted example: "+70000000000" / "8 (000) 000-00-00" /
 // "+7-000-000-00-00" → "0000000000". amoCRM ?query=<substring> капризно
@@ -362,7 +364,11 @@ export class AmoCrmAdapter {
       throw new Error("AMO_READONLY_RESPONSE_LIMIT_INVALID");
     }
     if (!this.token) {
-      if (!didRefresh && amoTokens.refresh) {
+      if (
+        options.retryTransient !== false &&
+        !didRefresh &&
+        amoTokens.refresh
+      ) {
         const ok = await this.refreshAccessToken();
         if (ok) return this.request<T>(path, init, options, attempt, true);
       }
@@ -406,7 +412,7 @@ export class AmoCrmAdapter {
 
     // 2026-06-05: 401 → попытка refresh + одиночный retry. Если refresh уже
     // делали в этом цепочке — не повторяем, бросаем.
-    if (res.status === 401 && !didRefresh) {
+    if (options.retryTransient !== false && res.status === 401 && !didRefresh) {
       clearTimeout(timer);
       console.warn(`[amo] 401 на ${safePath}, пробуем refresh access_token`);
       const ok = await this.refreshAccessToken();
@@ -624,7 +630,10 @@ export class AmoCrmAdapter {
   }
 
   // === Contacts ===
-  async findContactByPhone(phone: string): Promise<AmoContact | null> {
+  async findContactByPhone(
+    phone: string,
+    options: { strict?: boolean } = {},
+  ): Promise<AmoContact | null> {
     // Bug fix 2026-06-02: раньше брали `contacts[0]` без постфильтрации —
     // amoCRM ?query= ищет по подстроке и возвращает совпадения по имени/email/
     // комменту, а главное — не находит контакт сохранённый в другом формате
@@ -633,8 +642,37 @@ export class AmoCrmAdapter {
     // +70000000000 был КЦ-контактом, новая фиксация создавала второй).
     const target = last10Digits(phone);
     if (target.length < 10) return null;
-    const data = await this.request<any>(`/contacts?query=${target}&limit=50`);
-    const contacts: any[] = data?._embedded?.contacts || [];
+    let contacts: any[] = [];
+    if (options.strict) {
+      const seenIds = new Set<number>();
+      for (let page = 1; page <= AMO_EXACT_CONTACT_MAX_PAGES; page += 1) {
+        const data = await this.request<any>(
+          `/contacts?query=${target}&limit=${AMO_EXACT_CONTACT_PAGE_LIMIT}&page=${page}`,
+        );
+        if (data === null) break;
+        const pageContacts = data?._embedded?.contacts;
+        if (!Array.isArray(pageContacts)) {
+          throw new Error("AMO_EXACT_CONTACT_PAGE_INVALID");
+        }
+        for (const contact of pageContacts) {
+          const id = Number(contact?.id);
+          if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) {
+            throw new Error("AMO_EXACT_CONTACT_PAGE_ID_INVALID");
+          }
+          seenIds.add(id);
+          contacts.push(contact);
+        }
+        if (!data?._links?.next) break;
+        if (page === AMO_EXACT_CONTACT_MAX_PAGES) {
+          throw new Error("AMO_EXACT_CONTACT_PAGE_BOUND_EXCEEDED");
+        }
+      }
+    } else {
+      const data = await this.request<any>(
+        `/contacts?query=${target}&limit=50`,
+      );
+      contacts = data?._embedded?.contacts || [];
+    }
     const matches = contacts.filter((c: any) => {
       const fields = c.custom_fields_values || [];
       const phoneField = fields.find(
@@ -646,6 +684,9 @@ export class AmoCrmAdapter {
     });
     if (matches.length === 0) return null;
     if (matches.length === 1) return matches[0];
+    if (options.strict) {
+      throw new Error("AMBIGUOUS_EXACT_CONTACT");
+    }
     // An upstream failure must propagate. Returning null on 401/403/timeout
     // means "contact does not exist" and lets callers create duplicates.
     matches.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
@@ -1704,43 +1745,22 @@ export class AmoCrmAdapter {
     brokerEmail?: string | null;
     source: string; // 'LANDING_BROKER_TOUR' | 'LANDING_FORM' | 'FIXATION_BY_OTHER_BROKER'
     note?: string | null;
-    // 2026-07-01: если передан contactId — используем существующий контакт
-    // (без дублирования). Иначе создаём новый как раньше.
-    existingContactId?: number;
+    // Contact provisioning is owned by the API's shared advisory-lock flows.
+    // This lead helper must only consume an already resolved contact id and
+    // must never run its own unlocked find -> POST fallback.
+    existingContactId: number;
     // 2026-07-01: кастомное название лида. Если не передано — используется
     // старое «Заявка с лендинга — X» для обратной совместимости.
     leadName?: string;
   }): Promise<{ contactId?: number; leadId?: number } | null> {
-    let contact: { id: number } | null | undefined;
+    if (
+      !Number.isSafeInteger(data.existingContactId) ||
+      data.existingContactId <= 0
+    ) {
+      throw new Error("AMO_BROKER_CONTACT_ID_REQUIRED");
+    }
+    const contact: { id: number } = { id: data.existingContactId };
     try {
-      // 1) Контакт с IS_BROKER=true. Если передан existingContactId — не
-      // создаём новый (контакт уже настроен через syncBrokerProfileToAmo).
-      contact = data.existingContactId
-        ? { id: data.existingContactId }
-        : await this.findBrokerContactByPhone(data.brokerPhone, {
-            strict: true,
-          });
-      if (!contact) {
-        contact = await this.createContact({
-          name: data.brokerName,
-          custom_fields_values: [
-            {
-              field_code: "PHONE",
-              values: [{ value: data.brokerPhone, enum_code: "WORK" }],
-            },
-            ...(data.brokerEmail
-              ? [
-                  {
-                    field_code: "EMAIL" as const,
-                    values: [{ value: data.brokerEmail, enum_code: "WORK" }],
-                  },
-                ]
-              : []),
-            { field_id: 835415, values: [{ value: true }] }, // IS_BROKER
-          ],
-        });
-      }
-
       // 2026-06-17: ответственный — менеджер брокеров (Ксения). Раньше lead
       // и task создавались без responsible_user_id → попадали на тех.админа,
       // КЦ-менеджер их в своих фильтрах НЕ видел. Берём из env: сначала
