@@ -44,6 +44,19 @@ const RESOLUTION_CLASSES = [
   "candidate_already_bound",
 ];
 
+const PROVISIONING_RESOLUTION_CLASSES = [
+  "link_existing_broker_contact",
+  "promote_existing_contact_candidate",
+  "create_contact_candidate",
+  "already_linked",
+  "effective_broker_missing",
+  "broker_merged",
+  "no_valid_phone",
+  "db_phone_ambiguous",
+  "ambiguous_exact_contacts",
+  "candidate_already_bound",
+];
+
 const ERROR_CLASSES = [
   "none",
   "create_reconciliation_required",
@@ -92,6 +105,7 @@ const FAILURE_CODE_BY_MESSAGE = new Map([
     "AMO_CONTACTS_PAGINATION_SAFETY_BOUND_EXCEEDED",
   ],
   ["Report hash key is invalid", "REPORT_HASH_KEY_INVALID"],
+  ["Inspector mode is invalid", "INSPECTOR_MODE_INVALID"],
 ]);
 
 let activeFailurePhase = FAILURE_PHASE.DATABASE;
@@ -418,18 +432,18 @@ async function assertExpectedAccount(request) {
   }
 }
 
-async function lookupExactBrokerContacts(
+async function lookupExactContacts(
   request,
   normalizedPhone,
   maxPages = MAX_LOOKUP_PAGES,
 ) {
   const target = normalizePhone(normalizedPhone);
   if (!target) {
-    return { contactIds: [], pagesRead: 0, contactsRead: 0 };
+    return { contacts: [], pagesRead: 0, contactsRead: 0 };
   }
   const query = target.slice(-10);
   const seenIds = new Set();
-  const matches = new Set();
+  const matches = new Map();
   let contactsRead = 0;
 
   for (let page = 1; page <= maxPages; page += 1) {
@@ -440,7 +454,9 @@ async function lookupExactBrokerContacts(
     });
     if (payload === null) {
       return {
-        contactIds: [...matches].sort((left, right) => left - right),
+        contacts: [...matches.values()].sort(
+          (left, right) => left.contactId - right.contactId,
+        ),
         pagesRead: page - 1,
         contactsRead,
       };
@@ -460,12 +476,19 @@ async function lookupExactBrokerContacts(
       const exactPhone = contactPhoneValues(contact).some(
         (item) => normalizePhone(item?.value) === target,
       );
-      if (exactPhone && isBrokerContact(contact)) matches.add(contactId);
+      if (exactPhone) {
+        matches.set(contactId, {
+          contactId,
+          brokerFlag: isBrokerContact(contact),
+        });
+      }
     }
     const hasNext = Boolean(payload?._links?.next);
     if (!hasNext) {
       return {
-        contactIds: [...matches].sort((left, right) => left - right),
+        contacts: [...matches.values()].sort(
+          (left, right) => left.contactId - right.contactId,
+        ),
         pagesRead: page,
         contactsRead,
       };
@@ -475,6 +498,21 @@ async function lookupExactBrokerContacts(
     }
   }
   throw new Error("amoCRM contacts pagination exceeded safety bound");
+}
+
+async function lookupExactBrokerContacts(
+  request,
+  normalizedPhone,
+  maxPages = MAX_LOOKUP_PAGES,
+) {
+  const lookup = await lookupExactContacts(request, normalizedPhone, maxPages);
+  return {
+    contactIds: lookup.contacts
+      .filter((contact) => contact.brokerFlag)
+      .map((contact) => contact.contactId),
+    pagesRead: lookup.pagesRead,
+    contactsRead: lookup.contactsRead,
+  };
 }
 
 function reportHash(kind, value, hashKey) {
@@ -824,6 +862,224 @@ function buildReport(
   };
 }
 
+function buildProvisioningRecord(
+  group,
+  phoneOwners,
+  contactOwners,
+  lookups,
+  hashKey,
+) {
+  const preliminary = preclassifyGroup(group, phoneOwners);
+  const broker = group.broker;
+  let resolution = preliminary.resolution;
+  let candidateContactHash = null;
+  let exactPhoneMatchCount = 0;
+  let exactContactCount = 0;
+  let brokerFlaggedContactCount = 0;
+  let unflaggedContactCount = 0;
+
+  if (resolution === null) {
+    const candidates = new Map();
+    for (const phone of preliminary.phones) {
+      const lookup = lookups.get(phone);
+      if (!lookup || !Array.isArray(lookup.contacts)) {
+        throw new Error("Malformed amoCRM contacts page");
+      }
+      if (lookup.contacts.length > 0) exactPhoneMatchCount += 1;
+      for (const contact of lookup.contacts) {
+        const contactId = positiveInteger(contact?.contactId);
+        if (!contactId || typeof contact?.brokerFlag !== "boolean") {
+          throw new Error("Invalid amoCRM contact record");
+        }
+        const existing = candidates.get(contactId);
+        if (
+          existing !== undefined &&
+          existing.brokerFlag !== contact.brokerFlag
+        ) {
+          throw new Error("Invalid amoCRM contact record");
+        }
+        candidates.set(contactId, {
+          contactId,
+          brokerFlag: contact.brokerFlag,
+        });
+      }
+    }
+
+    exactContactCount = candidates.size;
+    brokerFlaggedContactCount = [...candidates.values()].filter(
+      (contact) => contact.brokerFlag,
+    ).length;
+    unflaggedContactCount = exactContactCount - brokerFlaggedContactCount;
+
+    if (exactContactCount === 0) {
+      resolution = "create_contact_candidate";
+    } else if (exactContactCount > 1) {
+      resolution = "ambiguous_exact_contacts";
+    } else {
+      const candidate = [...candidates.values()][0];
+      const owners = contactOwners.get(candidate.contactId) || new Set();
+      const occupiedByOther = [...owners].some(
+        (ownerId) => ownerId !== String(broker.id),
+      );
+      if (occupiedByOther) {
+        resolution = "candidate_already_bound";
+      } else {
+        resolution = candidate.brokerFlag
+          ? "link_existing_broker_contact"
+          : "promote_existing_contact_candidate";
+        candidateContactHash = reportHash(
+          "contact",
+          candidate.contactId,
+          hashKey,
+        );
+      }
+    }
+  }
+
+  return {
+    brokerHash: broker?.id ? reportHash("broker", broker.id, hashKey) : null,
+    queueHashes: group.queueRows
+      .map((row) => reportHash("queue", row.id, hashKey))
+      .sort(),
+    queueCount: group.queueRows.length,
+    resolution,
+    searchedPhoneCount: preliminary.phones.length,
+    exactPhoneMatchCount,
+    exactContactCount,
+    brokerFlaggedContactCount,
+    unflaggedContactCount,
+    candidateContactHash,
+    prerequisites: queuePrerequisites(group.queueRows),
+    advisory: {
+      databaseLinkCandidate:
+        resolution === "link_existing_broker_contact" ||
+        resolution === "promote_existing_contact_candidate",
+      amoPromotionCandidate:
+        resolution === "promote_existing_contact_candidate",
+      amoCreateCandidate: resolution === "create_contact_candidate",
+      databaseMutationAuthorized: false,
+      amoMutationAuthorized: false,
+      retryAuthorized: false,
+    },
+  };
+}
+
+function buildProvisioningReport(
+  queueRows,
+  allBrokers,
+  lookups,
+  generatedAt = new Date(),
+  hashKey = randomBytes(32),
+) {
+  const phoneOwners = buildPhoneOwnerMap(allBrokers);
+  const contactOwners = buildContactOwnerMap(allBrokers);
+  const records = groupQueueRows(queueRows)
+    .map((group) =>
+      buildProvisioningRecord(
+        group,
+        phoneOwners,
+        contactOwners,
+        lookups,
+        hashKey,
+      ),
+    )
+    .sort((left, right) =>
+      String(left.brokerHash || left.queueHashes[0]).localeCompare(
+        String(right.brokerHash || right.queueHashes[0]),
+      ),
+    );
+  const resolutionByBroker = zeroCounts(PROVISIONING_RESOLUTION_CLASSES);
+  const resolutionByQueueRow = zeroCounts(PROVISIONING_RESOLUTION_CLASSES);
+  const queueStatus = { FAILED: 0, PENDING: 0, UNKNOWN: 0 };
+  const errorClass = zeroCounts(ERROR_CLASSES);
+  const leadId = { present: 0, absent: 0 };
+  const fixationAgency = { present: 0, absent: 0 };
+  for (const record of records) {
+    increment(resolutionByBroker, record.resolution);
+    increment(resolutionByQueueRow, record.resolution, record.queueCount);
+    for (const [key, value] of Object.entries(record.prerequisites.status)) {
+      increment(queueStatus, key, value);
+    }
+    for (const [key, value] of Object.entries(
+      record.prerequisites.errorClass,
+    )) {
+      increment(errorClass, key, value);
+    }
+    for (const [key, value] of Object.entries(record.prerequisites.leadId)) {
+      increment(leadId, key, value);
+    }
+    for (const [key, value] of Object.entries(
+      record.prerequisites.fixationAgency,
+    )) {
+      increment(fixationAgency, key, value);
+    }
+  }
+
+  const lookupStats = [...lookups.values()].reduce(
+    (accumulator, lookup) => ({
+      queries: accumulator.queries + 1,
+      pagesRead: accumulator.pagesRead + Number(lookup?.pagesRead || 0),
+      contactsRead:
+        accumulator.contactsRead + Number(lookup?.contactsRead || 0),
+      exactContacts:
+        accumulator.exactContacts +
+        (Array.isArray(lookup?.contacts) ? lookup.contacts.length : 0),
+    }),
+    { queries: 0, pagesRead: 0, contactsRead: 0, exactContacts: 0 },
+  );
+
+  return {
+    inspector: "amo_broker_contact_provisioning_plan",
+    schemaVersion: 1,
+    generatedAt: generatedAt.toISOString().replace(/\.\d{3}Z$/, "Z"),
+    safety: {
+      readOnly: true,
+      databaseSessionReadOnly: true,
+      databaseOperations:
+        "read-only session verification SELECT plus two Prisma findMany SELECTs",
+      statementTimeoutMs: STATEMENT_TIMEOUT_MS,
+      amoHttpMethods: ["GET"],
+      amoEndpoints: ["/api/v4/account", "/api/v4/contacts"],
+      oauthRefresh: false,
+      databaseMutations: false,
+      amoMutations: false,
+      rawIdentifiersEmitted: false,
+      contactFieldsHeldInMemoryOnly: true,
+    },
+    classification: {
+      hashScheme: "hmac-sha256-per-report-key-v1-24hex",
+      crossRunLinkable: false,
+      effectiveBroker: "responsible_broker_then_owner_fallback",
+      exactContactMatch:
+        "unique-active-db-owner-and-exact-normalized-amo-phone",
+      brokerFlagRead: true,
+      collisionPolicy: "fail_closed",
+    },
+    plan: {
+      advisoryOnly: true,
+      executablePayload: false,
+      databaseMutationAuthorized: false,
+      amoMutationAuthorized: false,
+      retryAuthorized: false,
+      requiredNextGate:
+        "apply only separately reviewed exact-count CAS link, promotion or create classes; reconcile client leads before retry",
+    },
+    aggregates: {
+      exhaustedQueueRows: queueRows.length,
+      effectiveBrokerGroups: records.filter((record) => record.brokerHash)
+        .length,
+      lookup: lookupStats,
+      resolutionByBroker,
+      resolutionByQueueRow,
+      queueStatus,
+      errorClass,
+      leadId,
+      fixationAgency,
+    },
+    records,
+  };
+}
+
 async function main() {
   const { PrismaClient } = require("@st-michael/database");
   const readOnlyDatabaseUrl = buildReadOnlyDatabaseUrl(
@@ -874,13 +1130,25 @@ async function main() {
     await assertExpectedAccount(request);
 
     activeFailurePhase = FAILURE_PHASE.CONTACT_LOOKUP;
+    const rawMode = String(process.env.BROKER_CONTACT_PROVISIONING_PLAN || "0");
+    if (rawMode !== "0" && rawMode !== "1") {
+      throw new Error("Inspector mode is invalid");
+    }
+    const provisioningMode = rawMode === "1";
     const lookups = new Map();
     for (const phone of requiredLookupPhones(queueRows, allBrokers)) {
-      lookups.set(phone, await lookupExactBrokerContacts(request, phone));
+      lookups.set(
+        phone,
+        provisioningMode
+          ? await lookupExactContacts(request, phone)
+          : await lookupExactBrokerContacts(request, phone),
+      );
     }
 
     activeFailurePhase = FAILURE_PHASE.REPORT;
-    const report = buildReport(queueRows, allBrokers, lookups);
+    const report = provisioningMode
+      ? buildProvisioningReport(queueRows, allBrokers, lookups)
+      : buildReport(queueRows, allBrokers, lookups);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } finally {
     await prisma.$disconnect();
@@ -897,6 +1165,7 @@ module.exports = {
   assertExpectedAccount,
   assertReadOnlySession,
   buildReadOnlyDatabaseUrl,
+  buildProvisioningReport,
   buildReport,
   canonicalAmoUrl,
   classifyFailure,
@@ -904,6 +1173,7 @@ module.exports = {
   createGetOnlyRequester,
   effectiveBroker,
   lookupExactBrokerContacts,
+  lookupExactContacts,
   normalizePhone,
   readJsonBounded,
   reportHash,
