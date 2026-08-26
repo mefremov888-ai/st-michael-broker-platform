@@ -8,12 +8,6 @@ name: Inspect production amo fixation lead reconciliation (PII-safe GET-only)
 # payloads are emitted.
 on:
   workflow_dispatch:
-    inputs:
-      expected_queue_rows:
-        description: Expected exact exhausted fixation queue row count
-        required: true
-        default: "12"
-        type: string
 
 concurrency:
   group: production-deploy
@@ -42,7 +36,9 @@ jobs:
           EXPECTED_REPOSITORY: ${{ github.repository }}
           EXPECTED_REF: ${{ github.ref }}
           EXPECTED_SHA: ${{ github.sha }}
-          EXPECTED_QUEUE_ROWS: ${{ inputs.expected_queue_rows }}
+          # This inspector is valid only for the reviewed exhausted cohort.
+          # It is deliberately not operator-configurable.
+          EXPECTED_QUEUE_ROWS: "12"
           CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
           HEALTH_URL: https://broker.stmichael.ru/api/health
           GH_TOKEN: ${{ github.token }}
@@ -58,7 +54,7 @@ jobs:
           test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Inspector is restricted to the canonical repository"; exit 1; }
           test "$EXPECTED_REF" = "refs/heads/master" || { echo "Inspector is restricted to master"; exit 1; }
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid inspector SHA"; exit 1; }
-          [[ "$EXPECTED_QUEUE_ROWS" =~ ^([1-9]|[1-9][0-9]|100)$ ]] || { echo "Expected queue row count is invalid"; exit 1; }
+          test "$EXPECTED_QUEUE_ROWS" = "12" || { echo "Expected queue row count is invalid"; exit 1; }
           test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
           case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
           [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
@@ -145,7 +141,7 @@ jobs:
           case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
           [[ "$expected_script_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
           [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid expected production SHA"; exit 1; }
-          [[ "$expected_queue_rows" =~ ^([1-9]|[1-9][0-9]|100)$ ]] || { echo "Expected queue row count is invalid"; exit 1; }
+          test "$expected_queue_rows" = "12" || { echo "Expected queue row count is invalid"; exit 1; }
 
           deploy_root=$(readlink -f -- "$deploy_path")
           test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing absolute non-root directory"; exit 1; }
@@ -222,7 +218,7 @@ jobs:
             case "$expected_key_sha" in ""|*[!0-9a-f]*) exit 1;; esac
             test "${#expected_script_sha}" -eq 64
             test "${#expected_deployed_sha}" -eq 40
-            test "$expected_queue_rows" -ge 1 -a "$expected_queue_rows" -le 100
+            test "$expected_queue_rows" = "12"
             test "${#expected_key_sha}" -eq 64
             actual_script_sha=$(sha256sum "$inspector")
             actual_script_sha=${actual_script_sha%% *}
@@ -231,12 +227,12 @@ jobs:
             actual_key_sha=${actual_key_sha%% *}
             test "$actual_key_sha" = "$expected_key_sha"
             test "$(wc -c < "$attestation_key_file")" -ge 32
-            export LEAD_RECONCILIATION_ATTESTATION_KEY_FILE="$attestation_key_file"
+            export BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file"
             export LEAD_RECONCILIATION_INSPECTOR_SHA256="$expected_script_sha"
             export LEAD_RECONCILIATION_DEPLOYED_GIT_SHA="$expected_deployed_sha"
             export LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS="$expected_queue_rows"
             node "$inspector"
-            unset LEAD_RECONCILIATION_ATTESTATION_KEY_FILE LEAD_RECONCILIATION_INSPECTOR_SHA256 LEAD_RECONCILIATION_DEPLOYED_GIT_SHA LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS
+            unset BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE LEAD_RECONCILIATION_INSPECTOR_SHA256 LEAD_RECONCILIATION_DEPLOYED_GIT_SHA LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS
           ' < "$payload_archive"
           REMOTE_SUFFIX
           } | timeout --foreground 23m ssh -T -i "$private_key" -p "$SSH_PORT" \

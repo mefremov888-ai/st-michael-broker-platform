@@ -22,6 +22,7 @@ const AMO_ORIGIN = "https://stmichael.amocrm.ru";
 const EXPECTED_ACCOUNT_ID = 28552900;
 const KC_PIPELINE_ID = 7600542;
 const ATTEMPT_LIMIT = 10;
+const KNOWN_QUEUE_ROWS = 12;
 const QUEUE_STATUSES = Object.freeze(["FAILED", "PENDING"]);
 const STATEMENT_TIMEOUT_MS = 15_000;
 
@@ -151,8 +152,14 @@ const FAILURE_CODE_BY_MESSAGE = new Map([
   ["Lead field value safety bound exceeded", "LEAD_FIELD_VALUE_BOUND_EXCEEDED"],
   ["Distinct lead safety bound exceeded", "DISTINCT_LEAD_BOUND_EXCEEDED"],
   ["Invalid amoCRM lead record", "INVALID_AMO_LEAD_RECORD"],
+  [
+    "Ambiguous amoCRM selected custom field",
+    "AMBIGUOUS_AMO_SELECTED_CUSTOM_FIELD",
+  ],
+  ["Invalid amoCRM selected custom field", "INVALID_AMO_SELECTED_CUSTOM_FIELD"],
   ["amoCRM contact/lead relation changed during scan", "AMO_RELATION_CHANGED"],
   ["Invalid queue row", "INVALID_QUEUE_ROW"],
+  ["Invalid stored amo lead id", "INVALID_STORED_AMO_LEAD_ID"],
   ["Invalid reconciliation evidence", "INVALID_RECONCILIATION_EVIDENCE"],
 ]);
 
@@ -218,6 +225,22 @@ function positiveInteger(value) {
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
+function optionalStoredAmoLeadId(value) {
+  if (value === null) return null;
+  let parsed;
+  if (typeof value === "bigint") {
+    parsed = value;
+  } else if (typeof value === "string" && /^[1-9]\d{0,15}$/.test(value)) {
+    parsed = BigInt(value);
+  } else {
+    throw new Error("Invalid stored amo lead id");
+  }
+  if (parsed <= 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("Invalid stored amo lead id");
+  }
+  return Number(parsed);
+}
+
 function normalizePhone(value) {
   const trimmed = String(value ?? "").trim();
   if (!trimmed) return null;
@@ -239,25 +262,39 @@ function isJsonRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function customValues(entity, fieldId) {
-  const fields = Array.isArray(entity?.custom_fields_values)
-    ? entity.custom_fields_values
-    : [];
-  const field = fields.find(
-    (candidate) => Number(candidate?.field_id) === fieldId,
+function selectedCustomField(entity, fieldId, fallbackCode = null) {
+  const rawFields = entity?.custom_fields_values;
+  if (
+    rawFields !== null &&
+    rawFields !== undefined &&
+    !Array.isArray(rawFields)
+  ) {
+    throw new Error("Invalid amoCRM selected custom field");
+  }
+  const fields = rawFields || [];
+  const selected = fields.filter(
+    (candidate) =>
+      positiveInteger(candidate?.field_id) === fieldId ||
+      (fallbackCode !== null && candidate?.field_code === fallbackCode),
   );
-  return Array.isArray(field?.values) ? field.values : [];
+  if (selected.length > 1) {
+    throw new Error("Ambiguous amoCRM selected custom field");
+  }
+  if (selected.length === 0) return null;
+  if (!Array.isArray(selected[0]?.values)) {
+    throw new Error("Invalid amoCRM selected custom field");
+  }
+  return selected[0];
+}
+
+function customValues(entity, fieldId) {
+  return selectedCustomField(entity, fieldId)?.values || [];
 }
 
 function contactPhoneValues(contact) {
-  const fields = Array.isArray(contact?.custom_fields_values)
-    ? contact.custom_fields_values
-    : [];
-  const field =
-    fields.find(
-      (candidate) => Number(candidate?.field_id) === CONTACT_FIELDS.PHONE,
-    ) || fields.find((candidate) => candidate?.field_code === "PHONE");
-  return Array.isArray(field?.values) ? field.values : [];
+  return (
+    selectedCustomField(contact, CONTACT_FIELDS.PHONE, "PHONE")?.values || []
+  );
 }
 
 function contactHasExactPhone(contact, normalizedPhone) {
@@ -1138,7 +1175,10 @@ function inspectQueueRow(row, evidenceByPhone, hashKey) {
     expectedBrokerContactId &&
     evidence.exactContactIds.includes(expectedBrokerContactId),
   );
-  const storedLeadId = positiveInteger(row.amoLeadId);
+  // Prisma returns PostgreSQL BIGINT values as bigint. A malformed or
+  // out-of-range persisted ID is evidence of an unsafe state, not evidence
+  // that the row is unlinked.
+  const storedLeadId = optionalStoredAmoLeadId(row.amoLeadId);
   const candidates = evidence.leads
     .map((lead) =>
       inspectCandidate(row, lead, evidence.exactContactIds, hashKey),
@@ -1285,15 +1325,8 @@ function increment(target, key, amount = 1) {
   target[key] = Number(target[key] || 0) + amount;
 }
 
-function assertExpectedQueueRows(rows, expectedCount) {
-  if (
-    !Number.isInteger(expectedCount) ||
-    expectedCount < 1 ||
-    expectedCount > 100
-  ) {
-    throw new Error("Expected queue row count is invalid");
-  }
-  if (!Array.isArray(rows) || rows.length !== expectedCount) {
+function assertExpectedQueueRows(rows) {
+  if (!Array.isArray(rows) || rows.length !== KNOWN_QUEUE_ROWS) {
     throw new Error("Exhausted queue cohort count changed");
   }
 }
@@ -1303,10 +1336,9 @@ function buildReport(
   amoEvidence,
   metadata,
   attestationKey,
-  generatedAt = new Date(),
   hashKey = randomBytes(32),
 ) {
-  assertExpectedQueueRows(queueRows, metadata?.expectedQueueRows);
+  assertExpectedQueueRows(queueRows);
   const inspected = queueRows
     .map((row) => inspectQueueRow(row, amoEvidence.byPhone, hashKey))
     .sort((left, right) =>
@@ -1349,7 +1381,6 @@ function buildReport(
   return {
     inspector: "amo_fixation_lead_reconciliation",
     schemaVersion: 1,
-    generatedAt: generatedAt.toISOString().replace(/\.\d{3}Z$/, "Z"),
     safety: {
       readOnly: true,
       databaseSessionReadOnly: true,
@@ -1390,7 +1421,7 @@ function buildReport(
       deterministicForSameSecretAndEvidence: true,
       bindsInspectorSha256: metadata.inspectorSha256,
       bindsDeployedGitSha: metadata.deployedGitSha,
-      expectedQueueRows: metadata.expectedQueueRows,
+      expectedQueueRows: KNOWN_QUEUE_ROWS,
       rawAttestationInputEmitted: false,
     },
     plan: {
@@ -1451,8 +1482,8 @@ function readCohortAttestationKey(keyFile) {
 }
 
 function readRuntimeMetadata(environment = process.env) {
-  const keyFile = environment.LEAD_RECONCILIATION_ATTESTATION_KEY_FILE;
-  delete environment.LEAD_RECONCILIATION_ATTESTATION_KEY_FILE;
+  const keyFile = environment.BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE;
+  delete environment.BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE;
   const inspectorSha256 = String(
     environment.LEAD_RECONCILIATION_INSPECTOR_SHA256 || "",
   ).trim();
@@ -1468,7 +1499,7 @@ function readRuntimeMetadata(environment = process.env) {
   if (!/^[0-9a-f]{40}$/.test(deployedGitSha)) {
     throw new Error("Deployed git SHA is invalid");
   }
-  if (!/^(?:[1-9]|[1-9]\d|100)$/.test(rawExpected)) {
+  if (rawExpected !== String(KNOWN_QUEUE_ROWS)) {
     throw new Error("Expected queue row count is invalid");
   }
   return {
@@ -1476,7 +1507,6 @@ function readRuntimeMetadata(environment = process.env) {
     metadata: {
       inspectorSha256,
       deployedGitSha,
-      expectedQueueRows: Number(rawExpected),
     },
   };
 }
@@ -1517,9 +1547,11 @@ async function main() {
         { createdAt: "asc" },
         { id: "asc" },
       ],
-      take: runtime.metadata.expectedQueueRows + 1,
+      // Twelve exact rows plus one overflow sentinel; any thirteenth row makes
+      // the cohort assertion fail closed before amoCRM is queried.
+      take: 13,
     });
-    assertExpectedQueueRows(queueRows, runtime.metadata.expectedQueueRows);
+    assertExpectedQueueRows(queueRows);
 
     activeFailurePhase = FAILURE_PHASE.ACCOUNT;
     const request = createGetOnlyRequester(process.env.AMO_ACCESS_TOKEN);
@@ -1545,6 +1577,7 @@ module.exports = {
   COHORT_ATTESTATION_DOMAIN,
   EXPECTED_ACCOUNT_ID,
   KC_PIPELINE_ID,
+  KNOWN_QUEUE_ROWS,
   MAX_CONTACT_SEARCH_PAGES,
   MAX_DISTINCT_LEADS,
   MAX_EXACT_CONTACTS_PER_PHONE,
@@ -1561,11 +1594,14 @@ module.exports = {
   classifySyncError,
   cohortAttestation,
   collectAmoEvidence,
+  contactHasExactPhone,
   createGetOnlyRequester,
   inspectQueueRow,
   lookupExactClientContacts,
   normalizePhone,
+  optionalStoredAmoLeadId,
   readBoundedJsonResponse,
+  reduceLeadEvidence,
   relativeTimeClass,
   reportHash,
   stableJson,

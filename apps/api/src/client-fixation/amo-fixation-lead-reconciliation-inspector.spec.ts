@@ -25,10 +25,11 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     COHORT_ATTESTATION_DOMAIN: string;
     EXPECTED_ACCOUNT_ID: number;
     KC_PIPELINE_ID: number;
+    KNOWN_QUEUE_ROWS: number;
     MAX_RESPONSE_BODY_BYTES: number;
     STATEMENT_TIMEOUT_MS: number;
     assertExpectedAccount: (request: any) => Promise<void>;
-    assertExpectedQueueRows: (rows: any[], expected: number) => void;
+    assertExpectedQueueRows: (rows: any[]) => void;
     assertReadOnlySession: (prisma: any) => Promise<void>;
     buildReadOnlyDatabaseUrl: (value: string) => string;
     buildReport: (
@@ -36,12 +37,12 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       evidence: any,
       metadata: any,
       attestationKey: Buffer,
-      generatedAt?: Date,
       hashKey?: Buffer,
     ) => any;
     canonicalAmoUrl: (path: string, query?: Record<string, unknown>) => URL;
     classifyFailure: (error: unknown) => string;
     collectAmoEvidence: (rows: any[], request: any) => Promise<any>;
+    contactHasExactPhone: (contact: any, phone: string) => boolean;
     createGetOnlyRequester: (token: string, fetchImpl?: any) => any;
     lookupExactClientContacts: (
       request: any,
@@ -49,7 +50,9 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       maxPages?: number,
     ) => Promise<any>;
     normalizePhone: (value: unknown) => string | null;
+    optionalStoredAmoLeadId: (value: unknown) => number | null;
     readBoundedJsonResponse: (response: any, controller?: any) => Promise<any>;
+    reduceLeadEvidence: (lead: any, expectedLeadId: number) => any;
     reportHash: (kind: string, value: unknown, key: Buffer) => string | null;
     unixTimestampEvidence: (values: unknown, reference: Date) => any;
   };
@@ -57,7 +60,6 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
   const metadata = {
     inspectorSha256: "a".repeat(64),
     deployedGitSha: "b".repeat(40),
-    expectedQueueRows: 1,
   };
   const attestationKey = Buffer.alloc(32, 0x31);
   const aliasKey = Buffer.alloc(32, 0x42);
@@ -80,6 +82,20 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     responsibleBroker: null,
     ...overrides,
   });
+
+  const fixedCohort = (primary = queueRow()) => [
+    primary,
+    ...Array.from({ length: inspector.KNOWN_QUEUE_ROWS - 1 }, (_, index) =>
+      queueRow({
+        id: `f${String(index + 1).padStart(7, "0")}-0000-4000-8000-${String(
+          index + 1,
+        ).padStart(12, "0")}`,
+        phone: `invalid-phone-${index + 1}`,
+        amoSyncError: null,
+        broker: null,
+      }),
+    ),
+  ];
 
   const leadEnvelope = (
     id: number,
@@ -169,7 +185,10 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     expect(script.match(/process\.stderr\.write\s*\(/g) || []).toHaveLength(1);
     expect(script).not.toMatch(/console\.(?:log|info|warn|error)/);
     expect(script).toContain("amoSyncAttempts: { gte: ATTEMPT_LIMIT }");
-    expect(script).toContain("take: runtime.metadata.expectedQueueRows + 1");
+    expect(inspector.KNOWN_QUEUE_ROWS).toBe(12);
+    expect(script).toContain("const KNOWN_QUEUE_ROWS = 12");
+    expect(script).toContain("take: 13");
+    expect(script).not.toContain("take: runtime.metadata.expectedQueueRows");
     expect(script).toContain(
       "leads.set(leadId, reduceLeadEvidence(lead, leadId))",
     );
@@ -447,21 +466,65 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     );
   });
 
+  it("fails closed on duplicate selected amoCRM custom fields", () => {
+    expect(() =>
+      inspector.contactHasExactPhone(
+        {
+          custom_fields_values: [
+            {
+              field_id: 557903,
+              field_code: "PHONE",
+              values: [{ value: "+79991234567" }],
+            },
+            {
+              field_id: 999999,
+              field_code: "PHONE",
+              values: [{ value: "+79991234567" }],
+            },
+          ],
+        },
+        "+79991234567",
+      ),
+    ).toThrow("Ambiguous amoCRM selected custom field");
+
+    for (const fieldId of [665195, 833189, 839179]) {
+      const selectedValue =
+        fieldId === 665195
+          ? { enum_id: 985337 }
+          : { value: fieldId === 839179 ? "Зорге 9" : 1787642871 };
+      expect(() =>
+        inspector.reduceLeadEvidence(
+          {
+            id: 32310587,
+            pipeline_id: inspector.KC_PIPELINE_ID,
+            status_id: 62907350,
+            created_at: 1787642871,
+            custom_fields_values: [
+              { field_id: fieldId, values: [selectedValue] },
+              { field_id: fieldId, values: [selectedValue] },
+            ],
+            _embedded: { contacts: [{ id: 800001 }, { id: 900001 }] },
+          },
+          32310587,
+        ),
+      ).toThrow("Ambiguous amoCRM selected custom field");
+    }
+  });
+
   it("emits one HMAC-only strong candidate and a deterministic cohort digest", () => {
     const rawLeadId = 32310587;
     const row = queueRow();
     const report = inspector.buildReport(
-      [row],
+      fixedCohort(row),
       evidence([leadEnvelope(rawLeadId)]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     const serialized = JSON.stringify(report);
     expect(report.aggregates).toMatchObject({
-      exhaustedQueueRows: 1,
-      exactClientContacts: { none: 0, one: 1, multiple: 0 },
+      exhaustedQueueRows: 12,
+      exactClientContacts: { none: 11, one: 1, multiple: 0 },
       candidates: { strong: 1, weak: 0 },
       rowsWithCasLinkCandidate: 1,
       resolution: { single_strong_candidate: 1 },
@@ -493,14 +556,13 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       hmacSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       bindsInspectorSha256: metadata.inspectorSha256,
       bindsDeployedGitSha: metadata.deployedGitSha,
-      expectedQueueRows: 1,
+      expectedQueueRows: 12,
     });
     const repeat = inspector.buildReport(
-      [row],
+      fixedCohort(row),
       evidence([leadEnvelope(rawLeadId)]),
-      metadata,
+      { ...metadata, expectedQueueRows: 1 },
       attestationKey,
-      new Date("2026-08-26T10:00:00.000Z"),
       Buffer.alloc(32, 0x43),
     );
     expect(repeat.cohortAttestation.hmacSha256).toBe(
@@ -508,33 +570,30 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     );
     expect(repeat.records[0].queueHash).not.toBe(report.records[0].queueHash);
     const changedDeployment = inspector.buildReport(
-      [row],
+      fixedCohort(row),
       evidence([leadEnvelope(rawLeadId)]),
       { ...metadata, deployedGitSha: "c".repeat(40) },
       attestationKey,
-      new Date("2026-08-26T10:00:00.000Z"),
       aliasKey,
     );
     expect(changedDeployment.cohortAttestation.hmacSha256).not.toBe(
       report.cohortAttestation.hmacSha256,
     );
     const sameCountDifferentQueue = inspector.buildReport(
-      [queueRow({ id: "8bdc616d-aa3a-493f-82a5-9b26d9e13cf9" })],
+      fixedCohort(queueRow({ id: "8bdc616d-aa3a-493f-82a5-9b26d9e13cf9" })),
       evidence([leadEnvelope(rawLeadId)]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T10:00:00.000Z"),
       aliasKey,
     );
     expect(sameCountDifferentQueue.cohortAttestation.hmacSha256).not.toBe(
       report.cohortAttestation.hmacSha256,
     );
     const sameCountDifferentLead = inspector.buildReport(
-      [row],
+      fixedCohort(row),
       evidence([leadEnvelope(32310589)]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T10:00:00.000Z"),
       aliasKey,
     );
     expect(sameCountDifferentLead.cohortAttestation.hmacSha256).not.toBe(
@@ -560,17 +619,96 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     expect(serialized).not.toContain("queueCreatedAtHourBucket");
     expect(serialized).not.toContain("lastAttemptAtHourBucket");
     expect(serialized).not.toContain("2026-08-25T07:00Z");
+
+    const parsedPublicReport = JSON.parse(serialized);
+    expect(parsedPublicReport).not.toHaveProperty("generatedAt");
+    expect(
+      Object.keys(
+        parsedPublicReport.records[0].strongCandidates[0].leadCreatedAt,
+      ).sort(),
+    ).toEqual(["coverage", "relativeToQueue", "validValueCount"]);
+    const pending: Array<{ path: string; value: unknown }> = [
+      { path: "$", value: parsedPublicReport },
+    ];
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (typeof current.value === "string") {
+        expect(current.value).not.toMatch(
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/,
+        );
+      } else if (typeof current.value === "number") {
+        expect(
+          current.value >= 946_684_800 && current.value <= 4_133_980_800,
+        ).toBe(false);
+      } else if (Array.isArray(current.value)) {
+        current.value.forEach((value, index) =>
+          pending.push({ path: `${current.path}[${index}]`, value }),
+        );
+      } else if (current.value && typeof current.value === "object") {
+        for (const [key, value] of Object.entries(current.value)) {
+          expect([
+            "generatedAt",
+            "queueCreatedAt",
+            "lastAttemptAt",
+            "clockBucket",
+            "hourBucket",
+          ]).not.toContain(key);
+          pending.push({ path: `${current.path}.${key}`, value });
+        }
+      }
+    }
+  });
+
+  it("never downgrades an invalid non-null stored amo lead BigInt to unlinked", () => {
+    expect(inspector.optionalStoredAmoLeadId(32310587n)).toBe(32310587);
+    expect(inspector.optionalStoredAmoLeadId("32310587")).toBe(32310587);
+    expect(() => inspector.optionalStoredAmoLeadId(32310587)).toThrow(
+      "Invalid stored amo lead id",
+    );
+    expect(() => inspector.optionalStoredAmoLeadId("032310587")).toThrow(
+      "Invalid stored amo lead id",
+    );
+
+    let failure: unknown;
+    let unsafeReport: unknown;
+    try {
+      unsafeReport = inspector.buildReport(
+        fixedCohort(queueRow({ amoLeadId: 9007199254740993n })),
+        evidence([leadEnvelope(32310587)]),
+        metadata,
+        attestationKey,
+        aliasKey,
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(unsafeReport).toBeUndefined();
+    expect(failure).toMatchObject({ message: "Invalid stored amo lead id" });
+    expect(inspector.classifyFailure(failure)).toBe(
+      "INVALID_STORED_AMO_LEAD_ID",
+    );
+
+    const alreadyLinked = inspector.buildReport(
+      fixedCohort(queueRow({ amoLeadId: "32310587" })),
+      evidence([leadEnvelope(32310587)]),
+      metadata,
+      attestationKey,
+      aliasKey,
+    );
+    expect(alreadyLinked.records[0]).toMatchObject({
+      resolution: "database_lead_already_present",
+      advisory: { casLinkCandidate: false, retryAuthorized: false },
+    });
   });
 
   it("fails closed on the two-near-simultaneous-lead shape and never authorizes retry", () => {
     const first = leadEnvelope(32310587);
     const second = leadEnvelope(32310589, { createdAt: 1787642872 });
     const report = inspector.buildReport(
-      [queueRow()],
+      fixedCohort(),
       evidence([second, first]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(report.records[0]).toMatchObject({
@@ -592,11 +730,10 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       contactIds: [800001],
     });
     const weak = inspector.buildReport(
-      [queueRow()],
+      fixedCohort(),
       evidence([weakLead]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(weak.records[0]).toMatchObject({
@@ -605,11 +742,10 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     });
 
     const strongButNotAmbiguousPost = inspector.buildReport(
-      [queueRow({ amoSyncError: "BROKER_AMO_CONTACT_MISSING" })],
+      fixedCohort(queueRow({ amoSyncError: "BROKER_AMO_CONTACT_MISSING" })),
       evidence([leadEnvelope(32310587)]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(strongButNotAmbiguousPost.records[0]).toMatchObject({
@@ -618,11 +754,10 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     });
 
     const projectMismatch = inspector.buildReport(
-      [queueRow()],
+      fixedCohort(),
       evidence([leadEnvelope(32310587, { projectValues: ["Берзарина 37"] })]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(projectMismatch.records[0]).toMatchObject({
@@ -632,18 +767,17 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     });
 
     const brokerClientRoleCollision = inspector.buildReport(
-      [
+      fixedCohort(
         queueRow({
           broker: {
             id: "24e7bdeb-20bd-4f3f-83d6-6db564531896",
             amoContactId: BigInt(800001),
           },
         }),
-      ],
+      ),
       evidence([leadEnvelope(32310587, { contactIds: [800001] })]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(brokerClientRoleCollision.records[0]).toMatchObject({
@@ -653,7 +787,7 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     });
 
     const conflictingRequestTime = inspector.buildReport(
-      [queueRow()],
+      fixedCohort(),
       evidence([
         leadEnvelope(32310587, {
           createdAt: "not-a-timestamp",
@@ -662,7 +796,6 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       ]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(conflictingRequestTime.records[0]).toMatchObject({
@@ -680,23 +813,22 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     });
 
     const ambiguous = inspector.buildReport(
-      [queueRow()],
+      fixedCohort(),
       evidence([leadEnvelope(32310587)], [800001, 800002]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(ambiguous.records[0]).toMatchObject({
       resolution: "ambiguous_exact_client_contacts",
       advisory: { casLinkCandidate: false, retryAuthorized: false },
     });
-    expect(() => inspector.assertExpectedQueueRows([], 1)).toThrow(
+    expect(() => inspector.assertExpectedQueueRows([])).toThrow(
       "Exhausted queue cohort count changed",
     );
-    expect(() => inspector.assertExpectedQueueRows([queueRow()], 0)).toThrow(
-      "Expected queue row count is invalid",
-    );
+    expect(() =>
+      inspector.assertExpectedQueueRows([...fixedCohort(), queueRow()]),
+    ).toThrow("Exhausted queue cohort count changed");
   });
 
   it("uses safe relative timestamp classes without emitting exact timestamps", () => {
@@ -727,19 +859,17 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       withinWeakWindow: true,
     });
     const missingAttempt = inspector.buildReport(
-      [queueRow({ amoSyncLastAttemptAt: null })],
+      fixedCohort(queueRow({ amoSyncLastAttemptAt: null })),
       evidence([leadEnvelope(32310587)]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     const epochAttempt = inspector.buildReport(
-      [queueRow({ amoSyncLastAttemptAt: new Date(0) })],
+      fixedCohort(queueRow({ amoSyncLastAttemptAt: new Date(0) })),
       evidence([leadEnvelope(32310587)]),
       metadata,
       attestationKey,
-      new Date("2026-08-26T09:00:00.000Z"),
       aliasKey,
     );
     expect(missingAttempt.cohortAttestation.hmacSha256).not.toBe(
@@ -789,7 +919,16 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
 
     expect(workflow).toContain("group: production-deploy");
     expect(workflow).toContain("environment: production");
-    expect(workflow).toContain('default: "12"');
+    expect(workflow).toContain('EXPECTED_QUEUE_ROWS: "12"');
+    expect(workflow).not.toContain("inputs.expected_queue_rows");
+    expect(workflow).not.toMatch(/expected_queue_rows:[\s\S]*default:/);
+    expect(workflow).toContain(
+      'test "$EXPECTED_QUEUE_ROWS" = "12" || { echo "Expected queue row count is invalid"; exit 1; }',
+    );
+    expect(
+      workflow.match(/test "\$expected_queue_rows" = "12"/g) || [],
+    ).toHaveLength(2);
+    expect(workflow).not.toMatch(/expected_queue_rows[^\n]*1-100|\[1-9\].*100/);
     expect(workflow).toContain(
       "CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform",
     );
@@ -830,7 +969,7 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       'test "$actual_script_sha" = "$expected_script_sha"',
     );
     expect(workflow).toContain(
-      'export LEAD_RECONCILIATION_ATTESTATION_KEY_FILE="$attestation_key_file"',
+      'export BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file"',
     );
     expect(workflow).toContain(
       'export LEAD_RECONCILIATION_INSPECTOR_SHA256="$expected_script_sha"',
