@@ -366,14 +366,17 @@ describe("loyalty production workflow safety", () => {
     const captureRunningImages = deployScript.indexOf(
       "PREVIOUS_API_IMAGE=$(docker inspect",
     );
-    const pinApiImage = deployScript.indexOf(
-      'docker tag "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"',
-    );
-    const pinWebImage = deployScript.indexOf(
-      'docker tag "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"',
+    const pinExistingImage = deployScript.indexOf(
+      'docker tag "$running_image" "$rollback_tag"',
     );
     const ownApiImageTag = deployScript.indexOf("ROLLBACK_API_TAG_CREATED=1");
+    const pinOrRecoverApi = deployScript.indexOf(
+      'pin_or_recover_rollback_image api "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"',
+    );
     const ownWebImageTag = deployScript.indexOf("ROLLBACK_WEB_TAG_CREATED=1");
+    const pinOrRecoverWeb = deployScript.indexOf(
+      'pin_or_recover_rollback_image web "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"',
+    );
     const firstImageBuild = deployScript.indexOf("build api");
     const secondImageBuild = deployScript.indexOf("build web");
     const stageRollbackRecord = deployScript.indexOf(
@@ -395,13 +398,15 @@ describe("loyalty production workflow safety", () => {
 
     expect(provisionalCleanup).toBeGreaterThan(-1);
     expect(captureRunningImages).toBeGreaterThan(provisionalCleanup);
-    expect(pinApiImage).toBeGreaterThan(captureRunningImages);
-    expect(pinWebImage).toBeGreaterThan(captureRunningImages);
-    expect(pinApiImage).toBeLessThan(firstImageBuild);
-    expect(pinWebImage).toBeLessThan(firstImageBuild);
-    expect(ownApiImageTag).toBeGreaterThan(pinApiImage);
+    expect(pinExistingImage).toBeGreaterThan(captureRunningImages);
+    expect(pinExistingImage).toBeLessThan(firstImageBuild);
+    expect(ownApiImageTag).toBeGreaterThan(pinExistingImage);
+    expect(pinOrRecoverApi).toBeGreaterThan(ownApiImageTag);
+    expect(pinOrRecoverApi).toBeLessThan(firstImageBuild);
     expect(ownApiImageTag).toBeLessThan(firstImageBuild);
-    expect(ownWebImageTag).toBeGreaterThan(pinWebImage);
+    expect(ownWebImageTag).toBeGreaterThan(pinOrRecoverApi);
+    expect(pinOrRecoverWeb).toBeGreaterThan(ownWebImageTag);
+    expect(pinOrRecoverWeb).toBeLessThan(firstImageBuild);
     expect(ownWebImageTag).toBeLessThan(firstImageBuild);
     expect(secondImageBuild).toBeGreaterThan(firstImageBuild);
     expect(stageRollbackRecord).toBeGreaterThan(secondImageBuild);
@@ -435,6 +440,70 @@ describe("loyalty production workflow safety", () => {
     expect(deployScript).toContain(
       'if [ "${ROLLBACK_OVERRIDE_CREATED:-0}" = "1" ]; then',
     );
+  });
+
+  it("rebuilds a missing running-image record only from the exact trusted previous Git tree", () => {
+    const captureRunningImages = deployScript.indexOf(
+      "PREVIOUS_API_IMAGE=$(docker inspect",
+    );
+    const recoveryFunction = deployScript.indexOf(
+      "prepare_rollback_recovery_context() {",
+    );
+    const ancestorGate = deployScript.indexOf(
+      'git merge-base --is-ancestor "$PREVIOUS_DEPLOY_SHA" "$EXPECTED_DEPLOY_SHA"',
+    );
+    const archivePreviousTree = deployScript.indexOf(
+      'git archive --format=tar "$PREVIOUS_DEPLOY_SHA"',
+    );
+    const fallbackDecision = deployScript.indexOf(
+      'if docker image inspect "$running_image" >/dev/null 2>&1; then',
+    );
+    const ownApiTag = deployScript.indexOf("ROLLBACK_API_TAG_CREATED=1");
+    const recoverApi = deployScript.indexOf(
+      'pin_or_recover_rollback_image api "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"',
+    );
+    const ownWebTag = deployScript.indexOf("ROLLBACK_WEB_TAG_CREATED=1");
+    const recoverWeb = deployScript.indexOf(
+      'pin_or_recover_rollback_image web "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"',
+    );
+    const recoveredBuild = deployScript.indexOf("docker build --pull=false");
+    const firstTargetBuild = deployScript.indexOf("build api");
+
+    expect(recoveryFunction).toBeGreaterThan(captureRunningImages);
+    expect(ancestorGate).toBeGreaterThan(recoveryFunction);
+    expect(archivePreviousTree).toBeGreaterThan(ancestorGate);
+    expect(fallbackDecision).toBeGreaterThan(archivePreviousTree);
+    expect(recoveredBuild).toBeGreaterThan(fallbackDecision);
+    expect(recoveredBuild).toBeLessThan(firstTargetBuild);
+    expect(ownApiTag).toBeLessThan(recoverApi);
+    expect(ownWebTag).toBeLessThan(recoverWeb);
+    expect(deployScript).toContain(
+      "ROLLBACK_RECOVERY_CONTEXT=$(mktemp -d /tmp/st-michael-rollback-recovery.XXXXXX)",
+    );
+    expect(deployScript).toContain(
+      '/tmp/st-michael-rollback-recovery.*) rm -rf -- "$ROLLBACK_RECOVERY_CONTEXT"',
+    );
+    expect(deployScript).toContain(
+      '--label "org.opencontainers.image.revision=$PREVIOUS_DEPLOY_SHA"',
+    );
+    expect(deployScript).toContain(
+      '--label "com.stmichael.rollback.recovered=true"',
+    );
+    expect(deployScript).toContain(
+      `--format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`,
+    );
+    expect(deployScript).toContain(
+      `--format '{{index .Config.Labels "com.stmichael.rollback.recovered"}}'`,
+    );
+    expect(deployScript).toContain(
+      'echo "previous_api_image=$ROLLBACK_API_IMAGE"',
+    );
+    expect(deployScript).toContain(
+      'echo "previous_web_image=$ROLLBACK_WEB_IMAGE"',
+    );
+    expect(deployScript).not.toMatch(/docker\s+(?:container\s+)?commit\b/);
+    expect(deployScript).not.toMatch(/docker\s+(?:container\s+)?export\b/);
+    expect(deployScript).not.toMatch(/docker\s+import\b/);
   });
 
   it("keeps the production API typecheck inside its one-GiB heap budget", () => {
