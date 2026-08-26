@@ -3,7 +3,12 @@ import {
   getAmoTokens,
   setAmoTokens,
 } from "../../../../packages/integrations/src/amo-crm.adapter";
-import { AMO_CONTACT_FIELDS } from "../../../../packages/integrations/src/amo-crm.fields";
+import {
+  AMO_CONTACT_FIELDS,
+  AMO_KC_STATUS,
+  AMO_PIPELINES,
+  AMO_ZORGE_STATUS,
+} from "../../../../packages/integrations/src/amo-crm.fields";
 
 describe("AmoCrmAdapter broker contact safety", () => {
   const originalFetch = global.fetch;
@@ -120,6 +125,131 @@ describe("AmoCrmAdapter broker contact safety", () => {
       new AmoCrmAdapter().findContactByPhone(phone, { strict: true }),
     ).rejects.toThrow("AMBIGUOUS_EXACT_CONTACT");
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the exhaustive strict contact lookup for uniqueness decisions", async () => {
+    const adapter = new AmoCrmAdapter();
+    const strictLookup = jest
+      .spyOn(adapter, "findContactByPhone")
+      .mockRejectedValue(new Error("AMBIGUOUS_EXACT_CONTACT"));
+
+    await expect(adapter.checkUniqueness("+79990000013")).rejects.toThrow(
+      "AMBIGUOUS_EXACT_CONTACT",
+    );
+    expect(strictLookup).toHaveBeenCalledWith("+79990000013", {
+      strict: true,
+    });
+  });
+
+  it("requires complete strict contact hydration before a uniqueness verdict", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest.spyOn(adapter, "findContactByPhone").mockResolvedValue({
+      id: 140,
+      name: "Client",
+    });
+    jest.spyOn(adapter, "getLeadsByContact").mockResolvedValue([
+      {
+        id: 141,
+        name: "Lead",
+        pipeline_id: AMO_PIPELINES.KC,
+        status_id: AMO_KC_STATUS.NEW_REQUEST,
+        _embedded: { contacts: [{ id: 140 }, { id: 142 }] },
+      },
+    ]);
+    const hydrate = jest
+      .spyOn(adapter, "getContactsByIds")
+      .mockRejectedValue(new Error("AMO_UNIQUENESS_CONTACTS_INCOMPLETE"));
+
+    await expect(adapter.checkUniqueness("+79990000014")).rejects.toThrow(
+      "AMO_UNIQUENESS_CONTACTS_INCOMPLETE",
+    );
+    expect(hydrate).toHaveBeenCalledWith([140, 142], { strict: true });
+  });
+
+  it("rejects a partial contact batch in strict mode", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest.spyOn(adapter as any, "request").mockResolvedValue({
+      _embedded: { contacts: [{ id: 151, name: "First" }] },
+    });
+
+    await expect(
+      adapter.getContactsByIds([151, 152], { strict: true }),
+    ).rejects.toThrow("AMO_UNIQUENESS_CONTACTS_INCOMPLETE");
+  });
+
+  it("rejects a partial lead set before evaluating uniqueness", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest
+      .spyOn(adapter as any, "request")
+      .mockResolvedValueOnce({
+        _embedded: { leads: [{ id: 161 }, { id: 162 }] },
+      })
+      .mockResolvedValueOnce({
+        _embedded: {
+          leads: [
+            {
+              id: 161,
+              pipeline_id: AMO_PIPELINES.KC,
+              status_id: AMO_KC_STATUS.NEW_REQUEST,
+              _embedded: { contacts: [{ id: 160 }] },
+            },
+          ],
+        },
+      });
+
+    await expect(adapter.getLeadsByContact(160)).rejects.toThrow(
+      "AMO_UNIQUENESS_LEADS_INCOMPLETE",
+    );
+  });
+
+  it("rejects an unrecognised active lead stage instead of falling through to RULE_3", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest
+      .spyOn(adapter as any, "request")
+      .mockResolvedValueOnce({ _embedded: { leads: [{ id: 171 }] } })
+      .mockResolvedValueOnce({
+        _embedded: {
+          leads: [
+            {
+              id: 171,
+              pipeline_id: 99999991,
+              status_id: 99999992,
+              _embedded: { contacts: [{ id: 170 }] },
+            },
+          ],
+        },
+      });
+
+    await expect(adapter.getLeadsByContact(170)).rejects.toThrow(
+      "AMO_UNIQUENESS_LEAD_STAGE_UNRECOGNIZED",
+    );
+  });
+
+  it("fails closed for a known active sales stage with no explicit uniqueness rule", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest.spyOn(adapter, "findContactByPhone").mockResolvedValue({
+      id: 180,
+      name: "Client",
+    });
+    jest
+      .spyOn(adapter as any, "request")
+      .mockResolvedValueOnce({ _embedded: { leads: [{ id: 181 }] } })
+      .mockResolvedValueOnce({
+        _embedded: {
+          leads: [
+            {
+              id: 181,
+              pipeline_id: AMO_PIPELINES.ZORGE9,
+              status_id: AMO_ZORGE_STATUS.NEW_LEAD,
+              _embedded: { contacts: [{ id: 180 }] },
+            },
+          ],
+        },
+      });
+
+    await expect(adapter.checkUniqueness("+79990000018")).rejects.toThrow(
+      "AMO_UNIQUENESS_LEAD_STAGE_UNCLASSIFIED",
+    );
   });
 
   it("does not retry createContact after a network error", async () => {
@@ -287,6 +417,36 @@ describe("AmoCrmAdapter broker contact safety", () => {
       new AmoCrmAdapter().createLead({ name: "Фиксация клиента" }),
     ).rejects.toThrow("amoCRM 503 /leads");
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a strict internal client-contact recheck and performs no writes on ambiguity", async () => {
+    const adapter = new AmoCrmAdapter();
+    const findContact = jest
+      .spyOn(adapter, "findContactByPhone")
+      .mockRejectedValue(new Error("AMBIGUOUS_EXACT_CONTACT"));
+    const createContact = jest.spyOn(adapter, "createContact");
+    const updateContact = jest.spyOn(adapter, "updateContact");
+    const createLead = jest.spyOn(adapter, "createLead");
+
+    await expect(
+      adapter.createFixationRequest({
+        clientPhone: "+79990000021",
+        clientName: "Client",
+        brokerPhone: "+79990000022",
+        brokerAmoContactId: 221,
+        agencyName: "Agency",
+        agencyInn: "7700000000",
+        comment: "",
+        project: "ZORGE9" as any,
+      }),
+    ).rejects.toThrow("AMBIGUOUS_EXACT_CONTACT");
+
+    expect(findContact).toHaveBeenCalledWith("+79990000021", {
+      strict: true,
+    });
+    expect(createContact).not.toHaveBeenCalled();
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(createLead).not.toHaveBeenCalled();
   });
 
   it.each([

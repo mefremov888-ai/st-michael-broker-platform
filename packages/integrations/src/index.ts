@@ -1,6 +1,7 @@
 // Export all adapters
 export * from "./amo-crm.adapter";
 export * from "./amo-crm.fields";
+export * from "./amo-fixation-phone-lock";
 export * from "./loyalty-readonly-audit";
 export * from "./dadata.adapter";
 export * from "./mango.adapter";

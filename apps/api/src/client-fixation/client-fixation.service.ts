@@ -3,6 +3,7 @@ import {
   Inject,
   Optional,
   BadRequestException,
+  ConflictException,
   NotFoundException,
   ServiceUnavailableException,
 } from "@nestjs/common";
@@ -37,12 +38,15 @@ import {
   AMO_CREATE_IN_PROGRESS_MARKER,
   AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
   AMO_RETRY_MAX_ATTEMPTS,
-  AMO_UNIQUENESS_RECHECK_MARKER,
   markAmoCreateFailure,
   publicAmoSyncError,
   requiresAmoCreateReconciliation,
   sanitizeAmoSyncError,
 } from "../common/amo-sync-retry";
+import {
+  findUnreflectedLinkedSamePhoneAmoClient,
+  findUnresolvedSamePhoneAmoClient,
+} from "../common/amo-fixation-phone-state";
 
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
@@ -104,6 +108,7 @@ export class ClientFixationService {
       // 2026-06-19: для координаторов — реальный брокер, ведущий клиента.
       responsibleBrokerId?: string;
     },
+    assertAmoCreateLeaseOwned: () => Promise<void>,
   ) {
     const broker = await this.prisma.broker.findUnique({
       where: { id: brokerId },
@@ -221,16 +226,24 @@ export class ClientFixationService {
         | "ACTIVE_SALES";
       triggerLeadId?: number;
     } | null = null;
-    let amoCheckError: string | null = null;
     try {
       amoVerdict = await this.amoCrmAdapter.checkUniqueness(data.phone);
       console.log(
         `[fixClient] amo uniqueness rule=${amoVerdict.rule} — ${amoVerdict.reason}${amoVerdict.triggerLeadId ? ` — triggerLeadId=${amoVerdict.triggerLeadId}` : ""}`,
       );
     } catch (e: any) {
-      amoCheckError = sanitizeAmoSyncError(e);
+      const uniquenessLookupError = String(e?.message || e || "");
+      if (uniquenessLookupError === "AMBIGUOUS_EXACT_CONTACT") {
+        throw new ConflictException(
+          "В amoCRM найдено несколько контактов с этим телефоном; создание новой сделки заблокировано до ручной сверки",
+        );
+      }
+      const safeLookupError = sanitizeAmoSyncError(e);
       console.error(
-        `[fixClient] amo checkUniqueness failed, fallback to local DB only: ${amoCheckError}`,
+        `[fixClient] amo checkUniqueness failed; lead creation is blocked: ${safeLookupError}`,
+      );
+      throw new ServiceUnavailableException(
+        "Полную проверку уникальности в amoCRM завершить не удалось; создание новой сделки временно заблокировано",
       );
     }
 
@@ -407,6 +420,7 @@ export class ClientFixationService {
       const isExceptionAfterSalesMeeting =
         amoVerdict?.rule === "RULE_EXCEPTION_AFTER_SALES_MEETING";
       // Scenario 1: New client
+      await this.assertNoUnresolvedSamePhoneAmoCreate(data.phone);
       const client = await this.prisma.client.create({
         data: {
           brokerId,
@@ -459,6 +473,11 @@ export class ClientFixationService {
       // фиксация состоялась. Если amo упал (401/таймаут/5xx) —
       // логируем в audit + помечаем amoSyncStatus=FAILED + шлём уведомление
       // менеджерам и координаторам. Брокеру возвращаем контакты менеджеров.
+      await this.assertNoUnreflectedSamePhoneAmoLead(
+        data.phone,
+        amoVerdict,
+        String(client.id),
+      );
       let amoSyncOk = true;
       let amoSyncError: string | null = null;
       let createdAmoLeadId: number | null = null;
@@ -468,6 +487,7 @@ export class ClientFixationService {
         );
         // 2026-06-19: используем responsibleBroker (для координатора — выбранный
         // реальный брокер, для обычного брокера — он сам).
+        await assertAmoCreateLeaseOwned();
         const resultLead = await this.amoCrmAdapter.createFixationRequest({
           clientPhone: data.phone,
           clientEmail: data.email,
@@ -698,96 +718,6 @@ export class ClientFixationService {
     //   • Если старая закрыта (любая причина: 142/143/CANCELLED/EXPIRED) —
     //     создаём НОВЫЙ Client + НОВЫЙ amo лид со ссылкой на старую карточку.
     //
-    // A real check failure must never be mistaken for a successful amo rule.
-    // Persist the repeat request, but defer every create decision until the
-    // scheduler can repeat checkUniqueness. This applies even when the local
-    // record looks expired: local state cannot prove that the amo lead closed.
-    if (!amoVerdict && amoCheckError) {
-      // amo упал. Создаём отдельный Client
-      // на повторную фиксацию (без amoLeadId — amo сам не доступен), чтобы
-      // брокер видел свою заявку в кабинете. Никаких диалогов «всё равно
-      // создать?». 2026-06-14: раньше тут был тихий merge (return existingClient),
-      // но брокер не видел повторную попытку в списке.
-      const refixClient = await this.prisma.client.create({
-        data: {
-          brokerId,
-          responsibleBrokerId: responsibleBroker.id,
-          phone: data.phone,
-          fullName: data.fullName,
-          email: data.email || null,
-          comment: data.comment,
-          project: data.project as any,
-          fixationAgencyId: agency.id,
-          uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
-          uniquenessExpiresAt: new Date(Date.now() + msInDays(UNIQUENESS_DAYS)),
-          uniquenessReason:
-            "Повторная фиксация: проверка amoCRM будет повторена автоматически.",
-          // The retry scheduler selects PENDING and FAILED rows. Without an
-          // explicit status Prisma would apply the SYNCED schema default and
-          // this fixation would never reach the retry queue.
-          amoSyncStatus: "PENDING" as any,
-          // Technical marker: unlike uniquenessReason, amoSyncError is not a
-          // broker-facing business explanation. The scheduler preserves this
-          // marker across failures until the recheck is resolved.
-          amoSyncError: `${AMO_UNIQUENESS_RECHECK_MARKER}${existingClient.id}`,
-          ...fixationFormFields,
-        },
-      });
-      try {
-        await this.logAudit(
-          brokerId,
-          "CLIENT_FIXATION",
-          "Client",
-          refixClient.id,
-          {
-            scenario: "REFIX_AMO_DOWN",
-            phone: data.phone,
-            previousClientId: existingClient.id,
-          },
-        );
-      } catch (e: any) {
-        console.error("[fixClient refix-merge] audit failed:", e?.message || e);
-      }
-      try {
-        await this.logAudit(
-          brokerId,
-          "AMO_SYNC_FAILED",
-          "Client",
-          refixClient.id,
-          {
-            step: "checkUniqueness",
-            scenario: "REFIX_AMO_DOWN",
-            error: amoCheckError,
-          },
-        );
-      } catch (e: any) {
-        console.error(
-          "[fixClient refix-merge] amo failure audit failed:",
-          e?.message || e,
-        );
-      }
-      try {
-        await this.notifyAmoSyncFailed(
-          refixClient.id,
-          brokerId,
-          amoCheckError || "amoCRM uniqueness check unavailable",
-          "REFIX_AMO_DOWN",
-        );
-      } catch (e: any) {
-        console.error(
-          "[fixClient refix-merge] notifyAmoSyncFailed failed:",
-          e?.message || e,
-        );
-      }
-      return {
-        client: refixClient,
-        status: "CONDITIONALLY_UNIQUE",
-        amoSyncStatus: "PENDING",
-        message:
-          "Клиент зафиксирован повторно. Синхронизация с amoCRM произойдёт автоматически.",
-      };
-    }
-
     // Старая закрыта (или не активна локально + amo не подтверждает активность).
     // Создаём НОВЫЙ Client + НОВЫЙ amo лид с ссылкой на старую карточку.
     const previousLeadId = existingClient.amoLeadId
@@ -810,6 +740,7 @@ export class ClientFixationService {
 
     const isExceptionAfterSalesMeeting =
       amoVerdict?.rule === "RULE_EXCEPTION_AFTER_SALES_MEETING";
+    await this.assertNoUnresolvedSamePhoneAmoCreate(data.phone);
     const newClient = await this.prisma.client.create({
       data: {
         brokerId,
@@ -850,6 +781,11 @@ export class ClientFixationService {
     if (data.comment) refixCommentParts.unshift(data.comment);
     const refixFullComment = refixCommentParts.join(". ");
 
+    await this.assertNoUnreflectedSamePhoneAmoLead(
+      data.phone,
+      amoVerdict,
+      String(newClient.id),
+    );
     let amoSyncOk = true;
     let amoSyncError: string | null = null;
     let createdAmoLeadId: number | null = null;
@@ -859,6 +795,7 @@ export class ClientFixationService {
       );
       // 2026-06-19: responsibleBroker — для координатора выбранный реальный,
       // для обычного брокера = он сам.
+      await assertAmoCreateLeaseOwned();
       const resultLead = await this.amoCrmAdapter.createFixationRequest({
         clientPhone: data.phone,
         clientEmail: data.email,
@@ -1376,6 +1313,54 @@ export class ClientFixationService {
           ? `Клиент зафиксирован. КЦ уведомлены о параллельной фиксации.`
           : `Клиент требует ручной проверки КЦ. ${amoVerdict.reason}`,
     };
+  }
+
+  /**
+   * A terminal or reconciliation row is durable evidence that an earlier
+   * POST may still need linking. UI retries must not create another lead for
+   * the same normalized phone, even when the historical row used formatting
+   * different from the current +7 DTO.
+   */
+  private async assertNoUnresolvedSamePhoneAmoCreate(
+    phone: unknown,
+  ): Promise<void> {
+    if (await findUnresolvedSamePhoneAmoClient(this.prisma, phone)) {
+      throw new ConflictException(
+        "Предыдущая передача клиента в amoCRM требует сверки; новая сделка по этому телефону временно заблокирована",
+      );
+    }
+  }
+
+  private async assertNoUnreflectedSamePhoneAmoLead(
+    phone: unknown,
+    verdict: { rule?: string; leads?: Array<{ id?: number }> } | null,
+    excludeClientId: string,
+  ): Promise<void> {
+    if (verdict?.rule !== "NO_CONFLICT" && !Array.isArray(verdict?.leads)) {
+      throw new Error("AMO_UNIQUENESS_LEADS_INCOMPLETE");
+    }
+    const reflectedLeadIds = Array.isArray(verdict?.leads)
+      ? verdict.leads.map((lead) => Number(lead?.id))
+      : [];
+    if (
+      reflectedLeadIds.some(
+        (id) => !Number.isSafeInteger(id) || id <= 0,
+      ) || new Set(reflectedLeadIds).size !== reflectedLeadIds.length
+    ) {
+      throw new Error("AMO_UNIQUENESS_LEAD_IDS_INVALID");
+    }
+    if (
+      await findUnreflectedLinkedSamePhoneAmoClient(
+        this.prisma,
+        phone,
+        excludeClientId,
+        reflectedLeadIds,
+      )
+    ) {
+      throw new ConflictException(
+        "AMO_FIXATION_PHONE_STATE_STALE",
+      );
+    }
   }
 
   async getClients(

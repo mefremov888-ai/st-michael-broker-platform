@@ -3,7 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate } from '@st-michael/integrations';
+import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, normalizeAmoFixationClientPhone } from '@st-michael/integrations';
 import { getSystemSetting } from '../common/system-setting';
 import { CmsService } from '../cms/cms.service';
 /**
@@ -38,6 +38,14 @@ import {
   requiresAmoCreateReconciliation,
   sanitizeAmoSyncError,
 } from '../common/amo-sync-retry';
+import {
+  AmoFixationPhoneLease,
+  AmoFixationPhoneLockService,
+} from '../common/amo-fixation-phone-lock.service';
+import {
+  findUnreflectedLinkedSamePhoneAmoClient,
+  findUnresolvedSamePhoneAmoClient,
+} from '../common/amo-fixation-phone-state';
 
 const OPS_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
@@ -62,6 +70,7 @@ export class SchedulerService {
     private readonly gsheets: GoogleSheetsSyncService,
     private readonly adminService: AdminService,
     private readonly cms: CmsService,
+    private readonly fixationPhoneLock: AmoFixationPhoneLockService,
     @Optional() private readonly opsAlerts?: OpsAlertService,
   ) {}
 
@@ -1083,7 +1092,23 @@ export class SchedulerService {
 
     let ok = 0;
     let failed = 0;
+    const seenPhones = new Set<string>();
     for (const client of candidates) {
+      let normalizedPhone: string;
+      try {
+        normalizedPhone = normalizeAmoFixationClientPhone(client.phone);
+      } catch {
+        this.logger.error('amo auto-retry: client phone is invalid');
+        failed++;
+        continue;
+      }
+      if (seenPhones.has(normalizedPhone)) {
+        this.logger.warn('amo auto-retry: duplicate normalized phone in batch, skipping');
+        continue;
+      }
+      // Mark before attempting Redis: one busy/failing representative must not
+      // let a later equivalent row become a second writer in this snapshot.
+      seenPhones.add(normalizedPhone);
       const requiresUniquenessRecheck = String(client.amoSyncError || '')
         .startsWith(AMO_UNIQUENESS_RECHECK_MARKER);
       const storedError = String(client.amoSyncError || '');
@@ -1126,6 +1151,23 @@ export class SchedulerService {
         failed++;
         continue;
       }
+      let phoneLease: AmoFixationPhoneLease | null = null;
+      try {
+        phoneLease = await this.fixationPhoneLock.tryAcquireLease(
+          client.phone,
+          'scheduler-amo-retry',
+        );
+      } catch {
+        // Redis is a readiness dependency for every fixation lead writer. A
+        // background retry must fail closed rather than bypass the UI lock.
+        this.logger.error('amo auto-retry: shared phone lock is unavailable');
+        failed++;
+        break;
+      }
+      if (!phoneLease) {
+        this.logger.warn('amo auto-retry: phone is owned by another writer, skipping');
+        continue;
+      }
       // Только ошибка вокруг самого createFixationRequest (POST, создающего
       // лид) неоднозначна — отваливающийся до него checkUniqueness ничего
       // не создаёт, ретраить его безопасно как обычно.
@@ -1137,24 +1179,64 @@ export class SchedulerService {
         );
         const clientId = String(client.id);
         const brokerId = retryBroker?.id ? String(retryBroker.id) : 'unknown';
-        let retryVerdict: any = null;
-        if (requiresUniquenessRecheck) {
-          retryVerdict = await this.amo.checkUniqueness(client.phone);
-          if (!retryVerdict?.rule) {
-            throw new Error('amoCRM uniqueness check returned no decision');
-          }
+        const unresolvedSiblingId = await findUnresolvedSamePhoneAmoClient(
+          this.prisma,
+          normalizedPhone,
+          clientId,
+        );
+        if (unresolvedSiblingId) {
+          await this.deferSamePhoneAmoRetry(client, 'SAME_PHONE_UNRESOLVED');
+          failed++;
+          continue;
+        }
 
-          if (await this.resolveRefixUniquenessDecision(client, retryVerdict)) {
-            ok++;
-            continue;
-          }
-          if (![
-            'RULE_3',
-            'NO_CONFLICT',
-            'RULE_EXCEPTION_AFTER_SALES_MEETING',
-          ].includes(retryVerdict.rule)) {
-            throw new Error('amoCRM uniqueness check returned an unsupported decision');
-          }
+        // Every retry gets a fresh exhaustive amo decision. Restricting this
+        // to legacy re-fix markers lets an ordinary row POST after another UI
+        // or cron writer linked a same-phone lead between snapshots.
+        const retryVerdict: any = await this.amo.checkUniqueness(client.phone);
+        if (!retryVerdict?.rule) {
+          throw new Error('amoCRM uniqueness check returned no decision');
+        }
+
+        if (await this.resolveRefixUniquenessDecision(client, retryVerdict)) {
+          ok++;
+          continue;
+        }
+        if (![
+          'RULE_3',
+          'NO_CONFLICT',
+          'RULE_EXCEPTION_AFTER_SALES_MEETING',
+        ].includes(retryVerdict.rule)) {
+          throw new Error('amoCRM uniqueness check returned an unsupported decision');
+        }
+
+        if (
+          retryVerdict.rule !== 'NO_CONFLICT' &&
+          !Array.isArray(retryVerdict.leads)
+        ) {
+          throw new Error('amoCRM uniqueness check returned incomplete leads');
+        }
+        const reflectedLeadIds = Array.isArray(retryVerdict.leads)
+          ? retryVerdict.leads.map((lead: any) => Number(lead?.id))
+          : [];
+        if (
+          reflectedLeadIds.some(
+            (id: number) => !Number.isSafeInteger(id) || id <= 0,
+          ) || new Set(reflectedLeadIds).size !== reflectedLeadIds.length
+        ) {
+          throw new Error('amoCRM uniqueness check returned invalid lead ids');
+        }
+        const linkedSiblingId =
+          await findUnreflectedLinkedSamePhoneAmoClient(
+            this.prisma,
+            normalizedPhone,
+            clientId,
+            reflectedLeadIds,
+          );
+        if (linkedSiblingId) {
+          await this.deferSamePhoneAmoRetry(client, 'SAME_PHONE_LINKED');
+          failed++;
+          continue;
         }
 
         if (!client.fixationAgencyId) {
@@ -1226,6 +1308,10 @@ export class SchedulerService {
         });
         if (claim.count !== 1) continue;
         leadCreateAttempted = true;
+        // Refresh and prove ownership immediately before the one-shot POST.
+        // If the durable DB claim was made but the Redis lease disappeared,
+        // the catch path leaves a reconciliation marker and never posts.
+        await phoneLease.assertOwned();
         const resultLead = await this.amo.createFixationRequest({
           clientPhone: client.phone,
           clientEmail: client.email || undefined,
@@ -1413,9 +1499,42 @@ export class SchedulerService {
           await this.alertAmoTokenDead(safeError);
           break;
         }
+      } finally {
+        await phoneLease.release();
       }
     }
     this.logger.log(`amo auto-retry: ${ok} success, ${failed} failed`);
+  }
+
+  private async deferSamePhoneAmoRetry(
+    client: any,
+    reason: 'SAME_PHONE_UNRESOLVED' | 'SAME_PHONE_LINKED',
+  ): Promise<void> {
+    const nextAttempts = Number(client.amoSyncAttempts || 0) + 1;
+    await this.prisma.client.updateMany({
+      where: {
+        id: client.id,
+        amoLeadId: null,
+        amoSyncError: client.amoSyncError ?? null,
+        ...(client.amoSyncStatus
+          ? { amoSyncStatus: client.amoSyncStatus }
+          : {}),
+        ...(client.amoSyncAttempts !== undefined
+          ? { amoSyncAttempts: client.amoSyncAttempts }
+          : {}),
+        ...(client.amoSyncLastAttemptAt !== undefined
+          ? { amoSyncLastAttemptAt: client.amoSyncLastAttemptAt }
+          : {}),
+      },
+      data: {
+        amoSyncStatus: (nextAttempts >= AMO_RETRY_MAX_ATTEMPTS
+          ? 'FAILED'
+          : 'PENDING') as any,
+        amoSyncError: `${AMO_UNIQUENESS_RECHECK_MARKER}${reason}`,
+        amoSyncAttempts: nextAttempts,
+        amoSyncLastAttemptAt: new Date(),
+      },
+    });
   }
 
   /**

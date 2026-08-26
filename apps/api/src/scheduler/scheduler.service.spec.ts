@@ -26,26 +26,39 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
   });
 
   function createService(candidate?: any) {
+    const candidateRows = candidate
+      ? Array.isArray(candidate)
+        ? candidate
+        : [candidate]
+      : [];
     const findMany = jest.fn().mockImplementation(async (args: any) => {
       const isMarkerQuery = Boolean(
         args?.where?.amoSyncError?.startsWith,
       );
-      const candidateHasMarker = String(candidate?.amoSyncError || "").startsWith(
-        AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+      if (isMarkerQuery) {
+        return candidateRows.filter((row) =>
+          String(row?.amoSyncError || "").startsWith(
+            AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+          ),
+        );
+      }
+      return candidateRows.filter(
+        (row) =>
+          !String(row?.amoSyncError || "").startsWith(
+            AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+          ),
       );
-      if (isMarkerQuery) return candidateHasMarker ? [candidate] : [];
-      if (candidateHasMarker) return [];
-      return candidate ? [candidate] : [];
     });
     const prisma = {
       client: {
         findMany,
-        count: jest.fn().mockImplementation(async () =>
-          String(candidate?.amoSyncError || "").startsWith(
-            AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
-          )
-            ? 1
-            : 0,
+        count: jest.fn().mockImplementation(
+          async () =>
+            candidateRows.filter((row) =>
+              String(row?.amoSyncError || "").startsWith(
+                AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+              ),
+            ).length,
         ),
         update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -64,6 +77,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       broker: {
         findMany: jest.fn().mockResolvedValue([{ id: "manager-1" }]),
       },
+      $queryRaw: jest.fn().mockResolvedValue([]),
     };
     const notificationQueue = { add: jest.fn().mockResolvedValue({}) };
     const opsAlerts = { sendSafely: jest.fn().mockResolvedValue(true) };
@@ -74,6 +88,16 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       reason: "No conflict",
     });
     const notifyFixation = jest.fn().mockResolvedValue({ ok: true });
+    const phoneLease = {
+      key: "client-fixation:semantic:test",
+      owner: "scheduler-test-owner",
+      hasLostOwnership: jest.fn().mockReturnValue(false),
+      assertOwned: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn().mockResolvedValue(undefined),
+    };
+    const fixationPhoneLock = {
+      tryAcquireLease: jest.fn().mockResolvedValue(phoneLease),
+    };
     const service = new SchedulerService(
       prisma as any,
       notificationQueue as any,
@@ -82,6 +106,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       {} as any,
       {} as any,
       { recheckDue: jest.fn() } as any,
+      fixationPhoneLock as any,
       opsAlerts as any,
     );
     (service as any).amo = { createFixationRequest, checkUniqueness };
@@ -94,6 +119,8 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       createFixationRequest,
       checkUniqueness,
       notifyFixation,
+      fixationPhoneLock,
+      phoneLease,
     };
   }
 
@@ -132,8 +159,14 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       broker: creator,
       responsibleBroker,
     };
-    const { service, prisma, createFixationRequest, notifyFixation } =
-      createService(candidate);
+    const {
+      service,
+      prisma,
+      createFixationRequest,
+      notifyFixation,
+      fixationPhoneLock,
+      phoneLease,
+    } = createService(candidate);
 
     await service.handleAmoFailedRetry();
 
@@ -148,6 +181,14 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
         brokerAmoContactId: 222,
       }),
     );
+    expect(fixationPhoneLock.tryAcquireLease).toHaveBeenCalledWith(
+      candidate.phone,
+      "scheduler-amo-retry",
+    );
+    expect(phoneLease.assertOwned.mock.invocationCallOrder[0]).toBeLessThan(
+      createFixationRequest.mock.invocationCallOrder[0],
+    );
+    expect(phoneLease.release).toHaveBeenCalledTimes(1);
     expect(notifyFixation).toHaveBeenCalledWith(
       expect.objectContaining({
         broker_id: "222",
@@ -157,6 +198,136 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       }),
       process.env.MOREKIT_WEBHOOK_URL,
     );
+  });
+
+  it("skips without claiming or posting when another phone writer owns the lock", async () => {
+    const candidate = {
+      id: "client-phone-lock-busy",
+      fixationAgencyId: "agency-1",
+      phone: "+79990000073",
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker: {
+        id: "broker-phone-lock-busy",
+        fullName: "Broker",
+        phone: "+79990000074",
+        email: null,
+        amoContactId: BigInt(274),
+      },
+      responsibleBroker: null,
+    };
+    const {
+      service,
+      prisma,
+      createFixationRequest,
+      fixationPhoneLock,
+    } = createService(candidate);
+    fixationPhoneLock.tryAcquireLease.mockResolvedValueOnce(null);
+
+    await service.handleAmoFailedRetry();
+
+    expect(fixationPhoneLock.tryAcquireLease).toHaveBeenCalledWith(
+      candidate.phone,
+      "scheduler-amo-retry",
+    );
+    expect(prisma.client.updateMany).not.toHaveBeenCalled();
+    expect(createFixationRequest).not.toHaveBeenCalled();
+  });
+
+  it("coalesces equivalent phone formats to one writer per retry snapshot", async () => {
+    const broker = {
+      id: "broker-same-phone-batch",
+      fullName: "Broker",
+      phone: "+79990000075",
+      email: null,
+      amoContactId: BigInt(275),
+    };
+    const candidate = (id: string, phone: string) => ({
+      id,
+      fixationAgencyId: "agency-1",
+      amoSyncAttempts: 0,
+      amoSyncError: null,
+      amoSyncStatus: "PENDING",
+      phone,
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker,
+      responsibleBroker: null,
+    });
+    const first = candidate("client-same-phone-a", "+79990000076");
+    const second = candidate("client-same-phone-b", "8 (999) 000-00-76");
+    const {
+      service,
+      createFixationRequest,
+      checkUniqueness,
+      fixationPhoneLock,
+    } = createService([first, second]);
+
+    await service.handleAmoFailedRetry();
+
+    expect(fixationPhoneLock.tryAcquireLease).toHaveBeenCalledTimes(1);
+    expect(checkUniqueness).toHaveBeenCalledTimes(1);
+    expect(createFixationRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks a stale RULE_3 retry when a local same-phone lead is not reflected by amo", async () => {
+    const candidate = {
+      id: "client-stale-rule-3",
+      fixationAgencyId: "agency-1",
+      amoSyncAttempts: 1,
+      amoSyncError: null,
+      amoSyncStatus: "PENDING",
+      phone: "+79990000077",
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker: {
+        id: "broker-stale-rule-3",
+        fullName: "Broker",
+        phone: "+79990000078",
+        email: null,
+        amoContactId: BigInt(278),
+      },
+      responsibleBroker: null,
+    };
+    const {
+      service,
+      prisma,
+      createFixationRequest,
+      checkUniqueness,
+      phoneLease,
+    } = createService(candidate);
+    checkUniqueness.mockResolvedValueOnce({
+      rule: "RULE_3",
+      verdict: "UNIQUE",
+      reason: "Only an old closed lead is visible",
+      leads: [{ id: 7077, pipeline_id: 7600542, status_id: 143 }],
+    });
+    prisma.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: "newly-linked-sibling" }]);
+
+    await service.handleAmoFailedRetry();
+
+    expect(createFixationRequest).not.toHaveBeenCalled();
+    expect(prisma.client.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: candidate.id }),
+      data: expect.objectContaining({
+        amoSyncError: "AMO_UNIQUENESS_RECHECK_REQUIRED:SAME_PHONE_LINKED",
+      }),
+    });
+    expect(phoneLease.release).toHaveBeenCalledTimes(1);
   });
 
   it("alerts on a MoreKIT result failure without rolling back a successful amo retry", async () => {
@@ -637,6 +808,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       verdict: "ALARM",
       reason: "Manual review required",
       triggerLeadId: 7002,
+      leads: [{ id: 7002, pipeline_id: 7600550, status_id: 62907430 }],
     });
 
     await service.handleAmoFailedRetry();
@@ -689,6 +861,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       verdict: "ALARM",
       reason: "Manual review required",
       triggerLeadId: 7003,
+      leads: [{ id: 7003, pipeline_id: 7600550, status_id: 62907430 }],
     });
     createFixationRequest.mockRejectedValueOnce(
       new Error("amoCRM did not return a lead id"),
@@ -793,12 +966,18 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
         amoContactId: null,
       },
     };
-    const { service, prisma, opsAlerts, createFixationRequest } =
-      createService(candidate);
+    const {
+      service,
+      prisma,
+      opsAlerts,
+      createFixationRequest,
+      phoneLease,
+    } = createService(candidate);
 
     await service.handleAmoFailedRetry();
 
     expect(createFixationRequest).not.toHaveBeenCalled();
+    expect(phoneLease.release).toHaveBeenCalledTimes(1);
     expect(prisma.client.update).toHaveBeenCalledWith({
       where: { id: candidate.id },
       data: expect.objectContaining({
@@ -1102,6 +1281,7 @@ describe("SchedulerService operations health alerts", () => {
     const service = new SchedulerService(
       prisma as any,
       notificationQueue as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,

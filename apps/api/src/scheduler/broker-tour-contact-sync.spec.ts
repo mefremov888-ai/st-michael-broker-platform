@@ -44,6 +44,7 @@ describe("SchedulerService.handleBrokerTourContactSync", () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
     const contacts = new Map<number, any>([
       [

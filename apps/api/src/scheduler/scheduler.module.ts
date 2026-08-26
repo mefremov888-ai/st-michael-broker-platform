@@ -7,6 +7,7 @@ import { CatalogModule } from '../catalog/catalog.module';
 import { AdminModule } from '../admin/admin.module';
 import { AmocrmModule } from '../amocrm/amocrm.module';
 import { CmsModule } from '../cms/cms.module';
+import { AmoFixationPhoneLockModule } from '../common/amo-fixation-phone-lock.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CmsModule } from '../cms/cms.module';
     AmocrmModule,
     // 2026-08-12: CmsService нужен для syncNewsFromStm в handleStmNewsSync.
     CmsModule,
+    AmoFixationPhoneLockModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
   providers: [SchedulerService],

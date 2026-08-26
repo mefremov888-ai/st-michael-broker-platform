@@ -130,6 +130,48 @@ export function isClosedLostStatus(statusId: number): boolean {
 }
 
 /**
+ * A new/renamed active stage must not silently fall through to RULE_3. Closed
+ * terminal ids remain global amoCRM ids; active stages must belong to one of
+ * the explicitly modelled client pipelines.
+ */
+export function isKnownUniquenessLeadStage(
+  pipelineId: number,
+  statusId: number,
+): boolean {
+  if (isClosedLostStatus(statusId)) return true;
+  const statuses =
+    pipelineId === AMO_PIPELINES.KC
+      ? Object.values(AMO_KC_STATUS)
+      : pipelineId === AMO_PIPELINES.BERZARINA
+        ? Object.values(AMO_BERZARINA_STATUS)
+        : pipelineId === AMO_PIPELINES.ZORGE9
+          ? Object.values(AMO_ZORGE_STATUS)
+          : pipelineId === AMO_PIPELINES.TOLBUKHINA
+            ? Object.values(AMO_TOLBUKHINA_STATUS)
+            : [];
+  return (statuses as number[]).includes(statusId);
+}
+
+/** Every active stage must map to an explicit uniqueness outcome. */
+export function isClassifiedUniquenessLeadStage(
+  pipelineId: number,
+  statusId: number,
+): boolean {
+  if (isClosedLostStatus(statusId)) return true;
+  if (isSalesPipeline(pipelineId)) {
+    return (
+      isSalesMeetingScheduledStatus(pipelineId, statusId) ||
+      isSalesExceptionStatus(pipelineId, statusId) ||
+      isSalesDealStatus(pipelineId, statusId)
+    );
+  }
+  return (
+    isFixationRule1Lead(pipelineId, statusId) ||
+    isFixationRule2Lead(pipelineId, statusId)
+  );
+}
+
+/**
  * 2026-06-15: лид в воронке продаж — Зорге9 / Берзарина / Толбухина.
  * После решения пользователя broker-platform НЕ трогает sales-pipeline
  * лиды никак: не attach контактов, не note-ы, не задачи, не статусы.

@@ -4,41 +4,16 @@ import {
   Logger,
   ServiceUnavailableException,
 } from "@nestjs/common";
-import { InjectQueue } from "@nestjs/bull";
-import type { Queue } from "bull";
 import { createHash, randomUUID } from "node:crypto";
+import { amoFixationPhoneLockFingerprint } from "@st-michael/integrations";
+import {
+  AMO_FIXATION_PHONE_LOCK_TTL_MS,
+  AmoFixationPhoneLockService,
+} from "../common/amo-fixation-phone-lock.service";
 
-const PROCESSING_TTL_MS = 10 * 60_000;
+const PROCESSING_TTL_MS = AMO_FIXATION_PHONE_LOCK_TTL_MS;
 const COMPLETED_TTL_MS = 5 * 60_000;
 const LEASE_RENEW_INTERVAL_MS = 30_000;
-
-const COMPARE_OWNER_SET_SCRIPT = [
-  "-- client-fixation:compare-owner-set",
-  "local raw = redis.call('GET', KEYS[1])",
-  "if not raw then return 0 end",
-  "local ok, current = pcall(cjson.decode, raw)",
-  "if not ok or current.owner ~= ARGV[1] then return 0 end",
-  "redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])",
-  "return 1",
-].join("\n");
-
-const COMPARE_OWNER_DELETE_SCRIPT = [
-  "-- client-fixation:compare-owner-delete",
-  "local raw = redis.call('GET', KEYS[1])",
-  "if not raw then return 0 end",
-  "local ok, current = pcall(cjson.decode, raw)",
-  "if not ok or current.owner ~= ARGV[1] then return 0 end",
-  "return redis.call('DEL', KEYS[1])",
-].join("\n");
-
-const COMPARE_OWNER_RENEW_SCRIPT = [
-  "-- client-fixation:compare-owner-renew",
-  "local raw = redis.call('GET', KEYS[1])",
-  "if not raw then return 0 end",
-  "local ok, current = pcall(cjson.decode, raw)",
-  "if not ok or current.owner ~= ARGV[1] then return 0 end",
-  "return redis.call('PEXPIRE', KEYS[1], ARGV[2])",
-].join("\n");
 
 type StoredFixation<T = unknown> = {
   fingerprint: string;
@@ -51,6 +26,11 @@ export interface GuardedClientFixation {
   actorId: string;
   payload: unknown;
   idempotencyKey?: string;
+}
+
+export interface ClientFixationLeaseContext {
+  /** Proves Redis ownership immediately before the one-shot amo write. */
+  assertOwned(): Promise<void>;
 }
 
 function stableJson(value: unknown): string {
@@ -95,9 +75,7 @@ export function clientFixationSemanticFingerprint(payload: unknown): string {
   }
 
   const parsed = payload as Record<string, unknown>;
-  return clientFixationFingerprint({
-    phone: typeof parsed.phone === "string" ? parsed.phone.trim() : parsed.phone,
-  });
+  return amoFixationPhoneLockFingerprint(parsed.phone);
 }
 
 /**
@@ -114,23 +92,20 @@ export function clientFixationSemanticFingerprint(payload: unknown): string {
 export class ClientFixationSafetyService {
   private readonly logger = new Logger(ClientFixationSafetyService.name);
 
-  constructor(
-    @InjectQueue("client-fixation-safety") private readonly queue: Queue,
-  ) {}
+  constructor(private readonly phoneLock: AmoFixationPhoneLockService) {}
 
   async execute<T>(
     request: GuardedClientFixation,
-    action: () => Promise<T>,
+    action: (lease: ClientFixationLeaseContext) => Promise<T>,
   ): Promise<T> {
-    const redis = this.queue.client as any;
+    const redis = this.phoneLock.redisClient;
     const fingerprint = clientFixationFingerprint({
       actorId: request.actorId,
       payload: request.payload,
     });
-    const semanticFingerprint = clientFixationSemanticFingerprint(
-      request.payload,
+    const semanticKey = this.phoneLock.key(
+      (request.payload as Record<string, unknown>)?.phone,
     );
-    const semanticKey = `client-fixation:semantic:${semanticFingerprint}`;
     const idempotencyKey = request.idempotencyKey?.trim();
     const replayKey = idempotencyKey
       ? `client-fixation:idempotency:${request.actorId}:${idempotencyKey}`
@@ -170,7 +145,7 @@ export class ClientFixationSafetyService {
         ownsReplay = true;
       }
 
-      const existingSemantic = await redis.get(semanticKey);
+      const existingSemantic = await this.phoneLock.readKey(semanticKey);
       if (existingSemantic) {
         const stored = this.parseStored<T>(existingSemantic, fingerprint);
         if (stored.status === "completed") {
@@ -192,15 +167,13 @@ export class ClientFixationSafetyService {
         throw this.processingConflict(stored.status);
       }
 
-      const acquiredSemantic = await redis.set(
+      const acquiredSemantic = await this.phoneLock.tryAcquireKey(
         semanticKey,
         processing,
-        "PX",
         PROCESSING_TTL_MS,
-        "NX",
       );
-      if (acquiredSemantic !== "OK") {
-        const racedSemantic = await redis.get(semanticKey);
+      if (!acquiredSemantic) {
+        const racedSemantic = await this.phoneLock.readKey(semanticKey);
         if (racedSemantic) {
           const stored = this.parseStored<T>(racedSemantic, fingerprint);
           if (stored.status === "completed") {
@@ -241,7 +214,7 @@ export class ClientFixationSafetyService {
       owner,
     );
     try {
-      const result = await action();
+      const result = await action({ assertOwned: lease.assertOwned });
       await lease.stop();
       if (lease.hasLostOwnership()) {
         throw new ConflictException(
@@ -400,6 +373,7 @@ export class ClientFixationSafetyService {
     owner: string,
   ): {
     hasLostOwnership: () => boolean;
+    assertOwned: () => Promise<void>;
     stop: () => Promise<void>;
   } {
     let stopped = false;
@@ -430,6 +404,16 @@ export class ClientFixationSafetyService {
     timer.unref?.();
     return {
       hasLostOwnership: () => lostOwnership,
+      assertOwned: async () => {
+        inFlight = inFlight.then(renew, renew);
+        await inFlight;
+        if (stopped || lostOwnership) {
+          lostOwnership = true;
+          throw new ConflictException(
+            "CLIENT_FIXATION_PHONE_LOCK_LOST",
+          );
+        }
+      },
       stop: async () => {
         stopped = true;
         clearInterval(timer);
@@ -439,51 +423,30 @@ export class ClientFixationSafetyService {
   }
 
   private async compareOwnerSet(
-    redis: any,
+    _redis: any,
     key: string,
     owner: string,
     value: string,
     ttlMs: number,
   ): Promise<boolean> {
-    return (
-      Number(
-        await redis.eval(
-          COMPARE_OWNER_SET_SCRIPT,
-          1,
-          key,
-          owner,
-          value,
-          String(ttlMs),
-        ),
-      ) === 1
-    );
+    return this.phoneLock.replaceOwnedKey(key, owner, value, ttlMs);
   }
 
   private async renewOwned(
-    redis: any,
+    _redis: any,
     key: string,
     owner: string,
   ): Promise<boolean> {
-    return (
-      Number(
-        await redis.eval(
-          COMPARE_OWNER_RENEW_SCRIPT,
-          1,
-          key,
-          owner,
-          String(PROCESSING_TTL_MS),
-        ),
-      ) === 1
-    );
+    return this.phoneLock.renewOwnedKey(key, owner, PROCESSING_TTL_MS);
   }
 
   private async releaseOwned(
-    redis: any,
+    _redis: any,
     key: string,
     owner: string,
   ): Promise<void> {
     try {
-      await redis.eval(COMPARE_OWNER_DELETE_SCRIPT, 1, key, owner);
+      await this.phoneLock.releaseOwnedKey(key, owner);
     } catch (error: any) {
       this.logger.error(
         `Failed to release client fixation guard: ${error?.message || error}`,
