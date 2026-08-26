@@ -744,6 +744,85 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 
+  it("durably blocks a second create after an unresolved one-shot POST", async () => {
+    const source = broker({ id: "uncertain-create", phone: "+79990000009" });
+    const row = queueRow("q-uncertain-create", source);
+    const record = {
+      broker: source,
+      queueRows: [row],
+      phones: [source.phone],
+      candidateContactId: null,
+      resolution: "create_contact_candidate",
+      brokerSourceSnapshot: provisioner.brokerSourceSnapshot(source, inspector),
+      queueSnapshot: provisioner.queueSnapshot([row]),
+    };
+    let marker: string | null = null;
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: source.id }]),
+      broker: {
+        findUnique: jest.fn().mockResolvedValue(source),
+        findMany: jest.fn().mockResolvedValue([source]),
+        update: jest.fn().mockResolvedValue(source),
+        updateMany: jest.fn(),
+      },
+      client: { findMany: jest.fn().mockResolvedValue([directQueue(row)]) },
+      auditLog: {
+        findFirst: jest.fn(async () => (marker ? { action: marker } : null)),
+        create: jest.fn(async ({ data }: any) => {
+          marker = data.action;
+          return data;
+        }),
+      },
+    };
+    const prisma = {
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
+    };
+    const requestGet = jest.fn().mockResolvedValue(contactsPage([]));
+    const mutateOnce = jest.fn().mockResolvedValue({
+      accepted: false,
+      uncertain: true,
+      responseContactId: null,
+    });
+
+    await expect(
+      provisioner.provisionAndLinkBrokerContact({
+        prisma,
+        record,
+        requestGet,
+        mutateOnce,
+        planModule: inspector,
+        sourceSha,
+        reviewedPlanRunId: "39947094767",
+        sleepImpl: jest.fn(),
+        requestIdFactory: () => requestId,
+      }),
+    ).rejects.toMatchObject({ code: "AMO_CREATE_RECONCILIATION_REQUIRED" });
+    expect(mutateOnce).toHaveBeenCalledTimes(1);
+    expect(requestGet).toHaveBeenCalledTimes(7);
+    expect(marker).toBe(provisioner.AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION);
+    expect(tx.broker.update).toHaveBeenCalledTimes(1);
+    expect(tx.broker.updateMany).not.toHaveBeenCalled();
+    expect(tx.client).not.toHaveProperty("update");
+
+    requestGet.mockClear();
+    mutateOnce.mockClear();
+    await expect(
+      provisioner.provisionAndLinkBrokerContact({
+        prisma,
+        record,
+        requestGet,
+        mutateOnce,
+        planModule: inspector,
+        sourceSha,
+        reviewedPlanRunId: "39947094767",
+        sleepImpl: jest.fn(),
+        requestIdFactory: () => requestId,
+      }),
+    ).rejects.toMatchObject({ code: "AMO_CREATE_UNCERTAIN_MARKER_PRESENT" });
+    expect(mutateOnce).not.toHaveBeenCalled();
+    expect(requestGet).not.toHaveBeenCalled();
+  });
+
   it("classifies database uniqueness and serialization failures without details", () => {
     expect(provisioner.safeFailureCode({ code: "P2002", meta: "PII" })).toBe(
       "DATABASE_UNIQUE_CONSTRAINT",

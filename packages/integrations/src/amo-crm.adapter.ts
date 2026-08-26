@@ -800,6 +800,30 @@ export class AmoCrmAdapter {
     });
   }
 
+  /**
+   * Broker promotion is a one-shot mutation. A timeout/401/429/5xx must be
+   * reconciled by an exact GET at the service layer and must never replay the
+   * PATCH, even though the generic updateContact remains retryable for its
+   * existing idempotent callers.
+   */
+  async promoteContactToBroker(id: number): Promise<void> {
+    await this.request(
+      `/contacts/${id}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          custom_fields_values: [
+            {
+              field_id: AMO_CONTACT_FIELDS.IS_BROKER,
+              values: [{ value: true }],
+            },
+          ],
+        }),
+      },
+      { retryTransient: false },
+    );
+  }
+
   // Добавить примечание к лиду в amoCRM. Используется для уведомления
   // менеджеров о действиях брокера (создал встречу, оператор зафиксировал
   // звонок и т.д.) — пока не настроены полноценные custom_fields.

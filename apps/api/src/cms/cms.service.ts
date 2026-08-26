@@ -2,7 +2,7 @@ import { Injectable, Inject, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import { AmoCrmAdapter, MorekitAdapter, morekitPhone, morekitLeadDate } from '@st-michael/integrations';
 import { getSystemSetting } from '../common/system-setting';
-import { acquireAmoBrokerContactAdvisoryXactLock, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate, recordUncertainAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
+import { acquireAmoBrokerContactAdvisoryXactLock, hasUnresolvedAmoBrokerContactCreate, isAmoBrokerContact, isDefinitiveAmoContactCreateRejection, normalizeAmoBrokerContactLockPhone, reconcileExactAmoBrokerContact, recordResolvedAmoBrokerContactCreate, recordUncertainAmoBrokerContactCreate } from '../common/amo-broker-contact-lock';
 import { COMMISSION_RATES, LEVEL_THRESHOLDS_BY_PROJECT, paymentTermsForPolicy, rateFor } from '../commission/commission.service';
 
 const KNOWN_KEYS = ['hero', 'advantages', 'commission', 'contact', 'howto', 'projectsSection', 'cooperation'] as const;
@@ -655,9 +655,15 @@ export class CmsService {
           await acquireAmoBrokerContactAdvisoryXactLock(tx, created.id, phone);
           const lockedBroker = await tx.broker.findUnique({
             where: { id: created.id },
-            select: { amoContactId: true },
+            select: { amoContactId: true, phone: true, mergedIntoId: true },
           });
           if (!lockedBroker) throw new Error('AMO_BROKER_CONTACT_LOCK_BROKER_MISSING');
+          if (
+            lockedBroker.mergedIntoId ||
+            normalizeAmoBrokerContactLockPhone(lockedBroker.phone) !== normalizeAmoBrokerContactLockPhone(phone)
+          ) {
+            throw new Error('AMO_BROKER_CONTACT_LOCK_PHONE_DRIFT');
+          }
           if (lockedBroker.amoContactId) return Number(lockedBroker.amoContactId);
           const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(tx, created.id);
 
@@ -666,9 +672,7 @@ export class CmsService {
           });
           if (contact) {
             if (!isAmoBrokerContact(contact)) {
-              await this.amo.updateContact(contact.id, {
-                custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
-              });
+              await this.amo.promoteContactToBroker(contact.id);
               contact = await reconcileExactAmoBrokerContact({
                 expectedContactId: Number(contact.id),
                 lookup: () =>

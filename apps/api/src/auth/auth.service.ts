@@ -1005,9 +1005,7 @@ export class AuthService {
             } else {
               // Promote the exact existing contact without overwriting fields
               // owned by another amoCRM workflow.
-              await this.amo.updateContact(existing.id, {
-                custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
-              });
+              await this.amo.promoteContactToBroker(existing.id);
               existing = await reconcileExactAmoBrokerContact({
                 expectedContactId: Number(existing.id),
                 lookup: () =>

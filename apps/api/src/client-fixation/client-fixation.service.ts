@@ -1202,9 +1202,7 @@ export class ClientFixationService {
               }
             } else {
               // Preserve all existing amoCRM-owned data on promotion.
-              await this.amoCrmAdapter.updateContact(amoContact.id, {
-                custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
-              });
+            await this.amoCrmAdapter.promoteContactToBroker(amoContact.id);
             }
             if (!wasBrokerContact) {
               amoContact = await reconcileExactAmoBrokerContact({

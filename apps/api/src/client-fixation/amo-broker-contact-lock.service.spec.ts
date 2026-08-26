@@ -54,6 +54,7 @@ describe("shared amo broker-contact advisory lock", () => {
       findContactByPhone: jest.fn(),
       createContact: jest.fn(),
       updateContact: jest.fn(),
+      promoteContactToBroker: jest.fn(),
     };
     (service as any).amo = amo;
     return { service, prisma, amo, fullBroker };
@@ -129,15 +130,14 @@ describe("shared amo broker-contact advisory lock", () => {
         id: 2103,
         custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
       });
-    amo.updateContact.mockResolvedValue(undefined);
+    amo.promoteContactToBroker.mockResolvedValue(undefined);
 
     await service.syncBrokerProfileToAmo(fullBroker.id);
 
     expect(amo.createContact).not.toHaveBeenCalled();
-    expect(amo.updateContact).toHaveBeenCalledTimes(1);
-    expect(amo.updateContact).toHaveBeenCalledWith(2103, {
-      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
-    });
+    expect(amo.updateContact).not.toHaveBeenCalled();
+    expect(amo.promoteContactToBroker).toHaveBeenCalledTimes(1);
+    expect(amo.promoteContactToBroker).toHaveBeenCalledWith(2103);
     expect(amo.findContactByPhone).toHaveBeenCalledTimes(2);
     expect(prisma.broker.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { amoContactId: BigInt(2103) } }),
@@ -235,9 +235,11 @@ describe("shared amo broker-contact advisory lock", () => {
       email: null,
     };
     const prisma = transactionPrisma();
-    prisma.broker.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ amoContactId: null });
+    prisma.broker.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      amoContactId: null,
+      phone: created.phone,
+      mergedIntoId: null,
+    });
     prisma.broker.create.mockResolvedValue(created);
     const service = new CmsService(prisma);
     const amo = {
@@ -252,6 +254,7 @@ describe("shared amo broker-contact advisory lock", () => {
         }),
       createContact: jest.fn().mockResolvedValue({ id: 3101 }),
       updateContact: jest.fn().mockResolvedValue(undefined),
+      promoteContactToBroker: jest.fn().mockResolvedValue(undefined),
       createBrokerLeadFromLanding: jest
         .fn()
         .mockResolvedValue({ contactId: 3101, leadId: 4101 }),
@@ -292,6 +295,57 @@ describe("shared amo broker-contact advisory lock", () => {
     });
   });
 
+  it("CMS fails closed when the broker phone changes after lock-key capture", async () => {
+    const created = {
+      id: "cms-phone-drift",
+      fullName: "CMS Phone Drift",
+      phone: "+79990000034",
+      email: null,
+    };
+    const prisma = transactionPrisma();
+    prisma.broker.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      amoContactId: null,
+      phone: "+79990000999",
+      mergedIntoId: null,
+    });
+    prisma.broker.create.mockResolvedValue(created);
+    const service = new CmsService(prisma);
+    const amo = {
+      findContactByPhone: jest.fn(),
+      createContact: jest.fn(),
+      updateContact: jest.fn(),
+      promoteContactToBroker: jest.fn(),
+      createBrokerLeadFromLanding: jest.fn(),
+    };
+    (service as any).amo = amo;
+    const consoleError = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        (service as any).upsertBrokerFromLandingLead({
+          fullName: created.fullName,
+          phone: created.phone,
+          email: null,
+          note: null,
+          source: "broker-tour",
+        }),
+      ).resolves.toBe(created.id);
+      expect(amo.findContactByPhone).not.toHaveBeenCalled();
+      expect(amo.createContact).not.toHaveBeenCalled();
+      expect(amo.promoteContactToBroker).not.toHaveBeenCalled();
+      expect(amo.createBrokerLeadFromLanding).not.toHaveBeenCalled();
+      expect(prisma.broker.updateMany).not.toHaveBeenCalled();
+      expect(consoleError).toHaveBeenCalledWith(
+        "[upsertBrokerFromLandingLead] amo create failed:",
+        "AMO_BROKER_CONTACT_LOCK_PHONE_DRIFT",
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("CMS resolves a lost contact POST by strict GET and never posts twice", async () => {
     const created = {
       id: "cms-lost-response",
@@ -300,9 +354,11 @@ describe("shared amo broker-contact advisory lock", () => {
       email: null,
     };
     const prisma = transactionPrisma();
-    prisma.broker.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ amoContactId: null });
+    prisma.broker.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      amoContactId: null,
+      phone: created.phone,
+      mergedIntoId: null,
+    });
     prisma.broker.create.mockResolvedValue(created);
     const service = new CmsService(prisma);
     const amo = {
@@ -317,6 +373,7 @@ describe("shared amo broker-contact advisory lock", () => {
         }),
       createContact: jest.fn().mockRejectedValue(new Error("lost response")),
       updateContact: jest.fn().mockResolvedValue(undefined),
+      promoteContactToBroker: jest.fn().mockResolvedValue(undefined),
       createBrokerLeadFromLanding: jest
         .fn()
         .mockResolvedValue({ contactId: 3102, leadId: 4102 }),
@@ -349,9 +406,11 @@ describe("shared amo broker-contact advisory lock", () => {
       email: null,
     };
     const prisma = transactionPrisma();
-    prisma.broker.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ amoContactId: null });
+    prisma.broker.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      amoContactId: null,
+      phone: created.phone,
+      mergedIntoId: null,
+    });
     prisma.broker.create.mockResolvedValue(created);
     const service = new CmsService(prisma);
     const amo = {
@@ -371,6 +430,7 @@ describe("shared amo broker-contact advisory lock", () => {
         }),
       createContact: jest.fn(),
       updateContact: jest.fn().mockResolvedValue(undefined),
+      promoteContactToBroker: jest.fn().mockResolvedValue(undefined),
       createBrokerLeadFromLanding: jest
         .fn()
         .mockResolvedValue({ contactId: 3103, leadId: 4103 }),
@@ -386,9 +446,8 @@ describe("shared amo broker-contact advisory lock", () => {
     });
 
     expect(amo.createContact).not.toHaveBeenCalled();
-    expect(amo.updateContact).toHaveBeenCalledWith(3103, {
-      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
-    });
+    expect(amo.updateContact).not.toHaveBeenCalled();
+    expect(amo.promoteContactToBroker).toHaveBeenCalledWith(3103);
     expect(prisma.broker.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { amoContactId: BigInt(3103) } }),
     );

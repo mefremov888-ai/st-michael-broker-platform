@@ -46,6 +46,7 @@ describe("ClientFixationService amo broker attachment", () => {
     amo = {
       findContactByPhone: jest.fn(),
       updateContact: jest.fn().mockResolvedValue(undefined),
+      promoteContactToBroker: jest.fn().mockResolvedValue(undefined),
       createContact: jest.fn(),
       checkUniqueness: jest.fn(),
       createFixationRequest: jest.fn(),
@@ -409,10 +410,9 @@ describe("ClientFixationService amo broker attachment", () => {
     ).resolves.toEqual(expect.objectContaining({ amoContactId: BigInt(781) }));
 
     expect(amo.createContact).not.toHaveBeenCalled();
-    expect(amo.updateContact).toHaveBeenCalledTimes(1);
-    expect(amo.updateContact).toHaveBeenCalledWith(781, {
-      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
-    });
+    expect(amo.updateContact).not.toHaveBeenCalled();
+    expect(amo.promoteContactToBroker).toHaveBeenCalledTimes(1);
+    expect(amo.promoteContactToBroker).toHaveBeenCalledWith(781);
     expect(amo.findContactByPhone).toHaveBeenCalledTimes(2);
     expect(prisma.broker.updateMany).toHaveBeenCalledWith({
       where: {

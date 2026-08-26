@@ -38,6 +38,10 @@ const POST_MUTATION_RECONCILIATION_ATTEMPTS = 6;
 const HASH_DOMAIN = "st-michael:amo-broker-contact-provisioner:v1";
 const AMO_BROKER_CONTACT_LOCK_DOMAIN =
   "st-michael:amo-broker-contact-phone-lock:v2";
+const AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION =
+  "AMO_BROKER_CONTACT_CREATE_UNCERTAIN";
+const AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION =
+  "AMO_BROKER_CONTACT_CREATE_RESOLVED";
 const QUEUE_STATUSES = ["FAILED", "PENDING"];
 const ATTEMPT_LIMIT = 10;
 
@@ -1077,9 +1081,12 @@ function createOneShotMutationRequester(
     }
     if (!response?.ok) {
       clearTimeout(timeout);
+      const definitiveRejection = [400, 401, 403, 404, 422].includes(
+        Number(response?.status),
+      );
       return {
         accepted: false,
-        uncertain: false,
+        uncertain: !definitiveRejection,
         responseContactId: null,
       };
     }
@@ -1175,6 +1182,7 @@ async function provisionAmoContact({
   planModule,
   sleepImpl,
   requestIdFactory = () => `provision_${randomBytes(16).toString("hex")}`,
+  onCreateMutationOutcome = () => undefined,
 }) {
   const preLookups = await lookupPhones(record.phones, requestGet, planModule);
   const preContacts = collectExactContacts(record.phones, preLookups);
@@ -1201,6 +1209,10 @@ async function provisionAmoContact({
         request_id: requestId,
       },
     });
+    onCreateMutationOutcome(mutation);
+    if (!mutation?.accepted && !mutation?.uncertain) {
+      fail("AMO_CREATE_REJECTED");
+    }
     if (positiveInteger(mutation?.responseContactId)) {
       expectedContactId = positiveInteger(mutation.responseContactId);
     }
@@ -1214,6 +1226,79 @@ async function provisionAmoContact({
     planModule,
     sleepImpl,
   });
+}
+
+async function hasUnresolvedAmoBrokerContactCreate(database, brokerId) {
+  const latest = await database.auditLog.findFirst({
+    where: {
+      entity: "Broker",
+      entityId: brokerId,
+      action: {
+        in: [
+          AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+          AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION,
+        ],
+      },
+    },
+    select: { action: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  return latest?.action === AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION;
+}
+
+async function recordUncertainAmoBrokerContactCreate(
+  transaction,
+  brokerId,
+  sourceSha,
+  reviewedPlanRunId,
+) {
+  await transaction.auditLog.create({
+    data: {
+      userId: null,
+      action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+      entity: "Broker",
+      entityId: brokerId,
+      payload: {
+        source: "production_amo_broker_contact_provisioner",
+        sourceSha,
+        reviewedPlanRunId,
+        reason: "AMBIGUOUS_POST_RESULT",
+        automaticRetryBlocked: true,
+        clientsMutated: false,
+        retriesRun: false,
+      },
+    },
+  });
+  await transaction.broker.update({
+    where: { id: brokerId },
+    data: { updatedAt: new Date() },
+  });
+}
+
+async function recordResolvedAmoBrokerContactCreate(transaction, brokerId) {
+  await transaction.auditLog.create({
+    data: {
+      userId: null,
+      action: AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION,
+      entity: "Broker",
+      entityId: brokerId,
+      payload: {
+        source: "production_amo_broker_contact_provisioner",
+        automaticRetryBlocked: false,
+      },
+    },
+  });
+}
+
+async function assertNoUnresolvedCreateMarkers(database, records) {
+  for (const record of records) {
+    if (
+      record.resolution === "create_contact_candidate" &&
+      (await hasUnresolvedAmoBrokerContactCreate(database, record.broker.id))
+    ) {
+      fail("AMO_CREATE_UNCERTAIN_MARKER_PRESENT");
+    }
+  }
 }
 
 function directQueueRows(rows) {
@@ -1520,7 +1605,7 @@ async function provisionAndLinkBrokerContact({
   requestIdFactory,
 }) {
   const queueIds = record.queueRows.map((row) => row.id);
-  return prisma.$transaction(
+  const result = await prisma.$transaction(
     async (tx) => {
       activeFailurePhase = FAILURE_PHASE.PREFLIGHT;
       await acquireAmoBrokerContactAdvisoryXactLock(
@@ -1536,15 +1621,49 @@ async function provisionAndLinkBrokerContact({
         planModule,
       });
 
-      const contactId = await provisionAmoContact({
-        record,
-        broker: before.currentBroker,
-        requestGet,
-        mutateOnce,
-        planModule,
-        sleepImpl,
-        requestIdFactory,
-      });
+      const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(
+        tx,
+        record.broker.id,
+      );
+      if (
+        unresolvedCreate &&
+        record.resolution === "create_contact_candidate"
+      ) {
+        fail("AMO_CREATE_UNCERTAIN_MARKER_PRESENT");
+      }
+
+      let createMutationMayHaveCommitted = false;
+      let contactId;
+      try {
+        contactId = await provisionAmoContact({
+          record,
+          broker: before.currentBroker,
+          requestGet,
+          mutateOnce,
+          planModule,
+          sleepImpl,
+          requestIdFactory,
+          onCreateMutationOutcome: (mutation) => {
+            createMutationMayHaveCommitted = Boolean(
+              mutation?.accepted || mutation?.uncertain,
+            );
+          },
+        });
+      } catch (error) {
+        if (
+          record.resolution === "create_contact_candidate" &&
+          createMutationMayHaveCommitted
+        ) {
+          await recordUncertainAmoBrokerContactCreate(
+            tx,
+            record.broker.id,
+            sourceSha,
+            reviewedPlanRunId,
+          );
+          return { unresolvedCreate: true };
+        }
+        throw error;
+      }
 
       activeFailurePhase = FAILURE_PHASE.DATABASE_CAS;
       const [currentBroker, currentQueueRows, allBrokers] = await Promise.all([
@@ -1598,6 +1717,9 @@ async function provisionAndLinkBrokerContact({
           },
         },
       });
+      if (unresolvedCreate) {
+        await recordResolvedAmoBrokerContactCreate(tx, record.broker.id);
+      }
       return contactId;
     },
     {
@@ -1606,6 +1728,10 @@ async function provisionAndLinkBrokerContact({
       timeout: TRANSACTION_TIMEOUT_MS,
     },
   );
+  if (result && typeof result === "object" && result.unresolvedCreate) {
+    fail("AMO_CREATE_RECONCILIATION_REQUIRED");
+  }
+  return result;
 }
 
 async function loadProductionState(prisma) {
@@ -1704,6 +1830,7 @@ async function main() {
     assertReviewedRunManifest(actualManifest);
     assertReviewedRunCeilings(actualManifest);
     assertExecutablePlan(records, planModule);
+    await assertNoUnresolvedCreateMarkers(prisma, records);
 
     // Recheck every group before the first mutation so a stale source row,
     // queue drift or amo ambiguity stops the whole run before partial apply.
@@ -1815,6 +1942,8 @@ async function main() {
 module.exports = {
   ACTIONABLE_RESOLUTIONS,
   AMO_BROKER_CONTACT_LOCK_DOMAIN,
+  AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION,
+  AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
   AMO_CONTACT_FIELDS,
   BLOCKED_RESOLUTIONS,
   BROKER_OWNER_SELECT,
@@ -1829,6 +1958,7 @@ module.exports = {
   acquireAmoBrokerContactAdvisoryXactLock,
   amoBrokerContactAdvisoryLockKey,
   assertExpectedCohortAttestation,
+  assertNoUnresolvedCreateMarkers,
   assertAmoPrecondition,
   assertAlreadyLinkedRecord,
   assertCurrentDatabaseInvariants,
