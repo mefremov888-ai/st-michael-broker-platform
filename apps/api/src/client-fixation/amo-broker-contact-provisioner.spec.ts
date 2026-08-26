@@ -7,9 +7,13 @@ import { brokerToAmoContactFields } from "../../../../packages/integrations/src/
 import {
   AMO_BROKER_CONTACT_LOCK_DOMAIN,
   amoBrokerContactAdvisoryLockKey,
+  amoBrokerContactGateDigest,
 } from "../common/amo-broker-contact-lock";
 
 describe("production-safe amo broker-contact provisioner", () => {
+  process.env.BROKER_CONTACT_GATE_HMAC_KEY =
+    "test-explicit-broker-contact-gate-key-32-bytes";
+  delete process.env.BROKER_CONTACT_GATE_HMAC_KEY_FILE;
   const repositoryRoot = resolve(__dirname, "../../../..");
   const scriptPath = resolve(
     repositoryRoot,
@@ -40,6 +44,9 @@ describe("production-safe amo broker-contact provisioner", () => {
   }
 
   const provisioner = compileCommonJs(scriptPath, script);
+  provisioner.injectGateHmacKeyForTests(
+    "test-explicit-broker-contact-gate-key-32-bytes",
+  );
   const inspector = compileCommonJs(inspectorPath, inspectorScript);
 
   const isoDate = new Date("2026-08-26T00:00:00.000Z");
@@ -655,6 +662,32 @@ describe("production-safe amo broker-contact provisioner", () => {
     );
   });
 
+  it("uses exact runtime/apply HMAC parity without exposing the phone", () => {
+    const phone = "+79990000077";
+    const digest = provisioner.amoBrokerContactGateDigest(phone);
+    expect(digest).toBe(amoBrokerContactGateDigest(phone));
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(digest).not.toContain("79990000077");
+  });
+
+  it("requires a distinct second database backend before any amo work", async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue([{ pid: 101 }]) };
+    const prisma = {
+      $queryRaw: jest.fn().mockResolvedValue([{ pid: 202 }]),
+      $transaction: jest.fn(async (callback: any) => callback(tx)),
+    };
+    await expect(
+      provisioner.assertDatabasePoolSupportsDurableGate(prisma),
+    ).resolves.toBeUndefined();
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+
+    prisma.$queryRaw.mockResolvedValue([{ pid: 101 }]);
+    await expect(
+      provisioner.assertDatabasePoolSupportsDurableGate(prisma),
+    ).rejects.toMatchObject({ code: "DATABASE_POOL_CAPACITY_INSUFFICIENT" });
+  });
+
   it("links with Serializable CAS and audit in the same locked transaction without Client writes", async () => {
     const source = broker({ id: "link", phone: "+79990000001" });
     const row = queueRow("q-link", source);
@@ -814,7 +847,7 @@ describe("production-safe amo broker-contact provisioner", () => {
       brokerSourceSnapshot: provisioner.brokerSourceSnapshot(source, inspector),
       queueSnapshot: provisioner.queueSnapshot([row]),
     };
-    let marker: string | null = null;
+    const gateEvents: any[] = [];
     const tx = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: source.id }]),
       broker: {
@@ -827,14 +860,14 @@ describe("production-safe amo broker-contact provisioner", () => {
       auditLog: {
         // Deliberately stale long-transaction view: it can never observe the
         // externally committed phone gate.
-        findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(),
       },
     };
     const authoritativeAuditLog = {
-      findFirst: jest.fn(async () => (marker ? { action: marker } : null)),
+      findMany: jest.fn(async () => gateEvents),
       create: jest.fn(async ({ data }: any) => {
-        marker = data.action;
+        gateEvents.push(data);
         return data;
       }),
     };
@@ -867,7 +900,9 @@ describe("production-safe amo broker-contact provisioner", () => {
       authoritativeAuditLog.create.mock.invocationCallOrder[0],
     ).toBeLessThan(mutateOnce.mock.invocationCallOrder[0]);
     expect(requestGet).toHaveBeenCalledTimes(7);
-    expect(marker).toBe(provisioner.AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION);
+    expect(gateEvents[0].action).toBe(
+      provisioner.AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+    );
     expect(tx.broker.update).not.toHaveBeenCalled();
     expect(tx.broker.updateMany).not.toHaveBeenCalled();
     expect(tx.client).not.toHaveProperty("update");
@@ -888,7 +923,34 @@ describe("production-safe amo broker-contact provisioner", () => {
       }),
     ).rejects.toMatchObject({ code: "AMO_CREATE_UNCERTAIN_MARKER_PRESENT" });
     expect(mutateOnce).not.toHaveBeenCalled();
-    expect(requestGet).not.toHaveBeenCalled();
+    expect(requestGet).toHaveBeenCalledTimes(1);
+
+    requestGet
+      .mockClear()
+      .mockResolvedValue(contactsPage([amoContact(909, source.phone, true)]));
+    tx.broker.updateMany.mockResolvedValue({ count: 1 });
+    await expect(
+      provisioner.provisionAndLinkBrokerContact({
+        prisma,
+        record,
+        requestGet,
+        mutateOnce,
+        planModule: inspector,
+        sourceSha,
+        reviewedPlanRunId: "39947094767",
+        sleepImpl: jest.fn(),
+        requestIdFactory: () => requestId,
+      }),
+    ).resolves.toBe(909);
+    expect(mutateOnce).not.toHaveBeenCalled();
+    expect(gateEvents.at(-1)).toEqual(
+      expect.objectContaining({
+        action: provisioner.AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION,
+        payload: expect.objectContaining({
+          gateId: gateEvents[0].payload.gateId,
+        }),
+      }),
+    );
   });
 
   it("classifies database uniqueness and serialization failures without details", () => {
@@ -990,6 +1052,9 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(workflow).toContain("apply_sha=$(sha256sum");
     expect(workflow).toContain("inspector_sha=$(sha256sum");
     expect(workflow).toContain("secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY");
+    expect(workflow).toContain("secrets.BROKER_CONTACT_GATE_HMAC_KEY");
+    expect(workflow).toContain("BROKER_CONTACT_GATE_HMAC_KEY_FILE");
+    expect(workflow).toContain('test "$runtime_gate_hash" = "$file_gate_hash"');
     expect(workflow).toContain("PROVISION_EXPECTED_COHORT_DIGEST");
     expect(workflow).toContain("cohort-attestation.key");
     expect(workflow).toContain(

@@ -154,6 +154,7 @@ jobs:
           PROVISION_REVIEWED_PLAN_RUN_ID: ${{ inputs.reviewed_inspector_run_id }}
           PROVISION_EXPECTED_COHORT_DIGEST: ${{ inputs.expected_cohort_digest }}
           COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}
+          BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}
           EXPECTED_QUEUE_ROWS: ${{ inputs.expected_queue_rows }}
           EXPECTED_EFFECTIVE_BROKER_GROUPS: ${{ inputs.expected_effective_broker_groups }}
           EXPECTED_LINK_EXISTING_BROKER_CONTACT_GROUPS: ${{ inputs.link_existing_broker_contact_groups }}
@@ -186,6 +187,7 @@ jobs:
           [[ "$PROVISION_REVIEWED_PLAN_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]] || { echo "Reviewed inspector run ID is invalid"; exit 1; }
           [[ "$PROVISION_EXPECTED_COHORT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected cohort attestation digest is invalid"; exit 1; }
           test "$(printf '%s' "$COHORT_ATTESTATION_KEY" | wc -c)" -ge 32 || { echo "Cohort attestation secret is missing or invalid"; exit 1; }
+          test "$(printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" | wc -c)" -ge 32 || { echo "Broker contact gate secret is missing or invalid"; exit 1; }
           test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
           case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
           [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
@@ -275,13 +277,17 @@ jobs:
           known_hosts="$ssh_root/known_hosts"
           private_key="$ssh_root/deploy-key"
           attestation_key="$ssh_root/cohort-attestation.key"
-          trap 'rm -f -- "$known_hosts" "$private_key" "$attestation_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          gate_key="$ssh_root/broker-contact-gate.key"
+          trap 'rm -f -- "$known_hosts" "$private_key" "$attestation_key" "$gate_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
           umask 077
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
           printf '%s' "$COHORT_ATTESTATION_KEY" > "$attestation_key"
+          printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" > "$gate_key"
           unset COHORT_ATTESTATION_KEY
+          unset BROKER_CONTACT_GATE_HMAC_KEY
           chmod 600 "$private_key"
           chmod 600 "$attestation_key"
+          chmod 600 "$gate_key"
           timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
           chmod 600 "$known_hosts"
           mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
@@ -404,18 +410,27 @@ jobs:
             apply_script="$temp_root/apply-amo-broker-contact-provisioning.js"
             inspector_script="$temp_root/inspect-amo-broker-link-repair-plan.js"
             attestation_key_file="$temp_root/cohort-attestation.key"
+            gate_key_file="$temp_root/broker-contact-gate.key"
             cleanup() {
-              rm -f -- "$apply_script" "$inspector_script" "$attestation_key_file"
+              rm -f -- "$apply_script" "$inspector_script" "$attestation_key_file" "$gate_key_file"
               rmdir -- "$temp_root" 2>/dev/null || true
             }
             trap cleanup EXIT HUP INT TERM
             tar -xf - -C "$temp_root"
             set -- "$temp_root"/*
-            test "$#" -eq 3
+            test "$#" -eq 4
             test -f "$apply_script" -a ! -L "$apply_script"
             test -f "$inspector_script" -a ! -L "$inspector_script"
             test -f "$attestation_key_file" -a ! -L "$attestation_key_file"
+            test -f "$gate_key_file" -a ! -L "$gate_key_file"
             test "$(wc -c < "$attestation_key_file")" -ge 32
+            test "$(wc -c < "$gate_key_file")" -ge 32
+            runtime_gate_hash=$(printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" | sha256sum)
+            runtime_gate_hash=${runtime_gate_hash%% *}
+            file_gate_hash=$(sha256sum "$gate_key_file")
+            file_gate_hash=${file_gate_hash%% *}
+            test "$runtime_gate_hash" = "$file_gate_hash"
+            unset BROKER_CONTACT_GATE_HMAC_KEY runtime_gate_hash file_gate_hash
             actual_apply_sha=$(sha256sum "$apply_script")
             actual_apply_sha=${actual_apply_sha%% *}
             actual_inspector_sha=$(sha256sum "$inspector_script")
@@ -425,6 +440,7 @@ jobs:
 
             BROKER_CONTACT_PLAN_MODULE="$inspector_script" \
             BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file" \
+            BROKER_CONTACT_GATE_HMAC_KEY_FILE="$gate_key_file" \
             BROKER_CONTACT_INSPECTOR_SHA256="$expected_inspector_sha" \
             BROKER_CONTACT_DEPLOYED_GIT_SHA="$source_sha" \
             PROVISION_EXPECTED_COHORT_DIGEST="$expected_cohort_digest" \
@@ -438,7 +454,7 @@ jobs:
             tar -cf - -C scripts \
               apply-amo-broker-contact-provisioning.js \
               inspect-amo-broker-link-repair-plan.js \
-              -C "$ssh_root" cohort-attestation.key | base64 -w 0
+              -C "$ssh_root" cohort-attestation.key broker-contact-gate.key | base64 -w 0
             printf '\nPII_SAFE_AMO_BROKER_CONTACT_APPLY_BUNDLE\n'
           } | timeout --foreground 28m ssh -T -i "$private_key" -p "$SSH_PORT" \
             -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \

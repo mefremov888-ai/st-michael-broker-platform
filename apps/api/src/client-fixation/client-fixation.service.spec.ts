@@ -6,6 +6,8 @@ import {
 } from "../common/amo-sync-retry";
 
 describe("ClientFixationService amo broker attachment", () => {
+  process.env.BROKER_CONTACT_GATE_HMAC_KEY =
+    "test-explicit-broker-contact-gate-key-32-bytes";
   let prisma: any;
   let amo: any;
   let queue: any;
@@ -35,6 +37,7 @@ describe("ClientFixationService amo broker attachment", () => {
       },
       auditLog: {
         findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn().mockResolvedValue({}),
       },
       systemSetting: { findUnique: jest.fn().mockResolvedValue(null) },

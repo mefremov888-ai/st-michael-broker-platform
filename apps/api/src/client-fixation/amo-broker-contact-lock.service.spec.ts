@@ -5,10 +5,13 @@ import {
   AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
   amoBrokerContactAdvisoryLockKey,
   amoBrokerContactGateDigest,
+  getUnresolvedAmoBrokerContactCreateGate,
   reconcileExactAmoBrokerContact,
 } from "../common/amo-broker-contact-lock";
 
 describe("shared amo broker-contact advisory lock", () => {
+  process.env.BROKER_CONTACT_GATE_HMAC_KEY =
+    "test-explicit-broker-contact-gate-key-32-bytes";
   function transactionPrisma(overrides: Record<string, any> = {}) {
     const prisma: any = {
       broker: {
@@ -19,6 +22,7 @@ describe("shared amo broker-contact advisory lock", () => {
       },
       auditLog: {
         findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn().mockResolvedValue({}),
       },
       $queryRaw: jest.fn().mockResolvedValue([{ id: "locked-broker" }]),
@@ -30,6 +34,31 @@ describe("shared amo broker-contact advisory lock", () => {
     );
     return prisma;
   }
+
+  it("pairs gate resolutions by gateId regardless of event order or timestamps", async () => {
+    const gateA = "11111111-1111-4111-8111-111111111111";
+    const gateB = "22222222-2222-4222-8222-222222222222";
+    const phone = "+79990000020";
+    const event = (action: string, gateId: string) => ({
+      action,
+      payload: { gateVersion: 1, gateId },
+      createdAt: new Date(0),
+    });
+    const database = {
+      auditLog: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            event("AMO_BROKER_CONTACT_CREATE_RESOLVED", gateA),
+            event("AMO_BROKER_CONTACT_CREATE_UNCERTAIN", gateB),
+            event("AMO_BROKER_CONTACT_CREATE_UNCERTAIN", gateA),
+          ]),
+      },
+    };
+    await expect(
+      getUnresolvedAmoBrokerContactCreateGate(database, phone),
+    ).resolves.toBe(gateB);
+  });
 
   function authHarness() {
     const fullBroker = {
@@ -118,6 +147,34 @@ describe("shared amo broker-contact advisory lock", () => {
     );
   });
 
+  it("recovers crash-after-link by exact GET, sends zero POSTs and resolves the observed gate", async () => {
+    const { service, prisma, amo, fullBroker } = authHarness();
+    const gateId = "33333333-3333-4333-8333-333333333333";
+    fullBroker.amoContactId = BigInt(2199);
+    prisma.auditLog.findMany.mockResolvedValue([
+      {
+        action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+        payload: { gateVersion: 1, gateId },
+      },
+    ]);
+    amo.findContactByPhone.mockResolvedValue({
+      id: 2199,
+      custom_fields_values: [{ field_id: 835415, values: [{ value: true }] }],
+    });
+    amo.updateContact.mockResolvedValue(undefined);
+
+    await service.syncBrokerProfileToAmo(fullBroker.id);
+
+    expect(amo.createContact).not.toHaveBeenCalled();
+    expect(amo.findContactByPhone).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "AMO_BROKER_CONTACT_CREATE_RESOLVED",
+        payload: expect.objectContaining({ gateId }),
+      }),
+    });
+  });
+
   it("AuthService promotes one exact unflagged contact and reconciles before CAS", async () => {
     const { service, prisma, amo, fullBroker } = authHarness();
     amo.findContactByPhone
@@ -175,9 +232,11 @@ describe("shared amo broker-contact advisory lock", () => {
       expect(prisma.broker.update).not.toHaveBeenCalled();
       expect(prisma.broker.updateMany).not.toHaveBeenCalled();
 
-      prisma.auditLog.findFirst.mockResolvedValue({
-        action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
-      });
+      const armedEvent = prisma.auditLog.create.mock.calls.find(
+        ([call]: any[]) =>
+          call.data.action === AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
+      )?.[0].data;
+      prisma.auditLog.findMany.mockResolvedValue([armedEvent]);
       prisma.broker.findUnique.mockResolvedValue(fullBroker);
       amo.findContactByPhone.mockClear().mockResolvedValue(null);
       amo.createContact.mockClear();

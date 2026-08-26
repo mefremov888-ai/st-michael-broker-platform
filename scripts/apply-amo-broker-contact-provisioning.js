@@ -19,7 +19,12 @@
 
 "use strict";
 
-const { createHash, createHmac, randomBytes } = require("node:crypto");
+const {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+} = require("node:crypto");
 const { lstatSync, readFileSync } = require("node:fs");
 const { isAbsolute, resolve } = require("node:path");
 
@@ -45,6 +50,14 @@ const AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION =
 const AMO_BROKER_CONTACT_GATE_ENTITY = "AmoBrokerContactPhone";
 const AMO_BROKER_CONTACT_GATE_DIGEST_DOMAIN =
   "st-michael:amo-broker-contact-gate:v1";
+let injectedGateHmacKeyForTests = null;
+
+function injectGateHmacKeyForTests(value) {
+  if (process.env.NODE_ENV !== "test") fail("AMO_GATE_TEST_KEY_FORBIDDEN");
+  const key = Buffer.from(String(value || ""), "utf8");
+  if (key.length < 32) fail("AMO_GATE_HMAC_KEY_INVALID");
+  injectedGateHmacKeyForTests = key;
+}
 const QUEUE_STATUSES = ["FAILED", "PENDING"];
 const ATTEMPT_LIMIT = 10;
 
@@ -1234,17 +1247,12 @@ async function provisionAmoContact({
 }
 
 function amoBrokerContactGateDigest(phone) {
-  const keyFile = process.env.BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE;
-  const secret = keyFile
-    ? readFileSync(keyFile)
-    : Buffer.from(
-        process.env.BROKER_CONTACT_GATE_HMAC_KEY ||
-          process.env.JWT_SECRET ||
-          (process.env.NODE_ENV === "test"
-            ? "test-only-broker-contact-gate-key-32-bytes"
-            : ""),
-        "utf8",
-      );
+  const gateKeyFile = process.env.BROKER_CONTACT_GATE_HMAC_KEY_FILE;
+  const secret =
+    injectedGateHmacKeyForTests ||
+    (gateKeyFile
+      ? readFileSync(gateKeyFile)
+      : Buffer.from(process.env.BROKER_CONTACT_GATE_HMAC_KEY || "", "utf8"));
   if (secret.length < 32) fail("AMO_GATE_HMAC_KEY_INVALID");
   return createHmac("sha256", secret)
     .update(AMO_BROKER_CONTACT_GATE_DIGEST_DOMAIN, "utf8")
@@ -1254,7 +1262,7 @@ function amoBrokerContactGateDigest(phone) {
 }
 
 async function hasUnresolvedAmoBrokerContactCreate(database, phone) {
-  const latest = await database.auditLog.findFirst({
+  const events = await database.auditLog.findMany({
     where: {
       entity: AMO_BROKER_CONTACT_GATE_ENTITY,
       entityId: amoBrokerContactGateDigest(phone),
@@ -1265,10 +1273,21 @@ async function hasUnresolvedAmoBrokerContactCreate(database, phone) {
         ],
       },
     },
-    select: { action: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { action: true, payload: true },
   });
-  return latest?.action === AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION;
+  const armed = new Set();
+  const resolved = new Set();
+  for (const event of events) {
+    const gateId = String(event?.payload?.gateId || "");
+    if (!/^[0-9a-f-]{36}$/.test(gateId)) continue;
+    if (event.action === AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION)
+      armed.add(gateId);
+    if (event.action === AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION)
+      resolved.add(gateId);
+  }
+  const unresolved = [...armed].filter((gateId) => !resolved.has(gateId));
+  if (unresolved.length > 1) fail("AMO_CREATE_GATE_AMBIGUOUS");
+  return unresolved[0] || null;
 }
 
 async function armDurableAmoBrokerContactCreateGate(
@@ -1277,6 +1296,7 @@ async function armDurableAmoBrokerContactCreateGate(
   sourceSha,
   reviewedPlanRunId,
 ) {
+  const gateId = randomUUID();
   await database.auditLog.create({
     data: {
       userId: null,
@@ -1284,6 +1304,8 @@ async function armDurableAmoBrokerContactCreateGate(
       entity: AMO_BROKER_CONTACT_GATE_ENTITY,
       entityId: amoBrokerContactGateDigest(phone),
       payload: {
+        gateVersion: 1,
+        gateId,
         source: "production_amo_broker_contact_provisioner",
         sourceSha,
         reviewedPlanRunId,
@@ -1294,9 +1316,11 @@ async function armDurableAmoBrokerContactCreateGate(
       },
     },
   });
+  return gateId;
 }
 
-async function recordResolvedAmoBrokerContactCreate(database, phone) {
+async function recordResolvedAmoBrokerContactCreate(database, phone, gateId) {
+  if (!/^[0-9a-f-]{36}$/.test(gateId)) fail("AMO_CREATE_GATE_ID_INVALID");
   await database.auditLog.create({
     data: {
       userId: null,
@@ -1304,6 +1328,8 @@ async function recordResolvedAmoBrokerContactCreate(database, phone) {
       entity: AMO_BROKER_CONTACT_GATE_ENTITY,
       entityId: amoBrokerContactGateDigest(phone),
       payload: {
+        gateVersion: 1,
+        gateId,
         source: "production_amo_broker_contact_provisioner",
         automaticRetryBlocked: false,
       },
@@ -1626,7 +1652,8 @@ async function provisionAndLinkBrokerContact({
   requestIdFactory,
 }) {
   const queueIds = record.queueRows.map((row) => row.id);
-  let durableCreateGateArmed = false;
+  let durableCreateGateId = null;
+  let observedGateId = null;
   let result;
   try {
     result = await prisma.$transaction(
@@ -1647,35 +1674,50 @@ async function provisionAndLinkBrokerContact({
 
         // Read through a fresh autocommit snapshot after the advisory waiter has
         // acquired the phone lock. Never trust the long Serializable snapshot.
-        const unresolvedCreate = await hasUnresolvedAmoBrokerContactCreate(
+        observedGateId = await hasUnresolvedAmoBrokerContactCreate(
           prisma,
           before.currentBroker.phone,
         );
+        let contactId;
         if (
-          unresolvedCreate &&
+          observedGateId &&
           record.resolution === "create_contact_candidate"
         ) {
-          fail("AMO_CREATE_UNCERTAIN_MARKER_PRESENT");
+          const recoveryLookups = await lookupPhones(
+            record.phones,
+            requestGet,
+            planModule,
+          );
+          const recoveryContacts = collectExactContacts(
+            record.phones,
+            recoveryLookups,
+          );
+          if (
+            recoveryContacts.length !== 1 ||
+            !recoveryContacts[0].brokerFlag
+          ) {
+            fail("AMO_CREATE_UNCERTAIN_MARKER_PRESENT");
+          }
+          contactId = recoveryContacts[0].contactId;
+        } else {
+          contactId = await provisionAmoContact({
+            record,
+            broker: before.currentBroker,
+            requestGet,
+            mutateOnce,
+            planModule,
+            sleepImpl,
+            requestIdFactory,
+            beforeCreateMutation: async () => {
+              durableCreateGateId = await armDurableAmoBrokerContactCreateGate(
+                prisma,
+                before.currentBroker.phone,
+                sourceSha,
+                reviewedPlanRunId,
+              );
+            },
+          });
         }
-
-        const contactId = await provisionAmoContact({
-          record,
-          broker: before.currentBroker,
-          requestGet,
-          mutateOnce,
-          planModule,
-          sleepImpl,
-          requestIdFactory,
-          beforeCreateMutation: async () => {
-            await armDurableAmoBrokerContactCreateGate(
-              prisma,
-              before.currentBroker.phone,
-              sourceSha,
-              reviewedPlanRunId,
-            );
-            durableCreateGateArmed = true;
-          },
-        });
 
         activeFailurePhase = FAILURE_PHASE.DATABASE_CAS;
         const [currentBroker, currentQueueRows, allBrokers] = await Promise.all(
@@ -1740,16 +1782,76 @@ async function provisionAndLinkBrokerContact({
       },
     );
   } catch (error) {
-    if (durableCreateGateArmed && error?.code === "AMO_CREATE_REJECTED") {
-      await recordResolvedAmoBrokerContactCreate(prisma, record.broker.phone);
-      durableCreateGateArmed = false;
+    if (durableCreateGateId && error?.code === "AMO_CREATE_REJECTED") {
+      await recordResolvedAmoBrokerContactCreate(
+        prisma,
+        record.broker.phone,
+        durableCreateGateId,
+      );
+      durableCreateGateId = null;
     }
     throw error;
   }
-  if (durableCreateGateArmed) {
-    await recordResolvedAmoBrokerContactCreate(prisma, record.broker.phone);
+  const gateToResolve = durableCreateGateId || observedGateId;
+  if (gateToResolve) {
+    await recordResolvedAmoBrokerContactCreate(
+      prisma,
+      record.broker.phone,
+      gateToResolve,
+    );
   }
   return result;
+}
+
+async function reconcileAlreadyLinkedCreateGate({
+  prisma,
+  record,
+  requestGet,
+  planModule,
+}) {
+  let observedGateId = null;
+  await prisma.$transaction(
+    async (tx) => {
+      await acquireAmoBrokerContactAdvisoryXactLock(
+        tx,
+        record.broker.id,
+        record.broker.phone,
+      );
+      observedGateId = await hasUnresolvedAmoBrokerContactCreate(
+        prisma,
+        record.broker.phone,
+      );
+      if (!observedGateId) return;
+      const current = await tx.broker.findUnique({
+        where: { id: record.broker.id },
+        select: BROKER_PROVISION_SELECT,
+      });
+      const expectedId = positiveInteger(current?.amoContactId);
+      if (!expectedId || current?.mergedIntoId)
+        fail("ALREADY_LINKED_GATE_DB_DRIFT");
+      const lookups = await lookupPhones(record.phones, requestGet, planModule);
+      const contacts = collectExactContacts(record.phones, lookups);
+      if (
+        contacts.length !== 1 ||
+        contacts[0].contactId !== expectedId ||
+        !contacts[0].brokerFlag
+      ) {
+        fail("ALREADY_LINKED_GATE_AMO_NOT_CONFIRMED");
+      }
+    },
+    {
+      isolationLevel: "Serializable",
+      maxWait: LOCK_TIMEOUT_MS,
+      timeout: TRANSACTION_TIMEOUT_MS,
+    },
+  );
+  if (observedGateId) {
+    await recordResolvedAmoBrokerContactCreate(
+      prisma,
+      record.broker.phone,
+      observedGateId,
+    );
+  }
 }
 
 async function loadProductionState(prisma) {
@@ -1770,6 +1872,44 @@ async function loadProductionState(prisma) {
     orderBy: { id: "asc" },
   });
   return { queueRows, allBrokers };
+}
+
+async function assertDatabasePoolSupportsDurableGate(prisma) {
+  await prisma.$transaction(
+    async (tx) => {
+      const first = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;
+      let poolTimer;
+      let second;
+      try {
+        second = await Promise.race([
+          prisma.$queryRaw`SELECT pg_backend_pid() AS pid`,
+          new Promise((_, reject) => {
+            poolTimer = setTimeout(
+              () =>
+                reject(
+                  new ProvisioningFailure(
+                    "DATABASE_POOL_CAPACITY_INSUFFICIENT",
+                  ),
+                ),
+              5_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (poolTimer) clearTimeout(poolTimer);
+      }
+      const firstPid = Number(first?.[0]?.pid);
+      const secondPid = Number(second?.[0]?.pid);
+      if (
+        !positiveInteger(firstPid) ||
+        !positiveInteger(secondPid) ||
+        firstPid === secondPid
+      ) {
+        fail("DATABASE_POOL_CAPACITY_INSUFFICIENT");
+      }
+    },
+    { maxWait: 2_000, timeout: 8_000 },
+  );
 }
 
 async function main() {
@@ -1795,7 +1935,9 @@ async function main() {
 
   try {
     activeFailurePhase = FAILURE_PHASE.DATABASE;
+    amoBrokerContactGateDigest("+70000000000");
     await assertProductionDatabase(prisma);
+    await assertDatabasePoolSupportsDurableGate(prisma);
     const { queueRows, allBrokers } = await loadProductionState(prisma);
 
     activeFailurePhase = FAILURE_PHASE.ACCOUNT;
@@ -1848,7 +1990,8 @@ async function main() {
     assertReviewedRunManifest(actualManifest);
     assertReviewedRunCeilings(actualManifest);
     assertExecutablePlan(records, planModule);
-    await assertNoUnresolvedCreateMarkers(prisma, records);
+    // Open create gates are recovered later under the same phone lock through
+    // exact GET confirmation; they must not be blanket-rejected here.
 
     // Recheck every group before the first mutation so a stale source row,
     // queue drift or amo ambiguity stops the whole run before partial apply.
@@ -1868,10 +2011,27 @@ async function main() {
           requestGet,
           planModule,
         );
-        assertAmoPrecondition(
-          record,
-          collectExactContacts(record.phones, preflightLookups),
+        const preflightContacts = collectExactContacts(
+          record.phones,
+          preflightLookups,
         );
+        const recoveryGateId =
+          record.resolution === "create_contact_candidate"
+            ? await hasUnresolvedAmoBrokerContactCreate(
+                prisma,
+                record.broker.phone,
+              )
+            : null;
+        if (recoveryGateId) {
+          if (
+            preflightContacts.length > 1 ||
+            (preflightContacts.length === 1 && !preflightContacts[0].brokerFlag)
+          ) {
+            fail("AMO_CREATE_GATE_PREFLIGHT_AMBIGUOUS");
+          }
+        } else {
+          assertAmoPrecondition(record, preflightContacts);
+        }
       }
     }
 
@@ -1879,6 +2039,16 @@ async function main() {
       process.env.AMO_ACCESS_TOKEN,
       planModule,
     );
+    for (const record of records.filter(
+      (candidate) => candidate.resolution === "already_linked",
+    )) {
+      await reconcileAlreadyLinkedCreateGate({
+        prisma,
+        record,
+        requestGet,
+        planModule,
+      });
+    }
     const actionable = records
       .filter((record) => ACTIONABLE_RESOLUTIONS.has(record.resolution))
       .map((record) => ({
@@ -1981,6 +2151,7 @@ module.exports = {
   assertAmoPrecondition,
   assertAlreadyLinkedRecord,
   assertCurrentDatabaseInvariants,
+  assertDatabasePoolSupportsDurableGate,
   assertExactManifest,
   assertExecutablePlan,
   assertFinalPostcondition,
@@ -1996,6 +2167,7 @@ module.exports = {
   createOneShotMutationRequester,
   extractCreatedContactId,
   internalPlanManifest,
+  injectGateHmacKeyForTests,
   linkBrokerContactCas,
   loadPlanModule,
   normalizeAmoBrokerContactLockPhone,
@@ -2004,6 +2176,7 @@ module.exports = {
   promotionPayload,
   provisionAmoContact,
   provisionAndLinkBrokerContact,
+  reconcileAlreadyLinkedCreateGate,
   queueSnapshot,
   readExecutionGate,
   reconcileUniqueBrokerContact,

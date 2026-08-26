@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
 /**
  * Cross-process lock domain for broker-contact GET -> POST -> DB-link flows.
@@ -21,12 +21,7 @@ const AMO_BROKER_CONTACT_GATE_DIGEST_DOMAIN =
   "st-michael:amo-broker-contact-gate:v1";
 
 export function amoBrokerContactGateDigest(phone: unknown): string {
-  const secret =
-    process.env.BROKER_CONTACT_GATE_HMAC_KEY ||
-    process.env.JWT_SECRET ||
-    (process.env.NODE_ENV === "test"
-      ? "test-only-broker-contact-gate-key-32-bytes"
-      : "");
+  const secret = process.env.BROKER_CONTACT_GATE_HMAC_KEY || "";
   if (Buffer.byteLength(secret, "utf8") < 32) {
     throw new Error("AMO_BROKER_CONTACT_GATE_HMAC_KEY_INVALID");
   }
@@ -91,11 +86,11 @@ export async function reconcileExactAmoBrokerContact({
   return null;
 }
 
-export async function hasUnresolvedAmoBrokerContactCreate(
+export async function getUnresolvedAmoBrokerContactCreateGate(
   database: any,
   phone: unknown,
-): Promise<boolean> {
-  const latest = await database.auditLog.findFirst({
+): Promise<string | null> {
+  const events = await database.auditLog.findMany({
     where: {
       entity: AMO_BROKER_CONTACT_GATE_ENTITY,
       entityId: amoBrokerContactGateDigest(phone),
@@ -106,28 +101,31 @@ export async function hasUnresolvedAmoBrokerContactCreate(
         ],
       },
     },
-    select: { action: true },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { action: true, payload: true },
   });
-  return latest?.action === AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION;
+  const armed = new Set<string>();
+  const resolved = new Set<string>();
+  for (const event of events) {
+    const gateId = String(event?.payload?.gateId || "");
+    if (!/^[0-9a-f-]{36}$/.test(gateId)) continue;
+    if (event.action === AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION)
+      armed.add(gateId);
+    if (event.action === AMO_BROKER_CONTACT_CREATE_RESOLVED_ACTION)
+      resolved.add(gateId);
+  }
+  const unresolved = [...armed].filter((gateId) => !resolved.has(gateId));
+  if (unresolved.length > 1)
+    throw new Error("AMO_BROKER_CONTACT_GATE_AMBIGUOUS");
+  return unresolved[0] || null;
 }
 
-export async function recordUncertainAmoBrokerContactCreate(
-  transaction: any,
+export async function hasUnresolvedAmoBrokerContactCreate(
+  database: any,
   phone: unknown,
-): Promise<void> {
-  await transaction.auditLog.create({
-    data: {
-      userId: null,
-      action: AMO_BROKER_CONTACT_CREATE_UNCERTAIN_ACTION,
-      entity: AMO_BROKER_CONTACT_GATE_ENTITY,
-      entityId: amoBrokerContactGateDigest(phone),
-      payload: {
-        reason: "AMBIGUOUS_POST_RESULT",
-        automaticRetryBlocked: true,
-      },
-    },
-  });
+): Promise<boolean> {
+  return Boolean(
+    await getUnresolvedAmoBrokerContactCreateGate(database, phone),
+  );
 }
 
 /**
@@ -139,7 +137,8 @@ export async function recordUncertainAmoBrokerContactCreate(
 export async function armDurableAmoBrokerContactCreateGate(
   database: any,
   phone: unknown,
-): Promise<void> {
+): Promise<string> {
+  const gateId = randomUUID();
   await database.auditLog.create({
     data: {
       userId: null,
@@ -147,17 +146,24 @@ export async function armDurableAmoBrokerContactCreateGate(
       entity: AMO_BROKER_CONTACT_GATE_ENTITY,
       entityId: amoBrokerContactGateDigest(phone),
       payload: {
+        gateVersion: 1,
+        gateId,
         reason: "PRE_MUTATION_DURABLE_GATE",
         automaticRetryBlocked: true,
       },
     },
   });
+  return gateId;
 }
 
 export async function recordResolvedAmoBrokerContactCreate(
   database: any,
   phone: unknown,
+  gateId: string,
 ): Promise<void> {
+  if (!/^[0-9a-f-]{36}$/.test(gateId)) {
+    throw new Error("AMO_BROKER_CONTACT_GATE_ID_INVALID");
+  }
   await database.auditLog.create({
     data: {
       userId: null,
@@ -165,6 +171,8 @@ export async function recordResolvedAmoBrokerContactCreate(
       entity: AMO_BROKER_CONTACT_GATE_ENTITY,
       entityId: amoBrokerContactGateDigest(phone),
       payload: {
+        gateVersion: 1,
+        gateId,
         automaticRetryBlocked: false,
       },
     },
