@@ -3,6 +3,7 @@ import {
   clientFixationFingerprint,
   clientFixationSemanticFingerprint,
 } from "./client-fixation-safety.service";
+import { AmoFixationPhoneLockService } from "../common/amo-fixation-phone-lock.service";
 
 class FakeRedis {
   readonly values = new Map<
@@ -90,8 +91,9 @@ class FakeRedis {
 
 function createService() {
   const redis = new FakeRedis();
-  const service = new ClientFixationSafetyService({ client: redis } as any);
-  return { redis, service };
+  const phoneLock = new AmoFixationPhoneLockService({ client: redis } as any);
+  const service = new ClientFixationSafetyService(phoneLock);
+  return { redis, service, phoneLock };
 }
 
 function deferred<T>() {
@@ -145,6 +147,33 @@ describe("ClientFixationSafetyService", () => {
 
     expect(changedPresentation).toBe(base);
     expect(changedPhone).not.toBe(base);
+  });
+
+  it("uses one deployed semantic key for equivalent phone formatting", () => {
+    const { phoneLock } = createService();
+    const canonicalKey = phoneLock.key("+79990000001");
+
+    expect(phoneLock.key("8 (999) 000-00-01")).toBe(canonicalKey);
+    expect(phoneLock.key("9990000001")).toBe(canonicalKey);
+    expect(phoneLock.key("779990000001")).toBe(canonicalKey);
+    expect(canonicalKey).toBe(
+      `client-fixation:semantic:${clientFixationFingerprint({ phone: payload.phone })}`,
+    );
+    expect(canonicalKey).not.toContain(payload.phone);
+  });
+
+  it("accepts a valid +77 subscriber prefix without treating it as duplicate country code", () => {
+    const { phoneLock } = createService();
+    const validDoubleSeven = "+77990000001";
+    const key = phoneLock.key(validDoubleSeven);
+
+    expect(key).toBe(
+      `client-fixation:semantic:${clientFixationFingerprint({ phone: validDoubleSeven })}`,
+    );
+    expect(phoneLock.key("777990000001")).toBe(key);
+    expect(() => phoneLock.key("789990000001")).toThrow(
+      "AMO_FIXATION_PHONE_LOCK_PHONE_INVALID",
+    );
   });
 
   it("allows only one amo lead for two parallel identical legacy requests", async () => {
@@ -434,6 +463,32 @@ describe("ClientFixationSafetyService", () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it("proves ownership before POST and cannot overwrite a replacement owner", async () => {
+    const { redis, service, phoneLock } = createService();
+    const amoCreateLead = jest.fn().mockResolvedValue({ id: 32310587 });
+    const replacement = JSON.stringify({
+      fingerprint: "replacement-writer",
+      status: "processing",
+      owner: "owner-b",
+    });
+    const semanticKey = phoneLock.key(payload.phone);
+
+    await expect(
+      service.execute(
+        { actorId: "broker-1", payload },
+        async ({ assertOwned }) => {
+          redis.values.delete(semanticKey);
+          await redis.set(semanticKey, replacement, "PX", 600_000, "NX");
+          await assertOwned();
+          return amoCreateLead();
+        },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(amoCreateLead).not.toHaveBeenCalled();
+    expect(await redis.get(semanticKey)).toBe(replacement);
   });
 
   it("fails closed before amoCRM when Redis is unavailable", async () => {

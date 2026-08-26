@@ -12,8 +12,9 @@ describe("ClientFixationController idempotency", () => {
     const clientFixationService = {
       fixClient: jest.fn().mockResolvedValue({ client: { id: "client-1" } }),
     };
+    const assertOwned = jest.fn().mockResolvedValue(undefined);
     const fixationSafety = {
-      execute: jest.fn((_request, action) => action()),
+      execute: jest.fn((_request, action) => action({ assertOwned })),
     };
     const controller = new ClientFixationController(
       clientFixationService as any,
@@ -39,6 +40,7 @@ describe("ClientFixationController idempotency", () => {
     expect(clientFixationService.fixClient).toHaveBeenCalledWith(
       "broker-1",
       validBody,
+      assertOwned,
     );
   });
 
@@ -46,8 +48,9 @@ describe("ClientFixationController idempotency", () => {
     const clientFixationService = {
       fixClient: jest.fn().mockResolvedValue({ client: { id: "client-1" } }),
     };
+    const assertOwned = jest.fn().mockResolvedValue(undefined);
     const fixationSafety = {
-      execute: jest.fn((_request, action) => action()),
+      execute: jest.fn((_request, action) => action({ assertOwned })),
     };
     const controller = new ClientFixationController(
       clientFixationService as any,

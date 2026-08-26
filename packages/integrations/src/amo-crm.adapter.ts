@@ -6,6 +6,8 @@ import {
   readinessLevelToEnumId,
   purchaseTimingToEnumId,
   evaluateUniqueness,
+  isClassifiedUniquenessLeadStage,
+  isKnownUniquenessLeadStage,
   brokerLeadMarkerFields,
 } from "./amo-crm.fields";
 
@@ -84,6 +86,39 @@ export interface CreateLeadDto {
   contacts?: { id: number }[];
   companies?: { id: number }[];
   custom_fields_values?: any[];
+}
+
+export interface FixationClientContactInput {
+  clientPhone: string;
+  clientEmail?: string;
+  clientName: string;
+  clientRegion?: string;
+  presentationSent?: boolean;
+}
+
+function fixationClientCustomFields(data: FixationClientContactInput): any[] {
+  const fields: any[] = [
+    {
+      field_code: "PHONE",
+      values: [{ value: data.clientPhone, enum_code: "WORK" }],
+    },
+  ];
+  if (data.clientEmail) {
+    fields.push({
+      field_code: "EMAIL",
+      values: [{ value: data.clientEmail, enum_code: "WORK" }],
+    });
+  }
+  if (data.clientRegion) {
+    fields.push({
+      field_id: 589265,
+      values: [{ value: data.clientRegion }],
+    });
+  }
+  if (data.presentationSent) {
+    fields.push({ field_id: 835955, values: [{ value: true }] });
+  }
+  return fields;
 }
 
 export interface UpdateLeadDto {
@@ -756,19 +791,55 @@ export class AmoCrmAdapter {
   // Это ~250x меньше HTTP-запросов чем перебор по одному.
   // Возвращает Map<id, AmoContact> с найденными контактами. Те, что не вернулись,
   // в map просто отсутствуют — вызывающий код решает, ошибка это или нет.
-  async getContactsByIds(ids: number[]): Promise<Map<number, AmoContact>> {
+  async getContactsByIds(
+    ids: number[],
+    options: { strict?: boolean } = {},
+  ): Promise<Map<number, AmoContact>> {
+    if (
+      options.strict &&
+      (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+        new Set(ids).size !== ids.length)
+    ) {
+      throw new Error("AMO_UNIQUENESS_CONTACT_IDS_INVALID");
+    }
     const result = new Map<number, AmoContact>();
     const BATCH = 250;
     for (let i = 0; i < ids.length; i += BATCH) {
       const chunk = ids.slice(i, i + BATCH);
+      const requested = new Set(chunk);
       const q = chunk.map((id) => `filter[id][]=${id}`).join("&");
       try {
         const data = await this.request<any>(
           `/contacts?${q}&with=leads&limit=${BATCH}`,
         );
-        const list: AmoContact[] = data?._embedded?.contacts || [];
-        for (const c of list) result.set(Number(c.id), c);
+        const rawList = data?._embedded?.contacts;
+        if (options.strict && !Array.isArray(rawList)) {
+          throw new Error("AMO_UNIQUENESS_CONTACTS_PAGE_INVALID");
+        }
+        const list: AmoContact[] = Array.isArray(rawList) ? rawList : [];
+        for (const c of list) {
+          const id = Number(c?.id);
+          if (options.strict) {
+            if (!Number.isSafeInteger(id) || id <= 0) {
+              throw new Error("AMO_UNIQUENESS_CONTACT_ID_INVALID");
+            }
+            if (!requested.has(id)) {
+              throw new Error("AMO_UNIQUENESS_CONTACT_ID_UNREQUESTED");
+            }
+            if (result.has(id)) {
+              throw new Error("AMO_UNIQUENESS_CONTACT_ID_DUPLICATE");
+            }
+          }
+          result.set(id, c);
+        }
+        if (
+          options.strict &&
+          chunk.some((requestedId) => !result.has(requestedId))
+        ) {
+          throw new Error("AMO_UNIQUENESS_CONTACTS_INCOMPLETE");
+        }
       } catch (e: any) {
+        if (options.strict) throw e;
         // Pacht прошёл с ошибкой — оставляем missing, не валим всю операцию.
         console.error("[getContactsByIds] batch failed:", e?.message || e);
       }
@@ -788,6 +859,28 @@ export class AmoCrmAdapter {
       { retryTransient: false },
     );
     return result?._embedded?.contacts?.[0];
+  }
+
+  /**
+   * One-shot client-contact mutation for a caller that already owns the
+   * shared fixation phone lease and has durably armed reconciliation. It does
+   * no lookup/upsert and inherits createContact's retryTransient:false POST.
+   */
+  async createFixationClientContactOnce(
+    data: FixationClientContactInput,
+  ): Promise<AmoContact> {
+    if (
+      typeof data?.clientPhone !== "string" ||
+      last10Digits(data.clientPhone).length !== 10 ||
+      typeof data?.clientName !== "string" ||
+      !data.clientName.trim()
+    ) {
+      throw new Error("FIXATION_CLIENT_CONTACT_INPUT_INVALID");
+    }
+    return this.createContact({
+      name: data.clientName,
+      custom_fields_values: fixationClientCustomFields(data),
+    });
   }
 
   async updateContact(
@@ -1159,7 +1252,10 @@ export class AmoCrmAdapter {
     triggerType?: "DEFERRED_DEMAND" | "NEW_REQUEST_NO_BROKER" | "ACTIVE_SALES";
     triggerLeadId?: number;
   }> {
-    const contact = await this.findContactByPhone(phone);
+    // Uniqueness must be based on the complete exact-phone result set. A
+    // best-effort first page (or choosing one of several exact contacts) can
+    // hide active leads and authorize a duplicate fixation.
+    const contact = await this.findContactByPhone(phone, { strict: true });
     if (!contact) {
       return {
         rule: "NO_CONFLICT",
@@ -1180,12 +1276,29 @@ export class AmoCrmAdapter {
     // Собрать все contactId из всех лидов одним батчем — экономим запросы.
     const allContactIds = new Set<number>();
     for (const lead of leads) {
-      const contactIds = ((lead as any)._embedded?.contacts || []).map(
-        (c: any) => c.id,
-      );
-      contactIds.forEach((id: number) => allContactIds.add(id));
+      const contactRefs = (lead as any)?._embedded?.contacts;
+      if (!Array.isArray(contactRefs)) {
+        throw new Error("AMO_UNIQUENESS_LEAD_CONTACTS_INVALID");
+      }
+      const leadContactIds = new Set<number>();
+      for (const contactRef of contactRefs) {
+        const contactId = Number(contactRef?.id);
+        if (!Number.isSafeInteger(contactId) || contactId <= 0) {
+          throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_ID_INVALID");
+        }
+        if (leadContactIds.has(contactId)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_ID_DUPLICATE");
+        }
+        leadContactIds.add(contactId);
+        allContactIds.add(contactId);
+      }
+      if (!leadContactIds.has(Number(contact.id))) {
+        throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_INCOMPLETE");
+      }
     }
-    const contactsMap = await this.getContactsByIds(Array.from(allContactIds));
+    const contactsMap = await this.getContactsByIds(Array.from(allContactIds), {
+      strict: true,
+    });
 
     const isBroker = (c: any): boolean => {
       const fields = c?.custom_fields_values || [];
@@ -1196,7 +1309,7 @@ export class AmoCrmAdapter {
     };
 
     const leadsForEval = leads.map((lead: any) => {
-      const contactIds = (lead._embedded?.contacts || []).map((c: any) => c.id);
+      const contactIds = lead._embedded.contacts.map((c: any) => Number(c.id));
       const hasBroker = contactIds.some((id: number) => {
         const c = contactsMap.get(id);
         return c ? isBroker(c) : false;
@@ -1227,17 +1340,100 @@ export class AmoCrmAdapter {
   }
 
   async getLeadsByContact(contactId: number): Promise<AmoLead[]> {
+    if (!Number.isSafeInteger(contactId) || contactId <= 0) {
+      throw new Error("AMO_UNIQUENESS_CONTACT_ID_INVALID");
+    }
     const contact = await this.request<any>(
       `/contacts/${contactId}?with=leads`,
     );
-    const leadIds = (contact?._embedded?.leads || []).map((l: any) => l.id);
+    const leadRefs = contact?._embedded?.leads;
+    if (!Array.isArray(leadRefs)) {
+      throw new Error("AMO_UNIQUENESS_CONTACT_LEADS_INVALID");
+    }
+    const leadIds: number[] = [];
+    const requestedLeadIds = new Set<number>();
+    for (const leadRef of leadRefs) {
+      const leadId = Number(leadRef?.id);
+      if (!Number.isSafeInteger(leadId) || leadId <= 0) {
+        throw new Error("AMO_UNIQUENESS_LEAD_ID_INVALID");
+      }
+      if (requestedLeadIds.has(leadId)) {
+        throw new Error("AMO_UNIQUENESS_LEAD_ID_DUPLICATE");
+      }
+      requestedLeadIds.add(leadId);
+      leadIds.push(leadId);
+    }
     if (leadIds.length === 0) return [];
     // A failed lookup must propagate. Treating a 401/403/timeout as "no leads"
     // makes uniqueness appear successful and can create a duplicate fixation.
-    const data = await this.request<any>(
-      `/leads?filter[id][]=${leadIds.join("&filter[id][]=")}&with=contacts`,
-    );
-    return data?._embedded?.leads || [];
+    const leads: AmoLead[] = [];
+    const returnedLeadIds = new Set<number>();
+    const BATCH = 250;
+    for (let i = 0; i < leadIds.length; i += BATCH) {
+      const chunk = leadIds.slice(i, i + BATCH);
+      const chunkIds = new Set(chunk);
+      const q = chunk.map((id) => `filter[id][]=${id}`).join("&");
+      const data = await this.request<any>(
+        `/leads?${q}&with=contacts&limit=${BATCH}`,
+      );
+      const batchLeads = data?._embedded?.leads;
+      if (!Array.isArray(batchLeads)) {
+        throw new Error("AMO_UNIQUENESS_LEADS_PAGE_INVALID");
+      }
+      for (const lead of batchLeads) {
+        const leadId = Number(lead?.id);
+        if (!Number.isSafeInteger(leadId) || leadId <= 0) {
+          throw new Error("AMO_UNIQUENESS_LEAD_ID_INVALID");
+        }
+        if (!chunkIds.has(leadId)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_ID_UNREQUESTED");
+        }
+        if (returnedLeadIds.has(leadId)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_ID_DUPLICATE");
+        }
+        const pipelineId = Number((lead as any)?.pipeline_id);
+        const statusId = Number((lead as any)?.status_id);
+        if (
+          !Number.isSafeInteger(pipelineId) ||
+          pipelineId <= 0 ||
+          !Number.isSafeInteger(statusId) ||
+          statusId <= 0
+        ) {
+          throw new Error("AMO_UNIQUENESS_LEAD_FIELDS_INVALID");
+        }
+        if (!isKnownUniquenessLeadStage(pipelineId, statusId)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_STAGE_UNRECOGNIZED");
+        }
+        if (!isClassifiedUniquenessLeadStage(pipelineId, statusId)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_STAGE_UNCLASSIFIED");
+        }
+        const contactRefs = (lead as any)?._embedded?.contacts;
+        if (!Array.isArray(contactRefs)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_CONTACTS_INVALID");
+        }
+        const contactIds = new Set<number>();
+        for (const contactRef of contactRefs) {
+          const linkedContactId = Number(contactRef?.id);
+          if (!Number.isSafeInteger(linkedContactId) || linkedContactId <= 0) {
+            throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_ID_INVALID");
+          }
+          if (contactIds.has(linkedContactId)) {
+            throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_ID_DUPLICATE");
+          }
+          contactIds.add(linkedContactId);
+        }
+        if (!contactIds.has(contactId)) {
+          throw new Error("AMO_UNIQUENESS_LEAD_CONTACT_INCOMPLETE");
+        }
+        returnedLeadIds.add(leadId);
+        leads.push(lead);
+      }
+      if (chunk.some((leadId) => !returnedLeadIds.has(leadId))) {
+        throw new Error("AMO_UNIQUENESS_LEADS_INCOMPLETE");
+      }
+      if (i + BATCH < leadIds.length) await sleep(150);
+    }
+    return leads;
   }
 
   async getLeadsByPipeline(
@@ -1367,8 +1563,10 @@ export class AmoCrmAdapter {
     clientName: string;
     clientRegion?: string; // правка 2026-05-22: регион клиента (REGION=589265)
     presentationSent?: boolean; // правка 2026-05-22: «Отправлена презентация» на контакт клиента
+    existingClientAmoContactId?: number;
     brokerPhone: string;
     brokerAmoContactId: number; // required invariant; linked as the lead's second contact
+    additionalBrokerAmoContactIds?: number[];
     agencyName: string;
     agencyInn: string;
     comment: string;
@@ -1405,36 +1603,70 @@ export class AmoCrmAdapter {
       throw new Error("BROKER_AMO_CONTACT_MISSING");
     }
 
-    // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
-    const clientCustomFields: any[] = [
-      {
-        field_code: "PHONE",
-        values: [{ value: data.clientPhone, enum_code: "WORK" }],
-      },
+    const additionalBrokerAmoContactIds =
+      data.additionalBrokerAmoContactIds === undefined
+        ? []
+        : data.additionalBrokerAmoContactIds;
+    if (
+      !Array.isArray(additionalBrokerAmoContactIds) ||
+      additionalBrokerAmoContactIds.some(
+        (id) => !Number.isSafeInteger(id) || id <= 0,
+      ) ||
+      new Set(additionalBrokerAmoContactIds).size !==
+        additionalBrokerAmoContactIds.length ||
+      additionalBrokerAmoContactIds.includes(data.brokerAmoContactId)
+    ) {
+      throw new Error("AMO_FIXATION_BROKER_CONTACT_SET_INVALID");
+    }
+    if (
+      data.reuseLeadId !== undefined &&
+      (data.existingClientAmoContactId !== undefined ||
+        data.additionalBrokerAmoContactIds !== undefined)
+    ) {
+      throw new Error("AMO_FIXATION_RECOVERY_CONTRACT_REUSE_UNSUPPORTED");
+    }
+    const brokerAmoContactIds = [
+      data.brokerAmoContactId,
+      ...additionalBrokerAmoContactIds
+        .slice()
+        .sort((left, right) => left - right),
     ];
-    if (data.clientEmail) {
-      clientCustomFields.push({
-        field_code: "EMAIL",
-        values: [{ value: data.clientEmail, enum_code: "WORK" }],
-      });
+    if (
+      data.existingClientAmoContactId !== undefined &&
+      (!Number.isSafeInteger(data.existingClientAmoContactId) ||
+        data.existingClientAmoContactId <= 0)
+    ) {
+      throw new Error("AMO_FIXATION_CLIENT_CONTACT_ID_INVALID");
     }
-    if (data.clientRegion) {
-      clientCustomFields.push({
-        field_id: 589265,
-        values: [{ value: data.clientRegion }],
-      });
+    if (
+      additionalBrokerAmoContactIds.length > 0 &&
+      data.existingClientAmoContactId === undefined
+    ) {
+      throw new Error("AMO_FIXATION_ADDITIONAL_BROKERS_REQUIRE_EXACT_CLIENT");
     }
-    if (data.presentationSent) {
-      clientCustomFields.push({ field_id: 835955, values: [{ value: true }] });
+    if (
+      data.existingClientAmoContactId !== undefined &&
+      brokerAmoContactIds.includes(data.existingClientAmoContactId)
+    ) {
+      throw new Error("AMO_FIXATION_CONTACT_ROLE_COLLISION");
     }
 
-    let contact = await this.findContactByPhone(data.clientPhone);
+    // Контакт КЛИЕНТА — формируем custom_fields_values, отдельно от создания
+    const clientCustomFields = fixationClientCustomFields(data);
+
+    const contactWasPreResolved = data.existingClientAmoContactId !== undefined;
+    let contact = contactWasPreResolved
+      ? ({
+          id: data.existingClientAmoContactId,
+          name: data.clientName,
+        } as AmoContact)
+      : await this.findContactByPhone(data.clientPhone, { strict: true });
     if (!contact) {
       contact = await this.createContact({
         name: data.clientName,
         custom_fields_values: clientCustomFields,
       });
-    } else {
+    } else if (!contactWasPreResolved) {
       // Контакт существует — обновим переданные поля (email/region/presentation).
       // Без try/catch: если amo вернёт ошибку, мы не валим всю операцию.
       try {
@@ -1449,6 +1681,10 @@ export class AmoCrmAdapter {
     //   583447 — "Сколько комнат рассматривает"
     //   833045 — "Стоимость без скидок, руб" (= бюджет покупки)
     //   604555 — "Метраж, м2"
+    if (!Number.isSafeInteger(contact?.id) || contact.id <= 0) {
+      throw new Error("AMO_FIXATION_CLIENT_CONTACT_ID_INVALID");
+    }
+
     const customFields: any[] = [];
     // 2026-06-09: 587387 «Тип объекта» и 583447 «Кол-во комнат» — это
     // multiselect (нужны enum_id). PATCH с value=строкой возвращает
@@ -1582,10 +1818,10 @@ export class AmoCrmAdapter {
     // Правка 2026-05-22: к лиду привязываются ДВА контакта — клиент И брокер.
     // Без брокера в `contacts` непонятно «от кого пришла заявка» (на скриншоте
     // КБ3 в лиде виден второй контакт «Малыгина Елена Александровна» — агент).
-    const leadContacts: Array<{ id: number }> = [];
-    if (contact?.id) leadContacts.push({ id: contact.id });
-    if (data.brokerAmoContactId)
-      leadContacts.push({ id: data.brokerAmoContactId });
+    const leadContacts: Array<{ id: number }> = [
+      { id: contact.id },
+      ...brokerAmoContactIds.map((id) => ({ id })),
+    ];
 
     // 2026-06-03: режим переиспользования существующего лида.
     // Когда у контакта уже есть активный лид в КЦ (Новое обращение /

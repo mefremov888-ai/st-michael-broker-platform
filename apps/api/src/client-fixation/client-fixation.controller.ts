@@ -52,7 +52,8 @@ export class ClientFixationController {
         payload: fixation,
         idempotencyKey,
       },
-      () => this.clientFixationService.fixClient(user.id, fixation),
+      ({ assertOwned }) =>
+        this.clientFixationService.fixClient(user.id, fixation, assertOwned),
     );
   }
 

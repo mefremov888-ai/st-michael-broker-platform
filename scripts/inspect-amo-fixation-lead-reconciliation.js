@@ -258,8 +258,6 @@ function normalizePhone(value) {
   let digits = trimmed.replace(/\D/g, "");
   if (digits.length === 12 && digits.startsWith("77")) {
     digits = digits.slice(1);
-  } else if (digits.length === 11 && digits.startsWith("77")) {
-    return null;
   } else if (digits.length === 11 && digits.startsWith("8")) {
     digits = `7${digits.slice(1)}`;
   } else if (digits.length === 10) {
