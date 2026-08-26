@@ -281,6 +281,13 @@ update_env_value() {
     echo "    $var_name accepted (${#var_value} characters)."
 }
 
+validate_broker_contact_gate_hmac_key() {
+    local gate_key_value="${1-}"
+    [ "${#gate_key_value}" -ge 32 ] \
+        && printf '%s' "$gate_key_value" | LC_ALL=C grep -Eq '^[A-Za-z0-9._~+/=-]{32,}$' \
+        && [ "$gate_key_value" != "replace-with-a-stable-random-secret-at-least-32-bytes" ]
+}
+
 for VAR_NAME in \
     AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN \
     BROKER_CONTACT_GATE_HMAC_KEY \
@@ -299,6 +306,41 @@ for VAR_NAME in \
     unset "$VAR_NAME"
 done
 unset VAR_NAME VAR_VALUE
+
+# Read back the exact target value written by the allowlist loop. Do not source
+# the server env: it is data, not trusted shell. The workflow accepts only this
+# dotenv-safe ASCII alphabet, so the single-quoted value can be decoded without
+# eval and checked before compose parsing, release-context creation, builds or
+# migrations. The value is never printed.
+BROKER_CONTACT_GATE_HMAC_LINE_COUNT=$(awk '
+    /^BROKER_CONTACT_GATE_HMAC_KEY=/ { count += 1 }
+    END { print count + 0 }
+' "$ENV_STAGING_FILE")
+if [ "$BROKER_CONTACT_GATE_HMAC_LINE_COUNT" -ne 1 ]; then
+    echo "    ✗ BROKER_CONTACT_GATE_HMAC_KEY is missing or duplicated in target env."
+    exit 1
+fi
+BROKER_CONTACT_GATE_HMAC_ENV_VALUE=$(awk '
+    /^BROKER_CONTACT_GATE_HMAC_KEY=/ {
+        print substr($0, length("BROKER_CONTACT_GATE_HMAC_KEY=") + 1)
+    }
+' "$ENV_STAGING_FILE")
+case "$BROKER_CONTACT_GATE_HMAC_ENV_VALUE" in
+    \'*\')
+        BROKER_CONTACT_GATE_HMAC_VALUE=${BROKER_CONTACT_GATE_HMAC_ENV_VALUE#\'}
+        BROKER_CONTACT_GATE_HMAC_VALUE=${BROKER_CONTACT_GATE_HMAC_VALUE%\'}
+        ;;
+    *)
+        echo "    ✗ BROKER_CONTACT_GATE_HMAC_KEY has an invalid target env encoding."
+        exit 1
+        ;;
+esac
+if ! validate_broker_contact_gate_hmac_key "$BROKER_CONTACT_GATE_HMAC_VALUE"; then
+    echo "    ✗ BROKER_CONTACT_GATE_HMAC_KEY must be a non-placeholder secret of at least 32 ASCII bytes."
+    exit 1
+fi
+unset BROKER_CONTACT_GATE_HMAC_LINE_COUNT BROKER_CONTACT_GATE_HMAC_ENV_VALUE BROKER_CONTACT_GATE_HMAC_VALUE
+
 # 2026-08-20: пишем реально задеплоенный SHA в .env, читается через
 # GET /api/health (см. health.controller.ts) — способ проверить, что сервер
 # на самом деле обновился, а не просто "workflow прошёл зелёным".

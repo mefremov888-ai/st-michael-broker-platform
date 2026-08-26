@@ -266,6 +266,45 @@ describe("production-safe amo broker-contact provisioner", () => {
     ).not.toThrow();
   });
 
+  it("uses exactly the same full provisioning Prisma select in inspection and apply while keeping global ownership narrow", () => {
+    expect(inspector.BROKER_PROVISION_SELECT).toEqual(
+      provisioner.BROKER_PROVISION_SELECT,
+    );
+    expect(inspector.PROVISIONING_QUEUE_ROW_SELECT).toEqual(
+      provisioner.QUEUE_ROW_SELECT,
+    );
+    expect(inspector.BROKER_OWNER_SELECT).toEqual(
+      provisioner.BROKER_OWNER_SELECT,
+    );
+    expect(inspector.BROKER_OWNER_SELECT).not.toHaveProperty("fullName");
+    expect(inspector.BROKER_OWNER_SELECT).not.toHaveProperty("brokerAgencies");
+    expect(inspector.BROKER_PROVISION_SELECT).toMatchObject({
+      fullName: true,
+      email: true,
+      region: true,
+      position: true,
+      telegramUsername: true,
+      telegramId: true,
+      whatsappUsername: true,
+      presentationSent: true,
+      doNotCall: true,
+      brokerAgencies: {
+        where: { isPrimary: true },
+        orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
+        take: 2,
+        select: {
+          agency: {
+            select: {
+              name: true,
+              inn: true,
+              address: true,
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("enforces the reviewed 12/9 and per-class one-shot ceilings", () => {
     expect(() =>
       provisioner.assertReviewedRunCeilings(liveManifest()),
@@ -1064,7 +1103,7 @@ describe("production-safe amo broker-contact provisioner", () => {
     }
   });
 
-  it("forwards the dedicated gate secret through both deploy allowlists", () => {
+  it("keeps first-deploy rollback parse-compatible and rejects a weak target gate secret before SSH, compose or builds", () => {
     const deployWorkflow = readFileSync(
       resolve(repositoryRoot, ".github/workflows/deploy.yml"),
       "utf8",
@@ -1073,8 +1112,32 @@ describe("production-safe amo broker-contact provisioner", () => {
       resolve(repositoryRoot, "deploy-update.sh"),
       "utf8",
     );
+    const compose = readFileSync(
+      resolve(repositoryRoot, "docker-compose.yml"),
+      "utf8",
+    );
+    expect(compose).toContain(
+      "BROKER_CONTACT_GATE_HMAC_KEY: ${BROKER_CONTACT_GATE_HMAC_KEY:-}",
+    );
+    expect(compose).not.toContain(
+      "${BROKER_CONTACT_GATE_HMAC_KEY:?BROKER_CONTACT_GATE_HMAC_KEY is required in server .env}",
+    );
     expect(deployWorkflow).toContain(
       "BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}",
+    );
+    const workflowSecretGate = deployWorkflow.indexOf(
+      'if [ "${#BROKER_CONTACT_GATE_HMAC_KEY}" -lt 32 ]',
+    );
+    expect(workflowSecretGate).toBeGreaterThan(-1);
+    expect(deployWorkflow).toContain("^[A-Za-z0-9._~+/=-]{32,}$");
+    expect(deployWorkflow).toContain(
+      "replace-with-a-stable-random-secret-at-least-32-bytes",
+    );
+    expect(workflowSecretGate).toBeLessThan(
+      deployWorkflow.indexOf("ssh_root=$(mktemp -d)"),
+    );
+    expect(workflowSecretGate).toBeLessThan(
+      deployWorkflow.indexOf("forwarded_names=("),
     );
     const forwarded = deployWorkflow.slice(
       deployWorkflow.indexOf("forwarded_names=("),
@@ -1084,6 +1147,104 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(deployScript).toMatch(
       /AMO_REFRESH_TOKEN \\\s+BROKER_CONTACT_GATE_HMAC_KEY \\/,
     );
+
+    const allowlistStart = deployScript.indexOf("for VAR_NAME in \\");
+    const allowlistEnd = deployScript.indexOf("; do", allowlistStart);
+    expect(
+      deployScript
+        .slice(allowlistStart, allowlistEnd)
+        .match(/[A-Z][A-Z0-9_]*/g),
+    ).toEqual([
+      "VAR_NAME",
+      "AMO_ACCESS_TOKEN",
+      "AMO_CLIENT_ID",
+      "AMO_CLIENT_SECRET",
+      "AMO_REFRESH_TOKEN",
+      "BROKER_CONTACT_GATE_HMAC_KEY",
+      "MANGO_API_KEY",
+      "MANGO_API_SALT",
+      "MANGO_API_URL",
+      "MANGO_CALLBACK_URL",
+      "MANGO_OUTBOUND_LINE",
+      "SMTP_HOST",
+      "SMTP_PORT",
+      "SMTP_USER",
+      "SMTP_PASS",
+      "SMTP_FROM",
+      "SMTP_SECURE",
+      "DADATA_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GOOGLE_SERVICE_ACCOUNT_JSON",
+      "TELEGRAM_BOT_TOKEN",
+      "OPS_TELEGRAM_BOT_TOKEN",
+      "OPS_ALERT_CHAT_ID",
+      "OPS_ALERT_CHAT_IDS",
+    ]);
+
+    const extraction = deployScript.indexOf(
+      "BROKER_CONTACT_GATE_HMAC_LINE_COUNT=$(awk",
+    );
+    const validation = deployScript.indexOf(
+      'validate_broker_contact_gate_hmac_key "$BROKER_CONTACT_GATE_HMAC_VALUE"',
+    );
+    expect(extraction).toBeGreaterThan(
+      deployScript.indexOf("unset VAR_NAME VAR_VALUE", allowlistEnd),
+    );
+    expect(validation).toBeGreaterThan(extraction);
+    for (const laterBoundary of [
+      deployScript.indexOf(
+        'docker compose --env-file "$ENV_STAGING_FILE" config --quiet',
+      ),
+      deployScript.indexOf("RELEASE_CONTEXT=$(mktemp -d"),
+      deployScript.indexOf("build api"),
+      deployScript.indexOf("prisma migrate deploy"),
+    ]) {
+      expect(laterBoundary).toBeGreaterThan(validation);
+    }
+
+    const functionStart = deployScript.indexOf(
+      "validate_broker_contact_gate_hmac_key() {",
+    );
+    const functionEnd =
+      deployScript.indexOf("\n}\n", functionStart) + "\n}\n".length;
+    const validationFunction = deployScript.slice(functionStart, functionEnd);
+    const bash =
+      process.platform === "win32"
+        ? "C:\\Program Files\\Git\\bin\\bash.exe"
+        : "bash";
+    expect(functionStart).toBeGreaterThan(-1);
+    expect(functionEnd).toBeGreaterThan(functionStart);
+    for (const invalidValue of [
+      "",
+      "short",
+      "replace-with-a-stable-random-secret-at-least-32-bytes",
+      `${"A".repeat(31)}é`,
+    ]) {
+      const result = spawnSync(
+        bash,
+        [
+          "-c",
+          `${validationFunction}\nvalidate_broker_contact_gate_hmac_key "$1"`,
+          "gate-contract",
+          invalidValue,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe("");
+    }
+    expect(
+      spawnSync(
+        bash,
+        [
+          "-c",
+          `${validationFunction}\nvalidate_broker_contact_gate_hmac_key "$1"`,
+          "gate-contract",
+          "A".repeat(32),
+        ],
+        { encoding: "utf8" },
+      ).status,
+    ).toBe(0);
   });
 
   it("has a syntactically valid exact-SHA, two-file, secret-backed exclusive-lock workflow with all 26 gates and no deploy", () => {

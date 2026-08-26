@@ -35,6 +35,79 @@ const CONTACT_FIELDS = Object.freeze({
   IS_BROKER: 835415,
 });
 
+// Keep global ownership reads deliberately narrow: unrelated broker profile
+// edits must not invalidate the account-wide phone/contact ownership proof.
+const BROKER_OWNER_SELECT = Object.freeze({
+  id: true,
+  amoContactId: true,
+  phone: true,
+  mergedIntoId: true,
+  phones: {
+    select: { phone: true },
+    orderBy: { phone: "asc" },
+  },
+});
+
+// This must stay structurally identical to BROKER_PROVISION_SELECT in the
+// apply script. These are the source fields from which POST/PATCH payloads and
+// their primary-agency values are built, so the reviewed HMAC binds all of
+// them rather than only ownership fields.
+const BROKER_PROVISION_SELECT = Object.freeze({
+  ...BROKER_OWNER_SELECT,
+  fullName: true,
+  email: true,
+  region: true,
+  position: true,
+  telegramUsername: true,
+  telegramId: true,
+  whatsappUsername: true,
+  presentationSent: true,
+  doNotCall: true,
+  updatedAt: true,
+  brokerAgencies: {
+    where: { isPrimary: true },
+    select: {
+      id: true,
+      agencyId: true,
+      isPrimary: true,
+      joinedAt: true,
+      agency: {
+        select: {
+          id: true,
+          name: true,
+          inn: true,
+          address: true,
+        },
+      },
+    },
+    orderBy: [{ joinedAt: "asc" }, { id: "asc" }],
+    take: 2,
+  },
+});
+
+const QUEUE_BASE_SELECT = Object.freeze({
+  id: true,
+  brokerId: true,
+  responsibleBrokerId: true,
+  amoLeadId: true,
+  fixationAgencyId: true,
+  amoSyncStatus: true,
+  amoSyncAttempts: true,
+  amoSyncError: true,
+});
+
+const OWNERSHIP_QUEUE_ROW_SELECT = Object.freeze({
+  ...QUEUE_BASE_SELECT,
+  broker: { select: BROKER_OWNER_SELECT },
+  responsibleBroker: { select: BROKER_OWNER_SELECT },
+});
+
+const PROVISIONING_QUEUE_ROW_SELECT = Object.freeze({
+  ...QUEUE_BASE_SELECT,
+  broker: { select: BROKER_PROVISION_SELECT },
+  responsibleBroker: { select: BROKER_PROVISION_SELECT },
+});
+
 const RESOLUTION_CLASSES = [
   "link_candidate",
   "already_linked",
@@ -590,6 +663,11 @@ function cohortAttestationMetadata(inspectorSha256, deployedGitSha) {
 function canonicalAtom(value) {
   if (value === null) return ["null"];
   if (value === undefined) return ["undefined"];
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime())
+      ? ["date", value.toISOString()]
+      : ["date", "invalid"];
+  }
   if (typeof value === "bigint") return ["bigint", value.toString(10)];
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return ["number", "non-finite"];
@@ -626,6 +704,43 @@ function canonicalBrokerTuple(role, broker) {
   ];
 }
 
+function canonicalProvisioningBrokerTuple(role, broker) {
+  if (!broker) return [role, ["missing"]];
+  const primaryAgencies = (
+    Array.isArray(broker.brokerAgencies) ? broker.brokerAgencies : []
+  )
+    .map((membership) => [
+      "primaryAgencyMembership",
+      canonicalAtom(membership?.id),
+      canonicalAtom(membership?.agencyId),
+      canonicalAtom(membership?.isPrimary),
+      canonicalAtom(membership?.joinedAt),
+      [
+        "agency",
+        canonicalAtom(membership?.agency?.id),
+        canonicalAtom(membership?.agency?.name),
+        canonicalAtom(membership?.agency?.inn),
+        canonicalAtom(membership?.agency?.address),
+      ],
+    ])
+    .sort(compareCanonical);
+  return [
+    role,
+    ["ownership", canonicalBrokerTuple("broker", broker)],
+    ["fullName", canonicalAtom(broker.fullName)],
+    ["email", canonicalAtom(broker.email)],
+    ["region", canonicalAtom(broker.region)],
+    ["position", canonicalAtom(broker.position)],
+    ["telegramUsername", canonicalAtom(broker.telegramUsername)],
+    ["telegramId", canonicalAtom(broker.telegramId)],
+    ["whatsappUsername", canonicalAtom(broker.whatsappUsername)],
+    ["presentationSent", canonicalAtom(broker.presentationSent)],
+    ["doNotCall", canonicalAtom(broker.doNotCall)],
+    ["updatedAt", canonicalAtom(broker.updatedAt)],
+    ["primaryAgencies", primaryAgencies],
+  ];
+}
+
 function canonicalQueueTuples(queueRows) {
   if (!Array.isArray(queueRows)) {
     throw new Error("Invalid cohort attestation input");
@@ -634,13 +749,18 @@ function canonicalQueueTuples(queueRows) {
     .map((row) => [
       "queue",
       canonicalAtom(row?.id),
+      canonicalAtom(row?.brokerId),
+      canonicalAtom(row?.responsibleBrokerId),
       canonicalAtom(row?.amoLeadId),
       canonicalAtom(row?.fixationAgencyId),
       canonicalAtom(row?.amoSyncStatus),
       canonicalAtom(row?.amoSyncAttempts),
       canonicalAtom(row?.amoSyncError),
-      canonicalBrokerTuple("assignedBroker", row?.broker),
-      canonicalBrokerTuple("responsibleBroker", row?.responsibleBroker),
+      canonicalProvisioningBrokerTuple("assignedBroker", row?.broker),
+      canonicalProvisioningBrokerTuple(
+        "responsibleBroker",
+        row?.responsibleBroker,
+      ),
     ])
     .sort(compareCanonical);
 }
@@ -1295,28 +1415,14 @@ async function main() {
   try {
     activeFailurePhase = FAILURE_PHASE.DATABASE;
     await assertReadOnlySession(prisma);
-    const brokerSelect = {
-      id: true,
-      amoContactId: true,
-      phone: true,
-      mergedIntoId: true,
-      phones: { select: { phone: true } },
-    };
     const queueRows = await prisma.client.findMany({
       where: {
         amoSyncStatus: { in: QUEUE_STATUSES },
         amoSyncAttempts: { gte: ATTEMPT_LIMIT },
       },
-      select: {
-        id: true,
-        amoLeadId: true,
-        fixationAgencyId: true,
-        amoSyncStatus: true,
-        amoSyncAttempts: true,
-        amoSyncError: true,
-        broker: { select: brokerSelect },
-        responsibleBroker: { select: brokerSelect },
-      },
+      select: provisioningMode
+        ? PROVISIONING_QUEUE_ROW_SELECT
+        : OWNERSHIP_QUEUE_ROW_SELECT,
       orderBy: [
         { amoSyncLastAttemptAt: "asc" },
         { createdAt: "asc" },
@@ -1324,7 +1430,7 @@ async function main() {
       ],
     });
     const allBrokers = await prisma.broker.findMany({
-      select: brokerSelect,
+      select: BROKER_OWNER_SELECT,
       orderBy: { id: "asc" },
     });
 
@@ -1370,6 +1476,10 @@ module.exports = {
   MAX_LOOKUP_PAGES,
   MAX_RESPONSE_BYTES,
   STATEMENT_TIMEOUT_MS,
+  BROKER_OWNER_SELECT,
+  BROKER_PROVISION_SELECT,
+  OWNERSHIP_QUEUE_ROW_SELECT,
+  PROVISIONING_QUEUE_ROW_SELECT,
   assertExpectedAccount,
   assertReadOnlySession,
   buildCohortAttestation,

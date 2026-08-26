@@ -264,6 +264,13 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           set -euo pipefail
+          export LC_ALL=C
+          if [ "${#BROKER_CONTACT_GATE_HMAC_KEY}" -lt 32 ] \
+            || ! printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" | grep -Eq '^[A-Za-z0-9._~+/=-]{32,}$' \
+            || [ "$BROKER_CONTACT_GATE_HMAC_KEY" = "replace-with-a-stable-random-secret-at-least-32-bytes" ]; then
+            echo "BROKER_CONTACT_GATE_HMAC_KEY must be a non-placeholder secret of at least 32 ASCII bytes"
+            exit 1
+          fi
           test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
           case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
           [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }

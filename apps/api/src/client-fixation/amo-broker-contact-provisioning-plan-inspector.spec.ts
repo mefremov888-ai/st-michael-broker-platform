@@ -29,6 +29,9 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
   loadedScript.paths = NodeModule._nodeModulePaths(dirname(scriptPath));
   loadedScript._compile(script, scriptPath);
   const inspector = loadedScript.exports as {
+    BROKER_OWNER_SELECT: Record<string, unknown>;
+    BROKER_PROVISION_SELECT: Record<string, unknown>;
+    PROVISIONING_QUEUE_ROW_SELECT: Record<string, unknown>;
     buildCohortAttestation: (
       rows: any[],
       brokers: any[],
@@ -71,13 +74,39 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
   const broker = (overrides: Record<string, unknown> = {}) => ({
     id: "broker-default",
     amoContactId: null,
+    fullName: "Test Broker",
     phone: "+79990000001",
+    email: "broker@example.test",
+    region: "MSK",
+    position: "Broker",
+    telegramUsername: "test_broker",
+    telegramId: "1000001",
+    whatsappUsername: "79990000001",
+    presentationSent: true,
+    doNotCall: false,
     mergedIntoId: null,
+    updatedAt: new Date("2026-08-26T00:00:00.000Z"),
     phones: [],
+    brokerAgencies: [
+      {
+        id: "membership-primary",
+        agencyId: "agency-primary",
+        isPrimary: true,
+        joinedAt: new Date("2026-01-01T00:00:00.000Z"),
+        agency: {
+          id: "agency-primary",
+          name: "Primary Agency",
+          inn: "7700000000",
+          address: "Moscow",
+        },
+      },
+    ],
     ...overrides,
   });
   const row = (id: string, effective: any | null, overrides: any = {}) => ({
     id,
+    brokerId: effective?.id ?? null,
+    responsibleBrokerId: null,
     amoLeadId: null,
     fixationAgencyId: "agency-internal-id",
     amoSyncStatus: "FAILED",
@@ -382,6 +411,80 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
       "digest",
       "inspectorSha256",
     ]);
+  });
+
+  it("binds every queue mutation source and primary-agency source while leaving unrelated profile fields out of global ownership", () => {
+    const target = broker({
+      id: "mutation-source-target",
+      phone: "+79990000031",
+    });
+    const unrelated = broker({
+      id: "unrelated-owner",
+      phone: "+79990000032",
+      amoContactId: BigInt(320),
+      fullName: "Unrelated Before",
+    });
+    const lookups = new Map([
+      [target.phone as string, { contacts: [], pagesRead: 1, contactsRead: 0 }],
+    ]);
+    const attest = (queueBroker: any, allBrokers: any[]) =>
+      inspector.buildCohortAttestation(
+        [row("mutation-source-queue", queueBroker)],
+        allBrokers,
+        lookups,
+        attestationKey,
+        inspectorSha256,
+        deployedGitSha,
+      ).digest;
+    const original = attest(target, [target, unrelated]);
+
+    for (const drift of [
+      { fullName: "Changed Broker" },
+      { email: "changed@example.test" },
+      { region: "SPB" },
+      { presentationSent: false },
+      { doNotCall: true },
+    ]) {
+      const changed = broker({ ...target, ...drift });
+      expect(attest(changed, [changed, unrelated])).not.toBe(original);
+    }
+
+    for (const [field, value] of [
+      ["name", "Changed Agency"],
+      ["inn", "7800000000"],
+      ["address", "Saint Petersburg"],
+    ]) {
+      const changed = broker({
+        ...target,
+        brokerAgencies: [
+          {
+            ...target.brokerAgencies[0],
+            agency: {
+              ...target.brokerAgencies[0].agency,
+              [field]: value,
+            },
+          },
+        ],
+      });
+      expect(attest(changed, [changed, unrelated])).not.toBe(original);
+    }
+
+    const unrelatedProfileDrift = broker({
+      ...unrelated,
+      fullName: "Unrelated After",
+      email: "unrelated-after@example.test",
+      region: "KZN",
+      doNotCall: true,
+    });
+    expect(attest(target, [target, unrelatedProfileDrift])).toBe(original);
+
+    for (const ownershipDrift of [
+      broker({ ...unrelated, id: "unrelated-owner-replaced" }),
+      broker({ ...unrelated, phone: "+79990000039" }),
+      broker({ ...unrelated, amoContactId: BigInt(321) }),
+    ]) {
+      expect(attest(target, [target, ownershipDrift])).not.toBe(original);
+    }
   });
 
   it("changes the attestation for same-count identity swaps and for either bound SHA", () => {

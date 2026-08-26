@@ -127,6 +127,7 @@ describe("loyalty production workflow safety", () => {
       "AMO_CLIENT_ID",
       "AMO_CLIENT_SECRET",
       "AMO_REFRESH_TOKEN",
+      "BROKER_CONTACT_GATE_HMAC_KEY",
       "MANGO_API_KEY",
       "MANGO_API_SALT",
       "MANGO_API_URL",
