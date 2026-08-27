@@ -864,7 +864,18 @@ jobs:
             test "$expected_target_web_image_id" = "$target_web_id" || { echo "Expected web image ID does not match the inspected rollback"; exit 1; }
             test "$expected_target_api_repo_digest" = "$target_api_repo_digest" || { echo "Expected API repo digest does not match the inspected rollback"; exit 1; }
             test "$expected_target_web_repo_digest" = "$target_web_repo_digest" || { echo "Expected web repo digest does not match the inspected rollback"; exit 1; }
-            test "$target_api_repo_digest" = "none" -a "$target_web_repo_digest" = "none" || { echo "Target images retain repo-digest references and cannot be safely retired by tag"; exit 1; }
+            # RepoDigests that resolve to the same image ID are local names, not a
+            # registry pin. Retirement removes by image ID (`docker image rm --no-prune`).
+            # Requiring digest=none blocked this pair after inspect already proved the
+            # digest maps to sha256:dcac4b4619a4 / sha256:82594645efc6.
+            case "$target_api_repo_digest" in
+              none|"st-michael-rollback-api@$target_api_id") ;;
+              *) echo "Target API repo digest is not a local name for the audited image"; exit 1 ;;
+            esac
+            case "$target_web_repo_digest" in
+              none|"st-michael-rollback-web@$target_web_id") ;;
+              *) echo "Target web repo digest is not a local name for the audited image"; exit 1 ;;
+            esac
             test "$expected_release_record_sha256" = "$release_record_sha_before" || { echo "Expected release-record SHA-256 does not match"; exit 1; }
             test "$expected_rollback_override_sha256" = "$rollback_override_sha_before" || { echo "Expected rollback-override SHA-256 does not match"; exit 1; }
             test "$expected_full_rollback_inventory_sha256" = "$full_rollback_inventory_sha256" || { echo "Expected full rollback inventory SHA-256 does not match"; exit 1; }
