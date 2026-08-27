@@ -1,0 +1,88 @@
+name: Truncate production container JSON logs (no restart)
+
+# Frees stdout/stderr docker json logs only. Does not touch volumes, images,
+# databases, or running processes. Needed for ~50 MiB more backup headroom
+# after retiring unused rollback images.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_truncate:
+        description: Confirm truncating Docker container *-json.log files only
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  truncate:
+    name: Truncate container JSON logs without restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Verify host and truncate json logs
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          CONFIRM_TRUNCATE: ${{ inputs.confirm_truncate }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_TRUNCATE" = "true" || { echo "Explicit truncate confirmation is required"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || exit 1
+          test "$EXPECTED_REF" = "refs/heads/master" || exit 1
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || exit 1
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || exit 1
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || exit 1
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || exit 1
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT"
+          ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            "${SSH_USER}@${SSH_HOST}" "bash -s" <<'REMOTE'
+          set -euo pipefail
+          export LC_ALL=C
+          exec 9>/tmp/st-michael-production-deploy.lock
+          flock -n 9 || { echo "Another production deploy holds the server lock"; exit 1; }
+          before=$(df -P -B1 / | awk 'NR==2 {print $4}')
+          echo "root_available_bytes_before=$before"
+          shopt -s nullglob
+          for f in /var/lib/docker/containers/*/*-json.log; do
+            sz=$(wc -c < "$f" | tr -d ' ')
+            echo "truncate_bytes=$sz path=$(basename "$(dirname "$f")")"
+            : > "$f" || sudo -n truncate -s 0 "$f"
+          done
+          after=$(df -P -B1 / | awk 'NR==2 {print $4}')
+          echo "root_available_bytes_after=$after"
+          echo "backup_reserve_needed=8892087319"
+          if [ "$after" -ge 8892087319 ]; then
+            echo "backup_reserve_threshold_satisfied=true"
+          else
+            echo "backup_reserve_threshold_satisfied=false"
+          fi
+          REMOTE
