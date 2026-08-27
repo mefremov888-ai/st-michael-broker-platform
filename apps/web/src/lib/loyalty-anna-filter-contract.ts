@@ -236,8 +236,8 @@ export const ANNA_RANKING_PERIOD_OPTIONS = [
 ] as const;
 
 export function annaSpecializationOptions(current = ""): string[] {
-  const options = [...ANNA_SPECIALIZATIONS];
-  if (current && !options.includes(current as (typeof ANNA_SPECIALIZATIONS)[number])) {
+  const options: string[] = [...ANNA_SPECIALIZATIONS];
+  if (current && !options.includes(current)) {
     options.push(current);
   }
   return options;
