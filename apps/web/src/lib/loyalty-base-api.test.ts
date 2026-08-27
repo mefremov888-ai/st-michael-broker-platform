@@ -27,6 +27,8 @@ import {
   unlinkActiveLoyaltyLink,
 } from "./loyalty-base-api";
 import {
+  AGENCY_SCENARIOS,
+  BROKER_SCENARIOS,
   emptyLoyaltyFilters,
   formatLoyaltyMetricExplanation,
   loyaltyFilterCapabilities,
@@ -41,6 +43,32 @@ import {
   loyaltyStatusDotColor,
   loyaltyStatusLabel,
 } from "./loyalty-status";
+import {
+  ANNA_AGENCY_CALL_RESULT_LABELS,
+  ANNA_AGENCY_SCENARIO_LABELS,
+  ANNA_APPLY_FILTERS_LABEL,
+  ANNA_BROKER_CALL_RESULT_LABELS,
+  ANNA_BROKER_ONLY_FILTER_LABELS,
+  ANNA_BROKER_SCENARIO_LABELS,
+  ANNA_BROKER_STATUS_OPTIONS,
+  ANNA_AGENCY_PARTNERSHIP_OPTIONS,
+  ANNA_COLUMN_ACTIVITY_OPTIONS,
+  ANNA_COLUMN_ARIA_LABELS,
+  ANNA_COLUMN_CALL_OPTIONS,
+  ANNA_COLUMN_CONTACT_OPTIONS,
+  ANNA_COLUMN_DEAL_OPTIONS,
+  ANNA_DEAL_FILTER_OPTIONS,
+  ANNA_EMPTY_OPTIONS,
+  ANNA_ENTITY_TAB_LABELS,
+  ANNA_FILTER_BAR_LABELS,
+  ANNA_FORBIDDEN_FILTER_LABELS,
+  ANNA_KPI_CHIP_LABELS,
+  ANNA_RANKING_PERIOD_OPTIONS,
+  ANNA_RESET_FILTERS_LABEL,
+  ANNA_SEARCH_PLACEHOLDER,
+  ANNA_SHOW_ALL_LABEL,
+  ANNA_SPECIALIZATIONS,
+} from "./loyalty-anna-filter-contract";
 import {
   agencyContactPointsPatch,
   agencyContactPersonRoleValue,
@@ -185,7 +213,6 @@ test("uses the shared accessible call-result badge on every V2 result surface", 
     readFileSync(new URL(relativePath, import.meta.url), "utf8");
   const badge = source("../components/loyalty-base/LoyaltyCallResultBadge.tsx");
   const consumers = [
-    "../components/loyalty-base/LoyaltyFilterPanel.tsx",
     "../components/loyalty-base/LoyaltyQueuePanel.tsx",
     "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
     "../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx",
@@ -295,7 +322,7 @@ test("builds independent canonical filters for brokers and agencies", () => {
   assert.deepEqual(agencyFilter.projectsOnSite, ["IN_PROGRESS"]);
   assert.equal(agencyFilter.specialTermsProposed, true);
   assert.deepEqual(agencyFilter.dataQuality, ["NEEDS_COMPLETION"]);
-  assert.equal(agencyFilter.specializations, undefined);
+  assert.deepEqual(agencyFilter.specializations, ["Вторичка"]);
   assert.equal(agencyFilter.includeLowSignal, true);
 });
 
@@ -338,6 +365,43 @@ test("defines authoritative filter capabilities for every base/entity pair", () 
   assert.equal(ourBroker.websitePresent, false);
   assert.equal(ourBroker.projectsOnSite, false);
   assert.equal(ourBroker.segments.includes("NEW_BROKER"), true);
+});
+
+test("keeps Anna's scenario option order for brokers and agencies", () => {
+  assert.deepEqual(
+    BROKER_SCENARIOS.map(([, label]) => label),
+    [
+      "Не звонили в период",
+      "Звонили в период",
+      "Был БТ",
+      "Не было БТ",
+      "Есть встречи",
+      "Нет встреч",
+      "Был на БТ → пропал",
+      "БТ + фиксация, без встречи",
+      "БТ + встреча, без сделки",
+      "Новый, не был на БТ",
+      "Есть сделки / топ",
+      "Не назначен",
+    ],
+  );
+  assert.deepEqual(
+    AGENCY_SCENARIOS.map(([, label]) => label),
+    [
+      "Не звонили в период",
+      "Звонили в период",
+      "Был БТ",
+      "Не было БТ",
+      "Есть встречи",
+      "Нет встреч",
+      "Размещены на сайте",
+      "Не размещены на сайте",
+      "Индивидуальные условия",
+      "Нет индивидуальных условий",
+      "Есть сделки / топ",
+      "Не назначен",
+    ],
+  );
 });
 
 test("clears unsupported OUR agency predicates before building an API filter", () => {
@@ -991,7 +1055,7 @@ test("retains, deduplicates and displays every backend computed status in order"
     "BROKER_TOUR",
     "FUTURE_BACKEND_STATUS",
   ]);
-  assert.equal(loyaltyStatusLabel("BROKER_TOUR"), "Был на БТ");
+  assert.equal(loyaltyStatusLabel("BROKER_TOUR"), "Был на брокер-туре");
   assert.equal(
     loyaltyStatusBadgeColor("BROKER_TOUR"),
     "bg-yellow-100 text-yellow-800",
@@ -1033,9 +1097,198 @@ test("keeps V2 table, detail, filter and legend on the shared multi-status contr
   assert.match(badges, /data-loyalty-status=\{status\}/);
   assert.match(legend, /loyaltyStatusDotColor\(item\.value\)/);
   assert.match(legend, /loyaltyStatusLabel\(item\.value\)/);
-  assert.match(filters, /loyaltyStatusLabel\(value\)/);
-  assert.match(filters, /<LoyaltyStatusBadge/);
-  assert.match(filters, /status=\{draft\.status\}/);
+  assert.match(filters, /ANNA_BROKER_STATUS_OPTIONS/);
+  assert.match(filters, /item\.label/);
+  assert.doesNotMatch(filters, /LoyaltyStatusBadge/);
+  assert.doesNotMatch(filters, /LoyaltyCallResultBadge/);
+});
+
+test("keeps Anna's dashboard filters and hides Codex extras", () => {
+  const filters = readFileSync(
+    new URL("../components/loyalty-base/LoyaltyFilterPanel.tsx", import.meta.url),
+    "utf8",
+  );
+  const workspace = readFileSync(
+    new URL(
+      "../components/loyalty-base/LoyaltyBaseWorkspaceV2.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const legend = readFileSync(
+    new URL(
+      "../components/loyalty-base/LoyaltyStatusLegend.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const contract = readFileSync(
+    new URL("./loyalty-anna-filter-contract.ts", import.meta.url),
+    "utf8",
+  );
+  const haystack = `${filters}\n${workspace}\n${contract}`;
+  const directionAt = filters.indexOf('label="Направление"');
+  const brokerOnlyAt = filters.indexOf("{isBroker &&");
+  assert.notEqual(directionAt, -1);
+  assert.notEqual(brokerOnlyAt, -1);
+  assert.ok(
+    directionAt < brokerOnlyAt,
+    "Направление must stay on agencies, not only on brokers",
+  );
+  assert.match(filters, /loyalty-anna-filter-contract/);
+  assert.match(workspace, /loyalty-anna-filter-contract/);
+  assert.match(filters, /annaSpecializationOptions/);
+  assert.match(filters, /ANNA_EMPTY_OPTIONS\.campaigns/);
+  assert.match(filters, /ANNA_APPLY_FILTERS_LABEL/);
+  assert.match(filters, /ANNA_RESET_FILTERS_LABEL/);
+  assert.match(workspace, /ANNA_SHOW_ALL_LABEL/);
+  assert.match(workspace, /ANNA_COLUMN_ARIA_LABELS/);
+  assert.match(workspace, /ANNA_BROKER_STATUS_OPTIONS/);
+  assert.match(workspace, /ANNA_AGENCY_PARTNERSHIP_OPTIONS/);
+  assert.doesNotMatch(filters, /facets\?\.specializations/);
+  assert.doesNotMatch(workspace, /facets\.statuses\.map/);
+  for (const keep of [
+    ...ANNA_FILTER_BAR_LABELS,
+    ...ANNA_BROKER_ONLY_FILTER_LABELS,
+  ]) {
+    assert.match(filters, new RegExp(keep.replace(/[–+/]/g, "\\$&")));
+  }
+  for (const keep of [
+    ANNA_SEARCH_PLACEHOLDER,
+    ANNA_EMPTY_OPTIONS.campaigns,
+    ANNA_EMPTY_OPTIONS.callResults,
+    ANNA_EMPTY_OPTIONS.scenarios,
+    ANNA_EMPTY_OPTIONS.assignees,
+    ANNA_EMPTY_OPTIONS.specializations,
+    ANNA_EMPTY_OPTIONS.statuses,
+    ANNA_EMPTY_OPTIONS.columnAssignees,
+    ANNA_APPLY_FILTERS_LABEL,
+    ANNA_RESET_FILTERS_LABEL,
+    ANNA_SHOW_ALL_LABEL,
+    ...ANNA_DEAL_FILTER_OPTIONS.common,
+    ...ANNA_DEAL_FILTER_OPTIONS.brokers,
+    ...ANNA_DEAL_FILTER_OPTIONS.agencies,
+    ...ANNA_DEAL_FILTER_OPTIONS.period,
+    ...ANNA_COLUMN_CONTACT_OPTIONS,
+    ...ANNA_BROKER_STATUS_OPTIONS.map((item) => item.label),
+    ...ANNA_AGENCY_PARTNERSHIP_OPTIONS.map((item) => item.label),
+    ...ANNA_COLUMN_ACTIVITY_OPTIONS,
+    ...ANNA_COLUMN_CALL_OPTIONS,
+    ...ANNA_COLUMN_DEAL_OPTIONS.common,
+    ...ANNA_COLUMN_DEAL_OPTIONS.brokers,
+    ...ANNA_COLUMN_DEAL_OPTIONS.agencies,
+    ...Object.values(ANNA_COLUMN_ARIA_LABELS),
+    ...ANNA_KPI_CHIP_LABELS,
+    ...ANNA_RANKING_PERIOD_OPTIONS.map((item) => item.label),
+  ]) {
+    assert.match(haystack, new RegExp(keep.replace(/[–+<>]/g, "\\$&")));
+  }
+  for (const extra of ANNA_FORBIDDEN_FILTER_LABELS) {
+    assert.doesNotMatch(filters, new RegExp(`label="${extra}"`));
+    assert.doesNotMatch(filters, new RegExp(`>${extra}<`));
+  }
+  assert.doesNotMatch(workspace, /Есть телефон/);
+  assert.doesNotMatch(workspace, /Контакт \/ агентство/);
+  assert.doesNotMatch(filters, /<details/);
+  assert.doesNotMatch(workspace, /Применить фильтры колонок/);
+  assert.match(legend, /filterable = entityType === "brokers"/);
+  assert.match(legend, /Справка по уровням/);
+  assert.match(workspace, /resetContext\(base, entity\)/);
+  assert.match(workspace, /applyEntityPatch\("brokers", \{ status \}\)/);
+  assert.match(workspace, /ANNA_ENTITY_TAB_LABELS/);
+  assert.match(workspace, /setSelected\(new Set\(\)\);/);
+  assert.match(workspace, /base !== "anna"/);
+  assert.match(workspace, /ANNA_RANKING_PERIOD_OPTIONS/);
+  assert.match(workspace, /aria-label="Период рейтинга"/);
+  assert.match(workspace, /Текущий месяц/);
+  assert.match(workspace, /Текущий квартал/);
+  assert.match(workspace, /Произвольные даты/);
+  assert.doesNotMatch(workspace, />Месяц</);
+  assert.doesNotMatch(workspace, />Квартал</);
+  assert.match(
+    workspace,
+    /base === "anna" \? \([\s\S]*<select[\s\S]*aria-label="Период рейтинга"/,
+  );
+  assert.match(
+    workspace,
+    /base !== "anna" && \([\s\S]*Контрольные показатели активности/,
+  );
+  const filterPanelAt = workspace.indexOf("<LoyaltyFilterPanel");
+  const legendAt = workspace.indexOf("<LoyaltyStatusLegend");
+  assert.notEqual(filterPanelAt, -1);
+  assert.notEqual(legendAt, -1);
+  assert.ok(
+    filterPanelAt < legendAt,
+    "Anna's portal puts the filter bar above the status legend",
+  );
+  assert.match(
+    workspace,
+    /else if \(base === "anna"\) applyEntityPatch\("brokers", \{\}\)/,
+  );
+  assert.match(
+    workspace,
+    /else if \(base === "anna"\) applyEntityPatch\("agencies", \{\}\)/,
+  );
+});
+
+test("uses Anna's call period for deals-in-period on her base", () => {
+  const state = emptyLoyaltyFilters();
+  state.callFrom = "2026-01-01";
+  state.callTo = "2026-01-31";
+  state.activityFrom = "2026-08-01";
+  state.activityTo = "2026-08-31";
+  state.dealsInPeriod = "true";
+  const anna = toCanonicalFilter(state, "brokers", "anna");
+  assert.deepEqual(anna.activityPeriod, {
+    from: "2026-01-01",
+    to: "2026-01-31",
+  });
+  assert.equal(anna.dealsInPeriod, true);
+  const ours = toCanonicalFilter(state, "brokers", "ours");
+  assert.deepEqual(ours.activityPeriod, {
+    from: "2026-08-01",
+    to: "2026-08-31",
+  });
+});
+
+test("locks Anna filter option values to her live portal contract", () => {
+  assert.deepEqual(
+    BROKER_SCENARIOS.map(([, label]) => label),
+    [...ANNA_BROKER_SCENARIO_LABELS],
+  );
+  assert.deepEqual(
+    AGENCY_SCENARIOS.map(([, label]) => label),
+    [...ANNA_AGENCY_SCENARIO_LABELS],
+  );
+  assert.deepEqual(
+    BROKER_CALL_RESULT_OPTIONS.map((item) => item.label),
+    [...ANNA_BROKER_CALL_RESULT_LABELS],
+  );
+  assert.deepEqual(
+    AGENCY_CALL_RESULT_OPTIONS.map((item) => item.label),
+    [...ANNA_AGENCY_CALL_RESULT_LABELS],
+  );
+  assert.deepEqual(
+    ANNA_BROKER_STATUS_OPTIONS.map((item) => item.label),
+    ANNA_BROKER_STATUS_OPTIONS.map((item) => loyaltyStatusLabel(item.value)),
+  );
+  assert.deepEqual(
+    ANNA_AGENCY_PARTNERSHIP_OPTIONS.map((item) => item.label),
+    ANNA_AGENCY_PARTNERSHIP_OPTIONS.map((item) =>
+      loyaltyStatusLabel(item.value),
+    ),
+  );
+  assert.deepEqual([...ANNA_SPECIALIZATIONS], [
+    "Бизнес / премиум",
+    "Коммерция — аренда",
+    "Коммерция — продажа",
+    "Вторичка",
+  ]);
+  assert.equal(loyaltyStatusLabel("BROKER_TOUR"), "Был на брокер-туре");
+  assert.deepEqual(
+    { ...ANNA_ENTITY_TAB_LABELS },
+    { brokers: "Все брокеры", agencies: "Все агентства" },
+  );
 });
 
 test("labels the amo dry-run as an entity traversal rather than event coverage", () => {

@@ -5,7 +5,7 @@ const labels: Readonly<Record<string, string>> = {
   SELLER: "Продавец",
   OFFERING: "Предлагающий",
   FIXATING: "Фиксирующий",
-  BROKER_TOUR: "Был на БТ",
+  BROKER_TOUR: "Был на брокер-туре",
   DORMANT: "Спящий",
   NEW: "Новый",
   VIP_PARTNER: "VIP-партнёр",

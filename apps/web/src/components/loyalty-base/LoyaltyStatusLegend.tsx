@@ -1,6 +1,5 @@
 "use client";
 
-import { RotateCcw } from "lucide-react";
 import type {
   LoyaltyAgencyStatus,
   LoyaltyBrokerStatus,
@@ -17,31 +16,31 @@ const brokerLegend: ReadonlyArray<{
 }> = [
   {
     value: "TOP_SELLER",
-    rule: "3 и более подтверждённых сделок",
+    rule: "3 и более сделок",
   },
   {
     value: "SELLER",
-    rule: "1–2 подтверждённые сделки",
+    rule: "1–2 сделки",
   },
   {
     value: "OFFERING",
-    rule: "Сделок нет, есть встреча",
+    rule: "Был на встрече",
   },
   {
     value: "FIXATING",
-    rule: "Встреч нет, есть фиксация",
+    rule: "Есть фиксации",
   },
   {
     value: "BROKER_TOUR",
-    rule: "БТ подтверждён полем или датой amoCRM",
+    rule: "Посетил БТ",
   },
   {
     value: "DORMANT",
-    rule: "Раньше был активен, более 90 дней без активности",
+    rule: "Более 90 дней нет активности",
   },
   {
     value: "NEW",
-    rule: "Не достиг БТ и нет подтверждённой активности",
+    rule: "Ещё не прошёл БТ",
   },
 ];
 
@@ -51,23 +50,23 @@ const agencyLegend: ReadonlyArray<{
 }> = [
   {
     value: "VIP_PARTNER",
-    rule: "5 и более подтверждённых сделок",
+    rule: "5 и более сделок",
   },
   {
     value: "SELLING_PARTNER",
-    rule: "1–4 подтверждённые сделки",
+    rule: "1–4 сделки",
   },
   {
     value: "ACTIVE_PARTNER",
-    rule: "Сделок нет, есть встречи",
+    rule: "Были встречи, но сделок пока нет",
   },
   {
     value: "FIXATING_PARTNER",
-    rule: "Есть фиксации, встреч нет",
+    rule: "Есть заявки / фиксации, но встреч пока нет",
   },
   {
     value: "WARM_PARTNER",
-    rule: "Был БТ, фиксаций нет",
+    rule: "Был БТ, но фиксаций пока нет",
   },
   {
     value: "STARTING_PARTNER",
@@ -75,11 +74,11 @@ const agencyLegend: ReadonlyArray<{
   },
   {
     value: "DORMANT_PARTNER",
-    rule: "Более 90 дней нет активности",
+    rule: "Ранее работали, но более 90 дней нет активности",
   },
   {
     value: "NEW_AGENCY",
-    rule: "Работа ещё не началась",
+    rule: "Взаимодействия ещё не было",
   },
 ];
 
@@ -89,67 +88,87 @@ export function LoyaltyStatusLegend({
   active,
   sourceStatusesUnconfirmed = false,
   onSelect,
-  onReset,
 }: {
   entityType: "brokers" | "agencies";
   facets: LoyaltyFacets | null;
   active: string;
   sourceStatusesUnconfirmed?: boolean;
-  onSelect: (status: LoyaltyBrokerStatus | LoyaltyAgencyStatus) => void;
-  onReset: () => void;
+  onSelect?: (status: LoyaltyBrokerStatus | LoyaltyAgencyStatus) => void;
 }) {
   const entries = entityType === "brokers" ? brokerLegend : agencyLegend;
+  const filterable = entityType === "brokers" && Boolean(onSelect);
   const count = (value: string) =>
     facets?.statuses.find((item) => item.value === value)?.matches ?? null;
   return (
-    <section className="card space-y-3" aria-label="Легенда статусов">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h2 className="font-semibold">
-            {entityType === "brokers"
-              ? "Статусы брокеров"
-              : "Уровни партнёрства"}
-          </h2>
-          <p className="text-xs text-text-muted">
-            {sourceStatusesUnconfirmed
-              ? "Статусы рассчитаны по срезу источника и не подтверждены событиями. Нажмите карточку, чтобы применить фильтр."
-              : "Статусы рассчитаны по подтверждённым событиям. Нажмите карточку, чтобы применить фильтр."}
-          </p>
-        </div>
-        <button type="button" className="btn btn-secondary" onClick={onReset}>
-          <RotateCcw className="h-4 w-4" /> Сбросить фильтры
-        </button>
+    <section
+      className="card space-y-3"
+      aria-label={
+        entityType === "brokers"
+          ? "Значения статусов брокеров"
+          : "Уровни партнёрства агентств"
+      }
+    >
+      <div>
+        <h2 className="font-semibold">
+          {entityType === "brokers"
+            ? "Статусы брокеров"
+            : "Уровни партнёрства"}
+        </h2>
+        <p className="text-xs text-text-muted">
+          {entityType === "agencies"
+            ? "Справка по уровням. Фильтр — в поле «Уровень партнёрства»."
+            : sourceStatusesUnconfirmed
+              ? "Статусы по срезу источника. Нажмите карточку, чтобы открыть список."
+              : "Нажмите карточку, чтобы открыть список."}
+        </p>
       </div>
       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        {entries.map((item) => (
-          <button
-            key={item.value}
-            type="button"
-            aria-pressed={active === item.value}
-            className={`rounded-xl border p-3 text-left transition hover:border-accent ${active === item.value ? "border-accent ring-2 ring-accent/20" : "border-border"}`}
-            onClick={() => onSelect(item.value)}
-          >
-            <span className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-2 font-semibold text-sm">
-                <span
-                  className={`h-3 w-3 rounded-full ${loyaltyStatusDotColor(item.value)}`}
-                />{" "}
-                {loyaltyStatusLabel(item.value)}
+        {entries.map((item) => {
+          const body = (
+            <>
+              <span className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 font-semibold text-sm">
+                  <span
+                    className={`h-3 w-3 rounded-full ${loyaltyStatusDotColor(item.value)}`}
+                  />{" "}
+                  {loyaltyStatusLabel(item.value)}
+                </span>
+                <b>
+                  {count(item.value) === null
+                    ? "Нет данных"
+                    : count(item.value)}
+                </b>
               </span>
-              <b>
-                {count(item.value) === null ? "Нет данных" : count(item.value)}
-              </b>
-            </span>
-            <span className="mt-1 block text-xs text-text-muted">
-              {sourceStatusesUnconfirmed
-                ? item.rule.replace(
-                    /подтвержд[ёе]нн(ых|ые|ой)/gi,
-                    "указанных в источнике",
-                  )
-                : item.rule}
-            </span>
-          </button>
-        ))}
+              <span className="mt-1 block text-xs text-text-muted">
+                {item.rule}
+                {filterable ? " · открыть список →" : ""}
+              </span>
+            </>
+          );
+          const className = `rounded-xl border p-3 text-left ${
+            active === item.value
+              ? "border-accent ring-2 ring-accent/20"
+              : "border-border"
+          }`;
+          if (!filterable) {
+            return (
+              <article key={item.value} className={className}>
+                {body}
+              </article>
+            );
+          }
+          return (
+            <button
+              key={item.value}
+              type="button"
+              aria-pressed={active === item.value}
+              className={`${className} transition hover:border-accent`}
+              onClick={() => onSelect?.(item.value)}
+            >
+              {body}
+            </button>
+          );
+        })}
       </div>
     </section>
   );

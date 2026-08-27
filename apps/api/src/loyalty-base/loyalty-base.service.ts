@@ -5532,7 +5532,8 @@ export class LoyaltyBaseService {
   private annaBrokerTour(item: any, entityType: EntityType): boolean | null {
     const attributes = item.attributes || {};
     const reported = item.sourceReportedMetrics?.brokerTourVisited;
-    if (typeof reported === "boolean") return reported;
+    // Anna's dashboard: hasBrokerTour = btDate || btAttended || stage «Был на БТ».
+    // An explicit false from the source slice must not hide a date/stage.
     if (
       truthyText(attributes.btAttended) ||
       hasText(attributes.btDate) ||
@@ -5542,8 +5543,11 @@ export class LoyaltyBaseService {
     ) {
       return true;
     }
+    if (reported === true) return true;
     const count = this.annaMetricValue(item, "brokerTours");
-    return count === null ? null : count > 0;
+    if (count !== null) return count > 0;
+    if (reported === false) return false;
+    return null;
   }
 
   private annaProjectStatus(value: unknown): string | null {
@@ -6094,17 +6098,15 @@ export class LoyaltyBaseService {
     if (scenario === "BT_MEETING_NO_DEAL")
       return value.bt === true && value.meetings > 0 && value.deals === 0;
     if (scenario === "NEW_NO_BT")
-      return (
-        value.bt === false && ["Новый", "NEW_BROKER"].includes(value.stage)
-      );
+      // Anna's dashboard: exclude only those who already attended BT.
+      return value.bt !== true;
     if (scenario === "HAS_DEALS")
       return value.deals !== null && value.deals > 0;
     if (scenario === "UNASSIGNED") return !value.assignee;
     if (scenario === "BT_VISITED") return value.bt === true;
-    if (scenario === "BT_NOT_VISITED") return value.bt === false;
+    if (scenario === "BT_NOT_VISITED") return value.bt !== true;
     if (scenario === "SITE_PLACED") return value.projectsOnSite === "YES";
-    if (scenario === "SITE_NOT_PLACED")
-      return ["NO", "IN_PROGRESS"].includes(value.projectsOnSite);
+    if (scenario === "SITE_NOT_PLACED") return value.projectsOnSite !== "YES";
     if (scenario === "INDIVIDUAL_TERMS")
       return value.hasIndividualTerms === true;
     if (scenario === "NO_INDIVIDUAL_TERMS")
@@ -6136,7 +6138,7 @@ export class LoyaltyBaseService {
     if (columns.statusStage && !value.statuses.includes(columns.statusStage))
       return false;
     if (columns.activity === "BT_VISITED" && value.bt !== true) return false;
-    if (columns.activity === "BT_NOT_VISITED" && value.bt !== false)
+    if (columns.activity === "BT_NOT_VISITED" && value.bt === true)
       return false;
     if (
       columns.activity === "HAS_FIXATIONS" &&
