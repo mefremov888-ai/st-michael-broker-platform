@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, Filter, RotateCcw } from "lucide-react";
+import { Filter, RotateCcw } from "lucide-react";
 import {
   getLoyaltyCallResultOptions,
   type LoyaltyBaseKey,
@@ -16,48 +16,85 @@ import type {
   LoyaltyCampaign,
   LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
-import { loyaltyStatusLabel } from "@/lib/loyalty-status";
-import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
-import { LoyaltyStatusBadge } from "./LoyaltyStatusBadges";
+import {
+  ANNA_AGENCY_PARTNERSHIP_OPTIONS,
+  ANNA_APPLY_FILTERS_LABEL,
+  ANNA_BROKER_STATUS_OPTIONS,
+  ANNA_DATA_AND_AMO_OPTIONS,
+  ANNA_EMPTY_OPTIONS,
+  ANNA_GEOGRAPHY_OPTIONS,
+  ANNA_RELATIONSHIP_STAGES,
+  ANNA_RESET_FILTERS_LABEL,
+  ANNA_SEARCH_PLACEHOLDER,
+  ANNA_WORK_FORMATS,
+  annaSpecializationOptions,
+} from "@/lib/loyalty-anna-filter-contract";
 
-const BROKER_STAGES = [
-  "Новый",
-  "Звонили",
-  "Приглашён на БТ",
-  "Был на БТ",
-  "Фиксация",
-  "Встреча",
-  "Сделка",
-  "Повторные сделки / VIP",
-] as const;
+type DealPreset =
+  | ""
+  | "HAS"
+  | "NONE"
+  | "3_PLUS"
+  | "5_PLUS"
+  | "1_2"
+  | "3_4"
+  | "5_9"
+  | "10_PLUS"
+  | "IN_PERIOD"
+  | "NONE_IN_PERIOD";
 
-const AGENCY_PARTNERSHIP = [
-  "VIP_PARTNER",
-  "SELLING_PARTNER",
-  "ACTIVE_PARTNER",
-  "FIXATING_PARTNER",
-  "WARM_PARTNER",
-  "STARTING_PARTNER",
-  "DORMANT_PARTNER",
-  "NEW_AGENCY",
-] as const;
+function dealPresetFromDraft(draft: LoyaltyFilterFormState): DealPreset {
+  if (draft.dealsInPeriod === "true") return "IN_PERIOD";
+  if (draft.dealsInPeriod === "false") return "NONE_IN_PERIOD";
+  if (draft.dealsMin === "0" && draft.dealsMax === "0") return "NONE";
+  if (draft.dealsMin === "1" && draft.dealsMax === "2") return "1_2";
+  if (draft.dealsMin === "3" && draft.dealsMax === "4") return "3_4";
+  if (draft.dealsMin === "5" && draft.dealsMax === "9") return "5_9";
+  if (draft.dealsMin === "10" && draft.dealsMax === "") return "10_PLUS";
+  if (draft.dealsMin === "3" && draft.dealsMax === "") return "3_PLUS";
+  if (draft.dealsMin === "5" && draft.dealsMax === "") return "5_PLUS";
+  if (draft.dealsMin === "1" && draft.dealsMax === "") return "HAS";
+  return "";
+}
 
-const BROKER_STATUSES = [
-  "TOP_SELLER",
-  "SELLER",
-  "OFFERING",
-  "FIXATING",
-  "BROKER_TOUR",
-  "DORMANT",
-  "NEW",
-] as const;
+function dealPatchFromPreset(
+  preset: DealPreset,
+): Pick<LoyaltyFilterFormState, "dealsMin" | "dealsMax" | "dealsInPeriod"> {
+  switch (preset) {
+    case "HAS":
+      return { dealsMin: "1", dealsMax: "", dealsInPeriod: "" };
+    case "NONE":
+      return { dealsMin: "0", dealsMax: "0", dealsInPeriod: "" };
+    case "3_PLUS":
+      return { dealsMin: "3", dealsMax: "", dealsInPeriod: "" };
+    case "5_PLUS":
+      return { dealsMin: "5", dealsMax: "", dealsInPeriod: "" };
+    case "1_2":
+      return { dealsMin: "1", dealsMax: "2", dealsInPeriod: "" };
+    case "3_4":
+      return { dealsMin: "3", dealsMax: "4", dealsInPeriod: "" };
+    case "5_9":
+      return { dealsMin: "5", dealsMax: "9", dealsInPeriod: "" };
+    case "10_PLUS":
+      return { dealsMin: "10", dealsMax: "", dealsInPeriod: "" };
+    case "IN_PERIOD":
+      return { dealsMin: "", dealsMax: "", dealsInPeriod: "true" };
+    case "NONE_IN_PERIOD":
+      return { dealsMin: "", dealsMax: "", dealsInPeriod: "false" };
+    default:
+      return { dealsMin: "", dealsMax: "", dealsInPeriod: "" };
+  }
+}
 
-const QUALITY = [
-  ["FULL", "Полные"],
-  ["NEEDS_COMPLETION", "Требуют заполнения"],
-  ["NOT_FOUND_IN_CRM", "Не найден в CRM"],
-  ["CONFLICT", "Конфликт"],
-] as const;
+type AmoQualityPreset = "" | "FOUND_AMO" | "NOT_FOUND_AMO" | "FULL" | "NEEDS_COMPLETION";
+
+function amoQualityFromDraft(draft: LoyaltyFilterFormState): AmoQualityPreset {
+  if (draft.hasAmo === "true") return "FOUND_AMO";
+  if (draft.hasAmo === "false") return "NOT_FOUND_AMO";
+  if (draft.dataQuality === "FULL") return "FULL";
+  if (draft.dataQuality === "NEEDS_COMPLETION") return "NEEDS_COMPLETION";
+  return "";
+}
 
 function Field({
   label,
@@ -71,40 +108,6 @@ function Field({
       <span>{label}</span>
       {children}
     </label>
-  );
-}
-
-function TriSelect({
-  value,
-  onChange,
-  disabled,
-  title,
-  any = "Неважно",
-  yes = "Да",
-  no = "Нет",
-}: {
-  value: "" | "true" | "false";
-  onChange: (value: "" | "true" | "false") => void;
-  disabled?: boolean;
-  title?: string;
-  any?: string;
-  yes?: string;
-  no?: string;
-}) {
-  return (
-    <select
-      className="input"
-      value={value}
-      disabled={disabled}
-      title={title}
-      onChange={(event) =>
-        onChange(event.target.value as "" | "true" | "false")
-      }
-    >
-      <option value="">{any}</option>
-      <option value="true">{yes}</option>
-      <option value="false">{no}</option>
-    </select>
   );
 }
 
@@ -141,126 +144,68 @@ export function LoyaltyFilterPanel({
         [key]: value,
       }),
     );
+  const patch = (next: Partial<LoyaltyFilterFormState>) =>
+    onChange(
+      sanitizeLoyaltyFilterState(base, entityType, {
+        ...draft,
+        ...next,
+      }),
+    );
   const isBroker = entityType === "brokers";
   const callResults = getLoyaltyCallResultOptions(entityType);
   const capabilities = loyaltyFilterCapabilities(base, entityType);
   const scenarios = capabilities.scenarios;
-  const statusOptions = isBroker ? BROKER_STATUSES : AGENCY_PARTNERSHIP;
-  const unavailableForOurAgency = base === "ours" && !isBroker;
-  const unavailableTitle = "Нет авторитетного поля в модели Нашей базы";
+  const statusOptions = isBroker
+    ? ANNA_BROKER_STATUS_OPTIONS
+    : ANNA_AGENCY_PARTNERSHIP_OPTIONS;
+  const specializations = annaSpecializationOptions(draft.specialization);
+  const assigneeValue = draft.unassigned ? "__unassigned__" : draft.assigneeId;
 
   return (
-    <details className="card group" open>
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-        <span className="flex items-center gap-2 font-semibold">
-          <Filter className="h-4 w-4 text-accent" /> Фильтры{" "}
-          {isBroker ? "брокеров" : "агентств"}
-        </span>
-        <ChevronDown className="h-4 w-4 transition group-open:rotate-180" />
-      </summary>
-
+    <section className="filters-bar">
       <form
-        className="mt-4 space-y-4"
         onSubmit={(event) => {
           event.preventDefault();
           onApply();
         }}
       >
-        {unavailableForOurAgency && (
-          <p className="rounded-lg bg-warning/10 p-3 text-xs text-warning">
-            Для агентств «Нашей базы» нет авторитетных полей связи с amoCRM,
-            качества данных, размера, сайта и размещения проектов. Сценарии
-            размещения и режим «Только архив» также недоступны. Эти условия
-            очищаются: неизвестные значения не считаются отрицательными.
-          </p>
-        )}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <Field
-            label={
-              isBroker
-                ? "ФИО, агентство, телефон или email"
-                : "Название, контакт, телефон или email"
-            }
-          >
+          <Field label="Поиск">
             <input
               className="input"
               value={draft.search}
               onChange={(event) => update("search", event.target.value)}
               autoComplete="off"
-              placeholder="Поиск"
+              placeholder={ANNA_SEARCH_PLACEHOLDER}
             />
           </Field>
-          <Field label="Город">
-            <input
-              className="input"
-              value={draft.city}
-              list={`loyalty-cities-${base}-${entityType}`}
-              onChange={(event) => update("city", event.target.value)}
-              autoComplete="off"
-              placeholder="Все города"
-            />
-            <datalist id={`loyalty-cities-${base}-${entityType}`}>
-              {facets?.cities.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.matches} записей
-                </option>
-              ))}
-            </datalist>
+          <Field label="Период звонков">
+            <div className="flex gap-1">
+              <input
+                className="input"
+                type="date"
+                aria-label="Звонки с"
+                value={draft.callFrom}
+                max={draft.callTo}
+                onChange={(event) => update("callFrom", event.target.value)}
+              />
+              <input
+                className="input"
+                type="date"
+                aria-label="Звонки по"
+                value={draft.callTo}
+                min={draft.callFrom}
+                onChange={(event) => update("callTo", event.target.value)}
+              />
+            </div>
           </Field>
-          <Field label="Связь с amoCRM">
-            <TriSelect
-              value={draft.hasAmo}
-              onChange={(value) => update("hasAmo", value)}
-              disabled={!capabilities.hasAmo}
-              title={!capabilities.hasAmo ? unavailableTitle : undefined}
-              any="Любая"
-              yes="Связана"
-              no="Не связана"
-            />
-          </Field>
-          <Field label="Звонки с">
-            <input
-              className="input"
-              type="date"
-              value={draft.callFrom}
-              max={draft.callTo}
-              onChange={(event) => update("callFrom", event.target.value)}
-            />
-          </Field>
-          <Field label="Звонки по">
-            <input
-              className="input"
-              type="date"
-              value={draft.callTo}
-              min={draft.callFrom}
-              onChange={(event) => update("callTo", event.target.value)}
-            />
-          </Field>
-          <Field label="Встречи и сделки с">
-            <input
-              className="input"
-              type="date"
-              value={draft.activityFrom}
-              max={draft.activityTo}
-              onChange={(event) => update("activityFrom", event.target.value)}
-            />
-          </Field>
-          <Field label="Встречи и сделки по">
-            <input
-              className="input"
-              type="date"
-              value={draft.activityTo}
-              min={draft.activityFrom}
-              onChange={(event) => update("activityTo", event.target.value)}
-            />
-          </Field>
-          <Field label="Кампания обзвона">
+          <Field label="Обзвон">
             <select
               className="input"
               value={draft.campaignId}
               onChange={(event) => update("campaignId", event.target.value)}
             >
-              <option value="">Все кампании</option>
+              <option value="">{ANNA_EMPTY_OPTIONS.campaigns}</option>
               {campaigns.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name}
@@ -280,20 +225,13 @@ export function LoyaltyFilterPanel({
                 )
               }
             >
-              <option value="">Любой результат</option>
+              <option value="">{ANNA_EMPTY_OPTIONS.callResults}</option>
               {callResults.map(({ code, label }) => (
                 <option key={code} value={code}>
                   {label}
                 </option>
               ))}
             </select>
-            {draft.lastCallResult && (
-              <LoyaltyCallResultBadge
-                result={draft.lastCallResult}
-                entityType={entityType}
-                className="mt-1"
-              />
-            )}
           </Field>
           <Field label="Сценарий">
             <select
@@ -306,7 +244,7 @@ export function LoyaltyFilterPanel({
                 )
               }
             >
-              <option value="">Все сценарии</option>
+              <option value="">{ANNA_EMPTY_OPTIONS.scenarios}</option>
               {scenarios.map(([value, label]) => (
                 <option key={value} value={value}>
                   {label}
@@ -317,11 +255,20 @@ export function LoyaltyFilterPanel({
           <Field label="Ответственный">
             <select
               className="input"
-              value={draft.assigneeId}
-              disabled={draft.unassigned}
-              onChange={(event) => update("assigneeId", event.target.value)}
+              value={assigneeValue}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === "__unassigned__") {
+                  patch({ unassigned: true, assigneeId: "" });
+                  return;
+                }
+                patch({ unassigned: false, assigneeId: value });
+              }}
             >
-              <option value="">Все сотрудники</option>
+              <option value="">{ANNA_EMPTY_OPTIONS.assignees}</option>
+              <option value="__unassigned__">
+                {ANNA_EMPTY_OPTIONS.unassigned}
+              </option>
               {operators.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name}
@@ -335,40 +282,26 @@ export function LoyaltyFilterPanel({
                 ))}
             </select>
           </Field>
-          <label className="flex items-end gap-2 pb-2 text-sm">
-            <input
-              type="checkbox"
-              checked={draft.unassigned}
-              onChange={(event) => {
-                update("unassigned", event.target.checked);
-              }}
-            />
-            Не назначен
-          </label>
 
-          {isBroker ? (
+          <Field label="Направление">
+            <select
+              className="input"
+              value={draft.specialization}
+              onChange={(event) =>
+                update("specialization", event.target.value)
+              }
+            >
+              <option value="">{ANNA_EMPTY_OPTIONS.specializations}</option>
+              {specializations.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {isBroker && (
             <>
-              <Field label="Специализация">
-                <select
-                  className="input"
-                  value={draft.specialization}
-                  onChange={(event) =>
-                    update("specialization", event.target.value)
-                  }
-                >
-                  <option value="">Все специализации</option>
-                  {[
-                    "Бизнес / премиум",
-                    "Коммерция — аренда",
-                    "Коммерция — продажа",
-                    "Вторичка",
-                  ].map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </Field>
               <Field label="География">
                 <select
                   className="input"
@@ -380,11 +313,42 @@ export function LoyaltyFilterPanel({
                     )
                   }
                 >
-                  <option value="">Москва и регионы</option>
-                  <option value="MOSCOW">Москва</option>
-                  <option value="REGION">Регион</option>
+                  {ANNA_GEOGRAPHY_OPTIONS.map((item) => (
+                    <option key={item.value || "all"} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
                 </select>
               </Field>
+              {capabilities.dataQuality && (
+                <Field label="Данные и amoCRM">
+                  <select
+                    className="input"
+                    value={amoQualityFromDraft(draft)}
+                    onChange={(event) => {
+                      const value = event.target.value as AmoQualityPreset;
+                      if (value === "FOUND_AMO") {
+                        patch({ hasAmo: "true", dataQuality: "" });
+                        return;
+                      }
+                      if (value === "NOT_FOUND_AMO") {
+                        patch({ hasAmo: "false", dataQuality: "" });
+                        return;
+                      }
+                      patch({
+                        hasAmo: "",
+                        dataQuality: value as LoyaltyFilterFormState["dataQuality"],
+                      });
+                    }}
+                  >
+                    {ANNA_DATA_AND_AMO_OPTIONS.map((item) => (
+                      <option key={item.value || "all"} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
               <Field label="Формат работы">
                 <select
                   className="input"
@@ -397,10 +361,12 @@ export function LoyaltyFilterPanel({
                     )
                   }
                 >
-                  <option value="">Все форматы</option>
-                  <option value="Агентство">Агентство</option>
-                  <option value="Частный брокер">Частный брокер</option>
-                  <option value="Координатор">Координатор</option>
+                  <option value="">{ANNA_EMPTY_OPTIONS.workFormats}</option>
+                  {ANNA_WORK_FORMATS.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
                 </select>
               </Field>
               <Field label="Стадия отношений">
@@ -411,8 +377,10 @@ export function LoyaltyFilterPanel({
                     update("relationshipStage", event.target.value)
                   }
                 >
-                  <option value="">Все стадии</option>
-                  {BROKER_STAGES.map((value) => (
+                  <option value="">
+                    {ANNA_EMPTY_OPTIONS.relationshipStages}
+                  </option>
+                  {ANNA_RELATIONSHIP_STAGES.map((value) => (
                     <option key={value} value={value}>
                       {value}
                     </option>
@@ -420,128 +388,7 @@ export function LoyaltyFilterPanel({
                 </select>
               </Field>
             </>
-          ) : (
-            <>
-              <Field label="Размер агентства">
-                <select
-                  className="input"
-                  value={draft.agencySize}
-                  disabled={!capabilities.agencySize}
-                  title={
-                    !capabilities.agencySize ? unavailableTitle : undefined
-                  }
-                  onChange={(event) =>
-                    update(
-                      "agencySize",
-                      event.target
-                        .value as LoyaltyFilterFormState["agencySize"],
-                    )
-                  }
-                >
-                  <option value="">Любой размер</option>
-                  <option value="Крупное">Крупное</option>
-                  <option value="Среднее">Среднее</option>
-                  <option value="Небольшое">Небольшое</option>
-                </select>
-              </Field>
-              <Field label="Статус партнёрства из источника">
-                <input
-                  className="input"
-                  list="loyalty-agency-partnership-stages"
-                  value={draft.partnershipStatus}
-                  onChange={(event) =>
-                    update("partnershipStatus", event.target.value)
-                  }
-                  placeholder="Все статусы"
-                />
-                <datalist id="loyalty-agency-partnership-stages">
-                  {facets?.stages.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.matches} записей
-                    </option>
-                  ))}
-                </datalist>
-              </Field>
-              <Field label="Размещение сайта">
-                <select
-                  className="input"
-                  value={draft.projectsOnSite}
-                  disabled={!capabilities.projectsOnSite}
-                  title={
-                    !capabilities.projectsOnSite ? unavailableTitle : undefined
-                  }
-                  onChange={(event) =>
-                    update(
-                      "projectsOnSite",
-                      event.target
-                        .value as LoyaltyFilterFormState["projectsOnSite"],
-                    )
-                  }
-                >
-                  <option value="">Любое</option>
-                  <option value="YES">Размещены</option>
-                  <option value="IN_PROGRESS">В процессе</option>
-                  <option value="NO">Не размещены</option>
-                </select>
-              </Field>
-              <Field label="Есть сайт">
-                <TriSelect
-                  value={draft.websitePresent}
-                  onChange={(value) => update("websitePresent", value)}
-                  disabled={!capabilities.websitePresent}
-                  title={
-                    !capabilities.websitePresent ? unavailableTitle : undefined
-                  }
-                />
-              </Field>
-              <Field label="Индивидуальные условия">
-                <TriSelect
-                  value={draft.individualTerms}
-                  onChange={(value) => update("individualTerms", value)}
-                  yes="Есть"
-                  no="Нет"
-                />
-              </Field>
-              <Field label="Предложены специальные условия">
-                <TriSelect
-                  value={draft.specialTermsProposed}
-                  onChange={(value) => update("specialTermsProposed", value)}
-                  yes="Предложены"
-                  no="Не предложены"
-                />
-              </Field>
-              <Field label="Награждены">
-                <TriSelect
-                  value={draft.rewardPresent}
-                  onChange={(value) => update("rewardPresent", value)}
-                  yes="Да"
-                  no="Нет"
-                />
-              </Field>
-            </>
           )}
-
-          <Field label="Качество данных">
-            <select
-              className="input"
-              value={draft.dataQuality}
-              disabled={!capabilities.dataQuality}
-              title={!capabilities.dataQuality ? unavailableTitle : undefined}
-              onChange={(event) =>
-                update(
-                  "dataQuality",
-                  event.target.value as LoyaltyFilterFormState["dataQuality"],
-                )
-              }
-            >
-              <option value="">Любое качество</option>
-              {QUALITY.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </Field>
 
           <Field label={isBroker ? "Статус брокера" : "Уровень партнёрства"}>
             <select
@@ -554,211 +401,49 @@ export function LoyaltyFilterPanel({
                 )
               }
             >
-              <option value="">Все</option>
-              {statusOptions.map((value) => (
-                <option key={value} value={value}>
-                  {loyaltyStatusLabel(value)}
+              <option value="">{ANNA_EMPTY_OPTIONS.statuses}</option>
+              {statusOptions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
                 </option>
               ))}
             </select>
-            {draft.status && (
-              <LoyaltyStatusBadge
-                status={draft.status}
-                title={
-                  isBroker
-                    ? "Выбранный статус брокера"
-                    : "Выбранный уровень партнёрства"
-                }
-                className="mt-1"
-              />
-            )}
           </Field>
-          <Field label="Был БТ">
-            <TriSelect
-              value={draft.bt}
-              onChange={(value) => update("bt", value)}
-            />
-          </Field>
-          <Field label="Встречи">
-            <TriSelect
-              value={draft.meetings}
-              onChange={(value) =>
-                onChange({
-                  ...draft,
-                  meetings: value,
-                  meetingsMin: "",
-                  meetingsMax: "",
-                })
-              }
-              yes="Есть"
-              no="Нет"
-            />
-          </Field>
-          <Field label="Встреч от">
-            <input
-              className="input"
-              type="number"
-              min="0"
-              value={draft.meetingsMin}
-              onChange={(event) =>
-                onChange({
-                  ...draft,
-                  meetings: "",
-                  meetingsMin: event.target.value,
-                })
-              }
-            />
-          </Field>
-          <Field label="Встреч до">
-            <input
-              className="input"
-              type="number"
-              min="0"
-              value={draft.meetingsMax}
-              onChange={(event) =>
-                onChange({
-                  ...draft,
-                  meetings: "",
-                  meetingsMax: event.target.value,
-                })
-              }
-            />
-          </Field>
-          <Field label="Сделки в выбранном периоде">
-            <TriSelect
-              value={draft.dealsInPeriod}
-              onChange={(value) => update("dealsInPeriod", value)}
-              yes="Есть сделки"
-              no="Нет сделок"
-            />
-          </Field>
-          {!isBroker && (
-            <Field label="Количество сделок">
-              <select
-                className="input"
-                value={
-                  draft.dealsMin === "0" && draft.dealsMax === "0"
-                    ? "0"
-                    : draft.dealsMin === "1" && draft.dealsMax === "4"
-                      ? "1_4"
-                      : draft.dealsMin === "5" && draft.dealsMax === ""
-                        ? "5_PLUS"
-                        : draft.dealsMin || draft.dealsMax
-                          ? "CUSTOM"
-                          : ""
-                }
-                onChange={(event) => {
-                  const preset = event.target.value;
-                  onChange({
-                    ...draft,
-                    dealsMin:
-                      preset === "0"
-                        ? "0"
-                        : preset === "1_4"
-                          ? "1"
-                          : preset === "5_PLUS"
-                            ? "5"
-                            : "",
-                    dealsMax:
-                      preset === "0" ? "0" : preset === "1_4" ? "4" : "",
-                  });
-                }}
-              >
-                <option value="">Любое количество</option>
-                <option value="0">Нет сделок</option>
-                <option value="1_4">1–4 сделки</option>
-                <option value="5_PLUS">5 и больше</option>
-                <option value="CUSTOM">Свой диапазон ниже</option>
-              </select>
-            </Field>
-          )}
-          <Field label="Сделок от">
-            <input
-              className="input"
-              type="number"
-              min="0"
-              value={draft.dealsMin}
-              onChange={(event) => update("dealsMin", event.target.value)}
-            />
-          </Field>
-          <Field label="Сделок до">
-            <input
-              className="input"
-              type="number"
-              min="0"
-              value={draft.dealsMax}
-              onChange={(event) => update("dealsMax", event.target.value)}
-            />
-          </Field>
-          <Field label="Давно не связывались, дней">
-            <input
-              className="input"
-              type="number"
-              min="1"
-              value={draft.staleDays}
-              onChange={(event) => update("staleDays", event.target.value)}
-              placeholder="Например, 90"
-            />
-          </Field>
-          <Field label="Архив">
+          <Field label="Количество сделок">
             <select
               className="input"
-              value={draft.archived}
+              value={dealPresetFromDraft(draft)}
               onChange={(event) =>
-                update(
-                  "archived",
-                  event.target.value as LoyaltyFilterFormState["archived"],
-                )
+                patch(dealPatchFromPreset(event.target.value as DealPreset))
               }
             >
-              <option value="exclude">Только активные</option>
-              {capabilities.archivedModes.includes("only") && (
-                <option value="only">Только архив</option>
+              <option value="">Все сделки</option>
+              <option value="HAS">Есть сделки</option>
+              <option value="NONE">Нет сделок</option>
+              {isBroker ? (
+                <>
+                  <option value="3_PLUS">3+ сделки</option>
+                  <option value="5_PLUS">5+ сделок</option>
+                </>
+              ) : (
+                <>
+                  <option value="1_2">1–2 сделки</option>
+                  <option value="3_4">3–4 сделки</option>
+                  <option value="5_9">5–9 сделок</option>
+                  <option value="10_PLUS">10+ сделок</option>
+                </>
               )}
-              <option value="include">Активные и архив</option>
+              <option value="IN_PERIOD">Сделка в выбранном периоде</option>
+              <option value="NONE_IN_PERIOD">
+                Нет сделок в выбранном периоде
+              </option>
             </select>
-          </Field>
-          <Field label="Сортировка">
-            <div className="flex gap-1">
-              <select
-                className="input"
-                value={draft.sortBy}
-                onChange={(event) =>
-                  update(
-                    "sortBy",
-                    event.target.value as LoyaltyFilterFormState["sortBy"],
-                  )
-                }
-              >
-                <option value="name">Имя / название</option>
-                <option value="lastCallAt">Последний звонок</option>
-                <option value="fixations">Фиксации</option>
-                <option value="meetings">Встречи</option>
-                <option value="deals">Сделки</option>
-                <option value="dealAmount">Сумма ДДУ</option>
-                <option value="updatedAt">Обновление</option>
-              </select>
-              <select
-                className="input w-20"
-                aria-label="Направление сортировки"
-                value={draft.sortOrder}
-                onChange={(event) =>
-                  update(
-                    "sortOrder",
-                    event.target.value as LoyaltyFilterFormState["sortOrder"],
-                  )
-                }
-              >
-                <option value="asc">↑</option>
-                <option value="desc">↓</option>
-              </select>
-            </div>
           </Field>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
           <button className="btn btn-primary" type="submit" disabled={loading}>
-            <Filter className="h-4 w-4" /> Применить фильтры
+            <Filter className="h-4 w-4" /> {ANNA_APPLY_FILTERS_LABEL}
           </button>
           <button
             className="btn btn-secondary"
@@ -766,13 +451,10 @@ export function LoyaltyFilterPanel({
             onClick={onReset}
             disabled={loading}
           >
-            <RotateCcw className="h-4 w-4" /> Сбросить фильтры
+            <RotateCcw className="h-4 w-4" /> {ANNA_RESET_FILTERS_LABEL}
           </button>
-          <span className="text-xs text-text-muted">
-            Изменения применятся только после кнопки «Применить фильтры».
-          </span>
         </div>
       </form>
-    </details>
+    </section>
   );
 }

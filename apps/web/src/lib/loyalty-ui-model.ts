@@ -179,9 +179,14 @@ export function toCanonicalFilter(
         ? { from: state.callFrom, to: state.callTo }
         : undefined,
     activityPeriod:
-      state.activityFrom && state.activityTo
-        ? { from: state.activityFrom, to: state.activityTo }
-        : undefined,
+      base === "anna" &&
+      state.dealsInPeriod !== "" &&
+      state.callFrom &&
+      state.callTo
+        ? { from: state.callFrom, to: state.callTo }
+        : state.activityFrom && state.activityTo
+          ? { from: state.activityFrom, to: state.activityTo }
+          : undefined,
     campaignIds: state.campaignId ? [state.campaignId] : undefined,
     lastCallResults: state.lastCallResult ? [state.lastCallResult] : undefined,
     scenario: state.scenario || undefined,
@@ -229,6 +234,9 @@ export function toCanonicalFilter(
     partnershipStatuses: state.partnershipStatus
       ? [state.partnershipStatus]
       : undefined,
+    specializations: state.specialization
+      ? [state.specialization]
+      : undefined,
     brokerStatuses: state.status
       ? [state.status as LoyaltyAgencyStatus]
       : undefined,
@@ -247,16 +255,16 @@ export const BROKER_SCENARIOS: ReadonlyArray<
 > = [
   ["NOT_CALLED_IN_PERIOD", "Не звонили в период"],
   ["CALLED_IN_PERIOD", "Звонили в период"],
+  ["BT_VISITED", "Был БТ"],
+  ["BT_NOT_VISITED", "Не было БТ"],
+  ["HAS_MEETINGS", "Есть встречи"],
+  ["NO_MEETINGS", "Нет встреч"],
   ["BT_DROPPED", "Был на БТ → пропал"],
   ["BT_FIXATION_NO_MEETING", "БТ + фиксация, без встречи"],
   ["BT_MEETING_NO_DEAL", "БТ + встреча, без сделки"],
   ["NEW_NO_BT", "Новый, не был на БТ"],
   ["HAS_DEALS", "Есть сделки / топ"],
   ["UNASSIGNED", "Не назначен"],
-  ["BT_VISITED", "Был БТ"],
-  ["BT_NOT_VISITED", "Не было БТ"],
-  ["HAS_MEETINGS", "Есть встречи"],
-  ["NO_MEETINGS", "Нет встреч"],
 ];
 
 export const AGENCY_SCENARIOS: ReadonlyArray<
@@ -264,16 +272,16 @@ export const AGENCY_SCENARIOS: ReadonlyArray<
 > = [
   ["NOT_CALLED_IN_PERIOD", "Не звонили в период"],
   ["CALLED_IN_PERIOD", "Звонили в период"],
-  ["HAS_DEALS", "Есть сделки / топ"],
-  ["UNASSIGNED", "Не назначен"],
   ["BT_VISITED", "Был БТ"],
   ["BT_NOT_VISITED", "Не было БТ"],
+  ["HAS_MEETINGS", "Есть встречи"],
+  ["NO_MEETINGS", "Нет встреч"],
   ["SITE_PLACED", "Размещены на сайте"],
   ["SITE_NOT_PLACED", "Не размещены на сайте"],
   ["INDIVIDUAL_TERMS", "Индивидуальные условия"],
   ["NO_INDIVIDUAL_TERMS", "Нет индивидуальных условий"],
-  ["HAS_MEETINGS", "Есть встречи"],
-  ["NO_MEETINGS", "Нет встреч"],
+  ["HAS_DEALS", "Есть сделки / топ"],
+  ["UNASSIGNED", "Не назначен"],
 ];
 
 export type LoyaltyArchiveMode = LoyaltyFilterFormState["archived"];
@@ -564,16 +572,11 @@ function sanitizeLoyaltyColumnFilters(
   if (typeof candidate.assignee === "string" && candidate.assignee.trim()) {
     output.assignee = candidate.assignee.trim();
   }
-  if (
-    [
-      "HAS_DEALS",
-      "NO_DEALS",
-      "ONE_TO_TWO",
-      "ONE_TO_FOUR",
-      "THREE_PLUS",
-      "FIVE_PLUS",
-    ].includes(String(candidate.deals || ""))
-  ) {
+  const dealValues =
+    entityType === "brokers"
+      ? ["HAS_DEALS", "NO_DEALS", "ONE_TO_TWO", "THREE_PLUS"]
+      : ["HAS_DEALS", "NO_DEALS", "ONE_TO_FOUR", "FIVE_PLUS"];
+  if (dealValues.includes(String(candidate.deals || ""))) {
     output.deals = candidate.deals as LoyaltyColumnFilters["deals"];
   }
   return output;

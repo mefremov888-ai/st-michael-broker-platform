@@ -8,7 +8,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useRouter } from "next/navigation";
 import {
   AlertCircle,
   Building2,
@@ -75,6 +74,16 @@ import {
   type LoyaltyCampaign,
   type LoyaltyOperator,
 } from "@/lib/loyalty-workflow-api";
+import {
+  ANNA_AGENCY_PARTNERSHIP_OPTIONS,
+  ANNA_BROKER_STATUS_OPTIONS,
+  ANNA_COLUMN_ARIA_LABELS,
+  ANNA_EMPTY_OPTIONS,
+  ANNA_ENTITY_TAB_LABELS,
+  ANNA_KPI_CHIP_LABELS,
+  ANNA_RANKING_PERIOD_OPTIONS,
+  ANNA_SHOW_ALL_LABEL,
+} from "@/lib/loyalty-anna-filter-contract";
 import { AnnaImportPanel } from "./AnnaImportPanel";
 import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 import { LoyaltyCampaignDashboard } from "./LoyaltyCampaignDashboard";
@@ -93,6 +102,12 @@ type ContextKey = `${LoyaltyBaseKey}:${LoyaltyEntityType}`;
 type PeriodPreset = "month" | "quarter" | "custom";
 const baseLabels = { anna: "База Анны Скибицкой", ours: "Наша база" } as const;
 const entityLabels = { brokers: "Брокеры", agencies: "Агентства" } as const;
+const SEGMENT_LABELS: Record<LoyaltySegment, string> = {
+  NOT_CALLED_CURRENT_MONTH: ANNA_KPI_CHIP_LABELS[0],
+  NEW_BROKER: ANNA_KPI_CHIP_LABELS[1],
+  BT_WITHOUT_FIXATION: ANNA_KPI_CHIP_LABELS[2],
+  BIRTHDAY_TODAY: ANNA_KPI_CHIP_LABELS[3],
+};
 const contextKey = (
   base: LoyaltyBaseKey,
   entity: LoyaltyEntityType,
@@ -369,8 +384,6 @@ function LoyaltyTable({
   operators,
   columnDraft,
   onColumnDraft,
-  onApplyColumns,
-  onResetColumns,
 }: {
   data: LoyaltyListResponse;
   entityType: LoyaltyEntityType;
@@ -383,8 +396,6 @@ function LoyaltyTable({
   operators: LoyaltyOperator[];
   columnDraft: LoyaltyColumnFilters;
   onColumnDraft: (next: LoyaltyColumnFilters) => void;
-  onApplyColumns: () => void;
-  onResetColumns: () => void;
 }) {
   const isChecked = (id: string) =>
     allFilterSelected ? !excluded.has(id) : selected.has(id);
@@ -424,11 +435,13 @@ function LoyaltyTable({
               />
             </th>
             <th className="pb-2 pr-3">
-              {entityType === "brokers"
-                ? "Контакт / агентство"
-                : "Агентство / контакты"}
+              {entityType === "brokers" ? "Брокер" : "Агентство"}
             </th>
-            <th className="pb-2 pr-3">Статус / стадия</th>
+            <th className="pb-2 pr-3">
+              {entityType === "brokers"
+                ? "Статус и стадия"
+                : "Уровень партнёрства"}
+            </th>
             <th className="pb-2 pr-3">Активность</th>
             <th className="pb-2 pr-3">Прошлые обзвоны</th>
             <th className="pb-2 pr-3">Ответственный</th>
@@ -439,28 +452,31 @@ function LoyaltyTable({
             <th className="pb-2 pr-3">
               <select
                 className={selectClass}
-                aria-label="Фильтр контактов"
+                aria-label={ANNA_COLUMN_ARIA_LABELS.contact}
                 value={columnDraft.contact || ""}
                 onChange={(event) => setColumn("contact", event.target.value)}
               >
-                <option value="">Все</option>
-                <option value="HAS_PHONE">Есть телефон</option>
-                <option value="NO_PHONE">Нет телефона</option>
+                <option value="">Все контакты</option>
+                <option value="HAS_PHONE">С телефоном</option>
+                <option value="NO_PHONE">Без телефона</option>
               </select>
             </th>
             <th className="pb-2 pr-3">
               <select
                 className={selectClass}
-                aria-label="Фильтр статуса"
+                aria-label={ANNA_COLUMN_ARIA_LABELS.status}
                 value={columnDraft.statusStage || ""}
                 onChange={(event) =>
                   setColumn("statusStage", event.target.value)
                 }
               >
-                <option value="">Все</option>
-                {data.facets.statuses.map((item) => (
+                <option value="">Все статусы</option>
+                {(entityType === "brokers"
+                  ? ANNA_BROKER_STATUS_OPTIONS
+                  : ANNA_AGENCY_PARTNERSHIP_OPTIONS
+                ).map((item) => (
                   <option key={item.value} value={item.value}>
-                    {item.value} ({item.matches})
+                    {item.label}
                   </option>
                 ))}
               </select>
@@ -468,13 +484,13 @@ function LoyaltyTable({
             <th className="pb-2 pr-3">
               <select
                 className={selectClass}
-                aria-label="Фильтр активности"
+                aria-label={ANNA_COLUMN_ARIA_LABELS.activity}
                 value={columnDraft.activity || ""}
                 onChange={(event) => setColumn("activity", event.target.value)}
               >
-                <option value="">Все</option>
-                <option value="BT_VISITED">Был на БТ</option>
-                <option value="BT_NOT_VISITED">Не был на БТ</option>
+                <option value="">Вся активность</option>
+                <option value="BT_VISITED">Был БТ</option>
+                <option value="BT_NOT_VISITED">Не было БТ</option>
                 <option value="HAS_FIXATIONS">Есть фиксации</option>
                 <option value="NO_FIXATIONS">Нет фиксаций</option>
                 <option value="HAS_MEETINGS">Есть встречи</option>
@@ -484,26 +500,26 @@ function LoyaltyTable({
             <th className="pb-2 pr-3">
               <select
                 className={selectClass}
-                aria-label="Фильтр звонков"
+                aria-label={ANNA_COLUMN_ARIA_LABELS.calls}
                 value={columnDraft.calls || ""}
                 onChange={(event) => setColumn("calls", event.target.value)}
               >
-                <option value="">Все</option>
-                <option value="CALLED_IN_PERIOD">Звонили в периоде</option>
+                <option value="">Все звонки</option>
+                <option value="CALLED_IN_PERIOD">Звонили в период</option>
                 <option value="NOT_CALLED_IN_PERIOD">
-                  Не звонили в периоде
+                  Не звонили в период
                 </option>
               </select>
             </th>
             <th className="pb-2 pr-3">
               <select
                 className={selectClass}
-                aria-label="Фильтр ответственного"
+                aria-label={ANNA_COLUMN_ARIA_LABELS.assignee}
                 value={columnDraft.assignee || ""}
                 onChange={(event) => setColumn("assignee", event.target.value)}
               >
-                <option value="">Все</option>
-                <option value="UNASSIGNED">Не назначен</option>
+                <option value="">{ANNA_EMPTY_OPTIONS.columnAssignees}</option>
+                <option value="UNASSIGNED">{ANNA_EMPTY_OPTIONS.unassigned}</option>
                 {operators.map((person) => (
                   <option key={person.id} value={person.id}>
                     {person.name}
@@ -528,43 +544,25 @@ function LoyaltyTable({
             <th className="pb-2">
               <select
                 className={selectClass}
-                aria-label="Фильтр сделок"
+                aria-label={ANNA_COLUMN_ARIA_LABELS.deals}
                 value={columnDraft.deals || ""}
                 onChange={(event) => setColumn("deals", event.target.value)}
               >
-                <option value="">Все</option>
-                <option value="NO_DEALS">Нет сделок</option>
+                <option value="">Все сделки</option>
                 <option value="HAS_DEALS">Есть сделки</option>
-                <option value="ONE_TO_TWO">1–2</option>
-                <option value="ONE_TO_FOUR">1–4</option>
-                <option value="THREE_PLUS">3+</option>
-                <option value="FIVE_PLUS">5+</option>
+                <option value="NO_DEALS">Нет сделок</option>
+                {entityType === "brokers" ? (
+                  <>
+                    <option value="ONE_TO_TWO">1–2 сделки</option>
+                    <option value="THREE_PLUS">3+ сделки</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="ONE_TO_FOUR">1–4 сделки</option>
+                    <option value="FIVE_PLUS">5+ сделок</option>
+                  </>
+                )}
               </select>
-            </th>
-          </tr>
-          <tr className="border-b border-border">
-            <th />
-            <th colSpan={6} className="pb-2">
-              <div className="flex items-center gap-2">
-                <button
-                  className="btn btn-primary px-3 py-1 text-xs"
-                  type="button"
-                  onClick={onApplyColumns}
-                >
-                  Применить фильтры колонок
-                </button>
-                <button
-                  className="btn btn-secondary px-3 py-1 text-xs"
-                  type="button"
-                  onClick={onResetColumns}
-                >
-                  Сбросить
-                </button>
-                <span className="text-xs text-text-muted">
-                  Фильтры колонок выполняются на сервере и входят в выбор всех
-                  записей и экспорт.
-                </span>
-              </div>
             </th>
           </tr>
         </thead>
@@ -765,7 +763,6 @@ function AddContactModal({
 }
 
 export function LoyaltyBaseWorkspaceV2() {
-  const router = useRouter();
   const { broker: me } = useAuth();
   const [base, setBase] = useState<LoyaltyBaseKey>("anna");
   const [entityType, setEntityType] = useState<LoyaltyEntityType>("brokers");
@@ -773,6 +770,7 @@ export function LoyaltyBaseWorkspaceV2() {
   const [drafts, setDrafts] = useState(contexts);
   const [applied, setApplied] = useState(contexts);
   const [segmentState, setSegmentState] = useState(segments);
+  const [listBanner, setListBanner] = useState("");
   const [columnDrafts, setColumnDrafts] = useState(columnContexts);
   const [columnApplied, setColumnApplied] = useState(columnContexts);
   const draft = drafts[key];
@@ -882,6 +880,7 @@ export function LoyaltyBaseWorkspaceV2() {
       setSegmentState((current) => ({ ...current, [nextKey]: "" }));
       setColumnDrafts((current) => ({ ...current, [nextKey]: {} }));
       setColumnApplied((current) => ({ ...current, [nextKey]: {} }));
+      setListBanner("");
       setBase(nextBase);
       setEntityType(nextEntity);
       setPage(1);
@@ -1035,22 +1034,6 @@ export function LoyaltyBaseWorkspaceV2() {
       active = false;
     };
   }, [base, canReadAll, detailId, entityType, list]);
-  const applyFilters = () => {
-    const next = sanitizeLoyaltyFilterState(base, entityType, draft);
-    setDrafts((current) => ({ ...current, [key]: next }));
-    setApplied((current) => ({ ...current, [key]: next }));
-    setSegmentState((current) => ({ ...current, [key]: "" }));
-    setPage(1);
-  };
-  const applyColumnFilters = () => {
-    setColumnApplied((current) => ({ ...current, [key]: { ...columnDraft } }));
-    setPage(1);
-  };
-  const resetColumnFilters = () => {
-    setColumnDrafts((current) => ({ ...current, [key]: {} }));
-    setColumnApplied((current) => ({ ...current, [key]: {} }));
-    setPage(1);
-  };
   const scrollToList = () =>
     window.setTimeout(
       () =>
@@ -1059,18 +1042,44 @@ export function LoyaltyBaseWorkspaceV2() {
           ?.scrollIntoView({ behavior: "smooth", block: "start" }),
       0,
     );
+  const applyFilters = () => {
+    const next = sanitizeLoyaltyFilterState(base, entityType, draft);
+    setDrafts((current) => ({ ...current, [key]: next }));
+    setApplied((current) => ({ ...current, [key]: next }));
+    setSegmentState((current) => ({ ...current, [key]: "" }));
+    setListBanner("");
+    setPage(1);
+    setSelected(new Set());
+    setAllFilterSelected(false);
+    setExcluded(new Set());
+    scrollToList();
+  };
   const applyBrokerPatch = (
     patch: Partial<LoyaltyFilterFormState>,
     nextSegment: LoyaltySegment | "" = "",
+  ) => applyEntityPatch("brokers", patch, nextSegment);
+  const applyEntityPatch = (
+    nextEntity: LoyaltyEntityType,
+    patch: Partial<LoyaltyFilterFormState>,
+    nextSegment: LoyaltySegment | "" = "",
   ) => {
-    const brokerKey = contextKey(base, "brokers");
+    const nextKey = contextKey(base, nextEntity);
     const next = { ...emptyLoyaltyFilters(), ...patch };
-    setDrafts((current) => ({ ...current, [brokerKey]: next }));
-    setApplied((current) => ({ ...current, [brokerKey]: next }));
-    setSegmentState((current) => ({ ...current, [brokerKey]: nextSegment }));
-    setColumnDrafts((current) => ({ ...current, [brokerKey]: {} }));
-    setColumnApplied((current) => ({ ...current, [brokerKey]: {} }));
-    setEntityType("brokers");
+    setDrafts((current) => ({ ...current, [nextKey]: next }));
+    setApplied((current) => ({ ...current, [nextKey]: next }));
+    setSegmentState((current) => ({ ...current, [nextKey]: nextSegment }));
+    setColumnDrafts((current) => ({ ...current, [nextKey]: {} }));
+    setColumnApplied((current) => ({ ...current, [nextKey]: {} }));
+    setListBanner(
+      nextSegment
+        ? SEGMENT_LABELS[nextSegment]
+        : patch.search
+          ? nextEntity === "brokers"
+            ? `Топ-брокер за ${ratingLabel}`
+            : `Топ-агентство за ${ratingLabel}`
+          : "",
+    );
+    setEntityType(nextEntity);
     setPage(1);
     scrollToList();
   };
@@ -1089,6 +1098,7 @@ export function LoyaltyBaseWorkspaceV2() {
     setSegmentState((current) => ({ ...current, [nextKey]: "" }));
     setColumnDrafts((current) => ({ ...current, [nextKey]: {} }));
     setColumnApplied((current) => ({ ...current, [nextKey]: {} }));
+    setListBanner("");
     setEntityType(nextEntity);
     setPage(1);
     scrollToList();
@@ -1155,7 +1165,7 @@ export function LoyaltyBaseWorkspaceV2() {
   const kpis = [
     {
       methodKey: "brokers.notCalledCurrentMonth",
-      title: "Не звонили в текущем месяце",
+      title: ANNA_KPI_CHIP_LABELS[0],
       value: number(overview?.notCalledCurrentMonth ?? null),
       detail: "Активные брокеры без звонка",
       formula:
@@ -1166,7 +1176,7 @@ export function LoyaltyBaseWorkspaceV2() {
     },
     {
       methodKey: "brokers.newCount",
-      title: "Новые брокеры",
+      title: ANNA_KPI_CHIP_LABELS[1],
       value: number(overview?.newBrokers ?? null),
       detail: "Стадия «Новый», без достигнутой активности",
       formula: "stage = Новый AND нет БТ, фиксаций, встреч и сделок",
@@ -1176,7 +1186,7 @@ export function LoyaltyBaseWorkspaceV2() {
     },
     {
       methodKey: "brokers.btWithoutFixation",
-      title: "Посетил БТ и нет фиксации",
+      title: ANNA_KPI_CHIP_LABELS[2],
       value: number(overview?.btWithoutFixation ?? null),
       detail: "Только подтверждённый флаг/дата БТ",
       formula: "bt_attended = true AND fixation_count = 0",
@@ -1186,9 +1196,9 @@ export function LoyaltyBaseWorkspaceV2() {
     },
     {
       methodKey: "brokers.birthdaysToday",
-      title: "Дни рождения сегодня",
+      title: ANNA_KPI_CHIP_LABELS[3],
       value: number(overview?.birthdaysToday ?? null),
-      detail: "День и месяц по Europe/Moscow",
+      detail: "Сегодня · открыть список →",
       formula: "day(birthday) = day(today) AND month(birthday) = month(today)",
       period: "сегодня, Europe/Moscow",
       icon: Cake,
@@ -1196,41 +1206,35 @@ export function LoyaltyBaseWorkspaceV2() {
     },
     {
       methodKey: "brokers.top",
-      title: `${periodPreset === "month" ? "Топ-брокер месяца" : "Топ-брокер за период"}${preliminaryLeaders ? " · предварительно" : ""}`,
+      title: `Топ-брокер за ${ratingLabel}${preliminaryLeaders ? " · предварительно" : ""}`,
       value: leader(overview?.topBroker || null),
       detail: leaderDetail(overview?.topBroker || null),
       formula:
         "подтверждённые сделки ↓, сумма ДДУ ↓, дата договора ↓, стабильный ID",
       period: ratingLabel,
       icon: Trophy,
-      onClick:
-        visibleLeaders && overview?.topBroker?.id
-          ? () =>
-              router.push(
-                `/admin/loyalty-base/${base}/brokers/${encodeURIComponent(overview.topBroker!.id)}`,
-              )
-          : () => openPeriodRanking("brokers"),
+      onClick: () => {
+        const name = overview?.topBroker?.name;
+        if (name) applyEntityPatch("brokers", { search: name });
+        else if (base === "anna") applyEntityPatch("brokers", {});
+        else openPeriodRanking("brokers");
+      },
     },
     {
       methodKey: "agencies.top",
-      title: `${
-        periodPreset === "month"
-          ? "Топ-агентство месяца"
-          : "Топ-агентство за период"
-      }${preliminaryLeaders ? " · предварительно" : ""}`,
+      title: `Топ-агентство за ${ratingLabel}${preliminaryLeaders ? " · предварительно" : ""}`,
       value: leader(overview?.topAgency || null),
       detail: leaderDetail(overview?.topAgency || null),
       formula:
         "подтверждённые сделки ↓, сумма ДДУ ↓, дата договора ↓, стабильный ID",
       period: ratingLabel,
       icon: Building2,
-      onClick:
-        visibleLeaders && overview?.topAgency?.id
-          ? () =>
-              router.push(
-                `/admin/loyalty-base/${base}/agencies/${encodeURIComponent(overview.topAgency!.id)}`,
-              )
-          : () => openPeriodRanking("agencies"),
+      onClick: () => {
+        const name = overview?.topAgency?.name;
+        if (name) applyEntityPatch("agencies", { search: name });
+        else if (base === "anna") applyEntityPatch("agencies", {});
+        else openPeriodRanking("agencies");
+      },
     },
   ];
   const metricExplanation = (
@@ -1527,7 +1531,7 @@ export function LoyaltyBaseWorkspaceV2() {
           </button>
         </div>
       )}
-      {mode === "base" && canReadAll && (
+      {mode === "base" && canReadAll && base !== "anna" && (
         <LoyaltySavedViews
           base={base}
           entityType={entityType}
@@ -1588,11 +1592,17 @@ export function LoyaltyBaseWorkspaceV2() {
                   key={entity}
                   className={`rounded-lg px-4 py-2 text-sm font-medium ${entityType === entity ? "bg-surface text-accent shadow-sm" : "text-text-muted"}`}
                   onClick={() => {
+                    if (base === "anna") {
+                      resetContext(base, entity);
+                      return;
+                    }
                     setEntityType(entity);
                     setPage(1);
                   }}
                 >
-                  {entityLabels[entity]}{" "}
+                  {base === "anna"
+                    ? ANNA_ENTITY_TAB_LABELS[entity]
+                    : entityLabels[entity]}{" "}
                   <span className="ml-1">
                     {entity === "brokers"
                       ? (overview?.brokersTotal ?? "—")
@@ -1602,29 +1612,50 @@ export function LoyaltyBaseWorkspaceV2() {
               ))}
             </nav>
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="text-text-muted">Период рейтинга:</span>
-              {(["month", "quarter", "custom"] as const).map((preset) => (
-                <button
-                  key={preset}
-                  className={`rounded-lg border px-3 py-2 ${periodPreset === preset ? "border-accent bg-accent text-white" : "border-border"}`}
-                  onClick={() => {
+              <span className="text-text-muted">Период рейтинга</span>
+              {base === "anna" ? (
+                <select
+                  className="input w-auto"
+                  aria-label="Период рейтинга"
+                  value={periodPreset}
+                  onChange={(event) => {
+                    const preset = event.target.value as PeriodPreset;
                     setPeriodPreset(preset);
                     if (preset !== "custom")
                       setRatingRange(periodRange(preset));
                   }}
                 >
-                  {preset === "month"
-                    ? "Месяц"
-                    : preset === "quarter"
-                      ? "Квартал"
-                      : "Даты"}
-                </button>
-              ))}
+                  {ANNA_RANKING_PERIOD_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                (["month", "quarter", "custom"] as const).map((preset) => (
+                  <button
+                    key={preset}
+                    className={`rounded-lg border px-3 py-2 ${periodPreset === preset ? "border-accent bg-accent text-white" : "border-border"}`}
+                    onClick={() => {
+                      setPeriodPreset(preset);
+                      if (preset !== "custom")
+                        setRatingRange(periodRange(preset));
+                    }}
+                  >
+                    {preset === "month"
+                      ? "Текущий месяц"
+                      : preset === "quarter"
+                        ? "Текущий квартал"
+                        : "Произвольные даты"}
+                  </button>
+                ))
+              )}
               {periodPreset === "custom" && (
                 <>
                   <input
                     className="input w-auto"
                     type="date"
+                    aria-label="Рейтинг с"
                     value={ratingRange.from}
                     max={ratingRange.to}
                     onChange={(event) =>
@@ -1637,6 +1668,7 @@ export function LoyaltyBaseWorkspaceV2() {
                   <input
                     className="input w-auto"
                     type="date"
+                    aria-label="Рейтинг по"
                     value={ratingRange.to}
                     min={ratingRange.from}
                     onChange={(event) =>
@@ -1685,6 +1717,7 @@ export function LoyaltyBaseWorkspaceV2() {
               );
             })}
           </section>
+          {base !== "anna" && (
           <section className="card">
             <div className="flex flex-wrap justify-between gap-3">
               <div>
@@ -1743,6 +1776,7 @@ export function LoyaltyBaseWorkspaceV2() {
               </Metric>
             </dl>
           </section>
+          )}
           {base === "anna" && sourceReported && (
             <section className="card border-warning/40 bg-warning/5">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1902,21 +1936,24 @@ export function LoyaltyBaseWorkspaceV2() {
               </p>
             </section>
           )}
-          <LoyaltyStatusLegend
-            entityType={entityType}
-            facets={list?.facets || null}
-            active={filters.status}
-            sourceStatusesUnconfirmed={!hasActivityEvidence}
-            onSelect={(status) => {
-              const next = { ...draft, status };
-              setDraft(next);
-              setApplied((current) => ({ ...current, [key]: next }));
-              setSegmentState((current) => ({ ...current, [key]: "" }));
-              setPage(1);
-              scrollToList();
-            }}
-            onReset={() => resetContext(base, entityType)}
-          />
+          {(listBanner || segment) && (
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/20 bg-accent/5 p-4">
+              <div>
+                <b>{listBanner || (segment ? SEGMENT_LABELS[segment] : "")}</b>
+                <span className="mt-1 block text-sm text-text-muted">
+                  Показано контактов:{" "}
+                  {list ? list.total.toLocaleString("ru-RU") : "…"}
+                </span>
+              </div>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                onClick={() => resetContext(base, entityType)}
+              >
+                {ANNA_SHOW_ALL_LABEL}
+              </button>
+            </section>
+          )}
           <LoyaltyFilterPanel
             base={base}
             entityType={entityType}
@@ -1928,6 +1965,13 @@ export function LoyaltyBaseWorkspaceV2() {
             operators={operators}
             facets={list?.facets || null}
             loading={listLoading}
+          />
+          <LoyaltyStatusLegend
+            entityType={entityType}
+            facets={list?.facets || null}
+            active={filters.status}
+            sourceStatusesUnconfirmed={!hasActivityEvidence}
+            onSelect={(status) => applyEntityPatch("brokers", { status })}
           />
           <section className="card scroll-mt-4" id="loyalty-list">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -2020,11 +2064,11 @@ export function LoyaltyBaseWorkspaceV2() {
                 onOpen={setDetailId}
                 operators={operators}
                 columnDraft={columnDraft}
-                onColumnDraft={(next) =>
-                  setColumnDrafts((current) => ({ ...current, [key]: next }))
-                }
-                onApplyColumns={applyColumnFilters}
-                onResetColumns={resetColumnFilters}
+                onColumnDraft={(next) => {
+                  setColumnDrafts((current) => ({ ...current, [key]: next }));
+                  setColumnApplied((current) => ({ ...current, [key]: next }));
+                  setPage(1);
+                }}
               />
             )}
             {list && list.totalPages > 1 && (

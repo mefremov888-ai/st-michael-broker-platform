@@ -3544,6 +3544,75 @@ describe("LoyaltyBaseService", () => {
       (service as any).matchesScenario("SITE_NOT_PLACED", {
         projectsOnSite: null,
       }),
+    ).toBe(true);
+    expect(
+      (service as any).matchesScenario("NEW_NO_BT", {
+        bt: false,
+        stage: "Звонили",
+      }),
+    ).toBe(true);
+    expect(
+      (service as any).matchesScenario("NEW_NO_BT", {
+        bt: true,
+        stage: "Новый",
+      }),
+    ).toBe(false);
+    expect(
+      (service as any).matchesColumnFilters(
+        { columns: { activity: "BT_NOT_VISITED" } },
+        {
+          hasPhone: true,
+          statuses: [],
+          bt: null,
+          fixations: null,
+          meetings: null,
+          callPresence: null,
+          assignees: null,
+          deals: null,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      (service as any).matchesColumnFilters(
+        { columns: { activity: "BT_NOT_VISITED" } },
+        {
+          hasPhone: true,
+          statuses: [],
+          bt: true,
+          fixations: null,
+          meetings: null,
+          callPresence: null,
+          assignees: null,
+          deals: null,
+        },
+      ),
+    ).toBe(false);
+    expect(
+      (service as any).annaBrokerTour(
+        {
+          attributes: { btDate: "2026-03-18" },
+          sourceReportedMetrics: { brokerTourVisited: false },
+        },
+        "BROKER",
+      ),
+    ).toBe(true);
+    expect(
+      (service as any).annaBrokerTour(
+        {
+          attributes: { stage: "Был на БТ" },
+          sourceReportedMetrics: { brokerTourVisited: false },
+        },
+        "BROKER",
+      ),
+    ).toBe(true);
+    expect(
+      (service as any).annaBrokerTour(
+        {
+          attributes: {},
+          sourceReportedMetrics: { brokerTourVisited: false },
+        },
+        "BROKER",
+      ),
     ).toBe(false);
     expect(
       (service as any).matchesColumnFilters(
