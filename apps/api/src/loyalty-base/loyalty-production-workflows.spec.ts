@@ -1244,7 +1244,10 @@ describe("loyalty production workflow safety", () => {
     const imageRemovalLines = remoteBody
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .filter((line) => /\bdocker\s+image\s+rm\b/.test(line));
+      .filter(
+        (line) =>
+          !line.startsWith("#") && /\bdocker\s+image\s+rm\b/.test(line),
+      );
     let remoteBodyWithoutApprovedCommands = remoteBody;
     for (const command of approvedImageRemovals) {
       expect(remoteBodyWithoutApprovedCommands.split(command)).toHaveLength(2);

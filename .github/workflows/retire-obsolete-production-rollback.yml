@@ -865,7 +865,7 @@ jobs:
             test "$expected_target_api_repo_digest" = "$target_api_repo_digest" || { echo "Expected API repo digest does not match the inspected rollback"; exit 1; }
             test "$expected_target_web_repo_digest" = "$target_web_repo_digest" || { echo "Expected web repo digest does not match the inspected rollback"; exit 1; }
             # RepoDigests that resolve to the same image ID are local names, not a
-            # registry pin. Retirement removes by image ID (`docker image rm --no-prune`).
+            # registry pin. Retirement removes the audited image by ID, without prune.
             # Requiring digest=none blocked this pair after inspect already proved the
             # digest maps to sha256:dcac4b4619a4 / sha256:82594645efc6.
             case "$target_api_repo_digest" in
