@@ -605,6 +605,55 @@ describe("PII-safe live amoCRM source aggregate inspector", () => {
     expect(report.dedupMethod.uncorroboratedSharedContactMerged).toBe(false);
   });
 
+  it("counts 2026 contract dates without emitting a deal date", async () => {
+    const empty = {
+      parentReferenceIds: [],
+      brokerCopyReferenceIds: [],
+      dedupClientContactIds: [],
+    };
+    const report = await inspector.buildDealReport([
+      {
+        ...empty,
+        id: 96001,
+        contractDateValues: ["2025-12-31"],
+        dduAmountValues: ["1000000"],
+      },
+      {
+        ...empty,
+        id: 96002,
+        contractDateValues: ["2026-01-01"],
+        dduAmountValues: ["2500000"],
+      },
+      {
+        ...empty,
+        id: 96003,
+        contractDateValues: ["2026-08-20"],
+        dduAmountValues: ["3000000"],
+      },
+    ]);
+    expect(report.from2026).toEqual({
+      contractDateOnOrAfter: "2026-01-01",
+      groups: 2,
+      withValidDduAmount: 2,
+      unambiguousSumRub: "5500000.00",
+    });
+    expect(report.contractDateByYear).toEqual({
+      "2025": {
+        groups: 1,
+        withValidDduAmount: 1,
+        unambiguousSumRub: "1000000.00",
+      },
+      "2026": {
+        groups: 2,
+        withValidDduAmount: 2,
+        unambiguousSumRub: "5500000.00",
+      },
+    });
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toContain("2025-12-31");
+    expect(serialized).not.toContain("2026-08-20");
+  });
+
   it("computes contact, lead, meeting and deduplicated deal aggregates without PII", async () => {
     const state = inspector.createState();
     const brokerOne = 10001;

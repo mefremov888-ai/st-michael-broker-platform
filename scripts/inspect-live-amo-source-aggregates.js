@@ -728,6 +728,12 @@ async function buildDealReport(dealCandidates) {
     );
   }
   let unambiguousDduAmountSumCents = 0n;
+  const yearBuckets = Object.create(null);
+  const from2026 = {
+    groups: 0,
+    withValidDduAmount: 0,
+    sumCents: 0n,
+  };
   for (const group of groups.values()) {
     const amount = groupAmount(group);
     increment(amountCoverage, amount.classification);
@@ -736,6 +742,35 @@ async function buildDealReport(dealCandidates) {
       contractDateCoverage,
       groupCoverage(group, "contractDateValues", validDateValue),
     );
+    const dateKey = singleValidDateKey(
+      group.flatMap((candidate) => candidate.contractDateValues || []),
+    );
+    const year = dateKey ? dateKey.slice(0, 4) : "unknown";
+    if (!yearBuckets[year]) {
+      yearBuckets[year] = { groups: 0, withValidDduAmount: 0, sumCents: 0n };
+    }
+    yearBuckets[year].groups += 1;
+    if (amount.cents !== null) {
+      yearBuckets[year].withValidDduAmount += 1;
+      yearBuckets[year].sumCents += amount.cents;
+    }
+    if (dateKey && dateKey >= "2026-01-01") {
+      from2026.groups += 1;
+      if (amount.cents !== null) {
+        from2026.withValidDduAmount += 1;
+        from2026.sumCents += amount.cents;
+      }
+    }
+  }
+
+  const contractDateByYear = {};
+  for (const year of Object.keys(yearBuckets).sort()) {
+    const bucket = yearBuckets[year];
+    contractDateByYear[year] = {
+      groups: bucket.groups,
+      withValidDduAmount: bucket.withValidDduAmount,
+      unambiguousSumRub: centsToRubles(bucket.sumCents),
+    };
   }
 
   return {
@@ -770,6 +805,13 @@ async function buildDealReport(dealCandidates) {
     contractDate: {
       rawQualifyingLeadCoverage: rawContractDateCoverage,
       coverageByDeduplicatedGroup: contractDateCoverage,
+    },
+    contractDateByYear,
+    from2026: {
+      contractDateOnOrAfter: "2026-01-01",
+      groups: from2026.groups,
+      withValidDduAmount: from2026.withValidDduAmount,
+      unambiguousSumRub: centsToRubles(from2026.sumCents),
     },
   };
 }
