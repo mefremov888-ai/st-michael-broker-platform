@@ -12,6 +12,11 @@ describe('AdminService.retryAmoSync', () => {
     };
     const service = Object.create(AdminService.prototype) as AdminService;
     (service as any).prisma = prisma;
+    (service as any).amo = {
+      recoverFixationLeadAfterAmbiguousCreate: jest
+        .fn()
+        .mockResolvedValue({ kind: 'empty' }),
+    };
     return { service, prisma };
   }
 
@@ -96,6 +101,43 @@ describe('AdminService.retryAmoSync', () => {
       'сначала найдите возможный лид в amoCRM и привяжите его идентификатор',
     );
     expect(prisma.client.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('GET-links an ambiguous create instead of asking the operator to POST again', async () => {
+    const client = {
+      id: 'client-nikita',
+      amoLeadId: null,
+      amoSyncStatus: 'FAILED',
+      amoSyncError: `${AMO_CREATE_RECONCILIATION_REQUIRED_MARKER}AMO_NETWORK_ERROR`,
+      phone: '+79154018836',
+      createdAt: new Date('2026-08-13T18:02:00.000Z'),
+      broker: { amoContactId: BigInt(9001) },
+      responsibleBroker: null,
+    };
+    const { service, prisma } = createService(client);
+    (service as any).amo.recoverFixationLeadAfterAmbiguousCreate = jest
+      .fn()
+      .mockResolvedValue({ kind: 'found', leadId: 32233521 });
+
+    await expect(service.retryAmoSync(client.id)).resolves.toEqual({
+      ok: true,
+      queued: false,
+      message: 'Заявка связана с найденным лидом amoCRM',
+    });
+    expect(prisma.client.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: client.id,
+        amoLeadId: null,
+        amoSyncStatus: 'FAILED',
+        amoSyncError: client.amoSyncError,
+      },
+      data: {
+        amoLeadId: BigInt(32233521),
+        amoSyncStatus: 'SYNCED',
+        amoSyncError: null,
+        amoSyncLastAttemptAt: expect.any(Date),
+      },
+    });
   });
 
   it('does not reset attempts for an application already in the queue', async () => {

@@ -1,5 +1,7 @@
 import {
   AmoCrmAdapter,
+  AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD,
+  AMO_LEAD_CREATE_TIMEOUT_MS,
   getAmoTokens,
   setAmoTokens,
 } from "../../../../packages/integrations/src/amo-crm.adapter";
@@ -676,4 +678,111 @@ describe("AmoCrmAdapter broker contact safety", () => {
       expect(createLead).not.toHaveBeenCalled();
     },
   );
+
+  it("gives POST /leads a 45s timeout and still does not retry the POST", async () => {
+    const adapter = new AmoCrmAdapter();
+    const request = jest
+      .spyOn(adapter as any, "request")
+      .mockResolvedValue({ _embedded: { leads: [{ id: 9 }] } });
+
+    await expect(
+      adapter.createLead({ name: "Фиксация клиента" }),
+    ).resolves.toMatchObject({ id: 9 });
+    expect(request).toHaveBeenCalledWith(
+      "/leads",
+      expect.objectContaining({ method: "POST" }),
+      {
+        retryTransient: false,
+        timeoutMs: AMO_LEAD_CREATE_TIMEOUT_MS,
+      },
+    );
+  });
+
+  it("GET-recovers exactly one KC lead with the broker attached in the window", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest
+      .spyOn(adapter, "findContactByPhone")
+      .mockResolvedValue({ id: 47202051 } as any);
+    jest.spyOn(adapter, "getLeadsByContact").mockResolvedValue([
+      {
+        id: 32233521,
+        pipeline_id: AMO_PIPELINES.KC,
+        created_at: 1_000,
+        status_id: 143,
+        _embedded: { contacts: [{ id: 47202051 }, { id: 9001 }] },
+      },
+      {
+        id: 1,
+        pipeline_id: AMO_PIPELINES.ZORGE9,
+        created_at: 1_000,
+        _embedded: { contacts: [{ id: 9001 }] },
+      },
+    ] as any);
+
+    await expect(
+      adapter.recoverFixationLeadAfterAmbiguousCreate({
+        clientPhone: "+79154018836",
+        brokerAmoContactId: 9001,
+        createdAfterUnix: 880,
+        createdBeforeUnix: 1_000 + 15 * 60,
+        lookupAttempts: 1,
+      }),
+    ).resolves.toEqual({ kind: "found", leadId: 32233521 });
+  });
+
+  it("recovers a lost POST /leads by GET-matching the KC lead", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest
+      .spyOn(adapter, "createLead")
+      .mockRejectedValue(new Error("amoCRM network error /leads"));
+    jest
+      .spyOn(adapter, "recoverFixationLeadAfterAmbiguousCreate")
+      .mockResolvedValue({ kind: "found", leadId: 32233521 });
+    jest
+      .spyOn(adapter, "getLead")
+      .mockResolvedValue({ id: 32233521, name: "Никита от брокера" } as any);
+    jest.spyOn(adapter, "updateLead").mockResolvedValue(undefined);
+    jest.spyOn(adapter, "addNoteToLead").mockResolvedValue(undefined);
+
+    await expect(
+      adapter.createFixationRequest({
+        clientPhone: "+79154018836",
+        clientName: "Никита",
+        existingClientAmoContactId: 101,
+        brokerPhone: "+79990000001",
+        brokerAmoContactId: 201,
+        agencyName: "Agency",
+        agencyInn: "7700000000",
+        comment: "",
+        project: "SILVER_BOR" as any,
+      }),
+    ).resolves.toMatchObject({ id: 32233521 });
+    expect(adapter.createLead).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws a safe empty-create code when GET recover finds no KC lead", async () => {
+    const adapter = new AmoCrmAdapter();
+    jest
+      .spyOn(adapter, "createLead")
+      .mockRejectedValue(new Error("amoCRM network error /leads"));
+    jest
+      .spyOn(adapter, "recoverFixationLeadAfterAmbiguousCreate")
+      .mockResolvedValue({ kind: "empty" });
+    const updateLead = jest.spyOn(adapter, "updateLead");
+
+    await expect(
+      adapter.createFixationRequest({
+        clientPhone: "+79154018836",
+        clientName: "Никита",
+        existingClientAmoContactId: 101,
+        brokerPhone: "+79990000001",
+        brokerAmoContactId: 201,
+        agencyName: "Agency",
+        agencyInn: "7700000000",
+        comment: "",
+        project: "SILVER_BOR" as any,
+      }),
+    ).rejects.toThrow(AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD);
+    expect(updateLead).not.toHaveBeenCalled();
+  });
 });

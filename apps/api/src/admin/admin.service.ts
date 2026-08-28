@@ -16,6 +16,7 @@ import {
   MangoAdapter,
   AMO_CONTACT_FIELDS,
   BROKER_PIPELINE_ID,
+  amoFixationRecoverWindowFromCreatedAt,
   setAmoTokens,
   getAmoTokens,
   setMangoConfig,
@@ -1947,6 +1948,10 @@ export class AdminService {
         amoLeadId: true,
         amoSyncStatus: true,
         amoSyncError: true,
+        phone: true,
+        createdAt: true,
+        broker: { select: { amoContactId: true } },
+        responsibleBroker: { select: { amoContactId: true } },
       },
     });
     if (!client) throw new NotFoundException('Заявка не найдена');
@@ -1964,6 +1969,8 @@ export class AdminService {
       && failureToClassify
       && !isSafeAmoCreateRetry(failureToClassify)
     ) {
+      const recovered = await this.tryRecoverAmbiguousAmoCreate(client);
+      if (recovered) return recovered;
       throw new ConflictException(
         'Ответ amoCRM неоднозначен: сначала найдите возможный лид в amoCRM и привяжите его идентификатор; повтор создания заблокирован',
       );
@@ -1999,6 +2006,58 @@ export class AdminService {
       ok: true,
       queued: true,
       message: 'Заявка возвращена в очередь amoCRM',
+    };
+  }
+
+  private async tryRecoverAmbiguousAmoCreate(client: {
+    id: string;
+    amoLeadId: bigint | number | null;
+    amoSyncStatus: string | null;
+    amoSyncError: string | null;
+    phone?: string | null;
+    createdAt?: Date | null;
+    broker?: { amoContactId?: bigint | number | null } | null;
+    responsibleBroker?: { amoContactId?: bigint | number | null } | null;
+  }): Promise<{ ok: true; queued: false; message: string } | null> {
+    if (client.amoLeadId || !client.phone || !client.createdAt) return null;
+    const rawContactId =
+      client.responsibleBroker?.amoContactId ?? client.broker?.amoContactId;
+    const brokerAmoContactId = Number(rawContactId);
+    if (!Number.isSafeInteger(brokerAmoContactId) || brokerAmoContactId <= 0) {
+      return null;
+    }
+    let recovered: { kind: string; leadId?: number };
+    try {
+      recovered = await this.amo.recoverFixationLeadAfterAmbiguousCreate({
+        clientPhone: client.phone,
+        brokerAmoContactId,
+        ...amoFixationRecoverWindowFromCreatedAt(client.createdAt),
+      });
+    } catch {
+      return null;
+    }
+    if (recovered.kind !== 'found' || !recovered.leadId) return null;
+    const updated = await this.prisma.client.updateMany({
+      where: {
+        id: client.id,
+        amoLeadId: null,
+        amoSyncStatus: 'FAILED',
+        amoSyncError: client.amoSyncError,
+      },
+      data: {
+        amoLeadId: BigInt(recovered.leadId),
+        amoSyncStatus: 'SYNCED',
+        amoSyncError: null,
+        amoSyncLastAttemptAt: new Date(),
+      },
+    });
+    if (!updated.count) {
+      return { ok: true, queued: false, message: 'Статус заявки уже изменился' };
+    }
+    return {
+      ok: true,
+      queued: false,
+      message: 'Заявка связана с найденным лидом amoCRM',
     };
   }
 
