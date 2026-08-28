@@ -15,7 +15,6 @@ import {
   Shield,
   Calendar,
   Sparkles,
-  BarChart3,
   Megaphone,
   PhoneCall,
   AlertTriangle,
@@ -41,7 +40,7 @@ const navigation = [
 
 const adminNavigation = [
   { name: 'Инструкции сотрудникам', href: '/admin/instructions', icon: ClipboardList },
-  { name: 'Аналитика платформы', href: '/admin/analytics', icon: BarChart3 },
+  // 2026-08-28: «Аналитика платформы» скрыта — отчёт падает, пункт убран из меню.
   { name: 'База лояльности', href: '/admin/loyalty-base', icon: Database },
   { name: 'Колл-центр', href: '/admin/call-center', icon: PhoneCall },
   { name: 'Конфликты уникальности', href: '/admin/uniqueness-conflicts', icon: AlertTriangle },
