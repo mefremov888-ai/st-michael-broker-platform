@@ -1391,23 +1391,23 @@ describe("loyalty production workflow safety", () => {
     expect(remoteBody).toContain('test "$daemon_uptime_seconds" -ge 900');
     expect(remoteBody).toContain("MIN_AVAILABLE_BYTES=8589934592");
     expect(remoteBody).toContain("BACKUP_SIZE_OVERHEAD_BYTES=67108864");
-    expect(remoteBody).toContain("RELEASE_TIMESTAMP=20260821-121353");
+    expect(remoteBody).toContain("RELEASE_TIMESTAMP=20260821-151042");
     expect(remoteBody).toContain(
       'TARGET_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"',
     );
     expect(remoteBody).toContain(
       'TARGET_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"',
     );
-    expect(remoteBody).toContain("TARGET_API_PREFIX=dcac4b4619a4");
-    expect(remoteBody).toContain("TARGET_WEB_PREFIX=82594645efc6");
+    expect(remoteBody).toContain("TARGET_API_PREFIX=ee0a02f547ca");
+    expect(remoteBody).toContain("TARGET_WEB_PREFIX=317a5e63839f");
     expect(remoteBody).toContain(
-      "TARGET_COMMIT=c690fa9b44b5c7d291247bd88343af94ba241dd0",
+      "TARGET_COMMIT=f765865a97998388b9debb50bfb06efe947283c9",
     );
     expect(remoteBody).toContain(
-      "NEWER_TIMESTAMPS=(20260821-151042 20260821-221026 20260825-145230 20260825-160034 20260826-101612 20260826-142213)",
+      "NEWER_TIMESTAMPS=(20260821-221026 20260825-145230 20260825-160034 20260826-101612 20260826-142213 20260827-230016)",
     );
     expect(remoteBody).toContain(
-      "NEWER_TARGET_COMMITS=(f765865a97998388b9debb50bfb06efe947283c9 e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015)",
+      "NEWER_TARGET_COMMITS=(e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015 784392e75274ee06db6448b6e0d01e719d8582c8)",
     );
     expect(remoteBody).toContain(
       "DUPLICATE_RETAINED_API_IMAGE_ID=sha256:24af61e598b6c4269017163476ccba26733d5b092f659e58c497687bb360ed0d",
@@ -1475,10 +1475,10 @@ describe("loyalty production workflow safety", () => {
     );
     expect(remoteBody).toContain("image_has_prefix()");
     expect(remoteBody).toContain(
-      "NEWER_API_PREFIXES=(ee0a02f547ca 3ee482ad303a 24af61e598b6 24af61e598b6 3cd30e4b9e03 8997f496e2d2)",
+      "NEWER_API_PREFIXES=(3ee482ad303a 24af61e598b6 24af61e598b6 3cd30e4b9e03 8997f496e2d2 5ee699e7255b)",
     );
     expect(remoteBody).toContain(
-      "NEWER_WEB_PREFIXES=(317a5e63839f e40d1ed4639e 4e1262c7e783 4e1262c7e783 dc06e1dca818 3ed296479876)",
+      "NEWER_WEB_PREFIXES=(e40d1ed4639e 4e1262c7e783 4e1262c7e783 dc06e1dca818 3ed296479876 523176bd4f11)",
     );
     expect(remoteBody).toContain(
       'test "${image_id:7:12}" = "$expected_prefix"',
