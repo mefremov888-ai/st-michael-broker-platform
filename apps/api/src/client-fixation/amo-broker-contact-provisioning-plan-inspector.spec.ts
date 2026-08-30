@@ -59,6 +59,10 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
       hashKey?: Buffer,
     ) => any;
     readCohortAttestationKeyFile: (path: string) => Buffer;
+    ATTEMPT_LIMIT: number;
+    PROVISIONING_QUEUE_WHERE: Record<string, unknown>;
+    OWNERSHIP_QUEUE_WHERE: Record<string, unknown>;
+    queueRowIsProvisioningEligible: (row: unknown) => boolean;
     lookupExactBrokerContacts: (
       request: any,
       phone: string,
@@ -129,6 +133,47 @@ describe("PII-safe amo broker-contact provisioning-plan inspector", () => {
   );
   const inspectorSha256 = "a".repeat(64);
   const deployedGitSha = "b".repeat(40);
+
+  it("offers repair for a contact-missing row that never burned an attempt", () => {
+    expect(inspector.PROVISIONING_QUEUE_WHERE).toEqual({
+      amoSyncStatus: { in: ["FAILED", "PENDING"] },
+      OR: [
+        { amoSyncAttempts: { gte: inspector.ATTEMPT_LIMIT } },
+        { amoSyncError: "BROKER_AMO_CONTACT_MISSING" },
+      ],
+    });
+    expect(inspector.OWNERSHIP_QUEUE_WHERE).toEqual({
+      amoSyncStatus: { in: ["FAILED", "PENDING"] },
+      amoSyncAttempts: { gte: inspector.ATTEMPT_LIMIT },
+    });
+
+    const deferred = {
+      amoSyncStatus: "PENDING",
+      amoSyncAttempts: 0,
+      amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+    };
+    const exhausted = {
+      amoSyncStatus: "FAILED",
+      amoSyncAttempts: inspector.ATTEMPT_LIMIT,
+      amoSyncError: "AMO_NETWORK_ERROR",
+    };
+    const unrelated = {
+      amoSyncStatus: "PENDING",
+      amoSyncAttempts: 1,
+      amoSyncError: "AMO_NETWORK_ERROR",
+    };
+    const synced = {
+      amoSyncStatus: "SYNCED",
+      amoSyncAttempts: 0,
+      amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+    };
+
+    expect(inspector.queueRowIsProvisioningEligible(deferred)).toBe(true);
+    expect(inspector.queueRowIsProvisioningEligible(exhausted)).toBe(true);
+    expect(inspector.queueRowIsProvisioningEligible(unrelated)).toBe(false);
+    expect(inspector.queueRowIsProvisioningEligible(synced)).toBe(false);
+    expect(inspector.queueRowIsProvisioningEligible(null)).toBe(false);
+  });
 
   it("keeps the original broker-only lookup contract while exposing exact unflagged contacts only to the new in-memory plan", async () => {
     const response = {

@@ -266,6 +266,25 @@ describe("production-safe amo broker-contact provisioner", () => {
     ).not.toThrow();
   });
 
+  it("shares one queue cohort with the inspector so a contact-missing row passes the CAS precondition", () => {
+    expect(provisioner.PROVISIONING_QUEUE_WHERE).toEqual(
+      inspector.PROVISIONING_QUEUE_WHERE,
+    );
+
+    const deferred = {
+      amoSyncStatus: "PENDING",
+      amoSyncAttempts: 0,
+      amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+    };
+    expect(provisioner.queueRowIsProvisioningEligible(deferred)).toBe(true);
+    expect(
+      provisioner.queueRowIsProvisioningEligible({
+        ...deferred,
+        amoSyncError: "AMO_NETWORK_ERROR",
+      }),
+    ).toBe(false);
+  });
+
   it("uses exactly the same full provisioning Prisma select in inspection and apply while keeping global ownership narrow", () => {
     expect(inspector.BROKER_PROVISION_SELECT).toEqual(
       provisioner.BROKER_PROVISION_SELECT,

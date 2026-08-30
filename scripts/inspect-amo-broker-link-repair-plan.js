@@ -29,6 +29,32 @@ const HASH_DOMAIN = "st-michael:amo-broker-link-repair-plan:v1";
 const COHORT_ATTESTATION_DOMAIN =
   "st-michael:amo-broker-contact-provisioning-cohort-attestation:v1";
 const QUEUE_STATUSES = ["FAILED", "PENDING"];
+const BROKER_CONTACT_MISSING_ERROR = "BROKER_AMO_CONTACT_MISSING";
+
+// A retry deferred for a missing broker contact deliberately does not burn an
+// attempt, so those rows never reach ATTEMPT_LIMIT and a purely attempt-based
+// cohort would never offer to repair the one thing blocking them.
+const PROVISIONING_QUEUE_WHERE = Object.freeze({
+  amoSyncStatus: { in: QUEUE_STATUSES },
+  OR: [
+    { amoSyncAttempts: { gte: ATTEMPT_LIMIT } },
+    { amoSyncError: BROKER_CONTACT_MISSING_ERROR },
+  ],
+});
+
+const OWNERSHIP_QUEUE_WHERE = Object.freeze({
+  amoSyncStatus: { in: QUEUE_STATUSES },
+  amoSyncAttempts: { gte: ATTEMPT_LIMIT },
+});
+
+function queueRowIsProvisioningEligible(row) {
+  if (!row || !QUEUE_STATUSES.includes(row.amoSyncStatus)) return false;
+  if (row.amoSyncError === BROKER_CONTACT_MISSING_ERROR) return true;
+  return (
+    Number.isInteger(row.amoSyncAttempts) &&
+    row.amoSyncAttempts >= ATTEMPT_LIMIT
+  );
+}
 
 const CONTACT_FIELDS = Object.freeze({
   PHONE: 557903,
@@ -1416,10 +1442,9 @@ async function main() {
     activeFailurePhase = FAILURE_PHASE.DATABASE;
     await assertReadOnlySession(prisma);
     const queueRows = await prisma.client.findMany({
-      where: {
-        amoSyncStatus: { in: QUEUE_STATUSES },
-        amoSyncAttempts: { gte: ATTEMPT_LIMIT },
-      },
+      where: provisioningMode
+        ? PROVISIONING_QUEUE_WHERE
+        : OWNERSHIP_QUEUE_WHERE,
       select: provisioningMode
         ? PROVISIONING_QUEUE_ROW_SELECT
         : OWNERSHIP_QUEUE_ROW_SELECT,
@@ -1472,6 +1497,10 @@ async function main() {
 module.exports = {
   AMO_ORIGIN,
   ATTEMPT_LIMIT,
+  BROKER_CONTACT_MISSING_ERROR,
+  OWNERSHIP_QUEUE_WHERE,
+  PROVISIONING_QUEUE_WHERE,
+  queueRowIsProvisioningEligible,
   EXPECTED_ACCOUNT_ID,
   MAX_LOOKUP_PAGES,
   MAX_RESPONSE_BYTES,

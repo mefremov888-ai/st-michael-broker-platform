@@ -60,6 +60,26 @@ function injectGateHmacKeyForTests(value) {
 }
 const QUEUE_STATUSES = ["FAILED", "PENDING"];
 const ATTEMPT_LIMIT = 10;
+const BROKER_CONTACT_MISSING_ERROR = "BROKER_AMO_CONTACT_MISSING";
+
+// Mirrors the inspector cohort: a retry deferred for a missing broker contact
+// keeps its attempt, so eligibility cannot rest on ATTEMPT_LIMIT alone.
+const PROVISIONING_QUEUE_WHERE = Object.freeze({
+  amoSyncStatus: { in: QUEUE_STATUSES },
+  OR: [
+    { amoSyncAttempts: { gte: ATTEMPT_LIMIT } },
+    { amoSyncError: BROKER_CONTACT_MISSING_ERROR },
+  ],
+});
+
+function queueRowIsProvisioningEligible(row) {
+  if (!row || !QUEUE_STATUSES.includes(row.amoSyncStatus)) return false;
+  if (row.amoSyncError === BROKER_CONTACT_MISSING_ERROR) return true;
+  return (
+    Number.isInteger(row.amoSyncAttempts) &&
+    row.amoSyncAttempts >= ATTEMPT_LIMIT
+  );
+}
 
 const AMO_CONTACT_FIELDS = Object.freeze({
   PHONE: 557903,
@@ -535,6 +555,12 @@ function loadPlanModule(
   }
   if (loaded.ATTEMPT_LIMIT !== ATTEMPT_LIMIT) {
     fail("PLAN_MODULE_ATTEMPT_LIMIT_INVALID");
+  }
+  if (
+    JSON.stringify(loaded.PROVISIONING_QUEUE_WHERE) !==
+    JSON.stringify(PROVISIONING_QUEUE_WHERE)
+  ) {
+    fail("PLAN_MODULE_QUEUE_COHORT_INVALID");
   }
   return loaded;
 }
@@ -1470,9 +1496,7 @@ function assertCurrentDatabaseInvariants({
     const effectiveId = row.responsibleBrokerId || row.brokerId;
     if (
       effectiveId !== record.broker.id ||
-      !QUEUE_STATUSES.includes(row.amoSyncStatus) ||
-      !Number.isInteger(row.amoSyncAttempts) ||
-      row.amoSyncAttempts < ATTEMPT_LIMIT
+      !queueRowIsProvisioningEligible(row)
     ) {
       fail("QUEUE_CAS_PRECONDITION_DRIFT");
     }
@@ -1937,10 +1961,7 @@ async function reconcileAlreadyLinkedCreateGate({
 
 async function loadProductionState(prisma) {
   const queueRows = await prisma.client.findMany({
-    where: {
-      amoSyncStatus: { in: QUEUE_STATUSES },
-      amoSyncAttempts: { gte: ATTEMPT_LIMIT },
-    },
+    where: PROVISIONING_QUEUE_WHERE,
     select: QUEUE_ROW_SELECT,
     orderBy: [
       { amoSyncLastAttemptAt: "asc" },
@@ -2233,8 +2254,10 @@ module.exports = {
   EXACT_CONFIRMATION,
   FAILURE_STAGE,
   HISTORICAL_COUNT_EVIDENCE_RUN_ID,
+  PROVISIONING_QUEUE_WHERE,
   QUEUE_CAS_SELECT,
   QUEUE_ROW_SELECT,
+  queueRowIsProvisioningEligible,
   REVIEWED_RUN_MANIFEST,
   RESOLUTION_CLASSES,
   ProvisioningFailure,
