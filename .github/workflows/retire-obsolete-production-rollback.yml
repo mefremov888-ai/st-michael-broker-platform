@@ -1,7 +1,7 @@
 name: Retire one obsolete production rollback pair
 
-# One-purpose disk recovery for the loyalty release. The 20260821-151042
-# rollback pair is the oldest living pair, superseded by six complete newer
+# One-purpose disk recovery for the loyalty release. The 20260821-221026
+# rollback pair is the oldest living pair, superseded by five complete newer
 # rollback pairs, and is not referenced by any container. This workflow removes
 # only those two exact Docker tags after an inspect-only run records their full
 # image IDs and metadata hashes. It never prunes, changes a database or volume,
@@ -18,7 +18,7 @@ on:
           - inspect
           - retire
       confirm_retirement:
-        description: Confirm removal of only rollback api/web tags 20260821-151042
+        description: Confirm removal of only rollback api/web tags 20260821-221026
         required: true
         default: false
         type: boolean
@@ -154,22 +154,22 @@ jobs:
           export LC_ALL=C
           MIN_AVAILABLE_BYTES=8589934592
           BACKUP_SIZE_OVERHEAD_BYTES=67108864
-          RELEASE_TIMESTAMP=20260821-151042
+          RELEASE_TIMESTAMP=20260821-221026
           TARGET_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
           TARGET_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
-          TARGET_API_PREFIX=ee0a02f547ca
-          TARGET_WEB_PREFIX=317a5e63839f
-          TARGET_COMMIT=f765865a97998388b9debb50bfb06efe947283c9
+          TARGET_API_PREFIX=3ee482ad303a
+          TARGET_WEB_PREFIX=e40d1ed4639e
+          TARGET_COMMIT=e6dcd44de12ba056440125430b64c956fc0c41e8
           DUPLICATE_RETAINED_API_IMAGE_ID=sha256:24af61e598b6c4269017163476ccba26733d5b092f659e58c497687bb360ed0d
           DUPLICATE_RETAINED_WEB_IMAGE_ID=sha256:4e1262c7e7831914cd1076c5a1542cdffa8828b36d1956c4fb247028268832f3
-          NEWER_TIMESTAMPS=(20260821-221026 20260825-145230 20260825-160034 20260826-101612 20260826-142213 20260827-230016)
-          NEWER_API_PREFIXES=(3ee482ad303a 24af61e598b6 24af61e598b6 3cd30e4b9e03 8997f496e2d2 5ee699e7255b)
-          NEWER_WEB_PREFIXES=(e40d1ed4639e 4e1262c7e783 4e1262c7e783 dc06e1dca818 3ed296479876 523176bd4f11)
-          NEWER_TARGET_COMMITS=(e6dcd44de12ba056440125430b64c956fc0c41e8 47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015 784392e75274ee06db6448b6e0d01e719d8582c8)
-          test "${#NEWER_TIMESTAMPS[@]}" -eq 6 || { echo "Retained rollback timestamp audit is incomplete"; exit 1; }
-          test "${#NEWER_API_PREFIXES[@]}" -eq 6 || { echo "Retained API prefix audit is incomplete"; exit 1; }
-          test "${#NEWER_WEB_PREFIXES[@]}" -eq 6 || { echo "Retained web prefix audit is incomplete"; exit 1; }
-          test "${#NEWER_TARGET_COMMITS[@]}" -eq 6 || { echo "Retained commit audit is incomplete"; exit 1; }
+          NEWER_TIMESTAMPS=(20260825-145230 20260825-160034 20260826-101612 20260826-142213 20260827-230016)
+          NEWER_API_PREFIXES=(24af61e598b6 24af61e598b6 3cd30e4b9e03 8997f496e2d2 5ee699e7255b)
+          NEWER_WEB_PREFIXES=(4e1262c7e783 4e1262c7e783 dc06e1dca818 3ed296479876 523176bd4f11)
+          NEWER_TARGET_COMMITS=(47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015 784392e75274ee06db6448b6e0d01e719d8582c8)
+          test "${#NEWER_TIMESTAMPS[@]}" -eq 5 || { echo "Retained rollback timestamp audit is incomplete"; exit 1; }
+          test "${#NEWER_API_PREFIXES[@]}" -eq 5 || { echo "Retained API prefix audit is incomplete"; exit 1; }
+          test "${#NEWER_WEB_PREFIXES[@]}" -eq 5 || { echo "Retained web prefix audit is incomplete"; exit 1; }
+          test "${#NEWER_TARGET_COMMITS[@]}" -eq 5 || { echo "Retained commit audit is incomplete"; exit 1; }
           RELEASE_DIR=/var/backups/stmichael/releases
           RELEASE_RECORD="$RELEASE_DIR/release-$RELEASE_TIMESTAMP.txt"
           ROLLBACK_OVERRIDE="$RELEASE_DIR/rollback-$RELEASE_TIMESTAMP.yml"
@@ -681,11 +681,11 @@ jobs:
             | awk -v target_api="$TARGET_API_TAG" -v target_web="$TARGET_WEB_TAG" '$0 != target_api && $0 != target_web { print }')
           if [ "$actual_retained_tags" != "$expected_retained_tags" ]; then
             print_rollback_tag_diagnostics "$rollback_tags_before"
-            echo "Retained rollback tags differ from the exact twelve-tag allowlist"
+            echo "Retained rollback tags differ from the exact ten-tag allowlist"
             exit 1
           fi
           case "$rollback_tag_count" in
-            12|13|14) ;;
+            10|11|12) ;;
             *)
               print_rollback_tag_diagnostics "$rollback_tags_before"
               echo "Rollback inventory requires the exact retained set plus zero, one, or two target tags"
@@ -867,7 +867,7 @@ jobs:
             # RepoDigests that resolve to the same image ID are local names, not a
             # registry pin. Retirement removes the audited image by ID, without prune.
             # Requiring digest=none blocked this pair after inspect already proved the
-            # digest maps to sha256:ee0a02f547ca / sha256:317a5e63839f.
+            # digest maps to sha256:3ee482ad303a / sha256:e40d1ed4639e.
             case "$target_api_repo_digest" in
               none|"st-michael-rollback-api@$target_api_id") ;;
               *) echo "Target API repo digest is not a local name for the audited image"; exit 1 ;;
@@ -1138,9 +1138,9 @@ jobs:
 
           rollback_tags_after=$(rollback_tag_inventory)
           rollback_tag_count_after=$(printf '%s\n' "$rollback_tags_after" | awk 'NF { count++ } END { print count + 0 }')
-          if [ "$rollback_tag_count_after" -ne 12 ]; then
+          if [ "$rollback_tag_count_after" -ne 10 ]; then
             print_rollback_tag_diagnostics "$rollback_tags_after"
-            echo "Post-retirement rollback tag count is not twelve"
+            echo "Post-retirement rollback tag count is not ten"
             exit 1
           fi
           if [ "$rollback_tags_after" != "$expected_retained_tags" ]; then
