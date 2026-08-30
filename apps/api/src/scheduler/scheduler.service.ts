@@ -1041,6 +1041,21 @@ export class SchedulerService {
     };
   }
 
+  private async alertRemainingBrokerAmoContactMissing(): Promise<void> {
+    const queueCount = await this.prisma.client.count({
+      where: {
+        amoLeadId: null,
+        amoSyncStatus: { in: ['FAILED', 'PENDING'] } as any,
+        amoSyncError: 'BROKER_AMO_CONTACT_MISSING',
+      },
+    });
+    if (queueCount === 0) return;
+    await this.sendOpsAlert(
+      `🔴 PROD: фиксации не уходят в amoCRM — нет контакта брокера\nqueueCount: ${queueCount}\nОткрыть /admin/broker-applications, фильтр «Передача в amoCRM».`,
+      `scheduler:amo-retry:missing-broker-contact-summary:${queueCount}`,
+    );
+  }
+
   private async alertRemainingAmoCreateReconciliation(): Promise<void> {
     const reconciliationWhere = this.amoCreateReconciliationWhere();
     const reconciliationCount = await this.prisma.client.count({
@@ -1126,10 +1141,12 @@ export class SchedulerService {
     if (!hasConfiguredAmoCredentials()) {
       await this.alertAmoTokenMissing();
       await this.alertRemainingAmoCreateReconciliation();
+      await this.alertRemainingBrokerAmoContactMissing();
       return;
     }
     await this.recoverLockedAmbiguousAmoCreates();
     await this.alertRemainingAmoCreateReconciliation();
+    await this.alertRemainingBrokerAmoContactMissing();
     const candidates = await this.prisma.client.findMany({
       where: {
         amoSyncStatus: { in: ['FAILED', 'PENDING'] } as any,

@@ -586,7 +586,15 @@ describe("ClientFixationService amo broker attachment", () => {
         amoSyncStatus: "PENDING",
       }),
     );
-    expect(opsAlerts.sendSafely).not.toHaveBeenCalled();
+    expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
+      expect.stringContaining("у ответственного брокера нет контакта amoCRM"),
+      expect.objectContaining({
+        dedupKey: `fixation-amo-broker-contact:${broker.id}`,
+      }),
+    );
+    expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
+      "/admin/broker-applications",
+    );
   });
 
   it("durably blocks automatic retry when a new-client amo create response is ambiguous", async () => {

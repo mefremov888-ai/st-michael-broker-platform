@@ -672,7 +672,20 @@ export class ClientFixationService {
         );
       }
 
-      if (!amoSyncOk && !isDeferredBrokerContactError(amoSyncError)) {
+      if (isDeferredBrokerContactError(amoSyncError)) {
+        try {
+          await this.notifyBrokerAmoContactMissing(
+            client.id,
+            brokerId,
+            "NEW_CLIENT",
+          );
+        } catch (e: any) {
+          console.error(
+            "[fixClient] notifyBrokerAmoContactMissing failed:",
+            e?.message || e,
+          );
+        }
+      } else if (!amoSyncOk) {
         try {
           await this.logAudit(
             brokerId,
@@ -975,7 +988,20 @@ export class ClientFixationService {
       console.error("[fixClient refix] audit failed:", e?.message || e);
     }
 
-    if (!amoSyncOk && !isDeferredBrokerContactError(amoSyncError)) {
+    if (isDeferredBrokerContactError(amoSyncError)) {
+      try {
+        await this.notifyBrokerAmoContactMissing(
+          newClient.id,
+          brokerId,
+          "REFIX_AFTER_CLOSED",
+        );
+      } catch (e: any) {
+        console.error(
+          "[fixClient refix] notifyBrokerAmoContactMissing failed:",
+          e?.message || e,
+        );
+      }
+    } else if (!amoSyncOk) {
       try {
         await this.logAudit(
           brokerId,
@@ -2501,6 +2527,40 @@ export class ClientFixationService {
       phone: m.phone,
       telegram: m.telegramUsername || null,
     }));
+  }
+
+  private async notifyBrokerAmoContactMissing(
+    clientId: string,
+    brokerId: string,
+    scenario: "NEW_CLIENT" | "REFIX_AFTER_CLOSED" | "REFIX_AMO_DOWN",
+  ) {
+    const safeClientId = this.safeAlertIdentifier(clientId);
+    const safeBrokerId = this.safeAlertIdentifier(brokerId);
+    const safeScenario = this.safeAlertIdentifier(scenario);
+    if (!this.opsAlerts) return;
+    try {
+      await this.opsAlerts.sendSafely(
+        [
+          "🔴 PROD: фиксация не ушла в amoCRM",
+          "Причина: у ответственного брокера нет контакта amoCRM.",
+          `clientId: ${safeClientId}`,
+          `brokerId: ${safeBrokerId}`,
+          `scenario: ${safeScenario}`,
+          "Заявка сохранена в кабинете и стоит в очереди.",
+          "Открыть /admin/broker-applications, фильтр «Передача в amoCRM».",
+        ].join("\n"),
+        {
+          // One Telegram ping per responsible broker, not one per client.
+          dedupKey: `fixation-amo-broker-contact:${safeBrokerId}`,
+          cooldownMs: 15 * 60_000,
+        },
+      );
+    } catch (e: any) {
+      console.error(
+        "[notifyBrokerAmoContactMissing] ops alert failed:",
+        e?.message || e,
+      );
+    }
   }
 
   // Manager/coordinator notifications stay in the existing queue. A separate,

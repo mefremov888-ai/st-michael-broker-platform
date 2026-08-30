@@ -52,14 +52,19 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     const prisma = {
       client: {
         findMany,
-        count: jest.fn().mockImplementation(
-          async () =>
-            candidateRows.filter((row) =>
-              String(row?.amoSyncError || "").startsWith(
-                AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
-              ),
-            ).length,
-        ),
+        count: jest.fn().mockImplementation(async (args?: { where?: any }) => {
+          const errorEquals = args?.where?.amoSyncError;
+          if (errorEquals === "BROKER_AMO_CONTACT_MISSING") {
+            return candidateRows.filter(
+              (row) => row?.amoSyncError === "BROKER_AMO_CONTACT_MISSING",
+            ).length;
+          }
+          return candidateRows.filter((row) =>
+            String(row?.amoSyncError || "").startsWith(
+              AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
+            ),
+          ).length;
+        }),
         update: jest.fn().mockResolvedValue({}),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
@@ -477,7 +482,10 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       responsibleBroker: null,
     }));
     const { service, prisma, opsAlerts, createFixationRequest } = createService();
-    prisma.client.count.mockResolvedValue(reconciliationRows.length);
+    prisma.client.count.mockImplementation(async (args?: { where?: any }) => {
+      if (args?.where?.amoSyncError === "BROKER_AMO_CONTACT_MISSING") return 0;
+      return reconciliationRows.length;
+    });
     prisma.client.findMany.mockImplementation(async (args: any) => {
       if (args?.where?.amoSyncError?.startsWith) {
         return reconciliationRows.slice(0, 20);
@@ -1077,6 +1085,42 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     ).toBe(false);
   });
 
+  it("summarizes a broker-contact-missing queue in Telegram even before per-row retry", async () => {
+    const candidate = {
+      id: "client-missing-contact-summary",
+      amoSyncStatus: "FAILED",
+      amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+      fixationAgencyId: "agency-1",
+      amoSyncAttempts: 0,
+      phone: "+79990000086",
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker: {
+        id: "broker-missing-contact-summary",
+        fullName: "Broker",
+        phone: "+79990000087",
+        email: null,
+        amoContactId: null,
+      },
+      responsibleBroker: null,
+    };
+    const { service, opsAlerts, createFixationRequest } = createService(candidate);
+
+    await service.handleAmoFailedRetry();
+
+    expect(createFixationRequest).not.toHaveBeenCalled();
+    expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
+      expect.stringContaining("нет контакта брокера"),
+      expect.objectContaining({
+        dedupKey: "scheduler:amo-retry:missing-broker-contact-summary:1",
+      }),
+    );
+  });
+
   it.each([BigInt(-1), BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1)])(
     "never calls the lead adapter for an invalid broker amo contact id (%s)",
     async (invalidContactId) => {
@@ -1216,7 +1260,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
 
     await service.handleAmoFailedRetry();
 
-    expect(prisma.client.count).toHaveBeenCalledTimes(1);
+    expect(prisma.client.count).toHaveBeenCalledTimes(2);
     expect(prisma.client.findMany).toHaveBeenCalledTimes(1);
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
       expect.stringContaining(candidate.id),
