@@ -37,6 +37,9 @@ describe('amo sync retry safety', () => {
     expect(publicAmoSyncError('AMO_TEMPORARY_UNAVAILABLE')).toBe(
       'amoCRM временно недоступна.',
     );
+    expect(publicAmoSyncError('AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD')).toBe(
+      'Ответ amoCRM не получен, лид не найден. Повтор будет выполнен автоматически.',
+    );
   });
 
   it.each([
@@ -59,6 +62,7 @@ describe('amo sync retry safety', () => {
     ['amoCRM 401 Unauthorized', 'AMO_AUTH_401'],
     ['amoCRM 403 Forbidden', 'AMO_FORBIDDEN_403'],
     ['amoCRM 429 rate limit', 'AMO_RATE_LIMIT_429'],
+    ['AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD', 'AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD'],
   ])('keeps a definite rejected create eligible for the existing retry policy', (raw, code) => {
     expect(markAmoCreateFailure(new Error(raw))).toBe(code);
     expect(isSafeAmoCreateRetry(code)).toBe(true);

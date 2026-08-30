@@ -51,15 +51,54 @@ import {
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
 
-function requireBrokerAmoContactId(value: unknown): number {
+function safePositiveAmoContactId(value: unknown): number | null {
   const contactId =
     typeof value === "number" || typeof value === "bigint"
       ? Number(value)
       : Number.NaN;
-  if (!Number.isSafeInteger(contactId) || contactId <= 0) {
+  return Number.isSafeInteger(contactId) && contactId > 0 ? contactId : null;
+}
+
+function requireBrokerAmoContactId(value: unknown): number {
+  const contactId = safePositiveAmoContactId(value);
+  if (contactId == null) {
     throw new Error("BROKER_AMO_CONTACT_MISSING");
   }
   return contactId;
+}
+
+function isDeferredBrokerContactError(error: unknown): boolean {
+  return sanitizeAmoSyncError(error) === "BROKER_AMO_CONTACT_MISSING";
+}
+
+function amoCreateOutcomeWrite(
+  amoSyncOk: boolean,
+  amoSyncError: string | null,
+  createdAmoLeadId: number | null,
+) {
+  if (amoSyncOk) {
+    return {
+      amoSyncStatus: "SYNCED" as const,
+      amoSyncError: null as string | null,
+      amoSyncAttempts: 1,
+      ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
+    };
+  }
+  if (isDeferredBrokerContactError(amoSyncError)) {
+    return {
+      amoSyncStatus: "PENDING" as const,
+      amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+      amoSyncAttempts: 0,
+    };
+  }
+  return {
+    amoSyncStatus: "FAILED" as const,
+    amoSyncError,
+    amoSyncAttempts: requiresAmoCreateReconciliation(amoSyncError)
+      ? AMO_RETRY_MAX_ATTEMPTS
+      : 1,
+    ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
+  };
 }
 
 @Injectable()
@@ -136,10 +175,12 @@ export class ClientFixationService {
     }
 
     // Resolve the responsible broker before any path can create an amo lead.
-    // If provisioning is temporarily unavailable, the fixation is still saved
-    // locally, but the resolved id remains null and every lead-create path below
-    // fails closed with a safe pre-POST queue error. The scheduler may retry only
-    // after the broker has a verified amo contact.
+    // A failed live sync must not hide a already-committed Broker.amoContactId:
+    // production retries of BROKER_AMO_CONTACT_MISSING then POST the same id
+    // successfully. Only a truly missing id defers the lead (queue, not error).
+    const storedResponsibleAmoContactId = safePositiveAmoContactId(
+      responsibleBroker.amoContactId,
+    );
     let resolvedResponsibleBrokerAmoContactId: number | null = null;
     try {
       responsibleBroker = await this.ensureBrokerAmoContact(
@@ -149,9 +190,20 @@ export class ClientFixationService {
         responsibleBroker.amoContactId,
       );
     } catch {
-      console.error(
-        "[fixClient] responsible broker amo contact unavailable; lead creation is blocked and queued",
-      );
+      if (storedResponsibleAmoContactId) {
+        resolvedResponsibleBrokerAmoContactId = storedResponsibleAmoContactId;
+        responsibleBroker = {
+          ...responsibleBroker,
+          amoContactId: BigInt(storedResponsibleAmoContactId),
+        };
+        console.error(
+          "[fixClient] broker amo contact sync failed; creating the lead with the stored contact id",
+        );
+      } else {
+        console.error(
+          "[fixClient] responsible broker amo contact unavailable; lead creation is deferred",
+        );
+      }
     }
 
     // 2026-06-09: блок полей формы фиксации, общий для всех 4 веток create.
@@ -602,17 +654,8 @@ export class ClientFixationService {
             amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
           },
           data: {
-            amoSyncStatus: amoSyncOk ? "SYNCED" : "FAILED",
-            amoSyncError: amoSyncOk ? null : amoSyncError,
-            amoSyncAttempts: requiresAmoCreateReconciliation(amoSyncError)
-              ? AMO_RETRY_MAX_ATTEMPTS
-              : 1,
+            ...amoCreateOutcomeWrite(amoSyncOk, amoSyncError, createdAmoLeadId),
             amoSyncLastAttemptAt: new Date(),
-            // 2026-06-04: критично сохранять lead id, иначе webhook от amoCRM
-            // на этот лид не сможет найти Client (искал по amoLeadId).
-            ...(createdAmoLeadId
-              ? { amoLeadId: BigInt(createdAmoLeadId) }
-              : {}),
           } as any,
         });
         if (finalSync.count !== 1) {
@@ -629,7 +672,20 @@ export class ClientFixationService {
         );
       }
 
-      if (!amoSyncOk) {
+      if (isDeferredBrokerContactError(amoSyncError)) {
+        try {
+          await this.notifyBrokerAmoContactMissing(
+            client.id,
+            brokerId,
+            "NEW_CLIENT",
+          );
+        } catch (e: any) {
+          console.error(
+            "[fixClient] notifyBrokerAmoContactMissing failed:",
+            e?.message || e,
+          );
+        }
+      } else if (!amoSyncOk) {
         try {
           await this.logAudit(
             brokerId,
@@ -681,7 +737,7 @@ export class ClientFixationService {
 
       // Если amo упал — отдаём контакты менеджеров, чтобы брокер мог позвонить.
       let managerContacts: any = undefined;
-      if (!amoSyncOk) {
+      if (!amoSyncOk && !isDeferredBrokerContactError(amoSyncError)) {
         try {
           managerContacts = await this.getManagerContacts();
         } catch (e: any) {
@@ -692,13 +748,20 @@ export class ClientFixationService {
         }
       }
 
+      const newClientSync = amoCreateOutcomeWrite(
+        amoSyncOk,
+        amoSyncError,
+        createdAmoLeadId,
+      );
       return {
         client,
         status: "CONDITIONALLY_UNIQUE",
-        amoSyncStatus: amoSyncOk ? "SYNCED" : "FAILED",
+        amoSyncStatus: newClientSync.amoSyncStatus,
         message: amoSyncOk
           ? "Client conditionally fixed. Expires in 30 days."
-          : requiresAmoCreateReconciliation(amoSyncError)
+          : isDeferredBrokerContactError(amoSyncError)
+            ? "Клиент зафиксирован в кабинете. Передача в amoCRM поставлена в очередь и уйдёт автоматически."
+            : requiresAmoCreateReconciliation(amoSyncError)
             ? "Клиент зафиксирован в кабинете, но результат передачи в amoCRM не подтверждён. Автоповтор заблокирован до ручной сверки; менеджеры уведомлены."
             : "Клиент зафиксирован в кабинете, но не передан в amoCRM из-за технической ошибки. Менеджеры уведомлены. При срочности — свяжитесь напрямую.",
         managerContacts,
@@ -841,13 +904,8 @@ export class ClientFixationService {
           amoSyncAttempts: AMO_RETRY_MAX_ATTEMPTS,
         },
         data: {
-          amoSyncStatus: amoSyncOk ? "SYNCED" : "FAILED",
-          amoSyncError: amoSyncOk ? null : amoSyncError,
-          amoSyncAttempts: requiresAmoCreateReconciliation(amoSyncError)
-            ? AMO_RETRY_MAX_ATTEMPTS
-            : 1,
+          ...amoCreateOutcomeWrite(amoSyncOk, amoSyncError, createdAmoLeadId),
           amoSyncLastAttemptAt: new Date(),
-          ...(createdAmoLeadId ? { amoLeadId: BigInt(createdAmoLeadId) } : {}),
         } as any,
       });
       if (finalSync.count !== 1) {
@@ -930,7 +988,20 @@ export class ClientFixationService {
       console.error("[fixClient refix] audit failed:", e?.message || e);
     }
 
-    if (!amoSyncOk) {
+    if (isDeferredBrokerContactError(amoSyncError)) {
+      try {
+        await this.notifyBrokerAmoContactMissing(
+          newClient.id,
+          brokerId,
+          "REFIX_AFTER_CLOSED",
+        );
+      } catch (e: any) {
+        console.error(
+          "[fixClient refix] notifyBrokerAmoContactMissing failed:",
+          e?.message || e,
+        );
+      }
+    } else if (!amoSyncOk) {
       try {
         await this.logAudit(
           brokerId,
@@ -964,7 +1035,7 @@ export class ClientFixationService {
     }
 
     let managerContacts: any = undefined;
-    if (!amoSyncOk) {
+    if (!amoSyncOk && !isDeferredBrokerContactError(amoSyncError)) {
       try {
         managerContacts = await this.getManagerContacts();
       } catch (e: any) {
@@ -975,17 +1046,24 @@ export class ClientFixationService {
       }
     }
 
+    const refixSync = amoCreateOutcomeWrite(
+      amoSyncOk,
+      amoSyncError,
+      createdAmoLeadId,
+    );
     return {
       client: newClient,
       status: isExceptionAfterSalesMeeting
         ? "UNDER_REVIEW"
         : "CONDITIONALLY_UNIQUE",
-      amoSyncStatus: amoSyncOk ? "SYNCED" : "FAILED",
+      amoSyncStatus: refixSync.amoSyncStatus,
       message: amoSyncOk
         ? isExceptionAfterSalesMeeting
           ? "Создана новая фиксация на ручной проверке КЦ."
           : `Создана новая фиксация со ссылкой на предыдущую (${previousFixDate || "закрыта"}). Истекает через 30 дней.`
-        : requiresAmoCreateReconciliation(amoSyncError)
+        : isDeferredBrokerContactError(amoSyncError)
+          ? "Новая фиксация сохранена. Передача в amoCRM поставлена в очередь и уйдёт автоматически."
+          : requiresAmoCreateReconciliation(amoSyncError)
           ? "Новая фиксация сохранена, но результат передачи в amoCRM не подтверждён. Автоповтор заблокирован до ручной сверки; менеджеры уведомлены."
           : "Создана новая фиксация, но не передана в amoCRM. Менеджеры уведомлены.",
       managerContacts,
@@ -2449,6 +2527,40 @@ export class ClientFixationService {
       phone: m.phone,
       telegram: m.telegramUsername || null,
     }));
+  }
+
+  private async notifyBrokerAmoContactMissing(
+    clientId: string,
+    brokerId: string,
+    scenario: "NEW_CLIENT" | "REFIX_AFTER_CLOSED" | "REFIX_AMO_DOWN",
+  ) {
+    const safeClientId = this.safeAlertIdentifier(clientId);
+    const safeBrokerId = this.safeAlertIdentifier(brokerId);
+    const safeScenario = this.safeAlertIdentifier(scenario);
+    if (!this.opsAlerts) return;
+    try {
+      await this.opsAlerts.sendSafely(
+        [
+          "🔴 PROD: фиксация не ушла в amoCRM",
+          "Причина: у ответственного брокера нет контакта amoCRM.",
+          `clientId: ${safeClientId}`,
+          `brokerId: ${safeBrokerId}`,
+          `scenario: ${safeScenario}`,
+          "Заявка сохранена в кабинете и стоит в очереди.",
+          "Открыть /admin/broker-applications, фильтр «Передача в amoCRM».",
+        ].join("\n"),
+        {
+          // One Telegram ping per responsible broker, not one per client.
+          dedupKey: `fixation-amo-broker-contact:${safeBrokerId}`,
+          cooldownMs: 15 * 60_000,
+        },
+      );
+    } catch (e: any) {
+      console.error(
+        "[notifyBrokerAmoContactMissing] ops alert failed:",
+        e?.message || e,
+      );
+    }
   }
 
   // Manager/coordinator notifications stay in the existing queue. A separate,

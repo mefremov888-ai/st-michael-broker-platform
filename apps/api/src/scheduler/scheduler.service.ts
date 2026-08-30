@@ -3,7 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
-import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, normalizeAmoFixationClientPhone } from '@st-michael/integrations';
+import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, amoFixationRecoverWindowFromCreatedAt, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, normalizeAmoFixationClientPhone } from '@st-michael/integrations';
 import { getSystemSetting } from '../common/system-setting';
 import { CmsService } from '../cms/cms.service';
 /**
@@ -1032,36 +1032,121 @@ export class SchedulerService {
     }
   }
 
-  private async runAmoFailedRetry() {
-    // Alert on durable reconciliation rows independently of amo credentials.
-    // A total count plus a bounded newest-ID sample gives operators visibility
-    // without starving row 21+ or flooding one Telegram message per row.
-    const reconciliationWhere = {
+  private amoCreateReconciliationWhere() {
+    return {
       amoLeadId: null,
       amoSyncError: {
         startsWith: AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
       },
     };
+  }
+
+  private async alertRemainingBrokerAmoContactMissing(): Promise<void> {
+    const queueCount = await this.prisma.client.count({
+      where: {
+        amoLeadId: null,
+        amoSyncStatus: { in: ['FAILED', 'PENDING'] } as any,
+        amoSyncError: 'BROKER_AMO_CONTACT_MISSING',
+      },
+    });
+    if (queueCount === 0) return;
+    await this.sendOpsAlert(
+      `🔴 PROD: фиксации не уходят в amoCRM — нет контакта брокера\nqueueCount: ${queueCount}\nОткрыть /admin/broker-applications, фильтр «Передача в amoCRM».`,
+      `scheduler:amo-retry:missing-broker-contact-summary:${queueCount}`,
+    );
+  }
+
+  private async alertRemainingAmoCreateReconciliation(): Promise<void> {
+    const reconciliationWhere = this.amoCreateReconciliationWhere();
     const reconciliationCount = await this.prisma.client.count({
       where: reconciliationWhere,
     });
-    if (reconciliationCount > 0) {
-      const reconciliationRows = await this.prisma.client.findMany({
-        where: reconciliationWhere,
-        select: { id: true },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: 20,
-      });
-      const sampleIds = reconciliationRows.map((row) => String(row.id));
-      await this.sendOpsAlert(
-        `🔴 PROD: автоповтор фиксаций заблокирован\nreconciliationCount: ${reconciliationCount}\nnewestClientIds: ${sampleIds.join(', ') || 'none'}\nЛиды могли уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
-        `scheduler:amo-retry:reconciliation-summary:${reconciliationCount}:${sampleIds[0] || 'none'}`,
+    if (reconciliationCount === 0) return;
+    const reconciliationRows = await this.prisma.client.findMany({
+      where: reconciliationWhere,
+      select: { id: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: 20,
+    });
+    const sampleIds = reconciliationRows.map((row) => String(row.id));
+    await this.sendOpsAlert(
+      `🔴 PROD: автоповтор фиксаций заблокирован\nreconciliationCount: ${reconciliationCount}\nnewestClientIds: ${sampleIds.join(', ') || 'none'}\nЛиды могли уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
+      `scheduler:amo-retry:reconciliation-summary:${reconciliationCount}:${sampleIds[0] || 'none'}`,
+    );
+  }
+
+  private async recoverLockedAmbiguousAmoCreates(): Promise<void> {
+    const locked = await this.prisma.client.findMany({
+      where: this.amoCreateReconciliationWhere(),
+      include: { broker: true, responsibleBroker: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: 20,
+    });
+    let linked = 0;
+    for (const client of locked) {
+      if (await this.tryLinkRecoveredAmbiguousFixationLead(client)) linked += 1;
+    }
+    if (linked > 0) {
+      this.logger.log(
+        `amo auto-retry: GET-recover linked ${linked} locked fixation rows`,
       );
     }
+  }
+
+  private async tryLinkRecoveredAmbiguousFixationLead(client: {
+    id: string;
+    phone?: string | null;
+    createdAt?: Date | null;
+    amoSyncError?: string | null;
+    amoSyncStatus?: string | null;
+    responsibleBroker?: { amoContactId?: bigint | number | null } | null;
+    broker?: { amoContactId?: bigint | number | null } | null;
+  }): Promise<boolean> {
+    const retryBroker = client.responsibleBroker ?? client.broker;
+    const brokerAmoContactId = safePositiveAmoContactId(retryBroker?.amoContactId);
+    if (!brokerAmoContactId || !client.phone || !client.createdAt) return false;
+    let recovered: { kind: string; leadId?: number };
+    try {
+      recovered = await this.amo.recoverFixationLeadAfterAmbiguousCreate({
+        clientPhone: client.phone,
+        brokerAmoContactId,
+        ...amoFixationRecoverWindowFromCreatedAt(client.createdAt),
+      });
+    } catch {
+      return false;
+    }
+    if (recovered.kind !== 'found' || !recovered.leadId) return false;
+    const linked = await this.prisma.client.updateMany({
+      where: {
+        id: client.id,
+        amoLeadId: null,
+        ...(client.amoSyncError !== undefined
+          ? { amoSyncError: client.amoSyncError }
+          : {}),
+        ...(client.amoSyncStatus
+          ? { amoSyncStatus: client.amoSyncStatus as any }
+          : {}),
+      },
+      data: {
+        amoSyncStatus: 'SYNCED' as any,
+        amoSyncError: null,
+        amoLeadId: BigInt(recovered.leadId),
+        amoSyncLastAttemptAt: new Date(),
+      },
+    });
+    return linked.count === 1;
+  }
+
+  private async runAmoFailedRetry() {
     if (!hasConfiguredAmoCredentials()) {
       await this.alertAmoTokenMissing();
+      await this.alertRemainingAmoCreateReconciliation();
+      await this.alertRemainingBrokerAmoContactMissing();
       return;
     }
+    await this.recoverLockedAmbiguousAmoCreates();
+    await this.alertRemainingAmoCreateReconciliation();
+    await this.alertRemainingBrokerAmoContactMissing();
     const candidates = await this.prisma.client.findMany({
       where: {
         amoSyncStatus: { in: ['FAILED', 'PENDING'] } as any,
@@ -1143,6 +1228,11 @@ export class SchedulerService {
             },
           });
           if (!terminalized.count) continue;
+        }
+        const recovered = await this.tryLinkRecoveredAmbiguousFixationLead(client);
+        if (recovered) {
+          ok++;
+          continue;
         }
         await this.sendOpsAlert(
           `🔴 PROD: автоповтор фиксации заблокирован\nclientId: ${clientId}\nbrokerId: ${brokerId}\nЛид мог уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
@@ -1256,30 +1346,18 @@ export class SchedulerService {
         }
 
         if (!brokerAmoContactId) {
-          const nextAttempts = Number(client.amoSyncAttempts || 0) + 1;
           await this.prisma.client.update({
             where: { id: client.id },
             data: {
-              amoSyncError: requiresUniquenessRecheck
-                ? client.amoSyncError
-                : 'Responsible broker is not linked to an amoCRM contact; retry deferred',
-              amoSyncAttempts: { increment: 1 },
+              amoSyncStatus: 'PENDING' as any,
+              amoSyncError: 'BROKER_AMO_CONTACT_MISSING',
               amoSyncLastAttemptAt: new Date(),
-              ...(nextAttempts >= AMO_RETRY_MAX_ATTEMPTS
-                ? { amoSyncStatus: 'FAILED' as any }
-                : {}),
             },
           });
           await this.sendOpsAlert(
-            `🔴 PROD: retry фиксации отложен\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: у ответственного брокера нет связи с amoCRM.`,
+            `🟡 PROD: retry фиксации отложен без POST\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: у ответственного брокера нет связи с amoCRM. Попытка не сожжена, крон повторит после провижининга.`,
             `scheduler:amo-retry:missing-broker-contact:${clientId}`,
           );
-          if (nextAttempts >= AMO_RETRY_MAX_ATTEMPTS) {
-            await this.sendOpsAlert(
-              `🔴 PROD: фиксация не доставлена в amoCRM\nclientId: ${clientId}\nbrokerId: ${brokerId}\nАвтоматические повторы исчерпаны (${AMO_RETRY_MAX_ATTEMPTS} попыток); требуется ручная проверка.`,
-              `scheduler:amo-retry:dead-letter:${clientId}`,
-            );
-          }
           failed++;
           continue;
         }

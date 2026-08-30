@@ -3,6 +3,7 @@ import {
   AMO_LEAD_FIELDS,
   AMO_LEAD_ENUMS,
   AMO_CONTACT_FIELDS,
+  AMO_PIPELINES,
   readinessLevelToEnumId,
   purchaseTimingToEnumId,
   evaluateUniqueness,
@@ -18,6 +19,88 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // раньше позволяло двум прогонам крона параллельно слать один и тот же
 // лид (см. code-review PR #288).
 const AMO_REQUEST_TIMEOUT_MS = 15_000;
+// POST /leads is one-shot (retryTransient:false). 15s was aborting while amo
+// still created the lead — cabinet then stored "response not received" and
+// locked auto-retry to avoid duplicates.
+export const AMO_LEAD_CREATE_TIMEOUT_MS = 45_000;
+export const AMO_FIXATION_RECOVER_CLOCK_SKEW_SECONDS = 120;
+export const AMO_FIXATION_RECOVER_STRONG_WINDOW_SECONDS = 15 * 60;
+export const AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD =
+  "AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD";
+const AMO_FIXATION_RECOVER_LOOKUP_ATTEMPTS = 3;
+const AMO_FIXATION_RECOVER_RETRY_DELAY_MS = process.env.JEST_WORKER_ID
+  ? 0
+  : 1_500;
+
+export type RecoverFixationLeadResult =
+  | { kind: "found"; leadId: number }
+  | { kind: "empty" }
+  | { kind: "ambiguous"; reason: string };
+
+export function amoFixationRecoverWindowFromCreatedAt(createdAt: Date): {
+  createdAfterUnix: number;
+  createdBeforeUnix: number;
+} {
+  const createdMs =
+    createdAt instanceof Date ? createdAt.getTime() : Number.NaN;
+  if (!Number.isFinite(createdMs)) {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      createdAfterUnix: now - AMO_FIXATION_RECOVER_CLOCK_SKEW_SECONDS,
+      createdBeforeUnix: now + AMO_FIXATION_RECOVER_STRONG_WINDOW_SECONDS,
+    };
+  }
+  const unix = Math.floor(createdMs / 1000);
+  return {
+    createdAfterUnix: unix - AMO_FIXATION_RECOVER_CLOCK_SKEW_SECONDS,
+    createdBeforeUnix: unix + AMO_FIXATION_RECOVER_STRONG_WINDOW_SECONDS,
+  };
+}
+
+function isAmbiguousLeadCreateTransportError(error: unknown): boolean {
+  const msg = String((error as { message?: string })?.message || error || "");
+  if (!msg) return true;
+  const normalized = msg.toLowerCase();
+  if (normalized.includes("amo_access_token")) return false;
+  if (normalized.includes("broker_amo_contact")) return false;
+  if (/\b401\b/.test(normalized) || /\b403\b/.test(normalized)) return false;
+  if (/\b429\b/.test(normalized) || /\b400\b/.test(normalized)) return false;
+  if (normalized.includes("network error")) return true;
+  if (/\b5\d\d\b/.test(normalized)) return true;
+  if (normalized.includes("did not return a lead id")) return true;
+  if (normalized.includes("timeout") || normalized.includes("timed out")) {
+    return true;
+  }
+  if (normalized.includes("abort")) return true;
+  return false;
+}
+
+function leadHasBrokerContact(
+  lead: { _embedded?: { contacts?: Array<{ id?: unknown }> } },
+  brokerAmoContactId: number,
+): boolean {
+  const contacts = Array.isArray(lead?._embedded?.contacts)
+    ? lead._embedded.contacts
+    : [];
+  return contacts.some(
+    (contact) => Number(contact?.id) === brokerAmoContactId,
+  );
+}
+
+function isKcPipelineLeadInWindow(
+  lead: { pipeline_id?: unknown; created_at?: unknown },
+  createdAfterUnix: number,
+  createdBeforeUnix: number,
+): boolean {
+  const pipelineId = Number(lead?.pipeline_id);
+  const createdAt = Number(lead?.created_at);
+  return (
+    pipelineId === AMO_PIPELINES.KC &&
+    Number.isSafeInteger(createdAt) &&
+    createdAt >= createdAfterUnix &&
+    createdAt <= createdBeforeUnix
+  );
+}
 const AMO_READONLY_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const AMO_EXACT_CONTACT_PAGE_LIMIT = 250;
 const AMO_EXACT_CONTACT_MAX_PAGES = 20;
@@ -173,6 +256,7 @@ type AmoTokenRefreshHook = (tokens: AmoTokens) => Promise<void> | void;
 type AmoRequestOptions = {
   retryTransient?: boolean;
   maxResponseBytes?: number;
+  timeoutMs?: number;
 };
 
 let amoTokens: AmoTokens = {
@@ -414,7 +498,11 @@ export class AmoCrmAdapter {
     const safePath = safeAmoRequestPath(path);
     let res: Response;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), AMO_REQUEST_TIMEOUT_MS);
+    const timeoutMs =
+      Number.isSafeInteger(options.timeoutMs) && (options.timeoutMs as number) > 0
+        ? (options.timeoutMs as number)
+        : AMO_REQUEST_TIMEOUT_MS;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       res = await fetch(url, {
         ...init,
@@ -1206,9 +1294,121 @@ export class AmoCrmAdapter {
         method: "POST",
         body: JSON.stringify([payload]),
       },
-      { retryTransient: false },
+      { retryTransient: false, timeoutMs: AMO_LEAD_CREATE_TIMEOUT_MS },
     );
     return result?._embedded?.leads?.[0];
+  }
+
+  /**
+   * GET-only recovery after a lost POST /leads response. Matches exactly one
+   * KC-pipeline lead on the client contact, created in the given window, with
+   * the responsible broker attached. Never POSTs.
+   */
+  async recoverFixationLeadAfterAmbiguousCreate(params: {
+    clientPhone: string;
+    brokerAmoContactId: number;
+    createdAfterUnix: number;
+    createdBeforeUnix: number;
+    lookupAttempts?: number;
+  }): Promise<RecoverFixationLeadResult> {
+    if (
+      !Number.isSafeInteger(params.brokerAmoContactId) ||
+      params.brokerAmoContactId <= 0 ||
+      !Number.isSafeInteger(params.createdAfterUnix) ||
+      !Number.isSafeInteger(params.createdBeforeUnix) ||
+      params.createdAfterUnix > params.createdBeforeUnix
+    ) {
+      return { kind: "ambiguous", reason: "invalid_recover_window" };
+    }
+    const attempts = Number.isSafeInteger(params.lookupAttempts)
+      ? Math.max(1, Number(params.lookupAttempts))
+      : 1;
+    let last: RecoverFixationLeadResult = { kind: "empty" };
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      last = await this.lookupFixationLeadAfterAmbiguousCreate(params);
+      if (last.kind === "found" || last.kind === "ambiguous") return last;
+      if (attempt < attempts) await sleep(AMO_FIXATION_RECOVER_RETRY_DELAY_MS);
+    }
+    return last;
+  }
+
+  private async lookupFixationLeadAfterAmbiguousCreate(params: {
+    clientPhone: string;
+    brokerAmoContactId: number;
+    createdAfterUnix: number;
+    createdBeforeUnix: number;
+  }): Promise<RecoverFixationLeadResult> {
+    try {
+      const contact = await this.findContactByPhone(params.clientPhone, {
+        strict: true,
+      });
+      if (!contact) return { kind: "empty" };
+      const contactId = Number(contact.id);
+      if (!Number.isSafeInteger(contactId) || contactId <= 0) {
+        return { kind: "ambiguous", reason: "invalid_contact_id" };
+      }
+      const leads = await this.getLeadsByContact(contactId);
+      const matches = leads.filter(
+        (lead) =>
+          isKcPipelineLeadInWindow(
+            lead,
+            params.createdAfterUnix,
+            params.createdBeforeUnix,
+          ) && leadHasBrokerContact(lead, params.brokerAmoContactId),
+      );
+      if (matches.length === 0) return { kind: "empty" };
+      if (matches.length > 1) {
+        return {
+          kind: "ambiguous",
+          reason: `multiple_leads:${matches
+            .map((lead) => Number(lead.id))
+            .join(",")}`,
+        };
+      }
+      const leadId = Number(matches[0].id);
+      if (!Number.isSafeInteger(leadId) || leadId <= 0) {
+        return { kind: "ambiguous", reason: "invalid_lead_id" };
+      }
+      return { kind: "found", leadId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "lookup_failed";
+      return { kind: "ambiguous", reason: message.slice(0, 120) };
+    }
+  }
+
+  private async createFixationLeadOrRecover(params: {
+    leadData: Record<string, unknown>;
+    clientPhone: string;
+    brokerAmoContactId: number;
+  }): Promise<AmoLead> {
+    const createdAfterUnix =
+      Math.floor(Date.now() / 1000) - AMO_FIXATION_RECOVER_CLOCK_SKEW_SECONDS;
+    try {
+      const created = await this.createLead(params.leadData as any);
+      const id = Number(created?.id);
+      if (Number.isSafeInteger(id) && id > 0) return created;
+      throw new Error("amoCRM did not return a lead id");
+    } catch (error) {
+      if (!isAmbiguousLeadCreateTransportError(error)) throw error;
+      const createdBeforeUnix =
+        Math.floor(Date.now() / 1000) + AMO_FIXATION_RECOVER_CLOCK_SKEW_SECONDS;
+      const recovered = await this.recoverFixationLeadAfterAmbiguousCreate({
+        clientPhone: params.clientPhone,
+        brokerAmoContactId: params.brokerAmoContactId,
+        createdAfterUnix,
+        createdBeforeUnix,
+        lookupAttempts: AMO_FIXATION_RECOVER_LOOKUP_ATTEMPTS,
+      });
+      if (recovered.kind === "found") {
+        const lead = await this.getLead(recovered.leadId);
+        if (lead && Number(lead.id) === recovered.leadId) return lead;
+        return { id: recovered.leadId } as AmoLead;
+      }
+      if (recovered.kind === "empty") {
+        throw new Error(AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD);
+      }
+      throw error;
+    }
   }
 
   async updateLead(id: number, data: UpdateLeadDto): Promise<void> {
@@ -1845,15 +2045,19 @@ export class AmoCrmAdapter {
       const existing = await this.getLead(data.reuseLeadId);
       if (!existing) {
         // Лид не нашёлся — fallback на создание нового.
-        resultLead = await this.createLead({
-          name: `Фиксация: ${data.clientName} (${data.project})`,
-          contacts: leadContacts.length > 0 ? leadContacts : undefined,
-          pipeline_id: 7600542,
-          ...(defaultResponsibleUserId
-            ? { responsible_user_id: defaultResponsibleUserId }
-            : {}),
-          ...(data.amount && data.amount > 0 ? { price: data.amount } : {}),
-        } as any);
+        resultLead = await this.createFixationLeadOrRecover({
+          leadData: {
+            name: `Фиксация: ${data.clientName} (${data.project})`,
+            contacts: leadContacts.length > 0 ? leadContacts : undefined,
+            pipeline_id: 7600542,
+            ...(defaultResponsibleUserId
+              ? { responsible_user_id: defaultResponsibleUserId }
+              : {}),
+            ...(data.amount && data.amount > 0 ? { price: data.amount } : {}),
+          },
+          clientPhone: data.clientPhone,
+          brokerAmoContactId: data.brokerAmoContactId,
+        });
       } else {
         // Прикрепляем нашего брокера к контактам существующего лида.
         // amo: чтобы добавить второй контакт — `contacts: [{id: A, is_main: ...}, {id: B}]`.
@@ -1889,7 +2093,11 @@ export class AmoCrmAdapter {
       if (defaultResponsibleUserId)
         leadData.responsible_user_id = defaultResponsibleUserId;
       if (data.amount && data.amount > 0) leadData.price = data.amount;
-      resultLead = await this.createLead(leadData);
+      resultLead = await this.createFixationLeadOrRecover({
+        leadData,
+        clientPhone: data.clientPhone,
+        brokerAmoContactId: data.brokerAmoContactId,
+      });
     }
 
     // Шаг 2: PATCH с custom_fields_values — только для НОВОГО лида,

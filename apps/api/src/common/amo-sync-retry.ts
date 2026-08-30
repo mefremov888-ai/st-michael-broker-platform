@@ -17,6 +17,7 @@ const AMO_SYNC_ERROR_CODES = new Set([
   'AMO_INVALID_RESPONSE',
   'FIXATION_AGENCY_MISSING',
   'BROKER_AMO_CONTACT_MISSING',
+  'AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD',
   'AMO_SYNC_FAILED',
 ]);
 
@@ -68,6 +69,9 @@ export function sanitizeAmoSyncError(error: unknown): string {
   ) {
     return 'AMO_CONFIGURATION_ERROR';
   }
+  if (normalized.includes('unconfirmed_no_lead')) {
+    return 'AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD';
+  }
   if (
     normalized.includes('did not return a lead id') ||
     normalized.includes('не вернула id')
@@ -93,6 +97,7 @@ export function markAmoCreateFailure(error: unknown): string {
     'AMO_CONFIGURATION_ERROR',
     'FIXATION_AGENCY_MISSING',
     'BROKER_AMO_CONTACT_MISSING',
+    'AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD',
   ].includes(code)) return code;
   return `${AMO_CREATE_RECONCILIATION_REQUIRED_MARKER}${code}`;
 }
@@ -128,6 +133,8 @@ export function publicAmoSyncError(error: unknown): string | null {
     FIXATION_AGENCY_MISSING: 'У заявки не указана компания. Нужна ручная проверка.',
     BROKER_AMO_CONTACT_MISSING:
       'Ответственный брокер не связан с контактом amoCRM.',
+    AMO_FIXATION_CREATE_UNCONFIRMED_NO_LEAD:
+      'Ответ amoCRM не получен, лид не найден. Повтор будет выполнен автоматически.',
     AMO_SYNC_FAILED: 'Не удалось передать заявку в amoCRM.',
   };
   return messages[code] || messages.AMO_SYNC_FAILED;
