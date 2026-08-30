@@ -155,21 +155,25 @@ jobs:
                 p.client.count({ where }),
                 p.client.findFirst({ where, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
                 p.client.count({ where: { ...where, amoSyncAttempts: { gte: 10 } } }),
-              ]).then(([count, oldest, exhausted]) => {
-                console.log([count, oldest ? Math.floor(oldest.createdAt.getTime() / 1000) : 0, exhausted].join('|'));
+                p.client.count({ where: { ...where, amoSyncError: 'BROKER_AMO_CONTACT_MISSING' } }),
+              ]).then(([count, oldest, exhausted, missingContact]) => {
+                console.log([count, oldest ? Math.floor(oldest.createdAt.getTime() / 1000) : 0, exhausted, missingContact].join('|'));
               }).catch(() => process.exitCode = 1).finally(() => p.\$disconnect());
             " 2>/dev/null | tail -1)
 
-            if ! printf '%s' "$QUEUE_RESULT" | grep -Eq '^[0-9]+\|[0-9]+\|[0-9]+$'; then
+            if ! printf '%s' "$QUEUE_RESULT" | grep -Eq '^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$'; then
               add_incident "fixation-queue-check" "не удалось проверить очередь фиксаций"
             else
-              IFS='|' read -r FAILED_COUNT OLDEST_EPOCH EXHAUSTED_COUNT <<EOF
+              IFS='|' read -r FAILED_COUNT OLDEST_EPOCH EXHAUSTED_COUNT MISSING_CONTACT_COUNT <<EOF
             $QUEUE_RESULT
             EOF
               NOW_EPOCH=$(date +%s)
               OLDEST_MINUTES=0
               if [ "$OLDEST_EPOCH" -gt 0 ]; then
                 OLDEST_MINUTES=$(( (NOW_EPOCH - OLDEST_EPOCH) / 60 ))
+              fi
+              if [ "$MISSING_CONTACT_COUNT" -ge 1 ]; then
+                add_incident "fixation-broker-contact" "нет контакта брокера в amoCRM: ${MISSING_CONTACT_COUNT} заявок. Открыть /admin/broker-applications, фильтр «Передача в amoCRM»"
               fi
               if [ "$FAILED_COUNT" -ge 10 ] || [ "$EXHAUSTED_COUNT" -ge 1 ] \
                 || { [ "$FAILED_COUNT" -ge 1 ] && [ "$OLDEST_MINUTES" -ge 10 ]; }; then
