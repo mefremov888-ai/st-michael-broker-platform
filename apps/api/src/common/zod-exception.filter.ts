@@ -41,6 +41,7 @@ function humanizeMessage(msg: string, field: string): string {
   const lower = msg.toLowerCase();
   if (lower.includes('invalid email')) return 'неверный формат email (нужно name@domain.tld)';
   if (lower.includes('invalid phone')) return 'неверный формат телефона (нужно +7XXXXXXXXXX)';
+  if (lower.includes('inn')) return 'ИНН должен быть 10 цифр (юрлицо) или 12 цифр (физлицо/ИП)';
   if (lower.includes('required')) return 'обязательное поле';
   if (lower.includes('too small') && field.toLowerCase().includes('name')) return 'слишком короткое имя';
   return msg; // fallback на оригинал

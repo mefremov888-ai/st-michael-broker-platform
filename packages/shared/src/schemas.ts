@@ -68,7 +68,13 @@ export const fixClientDtoSchema = z.object({
   ),
   comment: z.string().optional(),
   project: z.nativeEnum(Project),
-  agencyInn: z.string().regex(/^\d{10}$/, 'INN must be 10 digits'),
+  // 10 цифр — юрлицо, 12 — физлицо/ИП. Раньше только 10, из‑за этого
+  // фиксация с профильным ИНН 12 цифр падала «INN must be 10 digits»,
+  // хотя поле на форме уже не показывают и ИНН берётся с агентства брокера.
+  agencyInn: z.preprocess(
+    (v) => (typeof v === 'string' ? v.replace(/\D/g, '') : v),
+    z.string().regex(/^\d{10}$|^\d{12}$/, 'INN must be 10 or 12 digits'),
+  ),
   // Auto-fill amo lead/contact fields (правка 2026-05-22)
   propertyType: z.string().optional(),
   roomsCount: z.string().optional(),
@@ -251,5 +257,8 @@ export const telegramFixClientDtoSchema = z.object({
   fullName: z.string().min(2),
   phone: phoneSchema,
   comment: z.string().optional(),
-  agencyInn: z.string().regex(/^\d{10}$/),
+  agencyInn: z.preprocess(
+    (v) => (typeof v === 'string' ? v.replace(/\D/g, '') : v),
+    z.string().regex(/^\d{10}$|^\d{12}$/, 'INN must be 10 or 12 digits'),
+  ),
 });
