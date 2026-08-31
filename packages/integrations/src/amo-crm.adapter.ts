@@ -10,6 +10,8 @@ import {
   isClassifiedUniquenessLeadStage,
   isKnownUniquenessLeadStage,
   brokerLeadMarkerFields,
+  AMO_BROKER_STAGE,
+  agencyToAmoCompanyFields,
 } from "./amo-crm.fields";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -166,6 +168,7 @@ export interface CreateLeadDto {
   price?: number;
   status_id?: number;
   pipeline_id?: number;
+  responsible_user_id?: number;
   contacts?: { id: number }[];
   companies?: { id: number }[];
   custom_fields_values?: any[];
@@ -1266,6 +1269,54 @@ export class AmoCrmAdapter {
     });
   }
 
+  /**
+   * Связывает контакт брокера с Company в amoCRM (поле «Компания» в карточке).
+   * Ищем по ИНН, иначе создаём компанию с названием агентства.
+   */
+  async syncAgencyCompanyToAmoContact(
+    contactId: number,
+    agency: {
+      name?: string | null;
+      inn?: string | null;
+      legalName?: string | null;
+      legalAddress?: string | null;
+      address?: string | null;
+      ogrn?: string | null;
+      kpp?: string | null;
+      bankName?: string | null;
+      bankBik?: string | null;
+      bankAccount?: string | null;
+      correspondentAccount?: string | null;
+      phone?: string | null;
+      email?: string | null;
+    } | null,
+  ): Promise<number | null> {
+    const agencyName = String(agency?.name || "").trim();
+    if (!contactId || !agencyName) return null;
+    const companyPayload = {
+      name: agencyName,
+      custom_fields_values: agencyToAmoCompanyFields(agency || {}),
+    };
+    let amoCompanyId: number | null = null;
+    if (agency?.inn) {
+      const found = await this.findCompanyByInn(agency.inn);
+      if (found?.id) {
+        amoCompanyId = Number(found.id);
+        await this.updateCompany(amoCompanyId, companyPayload);
+      }
+    }
+    if (!amoCompanyId) {
+      const created = await this.createCompany(companyPayload);
+      if (created?.id) amoCompanyId = Number(created.id);
+    }
+    if (amoCompanyId) {
+      await this.linkContactToCompany(contactId, amoCompanyId).catch(() => {
+        /* уже связаны — не критично */
+      });
+    }
+    return amoCompanyId;
+  }
+
   // === Leads (deals) ===
   async getLead(id: number): Promise<AmoLead | null> {
     try {
@@ -2249,23 +2300,47 @@ export class AmoCrmAdapter {
       const brokerMgrEnv =
         process.env.AMO_BROKER_MEETINGS_MANAGER_ID ||
         process.env.AMO_DEFAULT_RESPONSIBLE_USER_ID;
-      const responsibleUserId = brokerMgrEnv ? Number(brokerMgrEnv) : undefined;
+      const parsedResponsible = brokerMgrEnv ? Number(brokerMgrEnv) : NaN;
+      const responsibleUserId =
+        Number.isFinite(parsedResponsible) && parsedResponsible > 0
+          ? parsedResponsible
+          : undefined;
+      if (!responsibleUserId) {
+        console.error(
+          "[createBrokerLeadFromLanding] AMO_BROKER_MEETINGS_MANAGER_ID is empty — amo will assign the OAuth token owner (Admin)",
+        );
+      }
+
+      const fromCabinet = data.source === "FIXATION_BY_OTHER_BROKER";
+      const fromTour = data.source === "LANDING_BROKER_TOUR";
+      const headline = fromCabinet
+        ? "Заявка из кабинета брокера"
+        : "Заявка с лендинга";
+      const origin = fromCabinet
+        ? "Координатор / брокер завёл нового брокера"
+        : fromTour
+          ? "Запись на брокер-тур"
+          : "Форма «Связаться с нами»";
+      const taskSuffix = fromCabinet
+        ? "заявка из кабинета брокера"
+        : "заявка с лендинга";
 
       // 2) Лид в пайплайне брокеров
       const lead = await this.createLead({
-        name: data.leadName || `Заявка с лендинга — ${data.brokerName}`,
+        name: data.leadName || `${headline} — ${data.brokerName}`,
         pipeline_id: 10787390, // BROKERS
+        status_id: AMO_BROKER_STAGE.NEW,
         contacts: contact?.id ? [{ id: contact.id }] : undefined,
         ...(responsibleUserId
           ? { responsible_user_id: responsibleUserId }
           : {}),
-      } as any);
+      });
 
       // 3) Примечание и задача
       if (lead?.id) {
         const noteText = [
-          `📥 Заявка с лендинга`,
-          `Источник: ${data.source === "LANDING_BROKER_TOUR" ? "Запись на брокер-тур" : "Форма «Связаться с нами»"}`,
+          `📥 ${headline}`,
+          `Источник: ${origin}`,
           `Имя: ${data.brokerName}`,
           `Телефон: ${data.brokerPhone}`,
           ...(data.brokerEmail ? [`Email: ${data.brokerEmail}`] : []),
@@ -2276,7 +2351,7 @@ export class AmoCrmAdapter {
         } catch {}
         try {
           await this.createTask({
-            text: `Связаться с новым брокером ${data.brokerName} (${data.brokerPhone}) — заявка с лендинга`,
+            text: `Связаться с новым брокером ${data.brokerName} (${data.brokerPhone}) — ${taskSuffix}`,
             entityType: "leads",
             entityId: lead.id,
             taskTypeId: 1, // звонок

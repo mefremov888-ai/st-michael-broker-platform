@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, apiGet, apiPost, apiUpload } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { FileText, Upload, Link2, Plus, Trash2, Save, ExternalLink } from 'lucide-react';
+import { MaterialsFoldersAdmin } from './MaterialsFoldersAdmin';
 
 type DocItem = {
   id: string;
@@ -146,6 +147,8 @@ export default function AdminDocumentsPage() {
       </div>
 
       {message && <div className="mb-4 p-3 rounded-lg bg-info/20 text-info text-sm">{message}</div>}
+
+      <MaterialsFoldersAdmin isAdmin={isAdmin} onMessage={setMessage} />
 
       {isAdmin && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">

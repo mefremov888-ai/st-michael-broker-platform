@@ -1,5 +1,14 @@
 import { Injectable, Inject, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
+import {
+  DEFAULT_MATERIALS_LAYOUT,
+  MATERIALS_LAYOUT_SETTING_KEY,
+  discoverDiskPrefixes,
+  isValidMaterialsFolderLayout,
+  mergeMaterialsLayout,
+  parseMaterialsLayout,
+  type MaterialsFolderLayout,
+} from '@st-michael/shared';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
@@ -163,6 +172,52 @@ export class DocumentsService {
   async getDownloadUrl(id: string) {
     const doc = await this.getDocument(id);
     return { url: doc.fileUrl, name: doc.name, type: doc.type };
+  }
+
+  async getMaterialsFolderLayout() {
+    const [stored, docs] = await Promise.all([
+      this.prisma.systemSetting.findUnique({
+        where: { key: MATERIALS_LAYOUT_SETTING_KEY },
+        select: { value: true, updatedAt: true, updatedBy: true },
+      }),
+      this.prisma.document.findMany({
+        where: { category: 'materials' },
+        select: { subcategory: true },
+      }),
+    ]);
+    const saved = stored?.value
+      ? parseMaterialsLayout(stored.value)
+      : parseMaterialsLayout(DEFAULT_MATERIALS_LAYOUT);
+    const layout = mergeMaterialsLayout(saved, docs);
+    return {
+      layout,
+      diskFolders: discoverDiskPrefixes(docs),
+      isDefault: !stored?.value,
+      updatedAt: stored?.updatedAt ?? null,
+      updatedBy: stored?.updatedBy ?? null,
+    };
+  }
+
+  async saveMaterialsFolderLayout(layout: MaterialsFolderLayout, updatedBy: string) {
+    if (!isValidMaterialsFolderLayout(layout)) {
+      throw new BadRequestException('Некорректная раскладка папок материалов');
+    }
+    const groupIds = new Set(layout.groups.map((group) => group.id));
+    for (const rule of layout.rules) {
+      if (rule.groupId && !groupIds.has(rule.groupId)) {
+        throw new BadRequestException(`Папка «${rule.prefix}» ссылается на несуществующую группу ЖК`);
+      }
+    }
+    await this.prisma.systemSetting.upsert({
+      where: { key: MATERIALS_LAYOUT_SETTING_KEY },
+      update: { value: JSON.stringify(layout), updatedBy },
+      create: {
+        key: MATERIALS_LAYOUT_SETTING_KEY,
+        value: JSON.stringify(layout),
+        updatedBy,
+      },
+    });
+    return this.getMaterialsFolderLayout();
   }
 
   /**

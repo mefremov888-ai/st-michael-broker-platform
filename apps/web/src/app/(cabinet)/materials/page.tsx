@@ -3,8 +3,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiGet } from '@/lib/api';
-import { Folder } from 'lucide-react';
+import { Building2, Folder } from 'lucide-react';
 import { foldersAndFilesAt, materialHref } from '@/lib/materials-folder-tree';
+import {
+  DEFAULT_MATERIALS_LAYOUT,
+  parseMaterialsLayout,
+  sortMaterialsRootFolders,
+  withDisplaySubcategory,
+  type MaterialsFolderLayout,
+} from '@shared/materials-folder-layout';
 
 interface DocItem {
   id: string;
@@ -19,39 +26,56 @@ interface DocItem {
 export default function MaterialsPage() {
   const router = useRouter();
   const [docs, setDocs] = useState<DocItem[]>([]);
+  const [layout, setLayout] = useState<MaterialsFolderLayout>(DEFAULT_MATERIALS_LAYOUT);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    apiGet('/documents?category=materials&limit=2000')
-      .then((res: any) => setDocs(res?.documents || []))
+    Promise.all([
+      apiGet('/documents?category=materials&limit=2000'),
+      fetch('/api/public/documents/layout', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ])
+      .then(([docsRes, publicLayout]) => {
+        setDocs(docsRes?.documents || []);
+        if (publicLayout?.layout) setLayout(parseMaterialsLayout(publicLayout.layout));
+      })
       .catch(() => setDocs([]))
       .finally(() => setLoading(false));
   }, []);
 
-  const { folders } = useMemo(() => foldersAndFilesAt(docs, []), [docs]);
+  const mapped = useMemo(
+    () => withDisplaySubcategory(docs, layout, 'cabinet'),
+    [docs, layout],
+  );
+  const { folders } = useMemo(() => foldersAndFilesAt(mapped, []), [mapped]);
+  const roots = useMemo(() => sortMaterialsRootFolders(folders, layout), [folders, layout]);
+  const groupTitles = layout.groups.map((group) => group.title);
   const counts = useMemo(() => {
     const result: Record<string, number> = {};
-    for (const folder of folders) {
-      result[folder] = foldersAndFilesAt(docs, [folder]).files.length
-        + docs.filter((d) => (d.subcategory || '').startsWith(`${folder}/`)).length;
+    for (const folder of roots) {
+      result[folder] = mapped.filter((doc) => {
+        const path = (doc.subcategory || '').split('/');
+        return path[0] === folder;
+      }).length;
     }
     return result;
-  }, [docs, folders]);
+  }, [mapped, roots]);
 
   return (
     <div>
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-bold">Материалы для брокеров</h1>
-        <p className="text-text-muted text-sm mt-1">Папки как на Яндекс.Диске: проект → альбом → файлы</p>
+        <p className="text-text-muted text-sm mt-1">Условия и презентации отдельно. Фото и видео — внутри ЖК Зорге и Берарина.</p>
       </div>
 
       {loading ? (
         <div className="card text-center py-8 text-text-muted">Загрузка...</div>
-      ) : folders.length === 0 ? (
+      ) : roots.length === 0 ? (
         <div className="card text-center py-8 text-text-muted">Материалы ещё не загружены</div>
       ) : (
         <div data-tour="materials-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
-          {folders.map((folder) => (
+          {roots.map((folder) => (
             <button
               key={folder}
               onClick={() => router.push(materialHref([folder]))}
@@ -72,7 +96,11 @@ export default function MaterialsPage() {
               onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
               onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
             >
-              <div style={{ color: '#B4936F' }}><Folder size={40} strokeWidth={1.2} /></div>
+              <div style={{ color: '#B4936F' }}>
+                {groupTitles.includes(folder)
+                  ? <Building2 size={40} strokeWidth={1.2} />
+                  : <Folder size={40} strokeWidth={1.2} />}
+              </div>
               <div style={{ fontSize: 14, fontWeight: 600, textAlign: 'center' }}>{folder}</div>
               {counts[folder] > 0 && (
                 <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.4)' }}>{counts[folder]} файлов</div>

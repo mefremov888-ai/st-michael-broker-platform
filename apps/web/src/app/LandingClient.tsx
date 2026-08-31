@@ -8,10 +8,17 @@ import {
   Headphones, PhoneCall, Wallet, TrendingUp, Users2, GraduationCap,
   Shield, Sparkles,
   FileText, Download as DownloadIcon, ChevronLeft, ChevronRight,
-  Film, Camera, Box, BarChart2, Folder,
+  Film, Camera, Box, BarChart2, Folder, Building2,
 } from 'lucide-react';
 import { HintIcon } from '@/components/HintIcon';
 import { fileCountUnder, foldersAndFilesAt, materialHref } from '@/lib/materials-folder-tree';
+import {
+  DEFAULT_MATERIALS_LAYOUT,
+  parseMaterialsLayout,
+  sortMaterialsRootFolders,
+  withDisplaySubcategory,
+  type MaterialsFolderLayout,
+} from '@shared/materials-folder-layout';
 import {
   ActiveCommissionPolicy,
   buildPaymentTermsText,
@@ -710,28 +717,32 @@ function BrokerToursCalendarModal({ events, onClose }: { events: any[]; onClose:
   );
 }
 
-function folderIcon(name: string) {
+function folderIcon(name: string, groupTitles: string[]) {
+  if (groupTitles.includes(name)) return <Building2 size={54} strokeWidth={1.2} />;
   if (/reels|видео|анимац|ролик|сторис/i.test(name)) return <Film size={54} strokeWidth={1.2} />;
   if (/фото/i.test(name)) return <Camera size={54} strokeWidth={1.2} />;
   if (/рендер/i.test(name)) return <Box size={54} strokeWidth={1.2} />;
   if (/презентац/i.test(name)) return <BarChart2 size={54} strokeWidth={1.2} />;
-  if (/текст|условия|рассрочк/i.test(name)) return <FileText size={54} strokeWidth={1.2} />;
+  if (/текст|условия|рассрочк|вознагражд/i.test(name)) return <FileText size={54} strokeWidth={1.2} />;
   return <Folder size={54} strokeWidth={1.2} />;
 }
 
-function MaterialsSection({ materials }: { materials: any[] }) {
-  const { folders } = foldersAndFilesAt(materials, []);
+function MaterialsSection({ materials, layout }: { materials: any[]; layout: MaterialsFolderLayout }) {
+  const mapped = withDisplaySubcategory(materials, layout, 'landing');
+  const { folders } = foldersAndFilesAt(mapped, []);
+  const roots = sortMaterialsRootFolders(folders, layout);
+  const groupTitles = layout.groups.map((group) => group.title);
 
   return (
     <section id="materials" style={{background:'var(--bg)'}}>
-      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Папки как на Яндекс.Диске: проект, альбом, файлы для брокеров ST Michael.</p></div>
-      {folders.length === 0 ? (
+      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Условия и презентации отдельно. Фото и видео — внутри ЖК Зорге и Берарина.</p></div>
+      {roots.length === 0 ? (
         <div style={{textAlign:'center',padding:'36px 16px',color:'rgba(0,0,0,0.45)',background:'#f5efe8',borderRadius:12,border:'1px solid rgba(180,147,111,0.25)'}}>
           Материалы ещё загружаются. По вопросам: <a href="tel:+74992262249" style={{color:'var(--gold)'}}>+7 (499) 226-22-49</a>
         </div>
       ) : (
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(180,147,111,0.2)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(180,147,111,0.25)'}}>
-          {folders.map((cat) => (
+          {roots.map((cat) => (
             <a
               key={cat}
               href={materialHref([cat])}
@@ -739,9 +750,9 @@ function MaterialsSection({ materials }: { materials: any[] }) {
               onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
               onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
             >
-              <div style={{color:'var(--gold)',opacity:0.9}}>{folderIcon(cat)}</div>
+              <div style={{color:'var(--gold)',opacity:0.9}}>{folderIcon(cat, groupTitles)}</div>
               <div style={{fontSize:12,fontWeight:600,textAlign:'center',letterSpacing:0.5,marginTop:2}}>{cat}</div>
-              <div style={{fontSize:11,color:'rgba(0,0,0,0.4)'}}>{fileCountUnder(materials, [cat])} файлов</div>
+              <div style={{fontSize:11,color:'rgba(0,0,0,0.4)'}}>{fileCountUnder(mapped, [cat])} файлов</div>
             </a>
           ))}
         </div>
@@ -1176,6 +1187,7 @@ export type LandingInitialData = {
   analyticsDocs?: any[];
   marketingDocs?: any[];
   materialsDocs?: any[];
+  materialsLayout?: MaterialsFolderLayout;
   news?: any[];
   activePolicies?: ActiveCommissionPolicy[];
 };
@@ -1221,6 +1233,9 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
   const [analyticsDocs, setAnalyticsDocs] = useState<any[]>(() => Array.isArray(initialData?.analyticsDocs) ? initialData!.analyticsDocs! : []);
   const [marketingDocs, setMarketingDocs] = useState<any[]>(() => Array.isArray(initialData?.marketingDocs) ? initialData!.marketingDocs! : []);
   const [materialsDocs, setMaterialsDocs] = useState<any[]>(() => Array.isArray(initialData?.materialsDocs) ? initialData!.materialsDocs! : []);
+  const [materialsLayout, setMaterialsLayout] = useState<MaterialsFolderLayout>(() =>
+    parseMaterialsLayout(initialData?.materialsLayout || DEFAULT_MATERIALS_LAYOUT),
+  );
   const [news, setNews] = useState<any[]>(() => Array.isArray(initialData?.news) && initialData!.news!.length > 0 ? initialData!.news! : DEFAULT_NEWS);
   const { broker } = useAuth();
   const router = useRouter();
@@ -1256,7 +1271,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
       catch { return null; }
     };
     (async () => {
-      const [content, evs, prjs, prms, coop, anal, mark, mat, nws, policies] = await Promise.all([
+      const [content, evs, prjs, prms, coop, anal, mark, mat, nws, policies, matLayout] = await Promise.all([
         safeFetch('/api/public/cms/content'),
         safeFetch('/api/public/cms/events'),
         safeFetch('/api/public/cms/projects'),
@@ -1267,6 +1282,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
         safeFetch('/api/public/documents?category=materials'),
         safeFetch('/api/public/cms/news'),
         safeFetch('/api/public/cms/commission-policies/active'),
+        safeFetch('/api/public/documents/layout'),
       ]);
       if (Array.isArray(policies) && policies.length > 0) setActivePolicies(policies);
       if (Array.isArray(nws) && nws.length > 0) setNews(nws);
@@ -1300,6 +1316,7 @@ export default function LandingPage({ initialData }: { initialData?: LandingInit
       if (Array.isArray(anal)) setAnalyticsDocs(anal);
       if (Array.isArray(mark)) setMarketingDocs(mark);
       if (Array.isArray(mat)) setMaterialsDocs(mat);
+      if (matLayout?.layout) setMaterialsLayout(parseMaterialsLayout(matLayout.layout));
     })();
   }, []);
 
@@ -2056,7 +2073,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         {/* MARKETING — Материалы для продвижения.
             Источник — Яндекс.Диск (sync-yandex-files.js, category=materials).
             На лендинге показываем корневые папки диска, внутри — та же иерархия. */}
-        <MaterialsSection materials={materialsDocs} />
+        <MaterialsSection materials={materialsDocs} layout={materialsLayout} />
 
 
 

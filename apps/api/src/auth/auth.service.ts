@@ -16,7 +16,6 @@ import {
   AmoCrmAdapter,
   AMO_CONTACT_FIELDS,
   brokerToAmoContactFields,
-  agencyToAmoCompanyFields,
   mapMeetingStatus,
   leadToProject,
   BROKER_PIPELINE_ID,
@@ -1269,29 +1268,12 @@ export class AuthService {
     // а не в контакте. Ищем по ИНН → update / create → linkContactToCompany.
     // isolated от синка контакта: если контакт не создался, амо-компанию всё
     // равно можно обновить, никого не сломает.
-    if (primaryAgency && primaryAgency.inn) {
+    if (primaryAgency && (primaryAgency.inn || primaryAgency.name)) {
       try {
-        const companyFields = agencyToAmoCompanyFields(primaryAgency);
-        const companyPayload = {
-          name: primaryAgency.name,
-          custom_fields_values: companyFields,
-        };
-        let amoCompanyId: number | null = null;
-        const found = await this.amo.findCompanyByInn(primaryAgency.inn);
-        if (found?.id) {
-          amoCompanyId = Number(found.id);
-          await this.amo.updateCompany(amoCompanyId, companyPayload);
-        } else {
-          const created = await this.amo.createCompany(companyPayload);
-          if (created?.id) amoCompanyId = Number(created.id);
-        }
-        if (amoCompanyId && amoContactId) {
-          await this.amo
-            .linkContactToCompany(Number(amoContactId), amoCompanyId)
-            .catch(() => {
-              /* уже связаны — не критично */
-            });
-        }
+        await this.amo.syncAgencyCompanyToAmoContact(
+          Number(amoContactId),
+          primaryAgency,
+        );
       } catch (e: any) {
         console.error(
           "[syncBrokerProfileToAmo] agency company sync failed:",

@@ -21,6 +21,12 @@ import {
   materialHref,
 } from '@/lib/materials-folder-tree';
 import { materialsThumbUrl } from '@/lib/materials-thumb';
+import {
+  DEFAULT_MATERIALS_LAYOUT,
+  parseMaterialsLayout,
+  withDisplaySubcategory,
+  type MaterialsFolderLayout,
+} from '@shared/materials-folder-layout';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -131,28 +137,36 @@ export default function MaterialsFolderPage() {
   const params = useParams<{ subcategory: string[] }>();
   const router = useRouter();
   const parts = decodeMaterialsSegments(params.subcategory);
-  const currentPath = parts.join('/');
 
   const [docs, setDocs] = useState<DocItem[]>([]);
+  const [layout, setLayout] = useState<MaterialsFolderLayout>(DEFAULT_MATERIALS_LAYOUT);
   const [loading, setLoading] = useState(true);
   const [viewer, setViewer] = useState<{ items: DocItem[]; index: number } | null>(null);
   const [photoLimit, setPhotoLimit] = useState(30);
 
   useEffect(() => {
-    if (!currentPath) {
-      setDocs([]);
-      setLoading(false);
-      return;
-    }
     setLoading(true);
-    fetch(`${API_BASE}/api/public/documents?category=materials&subcategory=${encodeURIComponent(currentPath)}&limit=2000`)
-      .then((r) => r.json())
-      .then((data) => setDocs(Array.isArray(data) ? data : []))
+    Promise.all([
+      fetch(`${API_BASE}/api/public/documents?category=materials&limit=2000`).then((r) => r.json()),
+      fetch(`${API_BASE}/api/public/documents/layout`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ])
+      .then(([data, layoutRes]) => {
+        setDocs(Array.isArray(data) ? data : []);
+        if (layoutRes?.layout) setLayout(parseMaterialsLayout(layoutRes.layout));
+      })
       .catch(() => setDocs([]))
       .finally(() => setLoading(false));
-  }, [currentPath]);
+  }, []);
 
-  const { folders, files } = useMemo(() => foldersAndFilesAt(docs, parts), [docs, parts]);
+  const mapped = useMemo(
+    () => withDisplaySubcategory(docs, layout, 'landing'),
+    [docs, layout],
+  );
+  const displayView = useMemo(() => foldersAndFilesAt(mapped, parts), [mapped, parts]);
+  const rawView = useMemo(() => foldersAndFilesAt(docs, parts), [docs, parts]);
+  const usingDisplay = displayView.folders.length > 0 || displayView.files.length > 0;
+  const { folders, files } = usingDisplay ? displayView : rawView;
+  const countDocs = usingDisplay ? mapped : docs;
   const images = files.filter(isImage);
   const videos = files.filter(isVideo);
   const pdfs = files.filter(isPdf);
@@ -213,7 +227,7 @@ export default function MaterialsFolderPage() {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
                   {folders.map((folder) => {
                     const nested = [...parts, folder];
-                    const count = fileCountUnder(docs, nested);
+                    const count = fileCountUnder(countDocs, nested);
                     return (
                       <a
                         key={folder}

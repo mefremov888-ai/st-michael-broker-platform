@@ -86,4 +86,31 @@ describe("ClientFixationController idempotency", () => {
     expect(fixationSafety.execute).not.toHaveBeenCalled();
     expect(clientFixationService.fixClient).not.toHaveBeenCalled();
   });
+
+  it("accepts a 12-digit personal agency INN from the broker profile", async () => {
+    const clientFixationService = {
+      fixClient: jest.fn().mockResolvedValue({ client: { id: "client-1" } }),
+    };
+    const assertOwned = jest.fn().mockResolvedValue(undefined);
+    const fixationSafety = {
+      execute: jest.fn((_request, action) => action({ assertOwned })),
+    };
+    const controller = new ClientFixationController(
+      clientFixationService as any,
+      fixationSafety as any,
+    );
+
+    await expect(
+      controller.fixClient({ id: "broker-1" } as any, {
+        ...validBody,
+        agencyInn: "123456789777",
+      }),
+    ).resolves.toEqual({ client: { id: "client-1" } });
+
+    expect(clientFixationService.fixClient).toHaveBeenCalledWith(
+      "broker-1",
+      expect.objectContaining({ agencyInn: "123456789777" }),
+      assertOwned,
+    );
+  });
 });
