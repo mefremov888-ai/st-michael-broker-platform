@@ -1451,6 +1451,8 @@ export class ClientFixationService {
       status?: string;
       project?: string;
       search?: string;
+      brokerId?: string;
+      asStaff?: boolean;
     },
   ) {
     const page = Number(query.page) || 1;
@@ -1461,10 +1463,16 @@ export class ClientFixationService {
     // которых ему назначили координатором (responsibleBrokerId == свой,
     // brokerId != свой). До этой правки responsibleBroker не видел клиентов
     // которые ему назначил координатор — это был баг.
+    // 2026-08-31: ADMIN/MANAGER видят ту же панель уникальности, что и брокер,
+    // по всем фиксациям. Опционально сужаем до одного брокера (?brokerId=).
+    const scopedBrokerId =
+      query.asStaff && typeof query.brokerId === "string" && query.brokerId.trim()
+        ? query.brokerId.trim()
+        : brokerId;
     const ownershipFilter: any = {
-      OR: [{ brokerId }, { responsibleBrokerId: brokerId }],
+      OR: [{ brokerId: scopedBrokerId }, { responsibleBrokerId: scopedBrokerId }],
     };
-    const where: any = { ...ownershipFilter };
+    const where: any = query.asStaff && !query.brokerId ? {} : { ...ownershipFilter };
     if (query.status) where.uniquenessStatus = query.status;
     if (query.project) where.project = query.project;
     if (query.search) {
@@ -1472,16 +1480,18 @@ export class ClientFixationService {
       // "8925" и "+7925" дают одинаковый результат.
       // Search OR должен идти ВНУТРИ AND с ownership-фильтром, иначе нарушим
       // ownership (брокер увидит чужих клиентов с похожим телефоном).
-      where.AND = [
-        ownershipFilter,
-        {
-          OR: [
-            { fullName: { contains: query.search, mode: "insensitive" } },
-            ...buildPhoneSearchConditions(query.search),
-          ],
-        },
-      ];
-      delete where.OR;
+      const searchOr = {
+        OR: [
+          { fullName: { contains: query.search, mode: "insensitive" } },
+          ...buildPhoneSearchConditions(query.search),
+        ],
+      };
+      if (query.asStaff && !query.brokerId) {
+        Object.assign(where, searchOr);
+      } else {
+        where.AND = [ownershipFilter, searchOr];
+        delete where.OR;
+      }
     }
 
     const orderBy: any = {};

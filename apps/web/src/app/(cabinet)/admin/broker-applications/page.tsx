@@ -326,6 +326,7 @@ export default function BrokerApplicationsPage() {
                     <th className="pb-3 font-medium">Телефон</th>
                     <th className="pb-3 font-medium">Дата</th>
                     <th className="pb-3 font-medium">Брокер</th>
+                    <th className="pb-3 font-medium">Уникальность</th>
                     <th className="pb-3 font-medium">Передача в amoCRM</th>
                     <th className="pb-3 font-medium text-right">Действия</th>
                   </tr>
@@ -391,6 +392,24 @@ export default function BrokerApplicationsPage() {
                             </>
                           ) : (
                             <span className="text-text-muted">—</span>
+                          )}
+                        </td>
+                        <td className="py-3">
+                          {item.type === 'CLIENT' && item.extra?.uniquenessStatus ? (
+                            <span className={`text-xs px-2 py-1 rounded ${
+                              item.extra.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'bg-success/20 text-success'
+                              : item.extra.uniquenessStatus === 'REJECTED' ? 'bg-error/20 text-error'
+                              : item.extra.uniquenessStatus === 'UNDER_REVIEW' ? 'bg-warning/20 text-warning'
+                              : 'bg-text-muted/20 text-text-muted'
+                            }`}>
+                              {item.extra.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'Уникален'
+                                : item.extra.uniquenessStatus === 'REJECTED' ? 'Не уникален'
+                                : item.extra.uniquenessStatus === 'UNDER_REVIEW' ? 'На проверке'
+                                : item.extra.uniquenessStatus === 'EXPIRED' ? 'Истёк'
+                                : item.extra.uniquenessStatus}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-text-muted">—</span>
                           )}
                         </td>
                         <td className="py-3">
