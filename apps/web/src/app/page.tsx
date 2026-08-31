@@ -77,7 +77,7 @@ export default async function Page() {
     marketingDocs,
     materialsDocs,
     news,
-    90|    activePolicies,
+    activePolicies,
     materialsLayout,
   ] = await Promise.all([
     safeFetch<any>(`${base}/api/public/cms/content`),
