@@ -322,24 +322,45 @@ describe("production-safe amo broker-contact provisioner", () => {
     });
   });
 
-  it("enforces the reviewed 12/9 and per-class one-shot ceilings", () => {
+  it("accepts a live cohort inside the reviewed envelope and refuses a larger one", () => {
     expect(() =>
       provisioner.assertReviewedRunCeilings(liveManifest()),
     ).not.toThrow();
-    const tooMany = liveManifest();
-    tooMany.groups.create_contact_candidate = 7;
-    tooMany.rows.create_contact_candidate = 9;
-    expect(() => provisioner.assertReviewedRunCeilings(tooMany)).toThrow(
+
+    const overTotal = liveManifest();
+    overTotal.queueRows = provisioner.REVIEWED_RUN_CEILINGS.queueRows + 1;
+    expect(() => provisioner.assertReviewedRunCeilings(overTotal)).toThrow(
       expect.objectContaining({
         code: "REVIEWED_RUN_TOTAL_CEILING_EXCEEDED",
       }),
     );
+
+    const overGroups = liveManifest();
+    overGroups.effectiveBrokerGroups =
+      provisioner.REVIEWED_RUN_CEILINGS.effectiveBrokerGroups + 1;
+    expect(() => provisioner.assertReviewedRunCeilings(overGroups)).toThrow(
+      expect.objectContaining({
+        code: "REVIEWED_RUN_TOTAL_CEILING_EXCEEDED",
+      }),
+    );
+
+    for (const resolution of ["create_contact_candidate", "link_existing_broker_contact"]) {
+      const overClass = liveManifest();
+      overClass.groups[resolution] =
+        provisioner.REVIEWED_RUN_CEILINGS.groups[resolution] + 1;
+      overClass.rows[resolution] =
+        provisioner.REVIEWED_RUN_CEILINGS.rows[resolution] + 1;
+      expect(() => provisioner.assertReviewedRunCeilings(overClass)).toThrow(
+        expect.objectContaining({
+          code: "REVIEWED_RUN_CLASS_CEILING_EXCEEDED",
+        }),
+      );
+    }
   });
 
-  it("hard-binds the apply to every exact count from reviewed run 32947094767", () => {
-    expect(provisioner.REVIEWED_RUN_MANIFEST).toEqual(liveManifest());
+  it("still refuses any drift between the operator manifest and the live cohort", () => {
     expect(() =>
-      provisioner.assertReviewedRunManifest(liveManifest()),
+      provisioner.assertExactManifest(liveManifest(), liveManifest()),
     ).not.toThrow();
 
     const paths: Array<["queueRows" | "effectiveBrokerGroups", string?]> = [
@@ -358,9 +379,9 @@ describe("production-safe amo broker-contact provisioner", () => {
         const [bucket, resolution] = nested.split(".");
         drifted[bucket][resolution] += 1;
       }
-      expect(() => provisioner.assertReviewedRunManifest(drifted)).toThrow(
-        expect.objectContaining({ code: "EXACT_PLAN_COUNT_DRIFT" }),
-      );
+      expect(() =>
+        provisioner.assertExactManifest(drifted, liveManifest()),
+      ).toThrow(expect.objectContaining({ code: "EXACT_PLAN_COUNT_DRIFT" }));
     }
   });
 
