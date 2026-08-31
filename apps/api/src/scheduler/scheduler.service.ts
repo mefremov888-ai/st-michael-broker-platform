@@ -453,7 +453,7 @@ export class SchedulerService {
       const result = spawnSync('node', [scriptPath], {
         env: { ...process.env, YANDEX_DISK_PUBLIC_KEY: publicKey },
         encoding: 'utf-8',
-        timeout: 60 * 60 * 1000, // до часа — на первый прогон много скачать
+        timeout: 3 * 60 * 60 * 1000, // до 3 часов — полная папка ~8 ГБ
       });
       if (result.stdout) this.logger.log(result.stdout.trim());
       if (result.stderr) this.logger.error(result.stderr.trim());

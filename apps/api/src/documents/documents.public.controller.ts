@@ -14,7 +14,7 @@ export class DocumentsPublicController {
       category,
       subcategory,
       onlyPublic: true,
-      limit: 200,
+      limit: 2000,
     });
     return data.documents;
   }

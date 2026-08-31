@@ -94,7 +94,7 @@ services:
       MANGO_CALLBACK_URL: ${MANGO_CALLBACK_URL:-}
       MANGO_OUTBOUND_LINE: ${MANGO_OUTBOUND_LINE:-}
       # 2026-05-29: публичная папка Я.Диска с материалами для брокеров.
-      YANDEX_DISK_PUBLIC_KEY: ${YANDEX_DISK_PUBLIC_KEY:-https://disk.yandex.ru/d/8_w-xQ8PR3uz3w}
+      YANDEX_DISK_PUBLIC_KEY: ${YANDEX_DISK_PUBLIC_KEY:-https://disk.yandex.ru/d/Pf1bqSQkEG62sw}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_SECURE: ${SMTP_SECURE:-true}

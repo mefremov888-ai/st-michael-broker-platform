@@ -20,13 +20,18 @@ export class DocumentsService {
     page?: number;
     limit?: number;
   }) {
-    const page = Number(filters.page) || 1;
-    const limit = Number(filters.limit) || 100;
+    const page = Math.max(1, Number(filters.page) || 1);
+    const limit = Math.min(2000, Math.max(1, Number(filters.limit) || 100));
     const skip = (page - 1) * limit;
 
     const where: any = {};
     if (filters.category) where.category = filters.category;
-    if (filters.subcategory) where.subcategory = filters.subcategory;
+    if (filters.subcategory) {
+      where.OR = [
+        { subcategory: filters.subcategory },
+        { subcategory: { startsWith: `${filters.subcategory}/` } },
+      ];
+    }
     if (filters.project) where.project = filters.project;
     if (filters.onlyPublic) where.isPublic = true;
 

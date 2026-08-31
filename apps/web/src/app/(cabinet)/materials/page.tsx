@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiGet } from '@/lib/api';
-import { Film, BarChart2, Camera, Box, FileText } from 'lucide-react';
+import { Folder } from 'lucide-react';
+import { foldersAndFilesAt, materialHref } from '@/lib/materials-folder-tree';
 
 interface DocItem {
   id: string;
@@ -15,68 +16,45 @@ interface DocItem {
   fileSize: number | null;
 }
 
-const CANONICAL_CATS = ['Reels', 'Презентации', 'Фотографии', 'Рендеры', 'Тексты'] as const;
-type CanonicalCat = typeof CANONICAL_CATS[number];
-
-const SUBCATEGORY_MAP: Record<CanonicalCat, string[]> = {
-  'Reels': ['Reels', 'Для роликов сторис reels'],
-  'Презентации': ['Презентации', 'Презентация Квартал Серебряный Бор'],
-  'Фотографии': ['Фотографии', 'Зорге9 (фото)', 'Зорге 9 (фото)'],
-  'Рендеры': ['Рендеры'],
-  'Тексты': ['Тексты', 'Условия вознаграждения', 'Актуальные условия рассрочки'],
-};
-
-const CAT_ICONS: Record<CanonicalCat, React.ReactNode> = {
-  'Reels': <Film size={40} strokeWidth={1.2} />,
-  'Презентации': <BarChart2 size={40} strokeWidth={1.2} />,
-  'Фотографии': <Camera size={40} strokeWidth={1.2} />,
-  'Рендеры': <Box size={40} strokeWidth={1.2} />,
-  'Тексты': <FileText size={40} strokeWidth={1.2} />,
-};
-
 export default function MaterialsPage() {
   const router = useRouter();
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
-      apiGet('/documents?category=marketing&limit=200').catch(() => ({ documents: [] })),
-      apiGet('/documents?category=materials&limit=200').catch(() => ({ documents: [] })),
-    ])
-      .then(([a, b]: any[]) => setDocs([...(a.documents || []), ...(b.documents || [])]))
+    apiGet('/documents?category=materials&limit=2000')
+      .then((res: any) => setDocs(res?.documents || []))
+      .catch(() => setDocs([]))
       .finally(() => setLoading(false));
   }, []);
 
+  const { folders } = useMemo(() => foldersAndFilesAt(docs, []), [docs]);
   const counts = useMemo(() => {
-    const result: Record<CanonicalCat, number> = { Reels: 0, Презентации: 0, Фотографии: 0, Рендеры: 0, Тексты: 0 };
-    for (const d of docs) {
-      const sub = (d.subcategory || '').trim().toLowerCase();
-      for (const cat of CANONICAL_CATS) {
-        if (SUBCATEGORY_MAP[cat].some((alias) => alias.toLowerCase() === sub)) {
-          result[cat]++;
-          break;
-        }
-      }
+    const result: Record<string, number> = {};
+    for (const folder of folders) {
+      result[folder] = foldersAndFilesAt(docs, [folder]).files.length
+        + docs.filter((d) => (d.subcategory || '').startsWith(`${folder}/`)).length;
     }
     return result;
-  }, [docs]);
+  }, [docs, folders]);
 
   return (
     <div>
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-bold">Материалы для брокеров</h1>
-        <p className="text-text-muted text-sm mt-1">Готовый контент для продвижения проектов ST Michael</p>
+        <p className="text-text-muted text-sm mt-1">Папки как на Яндекс.Диске: проект → альбом → файлы</p>
       </div>
 
       {loading ? (
         <div className="card text-center py-8 text-text-muted">Загрузка...</div>
+      ) : folders.length === 0 ? (
+        <div className="card text-center py-8 text-text-muted">Материалы ещё не загружены</div>
       ) : (
         <div data-tour="materials-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
-          {CANONICAL_CATS.map((cat) => (
+          {folders.map((folder) => (
             <button
-              key={cat}
-              onClick={() => router.push(`/materials/${encodeURIComponent(cat)}`)}
+              key={folder}
+              onClick={() => router.push(materialHref([folder]))}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -94,10 +72,10 @@ export default function MaterialsPage() {
               onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
               onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
             >
-              <div style={{ color: '#B4936F' }}>{CAT_ICONS[cat]}</div>
-              <div style={{ fontSize: 14, fontWeight: 600, textAlign: 'center' }}>{cat}</div>
-              {counts[cat] > 0 && (
-                <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.4)' }}>{counts[cat]} файлов</div>
+              <div style={{ color: '#B4936F' }}><Folder size={40} strokeWidth={1.2} /></div>
+              <div style={{ fontSize: 14, fontWeight: 600, textAlign: 'center' }}>{folder}</div>
+              {counts[folder] > 0 && (
+                <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.4)' }}>{counts[folder]} файлов</div>
               )}
             </button>
           ))}
