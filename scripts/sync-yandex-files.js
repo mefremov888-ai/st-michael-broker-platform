@@ -1,31 +1,58 @@
 #!/usr/bin/env node
 /**
- * Скачивает файлы с публичной папки Яндекс.Диска в /app/uploads/yandex/<относительный путь>
- * и миниатюры (~20 КБ) в /app/uploads/yandex-thumbs/...thumb.jpg — сетка материалов
- * не тянет оригиналы по 10–20 МБ до клика.
+ * Скачивает материалы с нескольких публичных папок Яндекс.Диска в
+ * /app/uploads/yandex/<относительный путь> и миниатюры в yandex-thumbs.
  *
- * Структура папок на диске сохраняется целиком (проект → тип → альбом → файл).
- * По умолчанию удаляет локальные файлы и Document-записи синка, которых
- * больше нет на Я.Диске (старые неразнесённые материалы).
+ * Источники по умолчанию:
+ *   1) новая папка проектов (ЗОРГЕ 9 / КСБ)
+ *   2) архив старых материалов (фото, reels, рендеры, условия)
+ *   3) презентации → локальная папка «Презентации»
  *
- * Запуск:
+ * CLEAN_ORPHANS удаляет только то, чего нет ни в одном источнике.
+ *
  *   node scripts/sync-yandex-files.js [public_url]
- *   FORCE=1 node scripts/sync-yandex-files.js
- *   CLEAN_ORPHANS=0 node scripts/sync-yandex-files.js   # не чистить лишнее
- *
- * Cron: scheduler.service.ts handleYandexDiskFilesSync — раз в сутки.
+ *   CLEAN_ORPHANS=0 node scripts/sync-yandex-files.js
  */
 
 const fs = require('fs');
 const path = require('path');
 
-const DEFAULT_PUBLIC_KEY = 'https://disk.yandex.ru/d/Pf1bqSQkEG62sw';
-const PUBLIC_KEY = process.argv[2] || process.env.YANDEX_DISK_PUBLIC_KEY || DEFAULT_PUBLIC_KEY;
+const DEFAULT_MATERIALS = 'https://disk.yandex.ru/d/Pf1bqSQkEG62sw';
+const DEFAULT_ARCHIVE = 'https://disk.yandex.ru/d/xgzI7yrg50iYNg';
+const DEFAULT_PRESENTATIONS = 'https://disk.yandex.ru/d/r1QvoJpLNquhjg';
+
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT || '/app/uploads';
 const TARGET_DIR = path.join(UPLOAD_ROOT, 'yandex');
 const THUMB_DIR = path.join(UPLOAD_ROOT, 'yandex-thumbs');
 const FORCE = process.env.FORCE === '1' || process.env.FORCE === 'true';
 const CLEAN_ORPHANS = process.env.CLEAN_ORPHANS !== '0' && process.env.CLEAN_ORPHANS !== 'false';
+
+function uniqueSources() {
+  const raw = [
+    {
+      name: 'materials',
+      key: process.argv[2] || process.env.YANDEX_DISK_PUBLIC_KEY || DEFAULT_MATERIALS,
+      prefix: '',
+    },
+    {
+      name: 'archive',
+      key: process.env.YANDEX_DISK_ARCHIVE_KEY || DEFAULT_ARCHIVE,
+      prefix: '',
+    },
+    {
+      name: 'presentations',
+      key: process.env.YANDEX_DISK_PRESENTATIONS_KEY || DEFAULT_PRESENTATIONS,
+      prefix: 'Презентации',
+    },
+  ];
+  const seen = new Set();
+  return raw.filter((src) => {
+    const id = `${src.key}||${src.prefix}`;
+    if (!src.key || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
 
 let PrismaClient;
 try {
@@ -42,9 +69,9 @@ try {
 const API = 'https://cloud-api.yandex.net/v1/disk/public/resources';
 const DOWNLOAD_API = 'https://cloud-api.yandex.net/v1/disk/public/resources/download';
 
-async function fetchResource(p = '/', offset = 0, limit = 1000) {
+async function fetchResource(publicKey, p = '/', offset = 0, limit = 1000) {
   const url = new URL(API);
-  url.searchParams.set('public_key', PUBLIC_KEY);
+  url.searchParams.set('public_key', publicKey);
   url.searchParams.set('path', p);
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('offset', String(offset));
@@ -54,9 +81,9 @@ async function fetchResource(p = '/', offset = 0, limit = 1000) {
   return res.json();
 }
 
-async function getDownloadHref(filePath) {
+async function getDownloadHref(publicKey, filePath) {
   const url = new URL(DOWNLOAD_API);
-  url.searchParams.set('public_key', PUBLIC_KEY);
+  url.searchParams.set('public_key', publicKey);
   url.searchParams.set('path', filePath);
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`download link ${res.status}: ${await res.text()}`);
@@ -86,8 +113,8 @@ function pickPreview(it) {
   return preferred?.url || it?.preview || null;
 }
 
-async function refreshPreview(diskPath) {
-  const data = await fetchResource(diskPath, 0, 1);
+async function refreshPreview(publicKey, diskPath) {
+  const data = await fetchResource(publicKey, diskPath, 0, 1);
   if (data?.type === 'file') return pickPreview(data);
   const items = data?._embedded?.items || [];
   const match = items.find((it) => it.path === diskPath);
@@ -95,23 +122,24 @@ async function refreshPreview(diskPath) {
 }
 
 function projectFromRel(relDir) {
-  const top = (relDir || '').split('/')[0] || '';
-  if (/зорг/i.test(top)) return 'ZORGE9';
-  if (/ксб|серебрян/i.test(top)) return 'SILVER_BOR';
+  const s = relDir || '';
+  if (/зорг/i.test(s)) return 'ZORGE9';
+  if (/ксб|серебрян/i.test(s)) return 'SILVER_BOR';
   return null;
 }
 
-async function collectFiles(p, relDir, files) {
+async function collectFiles(publicKey, p, relDir, files) {
   let offset = 0;
   for (;;) {
-    const data = await fetchResource(p, offset);
+    const data = await fetchResource(publicKey, p, offset);
     const items = data?._embedded?.items || [];
     for (const it of items) {
       if (it.type === 'dir') {
         const nextRel = joinRel(relDir, sanitizeSegment(it.name));
-        await collectFiles(it.path, nextRel, files);
+        await collectFiles(publicKey, it.path, nextRel, files);
       } else if (it.type === 'file') {
         files.push({
+          publicKey,
           name: it.name,
           size: it.size || 0,
           path: it.path,
@@ -175,13 +203,13 @@ async function ensureThumb(f) {
     return { rel: thumbRelFor(rel), skipped: true, bytes: 0 };
   }
   let href = f.preview;
-  if (!href) href = await refreshPreview(f.path);
+  if (!href) href = await refreshPreview(f.publicKey, f.path);
   if (!href) return { rel: thumbRelFor(rel), skipped: true, bytes: 0 };
   try {
     const bytes = await downloadTo(href, dest);
     return { rel: thumbRelFor(rel), skipped: false, bytes };
   } catch (e) {
-    href = await refreshPreview(f.path);
+    href = await refreshPreview(f.publicKey, f.path);
     if (!href) throw e;
     const bytes = await downloadTo(href, dest);
     return { rel: thumbRelFor(rel), skipped: false, bytes };
@@ -194,19 +222,26 @@ function publicUrlFor(relDir, nameSafe) {
 }
 
 (async () => {
+  const sources = uniqueSources();
   console.log('=== Yandex.Disk files sync ===');
-  console.log('public_key:', PUBLIC_KEY);
+  for (const src of sources) {
+    console.log(`source ${src.name}: ${src.key}${src.prefix ? ` → ${src.prefix}/` : ''}`);
+  }
   console.log('target:    ', TARGET_DIR);
   console.log('thumbs:    ', THUMB_DIR);
   console.log('mode:      ', FORCE ? 'FORCE re-download' : 'skip same-size');
-  console.log('orphans:   ', CLEAN_ORPHANS ? 'delete missing' : 'keep extra local files');
+  console.log('orphans:   ', CLEAN_ORPHANS ? 'delete missing from all sources' : 'keep extra local files');
   console.log('');
 
   if (!fs.existsSync(TARGET_DIR)) fs.mkdirSync(TARGET_DIR, { recursive: true });
   if (!fs.existsSync(THUMB_DIR)) fs.mkdirSync(THUMB_DIR, { recursive: true });
 
   const files = [];
-  await collectFiles('/', '', files);
+  for (const src of sources) {
+    const before = files.length;
+    await collectFiles(src.key, '/', src.prefix, files);
+    console.log(`  ${src.name}: ${files.length - before} files`);
+  }
   const folders = [...new Set(files.map((f) => f.relativeDir || '(root)'))];
   console.log(`Found ${files.length} files in ${folders.length} folders`);
 
@@ -265,7 +300,7 @@ function publicUrlFor(relDir, nameSafe) {
 
     try {
       console.log(`↓ ${rel} (${(f.size / 1024 / 1024).toFixed(1)}MB)`);
-      const href = await getDownloadHref(f.path);
+      const href = await getDownloadHref(f.publicKey, f.path);
       const bytes = await downloadTo(href, localPath);
       totalBytes += bytes;
       downloaded++;
