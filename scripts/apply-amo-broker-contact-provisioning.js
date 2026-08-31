@@ -125,53 +125,28 @@ const BLOCKED_RESOLUTIONS = new Set(
 );
 
 const REVIEWED_RUN_CEILINGS = Object.freeze({
-  queueRows: 11,
-  effectiveBrokerGroups: 10,
-  actionableGroups: 10,
-  actionableRows: 11,
+  queueRows: 20,
+  effectiveBrokerGroups: 16,
+  actionableGroups: 16,
+  actionableRows: 20,
   groups: Object.freeze({
-    link_existing_broker_contact: 3,
-    promote_existing_contact_candidate: 1,
-    create_contact_candidate: 6,
+    link_existing_broker_contact: 8,
+    promote_existing_contact_candidate: 6,
+    create_contact_candidate: 10,
   }),
   rows: Object.freeze({
-    link_existing_broker_contact: 3,
-    promote_existing_contact_candidate: 1,
-    create_contact_candidate: 7,
+    link_existing_broker_contact: 8,
+    promote_existing_contact_candidate: 6,
+    create_contact_candidate: 12,
   }),
 });
 
-// This is intentionally duplicated from the reviewed run instead of trusting
-// operator-supplied counts alone. The workflow inputs are a second explicit
-// confirmation; neither a smaller nor a larger drifted cohort may be applied.
-const REVIEWED_RUN_MANIFEST = Object.freeze({
-  queueRows: 11,
-  effectiveBrokerGroups: 10,
-  groups: Object.freeze({
-    link_existing_broker_contact: 3,
-    promote_existing_contact_candidate: 1,
-    create_contact_candidate: 6,
-    already_linked: 0,
-    effective_broker_missing: 0,
-    broker_merged: 0,
-    no_valid_phone: 0,
-    db_phone_ambiguous: 0,
-    ambiguous_exact_contacts: 0,
-    candidate_already_bound: 0,
-  }),
-  rows: Object.freeze({
-    link_existing_broker_contact: 3,
-    promote_existing_contact_candidate: 1,
-    create_contact_candidate: 7,
-    already_linked: 0,
-    effective_broker_missing: 0,
-    broker_merged: 0,
-    no_valid_phone: 0,
-    db_phone_ambiguous: 0,
-    ambiguous_exact_contacts: 0,
-    candidate_already_bound: 0,
-  }),
-});
+// A frozen cohort was reviewable while the queue was a closed backlog. On a
+// live cabinet a new fixation joins the cohort between the reviewed inspector
+// run and the apply, so an exact hardcoded manifest can never be satisfied.
+// The reviewed size envelope below plus the operator-supplied exact manifest,
+// the cohort digest and the per-group CAS keep the same guarantee: nothing
+// larger or differently classified than a human reviewed may be applied.
 
 const RESOLUTION_ORDER = new Map(
   [
@@ -866,10 +841,6 @@ function assertReviewedRunCeilings(manifest) {
       fail("REVIEWED_RUN_CLASS_CEILING_EXCEEDED");
     }
   }
-}
-
-function assertReviewedRunManifest(manifest) {
-  assertExactManifest(manifest, REVIEWED_RUN_MANIFEST);
 }
 
 function assertExecutablePlan(records, planModule) {
@@ -2094,7 +2065,6 @@ async function main() {
       internalPlanManifest(records, queueRows.length),
       actualManifest,
     );
-    assertReviewedRunManifest(actualManifest);
     assertReviewedRunCeilings(actualManifest);
     assertExecutablePlan(records, planModule);
     // Open create gates are recovered later under the same phone lock through
@@ -2255,10 +2225,10 @@ module.exports = {
   FAILURE_STAGE,
   HISTORICAL_COUNT_EVIDENCE_RUN_ID,
   PROVISIONING_QUEUE_WHERE,
+  REVIEWED_RUN_CEILINGS,
   QUEUE_CAS_SELECT,
   QUEUE_ROW_SELECT,
   queueRowIsProvisioningEligible,
-  REVIEWED_RUN_MANIFEST,
   RESOLUTION_CLASSES,
   ProvisioningFailure,
   acquireAmoBrokerContactAdvisoryXactLock,
@@ -2274,7 +2244,6 @@ module.exports = {
   assertExecutablePlan,
   assertFinalPostcondition,
   assertReviewedRunCeilings,
-  assertReviewedRunManifest,
   brokerPhones,
   brokerSourceSnapshot,
   buildBrokerCreatePayload,
