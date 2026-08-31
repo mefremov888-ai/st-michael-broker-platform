@@ -20,6 +20,7 @@ describe("ClientFixationService amo broker attachment", () => {
     prisma = {
       broker: {
         findUnique: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(null),
         findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
@@ -62,6 +63,7 @@ describe("ClientFixationService amo broker attachment", () => {
       checkUniqueness: jest.fn(),
       createFixationRequest: jest.fn(),
       createBrokerLeadFromLanding: jest.fn(),
+      syncAgencyCompanyToAmoContact: jest.fn().mockResolvedValue(null),
     };
     queue = { add: jest.fn().mockResolvedValue(undefined) };
     opsAlerts = { sendSafely: jest.fn().mockResolvedValue(true) };
@@ -920,8 +922,53 @@ describe("ClientFixationService amo broker attachment", () => {
     ).rejects.toThrow("Не удалось создать контакт брокера в amoCRM");
 
     expect(amo.createBrokerLeadFromLanding).not.toHaveBeenCalled();
+    expect(amo.syncAgencyCompanyToAmoContact).not.toHaveBeenCalled();
     expect(prisma.broker.update).not.toHaveBeenCalled();
     expect(prisma.broker.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("links the creator agency as amo Company when a coordinator creates a broker", async () => {
+    const agency = { id: "a1", name: "Агентство Тест", inn: "7700000000" };
+    const creator = {
+      id: "creator",
+      fullName: "Брокер для Теста",
+      brokerAgencies: [{ isPrimary: true, agency }],
+    };
+    const created = {
+      id: "new-broker",
+      fullName: "тест101 тест101",
+      phone: "+79997778876",
+      email: "test101@mail1.ru",
+      amoContactId: null,
+    };
+    const synced = { ...created, amoContactId: BigInt(4101), brokerAgencies: creator.brokerAgencies };
+
+    prisma.broker.findUnique.mockImplementation(async (args: any) => {
+      if (args.where.id === "creator") return creator;
+      if (args.where.phone === created.phone) return null;
+      if (args.where.id === "new-broker") return synced;
+      return null;
+    });
+    prisma.broker.create.mockResolvedValue(created);
+    (service as any).ensureBrokerAmoContact = jest.fn().mockResolvedValue(synced);
+    amo.createBrokerLeadFromLanding.mockResolvedValue({ contactId: 4101, leadId: 5101 });
+    amo.syncAgencyCompanyToAmoContact.mockResolvedValue(6101);
+
+    const result = await service.createBrokerByCreator("creator", {
+      fullName: created.fullName,
+      phone: created.phone,
+      email: created.email,
+    });
+
+    expect(result.created).toBe(true);
+    expect(amo.createBrokerLeadFromLanding).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "FIXATION_BY_OTHER_BROKER",
+        existingContactId: 4101,
+        leadName: "тест101 тест101 (завёл Брокер для Теста)",
+      }),
+    );
+    expect(amo.syncAgencyCompanyToAmoContact).toHaveBeenCalledWith(4101, agency);
   });
 
   it("does not create a contact when the strict amo lookup fails", async () => {

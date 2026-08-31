@@ -1942,6 +1942,20 @@ export class ClientFixationService {
       );
     }
 
+    if (amoContactId) {
+      try {
+        await this.amoCrmAdapter.syncAgencyCompanyToAmoContact(
+          amoContactId,
+          agency,
+        );
+      } catch (e: any) {
+        console.error(
+          "[createBrokerByCreator] agency company sync failed:",
+          e?.message || e,
+        );
+      }
+    }
+
     if (!amoContactId) {
       throw new ServiceUnavailableException(
         "Не удалось создать контакт брокера в amoCRM",

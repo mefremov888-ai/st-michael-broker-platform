@@ -7,6 +7,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
 import { UserRole } from '@st-michael/shared';
+import { CurrentUser, CurrentUserPayload } from '../auth/current-user.decorator';
 import { DocumentsService } from './documents.service';
 
 @ApiTags('admin-documents')
@@ -20,6 +21,22 @@ export class DocumentsAdminController {
   @Get()
   async list(@Query() query: any) {
     return this.documentsService.getDocuments(query);
+  }
+
+  @Get('folders')
+  @ApiOperation({ summary: 'Materials folder grouping (landing + cabinet)' })
+  async getFolders() {
+    return this.documentsService.getMaterialsFolderLayout();
+  }
+
+  @Patch('folders')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Save materials folder grouping' })
+  async saveFolders(
+    @CurrentUser() user: CurrentUserPayload,
+    @Body() body: { layout?: unknown },
+  ) {
+    return this.documentsService.saveMaterialsFolderLayout(body.layout as any, user.id);
   }
 
   @Post('upload')

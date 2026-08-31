@@ -566,8 +566,47 @@ describe("shared amo broker-contact advisory lock", () => {
         existingContactId: 4101,
       }),
     ).resolves.toEqual({ contactId: 4101, leadId: 5101 });
-    expect(adapter.findContactByPhone).not.toHaveBeenCalled();
-    expect(adapter.createContact).not.toHaveBeenCalled();
+    expect(adapter.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pipeline_id: 10787390,
+        status_id: 84932446,
+        contacts: [{ id: 4101 }],
+      }),
+    );
+    expect(adapter.addNoteToLead).toHaveBeenCalledWith(
+      5101,
+      expect.stringContaining("Форма «Связаться с нами»"),
+    );
+
+    adapter.createLead.mockClear();
+    adapter.addNoteToLead.mockClear();
+    adapter.createTask.mockClear();
+    process.env.AMO_BROKER_MEETINGS_MANAGER_ID = "10216602";
+    await expect(
+      adapter.createBrokerLeadFromLanding({
+        brokerName: "Cabinet Broker",
+        brokerPhone: "+79990000043",
+        source: "FIXATION_BY_OTHER_BROKER",
+        existingContactId: 4102,
+      }),
+    ).resolves.toEqual({ contactId: 4102, leadId: 5101 });
+    expect(adapter.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responsible_user_id: 10216602,
+        status_id: 84932446,
+      }),
+    );
+    expect(adapter.addNoteToLead).toHaveBeenCalledWith(
+      5101,
+      expect.stringContaining("Заявка из кабинета брокера"),
+    );
+    expect(adapter.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("заявка из кабинета брокера"),
+        responsibleUserId: 10216602,
+      }),
+    );
+    delete process.env.AMO_BROKER_MEETINGS_MANAGER_ID;
 
     await expect(
       adapter.createBrokerLeadFromLanding({

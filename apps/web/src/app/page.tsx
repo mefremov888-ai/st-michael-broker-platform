@@ -77,7 +77,8 @@ export default async function Page() {
     marketingDocs,
     materialsDocs,
     news,
-    activePolicies,
+    90|    activePolicies,
+    materialsLayout,
   ] = await Promise.all([
     safeFetch<any>(`${base}/api/public/cms/content`),
     safeFetch<any[]>(`${base}/api/public/cms/events`),
@@ -89,6 +90,7 @@ export default async function Page() {
     safeFetch<any>(`${base}/api/public/documents?category=materials`),
     safeFetch<any[]>(`${base}/api/public/cms/news`),
     safeFetch<any[]>(`${base}/api/public/cms/commission-policies/active`),
+    safeFetch<any>(`${base}/api/public/documents/layout`),
   ]);
 
   // Документы приходят в формате { documents: [...] } — разворачиваем.
@@ -104,6 +106,7 @@ export default async function Page() {
     analyticsDocs: unwrapDocs(analyticsDocs),
     marketingDocs: unwrapDocs(marketingDocs),
     materialsDocs: unwrapDocs(materialsDocs),
+    materialsLayout: materialsLayout?.layout,
     news: Array.isArray(news) ? news : [],
     activePolicies: Array.isArray(activePolicies) ? activePolicies : [],
   };
@@ -142,6 +145,7 @@ export default async function Page() {
       analyticsDocs: pick(fresh.analyticsDocs, snapshot.analyticsDocs),
       marketingDocs: pick(fresh.marketingDocs, snapshot.marketingDocs),
       materialsDocs: pick(fresh.materialsDocs, snapshot.materialsDocs),
+      materialsLayout: fresh.materialsLayout || snapshot.materialsLayout,
       news: pick(fresh.news, snapshot.news),
       activePolicies: pick(fresh.activePolicies, snapshot.activePolicies),
     };
