@@ -20,6 +20,7 @@ import {
   foldersAndFilesAt,
   materialHref,
 } from '@/lib/materials-folder-tree';
+import { materialsThumbUrl } from '@/lib/materials-thumb';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -39,16 +40,24 @@ const IMAGE_RE = /\.(jpe?g|png|webp|gif|svg|heic|avif|bmp|tiff?)(\?|#|$)/i;
 const VIDEO_RE = /\.(mp4|mov|webm|m4v|avi|mkv)(\?|#|$)/i;
 const PDF_RE = /\.pdf(\?|#|$)/i;
 
-function thumbUrl(url: string): string {
-  if (
-    url.includes('storage.yandexcloud.net') ||
-    url.includes('yandexcloud') ||
-    url.includes('s3.ru-central1') ||
-    url.includes('stmichael.ru/storage')
-  ) {
-    return `https://stmichael.ru/proxy/insecure/w:280/q:40/plain/${url}@webp`;
-  }
-  return url;
+function ThumbImage({ src, alt }: { src: string; alt: string }) {
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={materialsThumbUrl(src)}
+      alt={alt}
+      style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0, transition: 'opacity 0.2s' }}
+      loading="lazy"
+      decoding="async"
+      onLoad={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '1'; }}
+      onError={(e) => {
+        const el = e.currentTarget as HTMLImageElement;
+        el.style.opacity = '1';
+        el.style.background = 'rgba(255,255,255,0.06)';
+        el.removeAttribute('src');
+      }}
+    />
+  );
 }
 
 const isImage = (d: DocItem) =>
@@ -234,15 +243,7 @@ export default function MaterialsFolderPage() {
                       style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, overflow: 'hidden', aspectRatio: '1', cursor: 'pointer', padding: 0, position: 'relative' }}
                       title={img.name}
                     >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={thumbUrl(img.fileUrl)}
-                        alt={img.name}
-                        style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0, transition: 'opacity 0.2s' }}
-                        loading="lazy"
-                        decoding="async"
-                        onLoad={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '1'; }}
-                      />
+                      <ThumbImage src={img.fileUrl} alt={img.name} />
                     </button>
                   ))}
                 </div>
@@ -270,8 +271,7 @@ export default function MaterialsFolderPage() {
                       style={{ background: '#000', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, overflow: 'hidden', aspectRatio: '16/9', cursor: 'pointer', padding: 0, position: 'relative' }}
                       title={v.name}
                     >
-                      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-                      <video src={v.fileUrl} style={{ width: '100%', height: '100%', objectFit: 'cover' }} preload="metadata" muted />
+                      <ThumbImage src={v.fileUrl} alt={v.name} />
                       <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.3)' }}>
                         <Play size={36} color="#fff" fill="#fff" />
                       </div>
