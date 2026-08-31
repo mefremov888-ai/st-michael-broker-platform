@@ -535,8 +535,17 @@ export default function ClientsPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl md:text-3xl font-bold">Клиенты</h1>
+      <div className="flex items-start justify-between mb-6 gap-4">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-bold">
+            {isStaff ? 'Клиенты и уникальность' : 'Клиенты'}
+          </h1>
+          {isStaff && (
+            <p className="text-sm text-text-muted mt-1">
+              Та же таблица, что у брокера: статус уникальности и срок. Здесь — по всем брокерам.
+            </p>
+          )}
+        </div>
         <span className="text-text-muted text-sm">Всего: {total}</span>
       </div>
 
@@ -618,6 +627,7 @@ export default function ClientsPage() {
                   <tr className="text-text-muted text-left border-b border-border">
                     <th className="pb-3 font-medium">ФИО</th>
                     <th className="pb-3 font-medium">Телефон</th>
+                    {isStaff && <th className="pb-3 font-medium">Брокер</th>}
                     <th className="pb-3 font-medium">Проект</th>
                     <th className="pb-3 font-medium">Статус</th>
                     <th className="pb-3 font-medium">Статус до</th>
@@ -634,6 +644,14 @@ export default function ClientsPage() {
                     >
                       <td className="py-3 font-medium">{c.fullName}</td>
                       <td className="py-3 text-text-muted">{formatPhone(c.phone)}</td>
+                      {isStaff && (
+                        <td className="py-3">
+                          <div className="text-sm">{c.broker?.fullName || '—'}</div>
+                          {c.responsibleBroker && c.responsibleBroker.id !== c.broker?.id && (
+                            <div className="text-xs text-text-muted">на {c.responsibleBroker.fullName}</div>
+                          )}
+                        </td>
+                      )}
                       <td className="py-3">{projectLabels[c.project] || c.project}</td>
                       <td className="py-3">
                         {/* 2026-07-02: исполнитель по фиксации не видит «Уникален» —

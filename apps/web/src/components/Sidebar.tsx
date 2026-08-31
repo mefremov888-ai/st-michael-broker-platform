@@ -75,7 +75,14 @@ export function Sidebar({ open, onClose }: { open?: boolean; onClose?: () => voi
   const baseNav = broker?.role === 'BROKER'
     ? navigation.filter((n) => n.href !== '/deals')
     : navigation;
-  const items = isAdmin ? [...baseNav, ...adminNavigation] : baseNav;
+  const items = isAdmin
+    ? [
+        ...baseNav.map((n) =>
+          n.href === '/clients' ? { ...n, name: 'Клиенты и уникальность' } : n,
+        ),
+        ...adminNavigation,
+      ]
+    : baseNav;
 
   return (
     <>

@@ -112,6 +112,8 @@ export class ClientFixationController {
       status: query.status,
       project: query.project,
       search: query.search,
+      brokerId: typeof query.brokerId === 'string' ? query.brokerId : undefined,
+      asStaff: user.role === 'ADMIN' || user.role === 'MANAGER',
     });
   }
 

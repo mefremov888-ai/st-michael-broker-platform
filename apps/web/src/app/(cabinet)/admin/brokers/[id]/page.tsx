@@ -73,7 +73,7 @@ export default function AdminBrokerDetailPage() {
       const [b, d, c, m] = await Promise.all([
         apiGet(`/admin/brokers/${id}`),
         apiGet(`/admin/brokers/${id}/deals?limit=10`),
-        apiGet(`/admin/brokers/${id}/clients?limit=10`),
+        apiGet(`/admin/brokers/${id}/clients?limit=50`),
         apiGet(`/admin/brokers/${id}/meetings?limit=10`),
       ]);
       setBroker(b);
@@ -431,9 +431,10 @@ export default function AdminBrokerDetailPage() {
 // не довела клиента до правильного статуса (баг, race condition,
 // ручная правка в amoCRM).
 const STATUS_LABELS: Record<string, string> = {
-  CONDITIONALLY_UNIQUE: 'Условно уникален',
+  CONDITIONALLY_UNIQUE: 'Уникален',
   UNDER_REVIEW: 'На проверке',
-  REJECTED: 'Отклонён',
+  REJECTED: 'Не уникален',
+  EXPIRED: 'Истёк',
 };
 function ClientRowWithStatus({ client, isAdmin, onUpdated }: { client: any; isAdmin: boolean; onUpdated: (newStatus: string) => void }) {
   const [editing, setEditing] = useState(false);
@@ -466,9 +467,17 @@ function ClientRowWithStatus({ client, isAdmin, onUpdated }: { client: any; isAd
         <div>
           <div className="font-medium">{client.fullName}</div>
           <div className="text-text-muted text-xs">{client.phone}</div>
+          {client.uniquenessExpiresAt && (
+            <div className="text-xs text-text-muted">до {new Date(client.uniquenessExpiresAt).toLocaleDateString('ru-RU')}</div>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs px-2 py-1 rounded bg-text-muted/20">
+          <span className={`text-xs px-2 py-1 rounded ${
+            client.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'bg-success/20 text-success'
+            : client.uniquenessStatus === 'REJECTED' ? 'bg-error/20 text-error'
+            : client.uniquenessStatus === 'UNDER_REVIEW' ? 'bg-warning/20 text-warning'
+            : 'bg-text-muted/20 text-text-muted'
+          }`}>
             {STATUS_LABELS[client.uniquenessStatus] || client.uniquenessStatus}
           </span>
           {isAdmin && !editing && (
