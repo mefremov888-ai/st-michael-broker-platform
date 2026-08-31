@@ -66,7 +66,7 @@ export default function MaterialsPage() {
     <div>
       <div className="mb-6">
         <h1 className="text-2xl md:text-3xl font-bold">Материалы для брокеров</h1>
-        <p className="text-text-muted text-sm mt-1">Условия и презентации отдельно. Фото и видео — внутри ЖК Зорге и Берарина.</p>
+        <p className="text-text-muted text-sm mt-1">Условия и презентации отдельно. Фото и видео — внутри ЖК Зорге 9 и Квартал Серебряный Бор.</p>
       </div>
 
       {loading ? (

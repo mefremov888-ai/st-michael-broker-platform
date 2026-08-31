@@ -735,7 +735,7 @@ function MaterialsSection({ materials, layout }: { materials: any[]; layout: Mat
 
   return (
     <section id="materials" style={{background:'var(--bg)'}}>
-      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Условия и презентации отдельно. Фото и видео — внутри ЖК Зорге и Берарина.</p></div>
+      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Условия и презентации отдельно. Фото и видео — внутри ЖК Зорге 9 и Квартал Серебряный Бор.</p></div>
       {roots.length === 0 ? (
         <div style={{textAlign:'center',padding:'36px 16px',color:'rgba(0,0,0,0.45)',background:'#f5efe8',borderRadius:12,border:'1px solid rgba(180,147,111,0.25)'}}>
           Материалы ещё загружаются. По вопросам: <a href="tel:+74992262249" style={{color:'var(--gold)'}}>+7 (499) 226-22-49</a>
