@@ -26,6 +26,7 @@ import {
   buildBrokerTourUpdate,
 } from '../amocrm/broker-tour-sync';
 import { OpsAlertService } from '../ops-alert/ops-alert.service';
+import { ClientFixationService } from '../client-fixation/client-fixation.service';
 import {
   AMO_CREATE_IN_PROGRESS_MARKER,
   AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
@@ -72,6 +73,7 @@ export class SchedulerService {
     private readonly cms: CmsService,
     private readonly fixationPhoneLock: AmoFixationPhoneLockService,
     @Optional() private readonly opsAlerts?: OpsAlertService,
+    @Optional() private readonly clientFixation?: ClientFixationService,
   ) {}
 
   // Placeholder — AmoReconciliationService не подключён в этой версии.
@@ -1041,6 +1043,35 @@ export class SchedulerService {
     };
   }
 
+  // Provisioning writes to amoCRM, so a failure here must not burn the row's
+  // attempt or abort the batch: the caller defers and cron tries again.
+  private async provisionRetryBrokerAmoContact(
+    brokerId: string,
+  ): Promise<number | null> {
+    if (!this.clientFixation?.provisionBrokerAmoContact) return null;
+    let provisioned: any;
+    try {
+      provisioned = await this.clientFixation.provisionBrokerAmoContact(
+        brokerId,
+      );
+    } catch (error: any) {
+      this.logger.error(
+        `amo auto-retry: broker amo contact provisioning failed: ${
+          error?.message || error
+        }`,
+      );
+      return null;
+    }
+    if (provisioned?.reconciliationRequired) return null;
+    const contactId = safePositiveAmoContactId(provisioned?.amoContactId);
+    if (!contactId) return null;
+    await this.sendOpsAlert(
+      `🟢 PROD: контакт брокера создан в amoCRM автоматически\nbrokerId: ${brokerId}\nФиксация уходит в amoCRM без ручного провижининга.`,
+      `scheduler:amo-retry:broker-contact-provisioned:${brokerId}`,
+    );
+    return contactId;
+  }
+
   private async alertRemainingBrokerAmoContactMissing(): Promise<void> {
     const queueCount = await this.prisma.client.count({
       where: {
@@ -1264,7 +1295,7 @@ export class SchedulerService {
       let leadCreateAttempted = false;
       try {
         const retryBroker = client.responsibleBroker ?? client.broker;
-        const brokerAmoContactId = safePositiveAmoContactId(
+        let brokerAmoContactId = safePositiveAmoContactId(
           retryBroker?.amoContactId,
         );
         const clientId = String(client.id);
@@ -1345,6 +1376,12 @@ export class SchedulerService {
           throw new Error('Fixation agency was not found; retry cannot continue');
         }
 
+        if (!brokerAmoContactId && retryBroker?.id) {
+          brokerAmoContactId = await this.provisionRetryBrokerAmoContact(
+            String(retryBroker.id),
+          );
+        }
+
         if (!brokerAmoContactId) {
           await this.prisma.client.update({
             where: { id: client.id },
@@ -1355,7 +1392,7 @@ export class SchedulerService {
             },
           });
           await this.sendOpsAlert(
-            `🟡 PROD: retry фиксации отложен без POST\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: у ответственного брокера нет связи с amoCRM. Попытка не сожжена, крон повторит после провижининга.`,
+            `🟡 PROD: retry фиксации отложен без POST\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: контакт брокера в amoCRM не удалось создать автоматически. Попытка не сожжена, крон повторит.`,
             `scheduler:amo-retry:missing-broker-contact:${clientId}`,
           );
           failed++;

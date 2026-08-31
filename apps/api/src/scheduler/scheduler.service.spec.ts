@@ -103,6 +103,8 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     const fixationPhoneLock = {
       tryAcquireLease: jest.fn().mockResolvedValue(phoneLease),
     };
+    const provisionBrokerAmoContact = jest.fn().mockResolvedValue(null);
+    const clientFixation = { provisionBrokerAmoContact };
     const service = new SchedulerService(
       prisma as any,
       notificationQueue as any,
@@ -113,6 +115,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       { recheckDue: jest.fn() } as any,
       fixationPhoneLock as any,
       opsAlerts as any,
+      clientFixation as any,
     );
     (service as any).amo = { createFixationRequest, checkUniqueness };
     (service as any).morekit = { notifyFixation };
@@ -126,6 +129,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       notifyFixation,
       fixationPhoneLock,
       phoneLease,
+      provisionBrokerAmoContact,
     };
   }
 
@@ -1083,6 +1087,170 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
         ([, options]: any[]) => String(options?.dedupKey || "").includes(":recovered:"),
       ),
     ).toBe(false);
+  });
+
+  it("creates the missing broker amo contact itself and then posts the lead", async () => {
+    const candidate = {
+      id: "client-provision",
+      fixationAgencyId: "agency-1",
+      amoSyncAttempts: 2,
+      phone: "+79990000106",
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker: {
+        id: "creator-provision",
+        fullName: "Creator",
+        phone: "+79990000107",
+        email: null,
+        amoContactId: BigInt(111),
+      },
+      responsibleBroker: {
+        id: "responsible-provision",
+        fullName: "Responsible broker",
+        phone: "+79990000108",
+        email: null,
+        amoContactId: null,
+      },
+    };
+    const {
+      service,
+      prisma,
+      opsAlerts,
+      createFixationRequest,
+      provisionBrokerAmoContact,
+    } = createService(candidate);
+    provisionBrokerAmoContact.mockResolvedValue({
+      id: candidate.responsibleBroker.id,
+      amoContactId: BigInt(4242),
+    });
+
+    await service.handleAmoFailedRetry();
+
+    expect(provisionBrokerAmoContact).toHaveBeenCalledWith(
+      candidate.responsibleBroker.id,
+    );
+    expect(createFixationRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ brokerAmoContactId: 4242 }),
+    );
+    expect(prisma.client.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+        }),
+      }),
+    );
+    expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
+      expect.stringContaining("контакт брокера создан в amoCRM автоматически"),
+      expect.objectContaining({
+        dedupKey: `scheduler:amo-retry:broker-contact-provisioned:${candidate.responsibleBroker.id}`,
+      }),
+    );
+  });
+
+  it("still defers without burning an attempt when provisioning the contact fails", async () => {
+    const candidate = {
+      id: "client-provision-failed",
+      fixationAgencyId: "agency-1",
+      amoSyncAttempts: 2,
+      phone: "+79990000116",
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker: {
+        id: "creator-provision-failed",
+        fullName: "Creator",
+        phone: "+79990000117",
+        email: null,
+        amoContactId: BigInt(111),
+      },
+      responsibleBroker: {
+        id: "responsible-provision-failed",
+        fullName: "Responsible broker",
+        phone: "+79990000118",
+        email: null,
+        amoContactId: null,
+      },
+    };
+    const {
+      service,
+      prisma,
+      opsAlerts,
+      createFixationRequest,
+      provisionBrokerAmoContact,
+    } = createService(candidate);
+    provisionBrokerAmoContact.mockRejectedValue(new Error("amo is down"));
+
+    await service.handleAmoFailedRetry();
+
+    expect(createFixationRequest).not.toHaveBeenCalled();
+    expect(prisma.client.update).toHaveBeenCalledWith({
+      where: { id: candidate.id },
+      data: expect.objectContaining({
+        amoSyncStatus: "PENDING",
+        amoSyncError: "BROKER_AMO_CONTACT_MISSING",
+        amoSyncLastAttemptAt: expect.any(Date),
+      }),
+    });
+    expect(prisma.client.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          amoSyncAttempts: { increment: 1 },
+        }),
+      }),
+    );
+    expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
+      expect.stringContaining(`clientId: ${candidate.id}`),
+      expect.objectContaining({
+        dedupKey: `scheduler:amo-retry:missing-broker-contact:${candidate.id}`,
+      }),
+    );
+  });
+
+  it("does not post the lead when provisioning reports reconciliation is required", async () => {
+    const candidate = {
+      id: "client-provision-reconcile",
+      fixationAgencyId: "agency-1",
+      amoSyncAttempts: 2,
+      phone: "+79990000126",
+      email: null,
+      fullName: "Client",
+      comment: null,
+      project: "ZORGE9",
+      amount: null,
+      propertyType: null,
+      broker: {
+        id: "creator-provision-reconcile",
+        fullName: "Creator",
+        phone: "+79990000127",
+        email: null,
+        amoContactId: BigInt(111),
+      },
+      responsibleBroker: {
+        id: "responsible-provision-reconcile",
+        fullName: "Responsible broker",
+        phone: "+79990000128",
+        email: null,
+        amoContactId: null,
+      },
+    };
+    const { service, createFixationRequest, provisionBrokerAmoContact } =
+      createService(candidate);
+    provisionBrokerAmoContact.mockResolvedValue({
+      id: candidate.responsibleBroker.id,
+      amoContactId: null,
+      reconciliationRequired: true,
+    });
+
+    await service.handleAmoFailedRetry();
+
+    expect(createFixationRequest).not.toHaveBeenCalled();
   });
 
   it("summarizes a broker-contact-missing queue in Telegram even before per-row retry", async () => {

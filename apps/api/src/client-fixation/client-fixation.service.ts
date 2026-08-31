@@ -1585,6 +1585,14 @@ export class ClientFixationService {
     return { agencies };
   }
 
+  // The scheduler retry only ever read Broker.amoContactId, so a row whose
+  // contact failed to appear during the original fixation waited forever for
+  // someone to provision it by hand. Cron now runs the same lock-aware
+  // link/promote/create path the cabinet uses.
+  async provisionBrokerAmoContact(brokerId: string): Promise<any> {
+    return this.ensureBrokerAmoContact(brokerId);
+  }
+
   private async ensureBrokerAmoContact(brokerId: string): Promise<any> {
     const inFlight = this.brokerAmoSyncInFlight.get(brokerId);
     if (inFlight) return inFlight;
