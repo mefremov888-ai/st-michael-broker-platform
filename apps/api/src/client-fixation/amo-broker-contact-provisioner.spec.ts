@@ -141,18 +141,16 @@ describe("production-safe amo broker-contact provisioner", () => {
     );
     const rows = { ...groups };
     Object.assign(groups, {
-      link_existing_broker_contact: 1,
+      link_existing_broker_contact: 3,
       promote_existing_contact_candidate: 1,
       create_contact_candidate: 6,
-      already_linked: 1,
     });
     Object.assign(rows, {
-      link_existing_broker_contact: 1,
-      promote_existing_contact_candidate: 2,
-      create_contact_candidate: 8,
-      already_linked: 1,
+      link_existing_broker_contact: 3,
+      promote_existing_contact_candidate: 1,
+      create_contact_candidate: 7,
     });
-    return { queueRows: 12, effectiveBrokerGroups: 9, groups, rows };
+    return { queueRows: 11, effectiveBrokerGroups: 10, groups, rows };
   }
 
   function gateEnv() {

@@ -125,19 +125,19 @@ const BLOCKED_RESOLUTIONS = new Set(
 );
 
 const REVIEWED_RUN_CEILINGS = Object.freeze({
-  queueRows: 12,
-  effectiveBrokerGroups: 9,
-  actionableGroups: 8,
+  queueRows: 11,
+  effectiveBrokerGroups: 10,
+  actionableGroups: 10,
   actionableRows: 11,
   groups: Object.freeze({
-    link_existing_broker_contact: 1,
+    link_existing_broker_contact: 3,
     promote_existing_contact_candidate: 1,
     create_contact_candidate: 6,
   }),
   rows: Object.freeze({
-    link_existing_broker_contact: 1,
-    promote_existing_contact_candidate: 2,
-    create_contact_candidate: 8,
+    link_existing_broker_contact: 3,
+    promote_existing_contact_candidate: 1,
+    create_contact_candidate: 7,
   }),
 });
 
@@ -145,13 +145,13 @@ const REVIEWED_RUN_CEILINGS = Object.freeze({
 // operator-supplied counts alone. The workflow inputs are a second explicit
 // confirmation; neither a smaller nor a larger drifted cohort may be applied.
 const REVIEWED_RUN_MANIFEST = Object.freeze({
-  queueRows: 12,
-  effectiveBrokerGroups: 9,
+  queueRows: 11,
+  effectiveBrokerGroups: 10,
   groups: Object.freeze({
-    link_existing_broker_contact: 1,
+    link_existing_broker_contact: 3,
     promote_existing_contact_candidate: 1,
     create_contact_candidate: 6,
-    already_linked: 1,
+    already_linked: 0,
     effective_broker_missing: 0,
     broker_merged: 0,
     no_valid_phone: 0,
@@ -160,10 +160,10 @@ const REVIEWED_RUN_MANIFEST = Object.freeze({
     candidate_already_bound: 0,
   }),
   rows: Object.freeze({
-    link_existing_broker_contact: 1,
-    promote_existing_contact_candidate: 2,
-    create_contact_candidate: 8,
-    already_linked: 1,
+    link_existing_broker_contact: 3,
+    promote_existing_contact_candidate: 1,
+    create_contact_candidate: 7,
+    already_linked: 0,
     effective_broker_missing: 0,
     broker_merged: 0,
     no_valid_phone: 0,
