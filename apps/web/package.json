@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "test": "tsx --test src/lib/loyalty-base-api.test.ts src/lib/materials-folder-tree.test.ts",
+    "test": "tsx --test src/lib/loyalty-base-api.test.ts src/lib/materials-folder-tree.test.ts src/lib/materials-thumb.test.ts",
     "start": "next start",
     "lint": "eslint ."
   },

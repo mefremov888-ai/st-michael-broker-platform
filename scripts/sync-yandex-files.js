@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Скачивает файлы с публичной папки Яндекс.Диска в /app/uploads/yandex/<относительный путь>
- * и записывает Document.fileUrl = /files/yandex/<относительный путь> в БД.
+ * и миниатюры (~20 КБ) в /app/uploads/yandex-thumbs/...thumb.jpg — сетка материалов
+ * не тянет оригиналы по 10–20 МБ до клика.
  *
  * Структура папок на диске сохраняется целиком (проект → тип → альбом → файл).
  * По умолчанию удаляет локальные файлы и Document-записи синка, которых
@@ -22,6 +23,7 @@ const DEFAULT_PUBLIC_KEY = 'https://disk.yandex.ru/d/Pf1bqSQkEG62sw';
 const PUBLIC_KEY = process.argv[2] || process.env.YANDEX_DISK_PUBLIC_KEY || DEFAULT_PUBLIC_KEY;
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT || '/app/uploads';
 const TARGET_DIR = path.join(UPLOAD_ROOT, 'yandex');
+const THUMB_DIR = path.join(UPLOAD_ROOT, 'yandex-thumbs');
 const FORCE = process.env.FORCE === '1' || process.env.FORCE === 'true';
 const CLEAN_ORPHANS = process.env.CLEAN_ORPHANS !== '0' && process.env.CLEAN_ORPHANS !== 'false';
 
@@ -46,6 +48,7 @@ async function fetchResource(p = '/', offset = 0, limit = 1000) {
   url.searchParams.set('path', p);
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('offset', String(offset));
+  url.searchParams.set('preview_size', 'M');
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`Yandex API ${res.status}: ${await res.text()}`);
   return res.json();
@@ -74,6 +77,23 @@ function joinRel(...parts) {
   return parts.filter(Boolean).join('/');
 }
 
+function pickPreview(it) {
+  const sizes = it?.sizes || [];
+  const preferred =
+    sizes.find((s) => s.name === 'M') ||
+    sizes.find((s) => s.name === 'L') ||
+    sizes.find((s) => s.name === 'S');
+  return preferred?.url || it?.preview || null;
+}
+
+async function refreshPreview(diskPath) {
+  const data = await fetchResource(diskPath, 0, 1);
+  if (data?.type === 'file') return pickPreview(data);
+  const items = data?._embedded?.items || [];
+  const match = items.find((it) => it.path === diskPath);
+  return pickPreview(match || data);
+}
+
 function projectFromRel(relDir) {
   const top = (relDir || '').split('/')[0] || '';
   if (/зорг/i.test(top)) return 'ZORGE9';
@@ -97,6 +117,7 @@ async function collectFiles(p, relDir, files) {
           path: it.path,
           relativeDir: relDir,
           nameSafe: sanitizeSegment(it.name),
+          preview: pickPreview(it),
         });
       }
     }
@@ -127,14 +148,43 @@ function listLocalFiles(dir, rel, out) {
   }
 }
 
-function removeEmptyDirs(dir) {
+function removeEmptyDirs(dir, root) {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return;
   for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (ent.isDirectory()) removeEmptyDirs(path.join(dir, ent.name));
+    if (ent.isDirectory()) removeEmptyDirs(path.join(dir, ent.name), root);
   }
   const leftover = fs.readdirSync(dir);
-  if (leftover.length === 0 && path.resolve(dir) !== path.resolve(TARGET_DIR)) {
+  if (leftover.length === 0 && path.resolve(dir) !== path.resolve(root)) {
     fs.rmdirSync(dir);
+  }
+}
+
+function thumbRelFor(rel) {
+  return `${rel}.thumb.jpg`;
+}
+
+function thumbPathFor(rel) {
+  return path.join(THUMB_DIR, ...thumbRelFor(rel).split('/'));
+}
+
+async function ensureThumb(f) {
+  const rel = joinRel(f.relativeDir, f.nameSafe);
+  const dest = thumbPathFor(rel);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  if (!FORCE && fs.existsSync(dest) && fs.statSync(dest).size > 2000) {
+    return { rel: thumbRelFor(rel), skipped: true, bytes: 0 };
+  }
+  let href = f.preview;
+  if (!href) href = await refreshPreview(f.path);
+  if (!href) return { rel: thumbRelFor(rel), skipped: true, bytes: 0 };
+  try {
+    const bytes = await downloadTo(href, dest);
+    return { rel: thumbRelFor(rel), skipped: false, bytes };
+  } catch (e) {
+    href = await refreshPreview(f.path);
+    if (!href) throw e;
+    const bytes = await downloadTo(href, dest);
+    return { rel: thumbRelFor(rel), skipped: false, bytes };
   }
 }
 
@@ -147,11 +197,13 @@ function publicUrlFor(relDir, nameSafe) {
   console.log('=== Yandex.Disk files sync ===');
   console.log('public_key:', PUBLIC_KEY);
   console.log('target:    ', TARGET_DIR);
+  console.log('thumbs:    ', THUMB_DIR);
   console.log('mode:      ', FORCE ? 'FORCE re-download' : 'skip same-size');
   console.log('orphans:   ', CLEAN_ORPHANS ? 'delete missing' : 'keep extra local files');
   console.log('');
 
   if (!fs.existsSync(TARGET_DIR)) fs.mkdirSync(TARGET_DIR, { recursive: true });
+  if (!fs.existsSync(THUMB_DIR)) fs.mkdirSync(THUMB_DIR, { recursive: true });
 
   const files = [];
   await collectFiles('/', '', files);
@@ -161,10 +213,33 @@ function publicUrlFor(relDir, nameSafe) {
   let downloaded = 0;
   let skipped = 0;
   let failed = 0;
+  let thumbsDownloaded = 0;
+  let thumbsSkipped = 0;
+  let thumbsFailed = 0;
   let totalBytes = 0;
+  let thumbBytes = 0;
   const prisma = new PrismaClient();
   const keepRel = new Set();
+  const keepThumbRel = new Set();
   const seenDiskPaths = new Set();
+
+  console.log('Downloading grid thumbnails...');
+  for (const f of files) {
+    const rel = joinRel(f.relativeDir, f.nameSafe);
+    keepThumbRel.add(thumbRelFor(rel));
+    try {
+      const thumb = await ensureThumb(f);
+      if (thumb.skipped) thumbsSkipped++;
+      else {
+        thumbsDownloaded++;
+        thumbBytes += thumb.bytes;
+        console.log(`▣ ${rel} (${(thumb.bytes / 1024).toFixed(0)}KB)`);
+      }
+    } catch (e) {
+      thumbsFailed++;
+      console.error(`  FAIL thumb ${f.path}: ${e.message}`);
+    }
+  }
 
   for (const f of files) {
     const localDir = f.relativeDir
@@ -216,7 +291,21 @@ function publicUrlFor(relDir, nameSafe) {
         console.error(`  FAIL unlink ${item.rel}: ${e.message}`);
       }
     }
-    removeEmptyDirs(TARGET_DIR);
+    removeEmptyDirs(TARGET_DIR, TARGET_DIR);
+
+    const thumbs = [];
+    listLocalFiles(THUMB_DIR, '', thumbs);
+    for (const item of thumbs) {
+      if (keepThumbRel.has(item.rel)) continue;
+      try {
+        fs.unlinkSync(item.full);
+        removedFiles++;
+        console.log(`✕ orphan thumb ${item.rel}`);
+      } catch (e) {
+        console.error(`  FAIL unlink thumb ${item.rel}: ${e.message}`);
+      }
+    }
+    removeEmptyDirs(THUMB_DIR, THUMB_DIR);
 
     const existing = await prisma.document.findMany({
       where: {
@@ -241,8 +330,9 @@ function publicUrlFor(relDir, nameSafe) {
 
   console.log('');
   console.log(`Downloaded: ${downloaded}, skipped: ${skipped}, failed: ${failed}`);
+  console.log(`Thumbs: downloaded ${thumbsDownloaded}, skipped ${thumbsSkipped}, failed ${thumbsFailed}`);
   console.log(`Removed orphan files: ${removedFiles}, orphan documents: ${removedDocs}`);
-  console.log(`Bytes downloaded: ${(totalBytes / 1024 / 1024).toFixed(1)} MB`);
+  console.log(`Bytes downloaded: ${(totalBytes / 1024 / 1024).toFixed(1)} MB, thumbs: ${(thumbBytes / 1024 / 1024).toFixed(1)} MB`);
 })().catch((e) => {
   console.error(e);
   process.exit(1);
