@@ -8,9 +8,10 @@ import {
   Headphones, PhoneCall, Wallet, TrendingUp, Users2, GraduationCap,
   Shield, Sparkles,
   FileText, Download as DownloadIcon, ChevronLeft, ChevronRight,
-  Film, Camera, Box, BarChart2,
+  Film, Camera, Box, BarChart2, Folder,
 } from 'lucide-react';
 import { HintIcon } from '@/components/HintIcon';
+import { fileCountUnder, foldersAndFilesAt, materialHref } from '@/lib/materials-folder-tree';
 import {
   ActiveCommissionPolicy,
   buildPaymentTermsText,
@@ -709,50 +710,42 @@ function BrokerToursCalendarModal({ events, onClose }: { events: any[]; onClose:
   );
 }
 
-const CANONICAL_MAT_CATS = ['Reels', 'Презентации', 'Фотографии', 'Рендеры', 'Тексты'];
-
-function normalizeMaterialCat(sub: string): string {
-  const s = (sub || '').toLowerCase().trim();
-  if (/^reels?$|ролик|сторис/.test(s)) return 'Reels';
-  if (/презентаци/.test(s)) return 'Презентации';
-  if (/фото/.test(s)) return 'Фотографии';
-  if (/рендер/.test(s)) return 'Рендеры';
-  if (/текст|условия|рассрочк/.test(s)) return 'Тексты';
-  return CANONICAL_MAT_CATS.includes(sub) ? sub : 'Тексты';
+function folderIcon(name: string) {
+  if (/reels|видео|анимац|ролик|сторис/i.test(name)) return <Film size={54} strokeWidth={1.2} />;
+  if (/фото/i.test(name)) return <Camera size={54} strokeWidth={1.2} />;
+  if (/рендер/i.test(name)) return <Box size={54} strokeWidth={1.2} />;
+  if (/презентац/i.test(name)) return <BarChart2 size={54} strokeWidth={1.2} />;
+  if (/текст|условия|рассрочк/i.test(name)) return <FileText size={54} strokeWidth={1.2} />;
+  return <Folder size={54} strokeWidth={1.2} />;
 }
 
 function MaterialsSection({ materials }: { materials: any[] }) {
-  const counts: Record<string, number> = {};
-  for (const d of materials) {
-    const cat = normalizeMaterialCat(d.subcategory?.trim() || '');
-    counts[cat] = (counts[cat] || 0) + 1;
-  }
-
-  const icons: Record<string, React.ReactNode> = {
-    'Reels': <Film size={54} strokeWidth={1.2} />,
-    'Презентации': <BarChart2 size={54} strokeWidth={1.2} />,
-    'Фотографии': <Camera size={54} strokeWidth={1.2} />,
-    'Рендеры': <Box size={54} strokeWidth={1.2} />,
-    'Тексты': <FileText size={54} strokeWidth={1.2} />,
-  };
+  const { folders } = foldersAndFilesAt(materials, []);
 
   return (
     <section id="materials" style={{background:'var(--bg)'}}>
-      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Изображения, рендеры, видео и презентации для брокеров ST Michael.</p></div>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(180,147,111,0.2)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(180,147,111,0.25)'}}>
-        {CANONICAL_MAT_CATS.map((cat) => (
-          <a
-            key={cat}
-            href={`/materials/${encodeURIComponent(cat)}`}
-            style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 16px 32px',textDecoration:'none',color:'var(--black)',background:'#f5efe8',gap:12,transition:'background 0.15s'}}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
-          >
-            <div style={{color:'var(--gold)',opacity:0.9}}>{icons[cat]}</div>
-            <div style={{fontSize:12,fontWeight:600,textAlign:'center',letterSpacing:0.5,marginTop:2}}>{cat}</div>
-          </a>
-        ))}
-      </div>
+      <div className="sh"><div className="sh-tag">Реклама</div><h2>Материалы для <em>продвижения</em></h2><p className="sh-sub">Папки как на Яндекс.Диске: проект, альбом, файлы для брокеров ST Michael.</p></div>
+      {folders.length === 0 ? (
+        <div style={{textAlign:'center',padding:'36px 16px',color:'rgba(0,0,0,0.45)',background:'#f5efe8',borderRadius:12,border:'1px solid rgba(180,147,111,0.25)'}}>
+          Материалы ещё загружаются. По вопросам: <a href="tel:+74992262249" style={{color:'var(--gold)'}}>+7 (499) 226-22-49</a>
+        </div>
+      ) : (
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(180,147,111,0.2)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(180,147,111,0.25)'}}>
+          {folders.map((cat) => (
+            <a
+              key={cat}
+              href={materialHref([cat])}
+              style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 16px 32px',textDecoration:'none',color:'var(--black)',background:'#f5efe8',gap:12,transition:'background 0.15s'}}
+              onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
+            >
+              <div style={{color:'var(--gold)',opacity:0.9}}>{folderIcon(cat)}</div>
+              <div style={{fontSize:12,fontWeight:600,textAlign:'center',letterSpacing:0.5,marginTop:2}}>{cat}</div>
+              <div style={{fontSize:11,color:'rgba(0,0,0,0.4)'}}>{fileCountUnder(materials, [cat])} файлов</div>
+            </a>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -2061,10 +2054,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
         <hr className="sep" />
 
         {/* MARKETING — Материалы для продвижения.
-            По правке Рената (2026-05-06): оформлено как сетка карточек
-            с hover-выделением, как в advantages. Источник — Яндекс.Диск
-            (sync-yandex-disk.js, category=materials), плюс fallback на
-            старые marketing-документы (если есть). Группируется по подкатегории. */}
+            Источник — Яндекс.Диск (sync-yandex-files.js, category=materials).
+            На лендинге показываем корневые папки диска, внутри — та же иерархия. */}
         <MaterialsSection materials={materialsDocs} />
 
 

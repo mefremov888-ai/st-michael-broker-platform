@@ -1,0 +1,50 @@
+name: Sync Yandex Disk materials to production
+
+# Downloads the public Yandex Disk folder into /app/uploads/yandex preserving
+# the remote directory tree, upserts Document rows, and removes leftover
+# unorganized local files from previous syncs.
+on:
+  workflow_dispatch:
+    inputs:
+      public_url:
+        description: 'Публичная ссылка Яндекс.Диска'
+        required: true
+        type: string
+        default: 'https://disk.yandex.ru/d/Pf1bqSQkEG62sw'
+      clean_orphans:
+        description: 'Удалить старые локальные файлы, которых нет на диске'
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: sync-yandex-files
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Download Yandex Disk materials
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: SSH and sync files
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 170m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/sync-yandex-files.js > /tmp/sync-yandex-files.js
+            docker cp /tmp/sync-yandex-files.js st-michael-api:/app/scripts/sync-yandex-files.js
+            CLEAN_ORPHANS="${{ inputs.clean_orphans }}"
+            if [ "$CLEAN_ORPHANS" = "true" ]; then CLEAN_FLAG=1; else CLEAN_FLAG=0; fi
+            docker compose exec -T -e CLEAN_ORPHANS="$CLEAN_FLAG" api \
+              node /app/scripts/sync-yandex-files.js "${{ inputs.public_url }}"
+            echo "=== Готово ==="

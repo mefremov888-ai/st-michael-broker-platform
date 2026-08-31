@@ -154,8 +154,8 @@ jobs:
 
             if [ "$TASK" = "all" ] || [ "$TASK" = "sync-yandex-disk" ]; then
               echo ""
-              echo "=== sync-yandex-disk (материалы с Яндекс.Диска) ==="
-              $COMPOSE_CMD exec -T api node /app/scripts/sync-yandex-disk.js
+              echo "=== sync-yandex-disk (материалы с Яндекс.Диска, структура папок) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/sync-yandex-files.js
             fi
 
             if [ "$TASK" = "all" ] || [ "$TASK" = "seed-cooperation-doc" ]; then

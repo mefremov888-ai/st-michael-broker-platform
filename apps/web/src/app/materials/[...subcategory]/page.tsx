@@ -1,8 +1,25 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, ExternalLink, FileText, Image as ImageIcon, Play, FileType, Download, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import {
+  ArrowLeft,
+  FileText,
+  Image as ImageIcon,
+  Play,
+  FileType,
+  Download,
+  X,
+  ChevronLeft,
+  ChevronRight,
+  Folder,
+} from 'lucide-react';
+import {
+  decodeMaterialsSegments,
+  fileCountUnder,
+  foldersAndFilesAt,
+  materialHref,
+} from '@/lib/materials-folder-tree';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -19,6 +36,8 @@ interface DocItem {
 }
 
 const IMAGE_RE = /\.(jpe?g|png|webp|gif|svg|heic|avif|bmp|tiff?)(\?|#|$)/i;
+const VIDEO_RE = /\.(mp4|mov|webm|m4v|avi|mkv)(\?|#|$)/i;
+const PDF_RE = /\.pdf(\?|#|$)/i;
 
 function thumbUrl(url: string): string {
   if (
@@ -31,8 +50,6 @@ function thumbUrl(url: string): string {
   }
   return url;
 }
-const VIDEO_RE = /\.(mp4|mov|webm|m4v|avi|mkv)(\?|#|$)/i;
-const PDF_RE = /\.pdf(\?|#|$)/i;
 
 const isImage = (d: DocItem) =>
   /^image\//i.test(d.type || '') || IMAGE_RE.test(d.fileUrl || '') || IMAGE_RE.test(d.name || '');
@@ -101,106 +118,109 @@ function Viewer({
   );
 }
 
-const SUBCATEGORY_ALIASES: Record<string, string[]> = {
-  'Reels': ['Reels', 'Для роликов сторис reels'],
-  'Презентации': ['Презентации', 'Презентация Квартал Серебряный Бор'],
-  'Фотографии': ['Фотографии', 'Зорге9 (фото)', 'Зорге 9 (фото)'],
-  'Рендеры': ['Рендеры'],
-  'Тексты': ['Тексты', 'Условия вознаграждения', 'Актуальные условия рассрочки'],
-};
-
-export default function MaterialsSubcategoryPage() {
-  const params = useParams<{ subcategory: string }>();
+export default function MaterialsFolderPage() {
+  const params = useParams<{ subcategory: string[] }>();
   const router = useRouter();
-  const subcategory = decodeURIComponent(params.subcategory || '');
+  const parts = decodeMaterialsSegments(params.subcategory);
+  const currentPath = parts.join('/');
 
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewer, setViewer] = useState<{ items: DocItem[]; index: number } | null>(null);
   const [photoLimit, setPhotoLimit] = useState(30);
-  const [projFilter, setProjFilter] = useState<'all' | 'ZORGE9' | 'SILVER_BOR'>('all');
 
   useEffect(() => {
-    const aliases = SUBCATEGORY_ALIASES[subcategory] || [subcategory];
-    Promise.all(
-      aliases.map((alias) =>
-        fetch(`${API_BASE}/api/public/documents?category=materials&subcategory=${encodeURIComponent(alias)}&limit=200`)
-          .then((r) => r.json())
-          .then((data) => (Array.isArray(data) ? data : []))
-          .catch(() => [] as DocItem[])
-      )
-    )
-      .then((results) => {
-        const seen = new Set<string>();
-        const merged = results.flat().filter((d: DocItem) => {
-          if (seen.has(d.id)) return false;
-          seen.add(d.id);
-          return true;
-        });
-        setDocs(merged);
-      })
+    if (!currentPath) {
+      setDocs([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    fetch(`${API_BASE}/api/public/documents?category=materials&subcategory=${encodeURIComponent(currentPath)}&limit=2000`)
+      .then((r) => r.json())
+      .then((data) => setDocs(Array.isArray(data) ? data : []))
+      .catch(() => setDocs([]))
       .finally(() => setLoading(false));
-  }, [subcategory]);
+  }, [currentPath]);
 
-  const filteredDocs = projFilter === 'all' ? docs : docs.filter((d) => d.project === projFilter);
-  const images = filteredDocs.filter(isImage);
-  const videos = filteredDocs.filter(isVideo);
-  const pdfs = filteredDocs.filter(isPdf);
-  const other = filteredDocs.filter((d) => !isImage(d) && !isVideo(d) && !isPdf(d));
-  const hasProjectDocs = docs.some((d) => d.project === 'ZORGE9' || d.project === 'SILVER_BOR');
-
-  const ICON: Record<string, string> = {
-    'Reels': '🎬',
-    'Презентации': '📊',
-    'Фотографии': '🖼️',
-    'Рендеры': '🏗️',
-    'Тексты': '📝',
-  };
+  const { folders, files } = useMemo(() => foldersAndFilesAt(docs, parts), [docs, parts]);
+  const images = files.filter(isImage);
+  const videos = files.filter(isVideo);
+  const pdfs = files.filter(isPdf);
+  const other = files.filter((d) => !isImage(d) && !isVideo(d) && !isPdf(d));
+  const title = parts[parts.length - 1] || 'Материалы';
+  const parentHref = parts.length > 1 ? materialHref(parts.slice(0, -1)) : '/#materials';
+  const empty = !loading && folders.length === 0 && files.length === 0;
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg, #0d0d0d)', color: 'var(--fg, #fff)', fontFamily: 'var(--font-body, sans-serif)', padding: '0 0 80px' }}>
-      {/* Header */}
-      <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', padding: '20px 32px', display: 'flex', alignItems: 'center', gap: 16 }}>
+      <div style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', padding: '20px 32px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <button
-          onClick={() => router.back()}
+          onClick={() => router.push(parentHref)}
           style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'rgba(255,255,255,0.6)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: 0 }}
         >
           <ArrowLeft size={16} />
           Назад
         </button>
         <span style={{ color: 'rgba(255,255,255,0.2)' }}>|</span>
-        <span style={{ fontSize: 22 }}>{ICON[subcategory] || '📁'}</span>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>{subcategory}</h1>
+        <Folder size={20} color="var(--gold, #B4936F)" />
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>{title}</h1>
       </div>
 
-      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '40px 32px 0' }}>
-        {!loading && (
-          <div style={{ display: 'flex', gap: 8, marginBottom: 28, alignItems: 'center' }}>
-            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginRight: 4 }}>Проект:</span>
-            {(['all', 'ZORGE9', 'SILVER_BOR'] as const).map((val) => {
-              const labels = { all: 'Все', ZORGE9: 'Зорге 9', SILVER_BOR: 'Серебряный Бор' };
-              return (
-                <button
-                  key={val}
-                  onClick={() => { setProjFilter(val); setPhotoLimit(30); }}
-                  style={{ padding: '7px 16px', fontSize: 12, fontWeight: 600, borderRadius: 8, border: 'none', cursor: 'pointer', background: projFilter === val ? 'var(--gold, #B4936F)' : 'rgba(255,255,255,0.08)', color: projFilter === val ? '#fff' : 'rgba(255,255,255,0.6)', transition: 'background 0.15s' }}
-                >
-                  {labels[val]}
-                </button>
-              );
-            })}
-          </div>
-        )}
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '28px 32px 0' }}>
+        <nav style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 28, fontSize: 13, color: 'rgba(255,255,255,0.45)' }}>
+          <a href="/#materials" style={{ color: 'rgba(255,255,255,0.45)', textDecoration: 'none' }}>Материалы</a>
+          {parts.map((part, index) => {
+            const href = materialHref(parts.slice(0, index + 1));
+            const last = index === parts.length - 1;
+            return (
+              <span key={href} style={{ display: 'flex', gap: 6 }}>
+                <span>/</span>
+                {last ? (
+                  <span style={{ color: 'rgba(255,255,255,0.85)' }}>{part}</span>
+                ) : (
+                  <a href={href} style={{ color: 'rgba(255,255,255,0.45)', textDecoration: 'none' }}>{part}</a>
+                )}
+              </span>
+            );
+          })}
+        </nav>
+
         {loading ? (
           <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.4)', padding: '80px 0', fontSize: 15 }}>Загрузка...</div>
-        ) : docs.length === 0 ? (
+        ) : empty ? (
           <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.4)', padding: '80px 0' }}>
-            <div style={{ fontSize: 48, marginBottom: 16 }}>{ICON[subcategory] || '📁'}</div>
-            <div style={{ fontSize: 16, marginBottom: 8 }}>Материалы пока не добавлены</div>
+            <div style={{ fontSize: 48, marginBottom: 16 }}>📁</div>
+            <div style={{ fontSize: 16, marginBottom: 8 }}>В этой папке пока нет файлов</div>
             <div style={{ fontSize: 13 }}>По вопросам: <a href="tel:+74992262249" style={{ color: 'var(--gold, #c9a96e)' }}>+7 (499) 226-22-49</a></div>
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 40 }}>
+            {folders.length > 0 && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: 'rgba(255,255,255,0.5)', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  <Folder size={14} /> Папки ({folders.length})
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
+                  {folders.map((folder) => {
+                    const nested = [...parts, folder];
+                    const count = fileCountUnder(docs, nested);
+                    return (
+                      <a
+                        key={folder}
+                        href={materialHref(nested)}
+                        style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 10, padding: '18px 16px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, textDecoration: 'none', color: '#fff' }}
+                      >
+                        <Folder size={22} color="var(--gold, #B4936F)" />
+                        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.3 }}>{folder}</div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{count} файлов</div>
+                      </a>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {images.length > 0 && (
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, color: 'rgba(255,255,255,0.5)', fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
@@ -228,7 +248,7 @@ export default function MaterialsSubcategoryPage() {
                 </div>
                 {images.length > photoLimit && (
                   <button
-                    onClick={() => setPhotoLimit(prev => prev + 30)}
+                    onClick={() => setPhotoLimit((prev) => prev + 30)}
                     style={{ marginTop: 16, width: '100%', padding: '12px', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, color: 'rgba(255,255,255,0.7)', fontSize: 13, cursor: 'pointer' }}
                   >
                     Загрузить ещё ({images.length - photoLimit} фото)
@@ -270,10 +290,10 @@ export default function MaterialsSubcategoryPage() {
                   <FileType size={14} /> PDF ({pdfs.length})
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
-                  {pdfs.map((p, i) => (
+                  {pdfs.map((p) => (
                     <button
                       key={p.id}
-                      onClick={() => setViewer({ items: pdfs, index: i })}
+                      onClick={() => setViewer({ items: pdfs, index: pdfs.indexOf(p) })}
                       style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 8, cursor: 'pointer', textAlign: 'left' }}
                     >
                       <div style={{ width: 40, height: 48, background: 'rgba(239,68,68,0.15)', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
