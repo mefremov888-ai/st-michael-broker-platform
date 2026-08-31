@@ -209,6 +209,10 @@ export function amoBrokerContactAdvisoryLockKey(phone: unknown): bigint {
 
 export async function acquireAmoBrokerContactAdvisoryXactLock(
   transaction: {
+    $executeRaw: (
+      strings: TemplateStringsArray,
+      ...values: unknown[]
+    ) => Promise<unknown>;
     $queryRaw: (
       strings: TemplateStringsArray,
       ...values: unknown[]
@@ -217,11 +221,19 @@ export async function acquireAmoBrokerContactAdvisoryXactLock(
   brokerId: string,
   phone: unknown,
 ): Promise<bigint> {
-  if (!transaction || typeof transaction.$queryRaw !== "function") {
+  if (
+    !transaction ||
+    typeof transaction.$executeRaw !== "function" ||
+    typeof transaction.$queryRaw !== "function"
+  ) {
     throw new Error("AMO_BROKER_CONTACT_LOCK_TRANSACTION_INVALID");
   }
   const key = amoBrokerContactAdvisoryLockKey(phone);
-  await transaction.$queryRaw`SELECT pg_advisory_xact_lock(${key})`;
+  // pg_advisory_xact_lock returns void. Prisma $queryRaw tries to deserialize
+  // that column and throws P2010 immediately. $executeRaw ignores the result.
+  // Cast the signed int64 key so a driver that binds BigInt as text still
+  // matches pg_advisory_xact_lock(bigint), not a missing text overload.
+  await transaction.$executeRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`;
   // Serializable snapshots may be established while waiting for the advisory
   // lock. Locking the broker row immediately afterwards makes PostgreSQL raise
   // a serialization failure (before any amo HTTP call) instead of allowing a

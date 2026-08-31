@@ -775,21 +775,31 @@ describe("production-safe amo broker-contact provisioner", () => {
       amoBrokerContactAdvisoryLockKey(phone),
     );
     const tx = {
-      $queryRaw: jest
-        .fn()
-        .mockResolvedValueOnce([{}])
-        .mockResolvedValueOnce([{ id: brokerId }]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValueOnce([{ id: brokerId }]),
     };
     await expect(
       provisioner.acquireAmoBrokerContactAdvisoryXactLock(tx, brokerId, phone),
     ).resolves.toBe(amoBrokerContactAdvisoryLockKey(phone));
-    expect(tx.$queryRaw).toHaveBeenCalledTimes(2);
-    expect(String(tx.$queryRaw.mock.calls[0][0][0])).toContain(
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(String(tx.$executeRaw.mock.calls[0][0][0])).toContain(
       "pg_advisory_xact_lock",
     );
-    expect(Array.from(tx.$queryRaw.mock.calls[1][0]).join("")).toContain(
+    expect(Array.from(tx.$executeRaw.mock.calls[0][0]).join("")).toContain(
+      "::bigint",
+    );
+    expect(Array.from(tx.$queryRaw.mock.calls[0][0]).join("")).toContain(
       "FOR UPDATE",
     );
+    const helper = readFileSync(
+      resolve(repositoryRoot, "apps/api/src/common/amo-broker-contact-lock.ts"),
+      "utf8",
+    );
+    expect(helper).toContain(
+      "await transaction.$executeRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`",
+    );
+    expect(helper).not.toMatch(/\$queryRaw`SELECT pg_advisory_xact_lock/);
   });
 
   it("uses exact runtime/apply HMAC parity without exposing the phone", () => {
@@ -831,10 +841,8 @@ describe("production-safe amo broker-contact provisioner", () => {
       queueSnapshot: provisioner.queueSnapshot([row]),
     };
     const tx = {
-      $queryRaw: jest
-        .fn()
-        .mockResolvedValueOnce([{}])
-        .mockResolvedValueOnce([{ id: source.id }]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: source.id }]),
       broker: {
         findUnique: jest.fn().mockResolvedValue(source),
         findMany: jest.fn().mockResolvedValue([source]),
@@ -891,10 +899,8 @@ describe("production-safe amo broker-contact provisioner", () => {
       queueSnapshot: provisioner.queueSnapshot([row]),
     };
     const tx = {
-      $queryRaw: jest
-        .fn()
-        .mockResolvedValueOnce([{}])
-        .mockResolvedValueOnce([{ id: source.id }]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: source.id }]),
       broker: {
         findUnique: jest.fn().mockResolvedValue(source),
         findMany: jest.fn().mockResolvedValue([source, occupied]),
@@ -935,10 +941,8 @@ describe("production-safe amo broker-contact provisioner", () => {
       queueSnapshot: provisioner.queueSnapshot([row]),
     };
     const tx = {
-      $queryRaw: jest
-        .fn()
-        .mockResolvedValueOnce([{}])
-        .mockResolvedValueOnce([{ id: source.id }]),
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      $queryRaw: jest.fn().mockResolvedValue([{ id: source.id }]),
       broker: {
         findUnique: jest.fn().mockResolvedValue(source),
         findMany: jest.fn().mockResolvedValue([source]),
@@ -979,6 +983,7 @@ describe("production-safe amo broker-contact provisioner", () => {
     };
     const gateEvents: any[] = [];
     const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
       $queryRaw: jest.fn().mockResolvedValue([{ id: source.id }]),
       broker: {
         findUnique: jest.fn().mockResolvedValue(source),
@@ -1202,7 +1207,15 @@ describe("production-safe amo broker-contact provisioner", () => {
     expect(script).toContain('method: "POST"');
     expect(script).toContain('method: "PATCH"');
     expect(script).toContain('isolationLevel: "Serializable"');
-    expect(script).toContain("pg_advisory_xact_lock");
+    expect(script).toContain(
+      "SELECT pg_advisory_xact_lock(${key}::bigint)",
+    );
+    expect(script).toContain(
+      "await transaction.$executeRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`",
+    );
+    expect(script).not.toMatch(
+      /\$queryRaw`SELECT pg_advisory_xact_lock/,
+    );
   });
 
   it("fails closed on an unflagged recovery contact in all three runtime paths", () => {
