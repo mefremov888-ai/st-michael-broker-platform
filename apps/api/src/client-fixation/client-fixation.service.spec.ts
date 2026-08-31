@@ -43,6 +43,7 @@ describe("ClientFixationService amo broker attachment", () => {
         create: jest.fn().mockResolvedValue({}),
       },
       systemSetting: { findUnique: jest.fn().mockResolvedValue(null) },
+      $executeRaw: jest.fn().mockResolvedValue(0),
       $queryRaw: jest.fn().mockImplementation(async (strings: any) => {
         const sql = Array.from(strings || []).join("");
         return sql.includes('FROM "clients"')
@@ -426,14 +427,21 @@ describe("ClientFixationService amo broker attachment", () => {
       expect.any(Function),
       expect.objectContaining({ isolationLevel: "Serializable" }),
     );
-    expect(prisma.$queryRaw).toHaveBeenCalledTimes(4);
-    expect(String(prisma.$queryRaw.mock.calls[0][0][0])).toContain(
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
+    expect(String(prisma.$executeRaw.mock.calls[0][0][0])).toContain(
       "pg_advisory_xact_lock",
     );
-    expect(Array.from(prisma.$queryRaw.mock.calls[1][0]).join("")).toContain(
+    expect(Array.from(prisma.$executeRaw.mock.calls[0][0]).join("")).toContain(
+      "::bigint",
+    );
+    expect(Array.from(prisma.$queryRaw.mock.calls[0][0]).join("")).toContain(
       "FOR UPDATE",
     );
-    expect(prisma.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+    expect(prisma.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      prisma.$queryRaw.mock.invocationCallOrder[0],
+    );
+    expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
       amo.findContactByPhone.mock.invocationCallOrder[0],
     );
     expect(prisma.broker.updateMany).toHaveBeenCalledWith({

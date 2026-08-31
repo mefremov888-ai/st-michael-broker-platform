@@ -589,11 +589,18 @@ async function acquireAmoBrokerContactAdvisoryXactLock(
   brokerId,
   phone,
 ) {
-  if (!transaction || typeof transaction.$queryRaw !== "function") {
+  if (
+    !transaction ||
+    typeof transaction.$executeRaw !== "function" ||
+    typeof transaction.$queryRaw !== "function"
+  ) {
     fail("AMO_BROKER_CONTACT_LOCK_TRANSACTION_INVALID");
   }
   const key = amoBrokerContactAdvisoryLockKey(phone);
-  await transaction.$queryRaw`SELECT pg_advisory_xact_lock(${key})`;
+  // pg_advisory_xact_lock returns void. Prisma $queryRaw deserializes that as
+  // P2010 DATABASE_RAW_QUERY_FAILED. $executeRaw + ::bigint is the supported
+  // path for a signed int64 advisory key.
+  await transaction.$executeRaw`SELECT pg_advisory_xact_lock(${key}::bigint)`;
   const brokerRows =
     await transaction.$queryRaw`SELECT id FROM brokers WHERE id = ${brokerId} FOR UPDATE`;
   if (!Array.isArray(brokerRows) || brokerRows.length !== 1) {
