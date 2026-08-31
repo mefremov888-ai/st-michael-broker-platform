@@ -39,14 +39,14 @@ export const DEFAULT_MATERIALS_LAYOUT: MaterialsFolderLayout = {
   groups: [
     {
       id: 'zorge',
-      title: 'Зорге',
+      title: 'Зорге 9',
       visibleOnLanding: true,
       visibleInCabinet: true,
       sortOrder: 40,
     },
     {
       id: 'berarina',
-      title: 'Берарина',
+      title: 'Квартал Серебряный Бор',
       visibleOnLanding: true,
       visibleInCabinet: true,
       sortOrder: 50,
@@ -188,6 +188,21 @@ export function isValidMaterialsFolderLayout(value: unknown): value is Materials
   );
 }
 
+/** Old default titles → current names. Ids stay the same so Disk rules keep working. */
+const GROUP_TITLE_UPGRADES: Record<string, Record<string, string>> = {
+  zorge: { Зорге: 'Зорге 9' },
+  berarina: { Берарина: 'Квартал Серебряный Бор' },
+};
+
+export function applyMaterialsGroupTitleUpgrades(layout: MaterialsFolderLayout): MaterialsFolderLayout {
+  const next = cloneLayout(layout);
+  for (const group of next.groups) {
+    const renamed = GROUP_TITLE_UPGRADES[group.id]?.[group.title];
+    if (renamed) group.title = renamed;
+  }
+  return next;
+}
+
 export function parseMaterialsLayout(raw: unknown): MaterialsFolderLayout {
   if (typeof raw === 'string') {
     try {
@@ -196,7 +211,7 @@ export function parseMaterialsLayout(raw: unknown): MaterialsFolderLayout {
       return cloneLayout(DEFAULT_MATERIALS_LAYOUT);
     }
   }
-  if (isValidMaterialsFolderLayout(raw)) return cloneLayout(raw);
+  if (isValidMaterialsFolderLayout(raw)) return applyMaterialsGroupTitleUpgrades(raw);
   return cloneLayout(DEFAULT_MATERIALS_LAYOUT);
 }
 

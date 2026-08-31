@@ -58,7 +58,7 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
   };
 
   const resetDefault = async () => {
-    if (!confirm('Вернуть группировку по умолчанию: условия отдельно, фото и видео внутри Зорге и Берарина?')) return;
+    if (!confirm('Вернуть группировку по умолчанию: условия отдельно, фото и видео внутри Зорге 9 и Квартала Серебряный Бор?')) return;
     await save(DEFAULT_MATERIALS_LAYOUT);
   };
 
@@ -139,7 +139,7 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
           Папки материалов
         </h2>
         <span className="text-xs text-text-muted sm:ml-auto">
-          {isDefault ? 'Сейчас дефолт: условия отдельно, фото/видео внутри Зорге и Берарина' : 'Сохранено в админке, ночной синк Диска это не затирает'}
+          {isDefault ? 'Сейчас дефолт: условия отдельно, фото/видео внутри Зорге 9 и Квартала Серебряный Бор' : 'Сохранено в админке, ночной синк Диска это не затирает'}
         </span>
       </div>
       <p className="text-sm text-text-muted mb-4">
@@ -306,7 +306,7 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
             <Save className="w-4 h-4" /> {saving ? 'Сохранение...' : 'Сохранить раскладку'}
           </button>
           <button className="btn btn-secondary text-sm" onClick={resetDefault} disabled={saving}>
-            Сбросить к Зорге / Берарина
+            Сбросить к Зорге 9 / Квартал Серебряный Бор
           </button>
         </div>
       )}

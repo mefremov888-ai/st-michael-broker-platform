@@ -33,25 +33,25 @@ test('landing roots are standalone terms plus two residential complexes', () => 
     'Актуальные условия рассрочки',
     'Презентации',
     'Условия вознаграждения',
-    'Зорге',
-    'Берарина',
+    'Зорге 9',
+    'Квартал Серебряный Бор',
   ]);
 });
 
-test('Зорге contains photo and video, not raw Disk names', () => {
+test('Зорге 9 contains photo and video, not raw Disk names', () => {
   const mapped = withDisplaySubcategory(docs, DEFAULT_MATERIALS_LAYOUT, 'landing');
-  const { folders } = foldersAndFilesAt(mapped, ['Зорге']);
+  const { folders } = foldersAndFilesAt(mapped, ['Зорге 9']);
   assert.deepEqual(folders, ['Видео', 'Фото']);
-  assert.equal(fileCountUnder(mapped, ['Зорге', 'Фото']), 2);
-  assert.equal(fileCountUnder(mapped, ['Зорге', 'Видео']), 2);
+  assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Фото']), 2);
+  assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Видео']), 2);
 });
 
-test('Берарина contains photo and video from КСБ, renders and video pack', () => {
+test('Квартал Серебряный Бор contains photo and video from КСБ, renders and video pack', () => {
   const mapped = withDisplaySubcategory(docs, DEFAULT_MATERIALS_LAYOUT, 'landing');
-  const { folders } = foldersAndFilesAt(mapped, ['Берарина']);
+  const { folders } = foldersAndFilesAt(mapped, ['Квартал Серебряный Бор']);
   assert.deepEqual(folders, ['Видео', 'Фото']);
-  assert.equal(fileCountUnder(mapped, ['Берарина', 'Фото']), 2);
-  assert.equal(fileCountUnder(mapped, ['Берарина', 'Видео']), 2);
+  assert.equal(fileCountUnder(mapped, ['Квартал Серебряный Бор', 'Фото']), 2);
+  assert.equal(fileCountUnder(mapped, ['Квартал Серебряный Бор', 'Видео']), 2);
 });
 
 test('raw Видеоконтент is hidden on landing and kept in cabinet leftovers', () => {
@@ -67,8 +67,8 @@ test('hiding a group in admin removes it from landing', () => {
   if (!zorge) throw new Error('missing zorge group');
   zorge.visibleOnLanding = false;
   const mapped = withDisplaySubcategory(docs, layout, 'landing');
-  assert.equal(foldersAndFilesAt(mapped, []).folders.includes('Зорге'), false);
-  assert.equal(foldersAndFilesAt(mapped, []).folders.includes('Берарина'), true);
+  assert.equal(foldersAndFilesAt(mapped, []).folders.includes('Зорге 9'), false);
+  assert.equal(foldersAndFilesAt(mapped, []).folders.includes('Квартал Серебряный Бор'), true);
 });
 
 test('classifyMaterialsMedia uses folder names and file types', () => {
@@ -77,8 +77,17 @@ test('classifyMaterialsMedia uses folder names and file types', () => {
 });
 
 test('parseMaterialsLayout falls back to default on garbage', () => {
-  assert.equal(parseMaterialsLayout('nope').groups[0]?.title, 'Зорге');
+  assert.equal(parseMaterialsLayout('nope').groups[0]?.title, 'Зорге 9');
   assert.equal(parseMaterialsLayout({ version: 1, groups: [], rules: [] }).groups.length, 0);
+});
+
+test('saved layout still showing Зорге / Берарина is renamed on parse', () => {
+  const stale = structuredClone(DEFAULT_MATERIALS_LAYOUT);
+  stale.groups[0].title = 'Зорге';
+  stale.groups[1].title = 'Берарина';
+  const parsed = parseMaterialsLayout(stale);
+  assert.equal(parsed.groups[0]?.title, 'Зорге 9');
+  assert.equal(parsed.groups[1]?.title, 'Квартал Серебряный Бор');
 });
 
 test('mergeMaterialsLayout adds unknown Disk folders without fighting grouped prefixes', () => {
