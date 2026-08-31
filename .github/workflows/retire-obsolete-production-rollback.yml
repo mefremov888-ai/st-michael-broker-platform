@@ -1,8 +1,10 @@
 name: Retire one obsolete production rollback pair
 
-# One-purpose disk recovery for the loyalty release. The 20260821-221026
-# rollback pair is the oldest living pair, superseded by five complete newer
-# rollback pairs, and is not referenced by any container. This workflow removes
+# One-purpose disk recovery for the loyalty release. The 20260826-101612
+# rollback pair is the oldest pair that still owns its own image layers: the
+# older 20260825 tags share one image ID, so removing them frees nothing. It is
+# superseded by five complete newer pairs and is not referenced by any
+# container. This workflow removes
 # only those two exact Docker tags after an inspect-only run records their full
 # image IDs and metadata hashes. It never prunes, changes a database or volume,
 # removes backup files, modifies build cache, or restarts a service.
@@ -18,7 +20,7 @@ on:
           - inspect
           - retire
       confirm_retirement:
-        description: Confirm removal of only rollback api/web tags 20260821-221026
+        description: Confirm removal of only rollback api/web tags 20260826-101612
         required: true
         default: false
         type: boolean
@@ -154,18 +156,18 @@ jobs:
           export LC_ALL=C
           MIN_AVAILABLE_BYTES=8589934592
           BACKUP_SIZE_OVERHEAD_BYTES=67108864
-          RELEASE_TIMESTAMP=20260821-221026
+          RELEASE_TIMESTAMP=20260826-101612
           TARGET_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
           TARGET_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
-          TARGET_API_PREFIX=3ee482ad303a
-          TARGET_WEB_PREFIX=e40d1ed4639e
-          TARGET_COMMIT=e6dcd44de12ba056440125430b64c956fc0c41e8
+          TARGET_API_PREFIX=3cd30e4b9e03
+          TARGET_WEB_PREFIX=dc06e1dca818
+          TARGET_COMMIT=5e28d89fd589d2444d23add7da09953dfd71ed69
           DUPLICATE_RETAINED_API_IMAGE_ID=sha256:24af61e598b6c4269017163476ccba26733d5b092f659e58c497687bb360ed0d
           DUPLICATE_RETAINED_WEB_IMAGE_ID=sha256:4e1262c7e7831914cd1076c5a1542cdffa8828b36d1956c4fb247028268832f3
-          NEWER_TIMESTAMPS=(20260825-145230 20260825-160034 20260826-101612 20260826-142213 20260827-230016)
-          NEWER_API_PREFIXES=(24af61e598b6 24af61e598b6 3cd30e4b9e03 8997f496e2d2 5ee699e7255b)
-          NEWER_WEB_PREFIXES=(4e1262c7e783 4e1262c7e783 dc06e1dca818 3ed296479876 523176bd4f11)
-          NEWER_TARGET_COMMITS=(47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf 5e28d89fd589d2444d23add7da09953dfd71ed69 baf5b3d959ad80d6040c5e703391862b336f9015 784392e75274ee06db6448b6e0d01e719d8582c8)
+          NEWER_TIMESTAMPS=(20260825-145230 20260825-160034 20260826-142213 20260827-230016 20260830-162326)
+          NEWER_API_PREFIXES=(24af61e598b6 24af61e598b6 8997f496e2d2 5ee699e7255b 482c858ae88d)
+          NEWER_WEB_PREFIXES=(4e1262c7e783 4e1262c7e783 3ed296479876 523176bd4f11 71741d659c9f)
+          NEWER_TARGET_COMMITS=(47591c0a7e844fa642e909c8d387207e59e3f626 2d6088ba7d6ab7aa2fcc9ccf3136f712abc2a6bf baf5b3d959ad80d6040c5e703391862b336f9015 784392e75274ee06db6448b6e0d01e719d8582c8 ad55b8531fb992f3be83c253d61e9525d0351e18)
           test "${#NEWER_TIMESTAMPS[@]}" -eq 5 || { echo "Retained rollback timestamp audit is incomplete"; exit 1; }
           test "${#NEWER_API_PREFIXES[@]}" -eq 5 || { echo "Retained API prefix audit is incomplete"; exit 1; }
           test "${#NEWER_WEB_PREFIXES[@]}" -eq 5 || { echo "Retained web prefix audit is incomplete"; exit 1; }
@@ -867,7 +869,7 @@ jobs:
             # RepoDigests that resolve to the same image ID are local names, not a
             # registry pin. Retirement removes the audited image by ID, without prune.
             # Requiring digest=none blocked this pair after inspect already proved the
-            # digest maps to sha256:3ee482ad303a / sha256:e40d1ed4639e.
+            # digest maps to sha256:3cd30e4b9e03 / sha256:dc06e1dca818.
             case "$target_api_repo_digest" in
               none|"st-michael-rollback-api@$target_api_id") ;;
               *) echo "Target API repo digest is not a local name for the audited image"; exit 1 ;;
