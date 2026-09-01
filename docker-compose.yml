@@ -162,6 +162,7 @@ services:
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./docker/ssl:/etc/nginx/ssl:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
       - uploads:/usr/share/nginx/files:ro
     depends_on:
       - api
