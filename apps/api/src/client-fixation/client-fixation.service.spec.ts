@@ -371,7 +371,7 @@ describe("ClientFixationService amo broker attachment", () => {
       email: null,
       amoContactId: BigInt(101),
       funnelStage: "FIXATION",
-      brokerAgencies: [],
+      brokerAgencies: [{ agencyId: "a1" }],
     };
     const responsible = {
       id: "responsible",
@@ -460,6 +460,13 @@ describe("ClientFixationService amo broker attachment", () => {
         brokerAmoContactId: 777,
       }),
     );
+    expect(amo.syncAgencyCompanyToAmoContact).toHaveBeenCalledWith(
+      777,
+      expect.objectContaining({
+        id: "a1",
+        inn: "7700000000",
+      }),
+    );
   });
 
   it("creates the lead with the stored broker contact id when live amo contact sync fails", async () => {
@@ -470,7 +477,7 @@ describe("ClientFixationService amo broker attachment", () => {
       email: null,
       amoContactId: BigInt(8131),
       funnelStage: "FIXATION",
-      brokerAgencies: [],
+      brokerAgencies: [{ agencyId: "agency-contact-unavailable-new" }],
     };
     const agency = {
       id: "agency-contact-unavailable-new",
@@ -507,6 +514,10 @@ describe("ClientFixationService amo broker attachment", () => {
         brokerPhone: broker.phone,
         brokerAmoContactId: 8131,
       }),
+    );
+    expect(amo.syncAgencyCompanyToAmoContact).toHaveBeenCalledWith(
+      8131,
+      agency,
     );
     expect(prisma.client.updateMany).toHaveBeenCalledWith({
       where: {

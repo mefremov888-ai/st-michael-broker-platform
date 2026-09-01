@@ -299,6 +299,24 @@ export class ClientFixationService {
       );
     }
 
+    // The agency displayed on an amoCRM broker contact follows the broker who
+    // submitted this fixation. For delegated fixation this is the coordinator's
+    // agency; for self-fixation it is the broker's own agency. Do not accept an
+    // arbitrary agencyInn from the request for this company association.
+    const agencyBelongsToCreator = (broker.brokerAgencies || []).some(
+      (link: { agencyId?: string }) => link.agencyId === agency.id,
+    );
+    if (resolvedResponsibleBrokerAmoContactId && agencyBelongsToCreator) {
+      try {
+        await this.amoCrmAdapter.syncAgencyCompanyToAmoContact(
+          resolvedResponsibleBrokerAmoContactId,
+          agency,
+        );
+      } catch {
+        console.error("[fixClient] broker agency company sync failed");
+      }
+    }
+
     // Проверяем сначала запись ЭТОГО брокера — если он уже фиксировал, обновляем её.
     const existingClient = await this.prisma.client.findFirst({
       where: { phone: data.phone, brokerId },
