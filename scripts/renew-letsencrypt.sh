@@ -65,7 +65,11 @@ dump_acme_debug() {
   echo "=== debug HTTP-01 ==="
   ls -ld "$WEBROOT" "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge" \
     "$WEBROOT/.well-known/acme-challenge/$ACME_HEALTH_TOKEN" || true
-  docker exec st-michael-nginx ls -la /var/www/certbot/.well-known/acme-challenge/ || echo "nginx не видит $WEBROOT"
+  echo "--- nginx mounts ---"
+  docker inspect st-michael-nginx --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{println}}{{end}}' || true
+  echo "--- nginx acme-webroot ---"
+  docker exec st-michael-nginx ls -la /usr/share/nginx/acme-webroot/.well-known/acme-challenge/ \
+    || echo "nginx не видит /usr/share/nginx/acme-webroot"
   echo "--- curl Host: $DOMAIN ---"
   curl -sS -D- -o /tmp/acme-health.body --connect-timeout 5 --max-time 10 \
     -H "Host: $DOMAIN" "http://127.0.0.1/.well-known/acme-challenge/$ACME_HEALTH_TOKEN" || true
@@ -99,16 +103,18 @@ apply_nginx_from_trusted_sha() {
   fi
 
   grep -q 'acme-challenge' docker/nginx.conf || fail "trusted SHA nginx.conf has no ACME location"
-  grep -q '/var/www/certbot:/var/www/certbot' docker-compose.yml || fail "trusted SHA compose is missing certbot webroot mount"
+  grep -q '/var/www/certbot:/usr/share/nginx/acme-webroot' docker-compose.yml \
+    || fail "trusted SHA compose is missing certbot webroot mount"
 
   docker compose up -d nginx --force-recreate --no-deps
   sleep 2
   docker exec st-michael-nginx nginx -t
-  if ! acme_http_ok; then
-    dump_acme_debug
-    fail "После обновления nginx HTTP-01 health-файл всё ещё не отдаётся с :80"
+  if acme_http_ok; then
+    echo "✓ HTTP-01 на :80 работает"
+    return 0
   fi
-  echo "✓ HTTP-01 на :80 работает"
+  dump_acme_debug
+  echo "HTTP-01 webroot после обновления nginx всё ещё не отдаётся; дальше standalone"
 }
 
 run_certbot_webroot() {
@@ -144,17 +150,28 @@ run_certbot_webroot() {
 }
 
 run_certbot_standalone_fallback() {
-  echo "=== webroot не сработал, fallback: standalone (кратко останавливаю nginx) ==="
+  echo "=== fallback: certbot standalone (кратко останавливаю nginx, порт 80) ==="
   docker stop st-michael-nginx
+  local rc=1
   set +e
-  docker run --rm -p 80:80 \
-    -v /etc/letsencrypt:/etc/letsencrypt \
-    -v /var/lib/letsencrypt:/var/lib/letsencrypt \
-    "$CERTBOT_IMAGE" \
-    certonly --standalone -d "$DOMAIN" \
-    --non-interactive --agree-tos --register-unsafely-without-email \
-    --cert-name "$DOMAIN" --preferred-challenges http --force-renewal
-  local rc=$?
+  if command -v certbot >/dev/null 2>&1; then
+    echo "=== host certbot --standalone ==="
+    certbot certonly --standalone -d "$DOMAIN" \
+      --non-interactive --agree-tos --cert-name "$DOMAIN" \
+      --preferred-challenges http --force-renewal
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "=== docker certbot --standalone ==="
+    docker run --rm -p 80:80 \
+      -v /etc/letsencrypt:/etc/letsencrypt \
+      -v /var/lib/letsencrypt:/var/lib/letsencrypt \
+      "$CERTBOT_IMAGE" \
+      certonly --standalone -d "$DOMAIN" \
+      --non-interactive --agree-tos --register-unsafely-without-email \
+      --cert-name "$DOMAIN" --preferred-challenges http --force-renewal
+    rc=$?
+  fi
   set -e
   docker start st-michael-nginx
   sleep 2
@@ -193,8 +210,12 @@ else
   apply_nginx_from_trusted_sha
 fi
 
-if ! run_certbot_webroot; then
-  echo "webroot certbot завершился ошибкой"
+if acme_http_ok; then
+  if ! run_certbot_webroot; then
+    echo "webroot certbot завершился ошибкой"
+    run_certbot_standalone_fallback
+  fi
+else
   run_certbot_standalone_fallback
 fi
 
