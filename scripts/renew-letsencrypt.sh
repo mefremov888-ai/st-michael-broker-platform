@@ -15,7 +15,9 @@
 # не упёрся в «tracked local changes». Образы api/web этот скрипт
 # НЕ пересобирает.
 set -euo pipefail
-umask 077
+# Challenge-файлы читает nginx внутри контейнера (пользователь nginx).
+# umask 077 оставлял бы их 600 — HTTP-01 тогда 403.
+umask 022
 
 DEPLOY_PATH="${1:?usage: renew-letsencrypt.sh <deploy_path> <trusted_sha> [force]}"
 TRUSTED_SHA="${2:?usage: renew-letsencrypt.sh <deploy_path> <trusted_sha> [force]}"
@@ -53,6 +55,23 @@ ensure_webroot() {
   fi
   printf 'ok\n' > "$WEBROOT/.well-known/acme-challenge/$ACME_HEALTH_TOKEN" 2>/dev/null \
     || sudo -n sh -c "printf 'ok\\n' > '$WEBROOT/.well-known/acme-challenge/$ACME_HEALTH_TOKEN'"
+  chmod 755 "$WEBROOT" "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge" 2>/dev/null \
+    || sudo -n chmod 755 "$WEBROOT" "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge"
+  chmod 644 "$WEBROOT/.well-known/acme-challenge/$ACME_HEALTH_TOKEN" 2>/dev/null \
+    || sudo -n chmod 644 "$WEBROOT/.well-known/acme-challenge/$ACME_HEALTH_TOKEN"
+}
+
+dump_acme_debug() {
+  echo "=== debug HTTP-01 ==="
+  ls -ld "$WEBROOT" "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge" \
+    "$WEBROOT/.well-known/acme-challenge/$ACME_HEALTH_TOKEN" || true
+  docker exec st-michael-nginx ls -la /var/www/certbot/.well-known/acme-challenge/ || echo "nginx не видит $WEBROOT"
+  echo "--- curl Host: $DOMAIN ---"
+  curl -sS -D- -o /tmp/acme-health.body --connect-timeout 5 --max-time 10 \
+    -H "Host: $DOMAIN" "http://127.0.0.1/.well-known/acme-challenge/$ACME_HEALTH_TOKEN" || true
+  echo "--- body ---"
+  cat /tmp/acme-health.body 2>/dev/null || true
+  echo
 }
 
 acme_http_ok() {
@@ -85,7 +104,10 @@ apply_nginx_from_trusted_sha() {
   docker compose up -d nginx --force-recreate --no-deps
   sleep 2
   docker exec st-michael-nginx nginx -t
-  acme_http_ok || fail "После обновления nginx HTTP-01 health-файл всё ещё не отдаётся с :80"
+  if ! acme_http_ok; then
+    dump_acme_debug
+    fail "После обновления nginx HTTP-01 health-файл всё ещё не отдаётся с :80"
+  fi
   echo "✓ HTTP-01 на :80 работает"
 }
 
