@@ -49,8 +49,10 @@ function daysUntilExpiry(expiresAt: string | null): number | null {
   return Math.ceil(ms / (24 * 60 * 60 * 1000));
 }
 
-// 2026-06-02: кнопка callback через Mango. Mango сначала наберёт телефон
-// брокера (из его профиля), брокер берёт трубку — Mango соединяет с клиентом.
+// 2026-06-02: кнопка callback через Mango.
+// 2026-08-28: только КЦ (MANAGER/ADMIN с mangoEmployeeNum). Брокер кнопку
+// не видит; API тоже отклоняет роль BROKER. Mango звонит на внутренний
+// номер сотрудника, тот берёт трубку — соединение с клиентом.
 function CallButton({ clientId, variant = 'icon' }: { clientId: string; variant?: 'icon' | 'full' }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -83,7 +85,7 @@ function CallButton({ clientId, variant = 'icon' }: { clientId: string; variant?
         type="button"
         onClick={handle}
         disabled={busy}
-        title="Позвонить клиенту через Mango (callback на ваш телефон)"
+        title="Позвонить клиенту через Mango (callback на внутренний номер КЦ)"
         className="p-1.5 rounded hover:bg-accent/10 text-accent disabled:opacity-50"
       >
         <PhoneCall className="w-4 h-4" />

@@ -1,4 +1,10 @@
-import { Injectable, Inject, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Inject,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import {
   MangoAdapter,
@@ -7,6 +13,9 @@ import {
 } from '@st-michael/integrations';
 import { PUBLIC_CALL_SELECT, toPublicCall } from '../common/public-call';
 import { MangoCallSafetyService } from '../common/mango-call-safety.service';
+import { CurrentUserPayload } from '../auth/current-user.decorator';
+
+const STAFF_ROLES = new Set(['ADMIN', 'MANAGER']);
 
 @Injectable()
 export class BrokerCallsService {
@@ -19,69 +28,73 @@ export class BrokerCallsService {
   ) {}
 
   /**
-   * Брокер инициирует callback клиенту через Mango.
-   * 1. Mango звонит на broker.phone, брокер берёт трубку.
-   * 2. Mango дозванивается до client.phone, соединяет.
-   * 3. Финальный результат прилетит в /webhooks/mango/call-result —
-   *    обновится duration, recording_url, status.
+   * Сотрудник КЦ звонит клиенту через Mango.
+   * 1. Mango звонит на внутренний номер сотрудника (mangoEmployeeNum).
+   * 2. Сотрудник берёт трубку — Mango дозванивается до клиента и соединяет.
+   * 3. Финальный результат прилетит в /webhooks/mango/call-result.
    *
-   * Мы пишем запись Call СРАЗУ при инициации (со status=INITIATED),
-   * чтобы у пользователя в журнале появилась строка «звоню сейчас…»,
-   * даже если Mango/webhook задержатся.
+   * Обычные брокеры эту кнопку не получают: callback идёт только с линии КЦ.
    */
-  async initiate(brokerId: string, clientId: string, idempotencyKey?: string) {
+  async initiate(
+    user: Pick<CurrentUserPayload, 'id' | 'role'>,
+    clientId: string,
+    idempotencyKey?: string,
+  ) {
+    if (!STAFF_ROLES.has(user.role)) {
+      throw new ForbiddenException(
+        'Звонок клиенту через Mango доступен только сотрудникам колл-центра',
+      );
+    }
+
     return this.mangoCallSafety.execute(
-      { actorId: brokerId, scope: 'client', targetId: clientId, idempotencyKey },
+      { actorId: user.id, scope: 'client', targetId: clientId, idempotencyKey },
       async () => {
-        const broker = await this.prisma.broker.findUnique({ where: { id: brokerId } });
-        if (!broker) throw new NotFoundException('Broker not found');
-        if (broker.doNotCall) {
-          throw new BadRequestException('Брокер в чёрном списке (doNotCall)');
+        const operator = await this.prisma.broker.findUnique({
+          where: { id: user.id },
+        });
+        if (!operator) throw new NotFoundException('Сотрудник не найден');
+        if (!STAFF_ROLES.has(String(operator.role))) {
+          throw new ForbiddenException(
+            'Звонок клиенту через Mango доступен только сотрудникам колл-центра',
+          );
         }
-        if (!broker.phone) {
-          throw new BadRequestException('У вас не указан телефон в профиле');
+        if (!operator.mangoEmployeeNum) {
+          throw new BadRequestException(
+            'У вас не заполнен внутренний номер Mango (mangoEmployeeNum) — обратитесь к администратору',
+          );
         }
 
-        const client = await this.prisma.client.findUnique({ where: { id: clientId } });
+        const client = await this.prisma.client.findUnique({
+          where: { id: clientId },
+        });
         if (!client) throw new NotFoundException('Client not found');
-        if (client.brokerId !== brokerId) {
-          throw new BadRequestException('Этот клиент привязан к другому брокеру');
-        }
         if (!client.phone) {
           throw new BadRequestException('У клиента не указан телефон');
         }
 
-    // При настроенных VPBX credentials используем подписанный callback и
-    // передаём command_id в Mango: так status webhook надёжно коррелируется
-    // с локальной записью. Старый integration-webhook остаётся fallback для
-    // инсталляций, где задан только его URL.
-        let callId: string;
         const mangoConfig = getMangoConfig();
-        if (broker.mangoEmployeeNum && mangoConfig.apiKey && mangoConfig.apiSalt) {
+        let callId: string;
+        if (mangoConfig.apiKey && mangoConfig.apiSalt) {
           const r = await this.mango.initiateCallbackFromExtension({
-            extension: broker.mangoEmployeeNum,
+            extension: operator.mangoEmployeeNum,
             to: client.phone,
           });
           callId = r.callId;
-        } else if (broker.mangoEmployeeNum && mangoConfig.callbackUrl) {
+        } else if (mangoConfig.callbackUrl) {
           const r = await this.mango.initiateCallbackViaWebhook({
-            employeeNum: broker.mangoEmployeeNum,
+            employeeNum: operator.mangoEmployeeNum,
             phone: client.phone,
           });
           callId = r.callId;
         } else {
-          const r = await this.mango.initiateCallback({
-            from: broker.phone,
-            to: client.phone,
-          });
-          callId = r.callId;
+          throw new BadRequestException(
+            'Mango не настроен: нужны VPBX ключи или callback URL',
+          );
         }
 
-    // Создаём запись Call со статусом «инициирован» — пользователь увидит её
-    // в журнале сразу. Webhook позже допишет duration/recording/result.
         const call = await this.prisma.call.create({
           data: {
-            brokerId,
+            brokerId: operator.id,
             clientId,
             mangoCallId: callId,
             direction: 'OUTBOUND',
@@ -91,10 +104,8 @@ export class BrokerCallsService {
           },
         });
 
-    // amo-sync: оставляем note в лиде клиента — менеджеру видно сразу,
-    // что брокер пошёл звонить. Не критично если упало — звонок уже состоялся.
         if (client.amoLeadId) {
-          const note = `📞 Брокер ${broker.fullName} инициировал звонок клиенту ${client.fullName} (${client.phone})`;
+          const note = `📞 КЦ ${operator.fullName} инициировал звонок клиенту ${client.fullName} (${client.phone})`;
           this.amo.addNoteToLead(Number(client.amoLeadId), note).catch((e: any) => {
             console.error('[broker-calls] amo addNoteToLead failed:', e?.message || e);
           });
@@ -103,14 +114,15 @@ export class BrokerCallsService {
         return {
           callId: call.id,
           mangoCallId: callId,
-          message: 'Mango сейчас наберёт ваш мобильный, возьмите трубку — мы соединим с клиентом.',
+          message:
+            'Mango сейчас позвонит вам на рабочий телефон — возьмите трубку, соединим с клиентом.',
         };
       },
     );
   }
 
   /**
-   * Журнал звонков брокера, фильтр по клиенту (опционально).
+   * Журнал звонков сотрудника КЦ, фильтр по клиенту (опционально).
    */
   async getCalls(brokerId: string, query: { clientId?: string; page?: number; limit?: number }) {
     const page = Number(query.page) || 1;
