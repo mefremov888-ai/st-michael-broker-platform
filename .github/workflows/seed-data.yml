@@ -26,6 +26,7 @@ on:
           - find-contact-by-phone
           - list-amo-users
           - inspect-contact
+          - inspect-broker-company-links
           - list-contact-fields
           - inspect-recent-fixations
           - inspect-broker-attachment
@@ -59,6 +60,9 @@ on:
         required: false
       contact_id:
         description: 'ID контакта amoCRM (для task=inspect-contact)'
+        required: false
+      broker_id:
+        description: 'ID брокера в кабинете (для read-only task=inspect-broker-company-links)'
         required: false
       email:
         description: 'Email брокера (для task=inspect-broker-attachment, проверка forgot-password)'
@@ -416,6 +420,17 @@ jobs:
                 exit 1
               fi
               $COMPOSE_CMD exec -T -e CONTACT_ID="${{ inputs.contact_id }}" api node /app/scripts/inspect-contact.js
+            fi
+
+            if [ "$TASK" = "inspect-broker-company-links" ]; then
+              echo "=== inspect-broker-company-links (READ-ONLY) ==="
+              if [ -z "${{ inputs.broker_id }}" ]; then
+                echo "ERROR: broker_id обязателен"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T \
+                -e BROKER_ID="${{ inputs.broker_id }}" \
+                api node /app/scripts/inspect-broker-company-links.js
             fi
 
             if [ "$TASK" = "create-admin" ]; then
