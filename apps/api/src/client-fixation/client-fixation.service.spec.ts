@@ -614,7 +614,7 @@ describe("ClientFixationService amo broker attachment", () => {
       }),
     );
     expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
-      "/admin/broker-applications",
+      "Админка → Все заявки от брокеров",
     );
   });
 
@@ -696,11 +696,11 @@ describe("ClientFixationService amo broker attachment", () => {
       }),
     );
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("Automatic retry is blocked"),
+      expect.stringContaining("Автоматический повтор остановлен"),
       expect.any(Object),
     );
     expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
-      "amoCRM fixation result is ambiguous",
+      "результат передачи в amoCRM не подтверждён",
     );
     const managerBody = String(queue.add.mock.calls[0][1].body);
     expect(managerBody).toContain(
@@ -780,7 +780,7 @@ describe("ClientFixationService amo broker attachment", () => {
         }),
       );
       expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-        expect.stringContaining("amoCRM fixation result is ambiguous"),
+        expect.stringContaining("результат передачи в amoCRM не подтверждён"),
         expect.any(Object),
       );
     },
@@ -1241,10 +1241,10 @@ describe("ClientFixationService amo broker attachment", () => {
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledTimes(1);
     expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
-      "scenario: REFIX_AFTER_CLOSED",
+      "Операция: повторная фиксация после закрытой заявки",
     );
     expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
-      "Automatic retry is blocked",
+      "Автоматический повтор остановлен",
     );
     expect(queue.add).toHaveBeenCalledWith(
       "send",
@@ -1416,7 +1416,7 @@ describe("ClientFixationService amo broker attachment", () => {
         }),
       );
       expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-        expect.stringContaining("amoCRM fixation result is ambiguous"),
+        expect.stringContaining("результат передачи в amoCRM не подтверждён"),
         expect.any(Object),
       );
     },
@@ -1444,9 +1444,10 @@ describe("ClientFixationService amo broker attachment", () => {
       String(call[1].body),
     );
     for (const text of [opsText, ...managerTexts]) {
-      expect(text).toContain("clientId: client-normal-failure");
-      expect(text).toContain("brokerId: broker-normal-failure");
-      expect(text).toContain("category: AMO_AUTH_ERROR");
+      expect(text).toContain("Номер заявки: client-normal-failure");
+      expect(text).toContain("Номер брокера: broker-normal-failure");
+      expect(text).toContain("Причина: ошибка авторизации в amoCRM");
+      expect(text).not.toContain("category:");
       expect(text).not.toContain("Ivan");
       expect(text).not.toContain("+79998887766");
       expect(text).not.toContain("TOP-SECRET");
@@ -1469,13 +1470,13 @@ describe("ClientFixationService amo broker attachment", () => {
       }),
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("clientId: client-morekit-failed"),
+      expect.stringContaining("Номер заявки: client-morekit-failed"),
       expect.objectContaining({
         dedupKey: "fixation-morekit:client-morekit-failed",
       }),
     );
     expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
-      "amoLeadId: 123456",
+      "Номер сделки в amoCRM: 123456",
     );
   });
 });

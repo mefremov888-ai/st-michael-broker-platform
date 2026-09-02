@@ -377,7 +377,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       data: expect.objectContaining({ amoSyncStatus: "SYNCED" }),
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("category: MOREKIT_DELIVERY_FAILED"),
+      expect.stringContaining("контакт-центр не получил фиксацию"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:morekit-delivery-failed:${candidate.id}`,
       }),
@@ -387,8 +387,8 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
         options.dedupKey ===
         `scheduler:amo-retry:morekit-delivery-failed:${candidate.id}`,
     )?.[0];
-    expect(directMessage).toContain(`clientId: ${candidate.id}`);
-    expect(directMessage).toContain(`brokerId: ${candidate.broker.id}`);
+    expect(directMessage).toContain(`Номер заявки: ${candidate.id}`);
+    expect(directMessage).toContain(`Номер брокера: ${candidate.broker.id}`);
     expect(directMessage).not.toContain(rawMorekitError);
     expect(directMessage).not.toContain(candidate.phone);
     expect(directMessage).not.toContain(candidate.fullName);
@@ -471,7 +471,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     expect(prisma.agency.findUnique).not.toHaveBeenCalled();
     expect(prisma.client.update).not.toHaveBeenCalled();
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("требуется ручная сверка/reconciliation"),
+      expect.stringContaining("нужно вручную сверить их с amoCRM"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:reconciliation-summary:1:${candidate.id}`,
       }),
@@ -501,7 +501,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
 
     expect(opsAlerts.sendSafely).toHaveBeenCalledTimes(1);
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("reconciliationCount: 21"),
+      expect.stringContaining("Заявок для ручной проверки: 21"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:reconciliation-summary:21:${reconciliationRows[0].id}`,
       }),
@@ -551,7 +551,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       },
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("требуется ручная сверка/reconciliation"),
+      expect.stringContaining("нужно проверить её вручную"),
       expect.any(Object),
     );
   });
@@ -765,7 +765,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       }),
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("Лид мог уже создаться"),
+      expect.stringContaining("Сделка могла уже появиться"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:ambiguous-post:${candidate.id}`,
       }),
@@ -1011,7 +1011,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       "uniquenessReason",
     );
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("10 попыток"),
+      expect.stringContaining("10 раз"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:dead-letter:${candidate.id}`,
       }),
@@ -1073,13 +1073,13 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       }),
     );
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining(`clientId: ${candidate.id}`),
+      expect.stringContaining(`Номер заявки: ${candidate.id}`),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:missing-broker-contact:${candidate.id}`,
       }),
     );
     expect(opsAlerts.sendSafely).not.toHaveBeenCalledWith(
-      expect.stringContaining("10 попыток"),
+      expect.stringContaining("10 раз"),
       expect.anything(),
     );
     expect(
@@ -1206,7 +1206,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       }),
     );
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining(`clientId: ${candidate.id}`),
+      expect.stringContaining(`Номер заявки: ${candidate.id}`),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:missing-broker-contact:${candidate.id}`,
       }),
@@ -1282,7 +1282,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
 
     expect(createFixationRequest).not.toHaveBeenCalled();
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("нет контакта брокера"),
+      expect.stringContaining("у брокеров нет контактов"),
       expect.objectContaining({
         dedupKey: "scheduler:amo-retry:missing-broker-contact-summary:1",
       }),
@@ -1365,13 +1365,13 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       },
     });
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("не указана компания"),
+      expect.stringContaining("не указано агентство"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:missing-agency:${candidate.id}`,
       }),
     );
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("10 попыток"),
+      expect.stringContaining("10 раз"),
       expect.objectContaining({
         dedupKey: `scheduler:amo-retry:dead-letter:${candidate.id}`,
       }),
@@ -1379,8 +1379,8 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     const directMessages = opsAlerts.sendSafely.mock.calls
       .map(([message]) => message)
       .join("\n");
-    expect(directMessages).toContain(`clientId: ${candidate.id}`);
-    expect(directMessages).toContain("brokerId: broker-private");
+    expect(directMessages).toContain(`Номер заявки: ${candidate.id}`);
+    expect(directMessages).toContain("Номер брокера: broker-private");
     expect(directMessages).not.toContain(candidate.phone);
     expect(directMessages).not.toContain(candidate.email);
     expect(directMessages).not.toContain(candidate.fullName);
@@ -1405,7 +1405,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     });
     expect(prisma.client.findMany).not.toHaveBeenCalled();
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("AMO_ACCESS_TOKEN отсутствует"),
+      expect.stringContaining("Данные доступа отсутствуют"),
       {
         dedupKey: "scheduler:amo:token-missing",
         cooldownMs: 60 * 60 * 1000,
@@ -1437,7 +1437,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
       }),
     );
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("AMO_ACCESS_TOKEN отсутствует"),
+      expect.stringContaining("Данные доступа отсутствуют"),
       expect.objectContaining({
         dedupKey: "scheduler:amo:token-missing",
       }),
@@ -1516,7 +1516,7 @@ describe("SchedulerService.handleAmoFailedRetry", () => {
     // единственный канал доставки теперь.
     expect(notificationQueue.add).not.toHaveBeenCalled();
     expect(opsAlerts.sendSafely).toHaveBeenCalledWith(
-      expect.stringContaining("токен amoCRM недействителен"),
+      expect.stringContaining("amoCRM отклонила подключение"),
       expect.objectContaining({ dedupKey: "scheduler:amo:token-dead" }),
     );
     const directMessage = opsAlerts.sendSafely.mock.calls.find(
@@ -1601,7 +1601,7 @@ describe("SchedulerService operations health alerts", () => {
     expect(opsAlerts.sendSafely).toHaveBeenCalledTimes(2);
     expect(opsAlerts.sendSafely).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("amoCRM недоступен"),
+      expect.stringContaining("amoCRM временно недоступна"),
       {
         dedupKey: "scheduler:amo:down",
         cooldownMs: 60 * 60 * 1000,
@@ -1609,7 +1609,7 @@ describe("SchedulerService operations health alerts", () => {
     );
     expect(opsAlerts.sendSafely).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining("amoCRM снова доступен"),
+      expect.stringContaining("связь с amoCRM восстановлена"),
       {
         dedupKey: "scheduler:amo:recovered",
         cooldownMs: 60 * 60 * 1000,
@@ -1662,7 +1662,7 @@ describe("SchedulerService operations health alerts", () => {
     expect(opsAlerts.sendSafely).toHaveBeenCalledTimes(2);
     expect(opsAlerts.sendSafely).toHaveBeenNthCalledWith(
       1,
-      expect.stringContaining("SMTP недоступен"),
+      expect.stringContaining("электронная почта временно не отправляется"),
       {
         dedupKey: "scheduler:smtp:down",
         cooldownMs: 60 * 60 * 1000,
@@ -1670,7 +1670,7 @@ describe("SchedulerService operations health alerts", () => {
     );
     expect(opsAlerts.sendSafely).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining("SMTP снова доступен"),
+      expect.stringContaining("отправка электронной почты восстановлена"),
       {
         dedupKey: "scheduler:smtp:recovered",
         cooldownMs: 60 * 60 * 1000,

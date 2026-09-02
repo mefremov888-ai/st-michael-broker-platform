@@ -134,7 +134,7 @@ jobs:
             echo "OPS Telegram secrets are not configured; skipping success notice"
             exit 0
           fi
-          TEXT="🟢 PROD: сертификат broker.stmichael.ru продлён. HTTPS снова валиден."
+          TEXT="🟢 Рабочий сайт: защищённое соединение восстановлено. Сертификат broker.stmichael.ru успешно продлён."
           curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
             -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$OPS_ALERT_CHAT_ID" \
@@ -152,7 +152,7 @@ jobs:
             echo "OPS Telegram secrets are not configured"
             exit 0
           fi
-          TEXT="🔴 PROD: не удалось продлить сертификат broker.stmichael.ru. Браузер показывает NET::ERR_CERT_DATE_INVALID, пока HTTPS не валиден."
+          TEXT="🔴 Рабочий сайт: не удалось продлить сертификат broker.stmichael.ru. Пользователи могут увидеть предупреждение о небезопасном соединении. Нужна ручная проверка сертификата."
           curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
             -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$OPS_ALERT_CHAT_ID" \

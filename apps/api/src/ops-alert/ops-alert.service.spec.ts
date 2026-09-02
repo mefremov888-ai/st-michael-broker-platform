@@ -1,4 +1,24 @@
-import { OpsAlertService } from './ops-alert.service';
+import {
+  OpsAlertService,
+  opsAlertCategoryLabel,
+  opsAlertScenarioLabel,
+  opsAlertTime,
+} from './ops-alert.service';
+
+describe('русские подписи технических уведомлений', () => {
+  it('не показывает внутренние коды причин и операций', () => {
+    expect(opsAlertCategoryLabel('AMO_AUTH_ERROR')).toBe('ошибка авторизации в amoCRM');
+    expect(opsAlertCategoryLabel('UNKNOWN_CODE')).toBe('неизвестная техническая ошибка');
+    expect(opsAlertScenarioLabel('REFIX_AFTER_CLOSED')).toBe('повторная фиксация после закрытой заявки');
+  });
+
+  it('показывает время по Москве', () => {
+    const result = opsAlertTime(new Date('2026-09-02T08:34:56.000Z'));
+    expect(result).toContain('02.09.2026');
+    expect(result).toContain('11:34:56');
+    expect(result).toContain('МСК');
+  });
+});
 
 describe('OpsAlertService', () => {
   let fetchMock: jest.SpyInstance;

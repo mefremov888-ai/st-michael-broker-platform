@@ -23,7 +23,12 @@ import type { Queue } from "bull";
 import * as XLSX from "xlsx";
 import { getSystemSetting } from "../common/system-setting";
 import { buildPhoneSearchConditions } from "../admin/brokers-import.helper";
-import { OpsAlertService } from "../ops-alert/ops-alert.service";
+import {
+  OpsAlertService,
+  opsAlertCategoryLabel,
+  opsAlertScenarioLabel,
+  opsAlertTime,
+} from "../ops-alert/ops-alert.service";
 import {
   acquireAmoBrokerContactAdvisoryXactLock,
   armDurableAmoBrokerContactCreateGate,
@@ -2591,13 +2596,13 @@ export class ClientFixationService {
     try {
       await this.opsAlerts.sendSafely(
         [
-          "🔴 PROD: фиксация не ушла в amoCRM",
+          "🔴 Рабочий сайт: фиксация не передана в amoCRM",
           "Причина: у ответственного брокера нет контакта amoCRM.",
-          `clientId: ${safeClientId}`,
-          `brokerId: ${safeBrokerId}`,
-          `scenario: ${safeScenario}`,
+          `Номер заявки: ${safeClientId}`,
+          `Номер брокера: ${safeBrokerId}`,
+          `Операция: ${opsAlertScenarioLabel(safeScenario)}`,
           "Заявка сохранена в кабинете и стоит в очереди.",
-          "Открыть /admin/broker-applications, фильтр «Передача в amoCRM».",
+          "Что сделать: открыть «Админка → Все заявки от брокеров» и выбрать фильтр «Передача в amoCRM».",
         ].join("\n"),
         {
           // One Telegram ping per responsible broker, not one per client.
@@ -2631,14 +2636,14 @@ export class ClientFixationService {
       ? "⚠ Результат передачи фиксации в amoCRM не подтверждён."
       : "⚠ Фиксация не передана в amoCRM.";
     const disposition = reconciliationRequired
-      ? "Клиент сохранён в кабинете. Автоповтор заблокирован: сначала нужна ручная сверка с amoCRM."
-      : "Клиент сохранён в кабинете и оставлен для автоматического ретрая.";
+      ? "Клиент сохранён в кабинете. Автоматический повтор остановлен: сначала нужна ручная сверка с amoCRM."
+      : "Клиент сохранён в кабинете. Система попробует передать его повторно автоматически.";
     const body = [
       headline,
-      `clientId: ${safeClientId}`,
-      `brokerId: ${safeBrokerId}`,
-      `category: ${category}`,
-      `scenario: ${safeScenario}`,
+      `Номер заявки: ${safeClientId}`,
+      `Номер брокера: ${safeBrokerId}`,
+      `Причина: ${opsAlertCategoryLabel(category)}`,
+      `Операция: ${opsAlertScenarioLabel(safeScenario)}`,
       disposition,
     ].join("\n");
 
@@ -2647,16 +2652,16 @@ export class ClientFixationService {
         await this.opsAlerts.sendSafely(
           [
             reconciliationRequired
-              ? "🔴 PROD: amoCRM fixation result is ambiguous"
-              : "🔴 PROD: amoCRM fixation sync failed",
-            `clientId: ${safeClientId}`,
-            `brokerId: ${safeBrokerId}`,
-            `category: ${category}`,
-            `scenario: ${safeScenario}`,
-            `at: ${new Date().toISOString()}`,
+              ? "🔴 Рабочий сайт: результат передачи в amoCRM не подтверждён"
+              : "🔴 Рабочий сайт: фиксация не передана в amoCRM",
+            `Номер заявки: ${safeClientId}`,
+            `Номер брокера: ${safeBrokerId}`,
+            `Причина: ${opsAlertCategoryLabel(category)}`,
+            `Операция: ${opsAlertScenarioLabel(safeScenario)}`,
+            `Время: ${opsAlertTime()}`,
             reconciliationRequired
-              ? "Automatic retry is blocked; reconcile the possible amoCRM lead manually."
-              : "Client remains queued for automatic retry.",
+              ? "Автоматический повтор остановлен. Нужно вручную проверить, появилась ли сделка в amoCRM."
+              : "Заявка сохранена в очереди. Система повторит передачу автоматически.",
           ].join("\n"),
           {
             dedupKey: `fixation-amo-sync:${safeClientId}:${category}`,
@@ -2730,12 +2735,11 @@ export class ClientFixationService {
 
     await this.opsAlerts?.sendSafely(
       [
-        "🔴 PROD: Morekit не принял фиксацию",
-        `clientId: ${safeClientId}`,
-        `brokerId: ${safeBrokerId}`,
-        `amoLeadId: ${safeLeadId}`,
-        "category: MOREKIT_DELIVERY_FAILED",
-        "Лид создан в amoCRM, но распределение менеджера КЦ нужно проверить вручную.",
+        "🔴 Рабочий сайт: контакт-центр не получил фиксацию",
+        `Номер заявки: ${safeClientId}`,
+        `Номер брокера: ${safeBrokerId}`,
+        `Номер сделки в amoCRM: ${safeLeadId}`,
+        "Сделка создана в amoCRM, но назначение менеджера контакт-центра нужно проверить вручную.",
       ].join("\n"),
       {
         dedupKey: `fixation-morekit:${safeClientId}`,

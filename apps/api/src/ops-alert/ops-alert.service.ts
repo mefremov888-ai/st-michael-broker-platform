@@ -4,6 +4,41 @@ import { ConfigService } from '@nestjs/config';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DEDUP_COOLDOWN_MS = 5 * 60_000;
 
+const ALERT_CATEGORY_LABELS: Record<string, string> = {
+  AMO_AUTH_ERROR: 'ошибка авторизации в amoCRM',
+  AMO_RATE_LIMIT: 'amoCRM временно ограничила количество запросов',
+  AMO_UNAVAILABLE: 'amoCRM временно недоступна',
+  AMO_TIMEOUT: 'amoCRM не ответила вовремя',
+  AMO_INVALID_RESPONSE: 'amoCRM вернула некорректный ответ',
+  AMO_SYNC_ERROR: 'ошибка передачи данных в amoCRM',
+  DATABASE_ERROR: 'ошибка базы данных кабинета',
+  TIMEOUT: 'операция не завершилась вовремя',
+  DEPENDENCY_UNAVAILABLE: 'внешний сервис временно недоступен',
+  UNEXPECTED_ERROR: 'непредвиденная техническая ошибка',
+};
+
+const FIXATION_SCENARIO_LABELS: Record<string, string> = {
+  NEW_CLIENT: 'новая фиксация',
+  REFIX_AFTER_CLOSED: 'повторная фиксация после закрытой заявки',
+  REFIX_AMO_DOWN: 'повторная фиксация после сбоя amoCRM',
+};
+
+export function opsAlertCategoryLabel(value: unknown): string {
+  return ALERT_CATEGORY_LABELS[String(value || '')] || 'неизвестная техническая ошибка';
+}
+
+export function opsAlertScenarioLabel(value: unknown): string {
+  return FIXATION_SCENARIO_LABELS[String(value || '')] || 'операция фиксации';
+}
+
+export function opsAlertTime(date = new Date()): string {
+  return `${new Intl.DateTimeFormat('ru-RU', {
+    timeZone: 'Europe/Moscow',
+    dateStyle: 'short',
+    timeStyle: 'medium',
+  }).format(date)} МСК`;
+}
+
 export interface OpsAlertOptions {
   /** Repeated alerts with the same key are suppressed during the cooldown. */
   dedupKey?: string;
