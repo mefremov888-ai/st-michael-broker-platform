@@ -1269,14 +1269,11 @@ export class AmoCrmAdapter {
     });
   }
 
-  async replaceContactCompany(
-    contactId: number,
-    companyId: number,
-  ): Promise<void> {
+  async getContactCompanyIds(contactId: number): Promise<number[]> {
     const links = await this.request<any>(
       `/contacts/${contactId}/links?filter[to_entity_type]=companies&limit=250`,
     );
-    const currentCompanyIds = Array.from(
+    return Array.from(
       new Set(
         (Array.isArray(links?._embedded?.links) ? links._embedded.links : [])
           .filter((link: any) => link?.to_entity_type === "companies")
@@ -1284,6 +1281,13 @@ export class AmoCrmAdapter {
           .filter((id: number) => Number.isSafeInteger(id) && id > 0),
       ),
     ) as number[];
+  }
+
+  async replaceContactCompany(
+    contactId: number,
+    companyId: number,
+  ): Promise<void> {
+    const currentCompanyIds = await this.getContactCompanyIds(contactId);
 
     if (!currentCompanyIds.includes(companyId)) {
       await this.linkContactToCompany(contactId, companyId);
