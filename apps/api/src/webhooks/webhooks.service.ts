@@ -739,6 +739,9 @@ export class WebhooksService {
       where: { amoLeadId: BigInt(leadId) },
       include: {
         broker: { select: { id: true, fullName: true, amoContactId: true } },
+        responsibleBroker: {
+          select: { id: true, fullName: true, amoContactId: true },
+        },
         deals: { select: { id: true, status: true } },
         meetings: { select: { id: true, status: true } },
       },
@@ -750,7 +753,13 @@ export class WebhooksService {
       );
       if (hasClosedDeal) continue;
 
-      const brokerAmoId = client.broker?.amoContactId ? Number(client.broker.amoContactId) : null;
+      // For delegated fixations, amoCRM uniqueness belongs to the selected
+      // responsible broker, while client.broker is only the coordinator who
+      // submitted the form.
+      const effectiveBroker = client.responsibleBroker || client.broker;
+      const brokerAmoId = effectiveBroker?.amoContactId
+        ? Number(effectiveBroker.amoContactId)
+        : null;
       if (!brokerAmoId) continue; // нечего проверять — брокер не синкан с amo
 
       // 2026-06-16 (правка 3, жёсткая версия): если КЦ-лид закрылся в
@@ -787,19 +796,9 @@ export class WebhooksService {
 
       const attached = leadContactIds.includes(brokerAmoId);
 
-      // 2026-07-03: исключение для делегированных клиентов («Фиксирую на другого
-      // брокера»). Если у клиента creator (client.brokerId) != executor
-      // (client.responsibleBrokerId) — то creator по бизнесу и НЕ должен быть
-      // в контактах amoCRM-лида: там executor, он ведёт клиента с КЦ. Значит
-      // attach/detach логика (attached==false → REJECTED) для такого Client
-      // ошибочна: она сбивает уникальность creator'а на пустом месте.
-      // Пропускаем обе attach/detach ветки для делегированных клиентов.
-      // Что осталось активным для делегированных: 143-закрытие КЦ-лида
-      // (см. выше), закрытие sales-карточки, сброс через `resolveUniqueness`.
-      const isDelegated = !!client.responsibleBrokerId
-        && client.responsibleBrokerId !== client.brokerId;
-      if (isDelegated) continue;
-
+      // 2026-09-01: delegated clients follow the selected responsible broker.
+      // The coordinator remains the local creator and can still see the row,
+      // but detaching the selected broker in amoCRM must reject uniqueness.
       // 2026-06-16: маркер «исключения» — Client был создан как RULE_EXCEPTION_AFTER_SALES_MEETING.
       // Лифт UNDER_REVIEW → CONDITIONALLY_UNIQUE ТОЛЬКО когда L2 (текущий лид)
       // дойдёт до 62907282 «Квалифицировали и выводим на встречу» в КЦ

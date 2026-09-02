@@ -1269,6 +1269,42 @@ export class AmoCrmAdapter {
     });
   }
 
+  async replaceContactCompany(
+    contactId: number,
+    companyId: number,
+  ): Promise<void> {
+    const links = await this.request<any>(
+      `/contacts/${contactId}/links?filter[to_entity_type]=companies&limit=250`,
+    );
+    const currentCompanyIds = Array.from(
+      new Set(
+        (Array.isArray(links?._embedded?.links) ? links._embedded.links : [])
+          .filter((link: any) => link?.to_entity_type === "companies")
+          .map((link: any) => Number(link?.to_entity_id))
+          .filter((id: number) => Number.isSafeInteger(id) && id > 0),
+      ),
+    ) as number[];
+
+    if (!currentCompanyIds.includes(companyId)) {
+      await this.linkContactToCompany(contactId, companyId);
+    }
+
+    const obsoleteCompanyIds = currentCompanyIds.filter(
+      (id) => id !== companyId,
+    );
+    if (obsoleteCompanyIds.length > 0) {
+      await this.request(`/contacts/${contactId}/unlink`, {
+        method: "POST",
+        body: JSON.stringify(
+          obsoleteCompanyIds.map((id) => ({
+            to_entity_id: id,
+            to_entity_type: "companies",
+          })),
+        ),
+      });
+    }
+  }
+
   /**
    * Связывает контакт брокера с Company в amoCRM (поле «Компания» в карточке).
    * Ищем по ИНН, иначе создаём компанию с названием агентства.
@@ -1310,9 +1346,7 @@ export class AmoCrmAdapter {
       if (created?.id) amoCompanyId = Number(created.id);
     }
     if (amoCompanyId) {
-      await this.linkContactToCompany(contactId, amoCompanyId).catch(() => {
-        /* уже связаны — не критично */
-      });
+      await this.replaceContactCompany(contactId, amoCompanyId);
     }
     return amoCompanyId;
   }

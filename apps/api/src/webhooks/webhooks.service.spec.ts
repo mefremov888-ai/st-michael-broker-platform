@@ -76,6 +76,112 @@ describe("WebhooksService amo contact tour sync", () => {
   });
 });
 
+describe("WebhooksService delegated broker attachment sync", () => {
+  const makeClient = (overrides: Record<string, unknown> = {}) => ({
+    id: "client-delegated",
+    brokerId: "coordinator",
+    responsibleBrokerId: "selected-broker",
+    uniquenessStatus: "CONDITIONALLY_UNIQUE",
+    uniquenessReason: null,
+    broker: {
+      id: "coordinator",
+      fullName: "Coordinator",
+      amoContactId: 700n,
+    },
+    responsibleBroker: {
+      id: "selected-broker",
+      fullName: "Selected broker",
+      amoContactId: 701n,
+    },
+    deals: [],
+    meetings: [],
+    ...overrides,
+  });
+
+  it("rejects delegated uniqueness when the selected broker is detached", async () => {
+    const prisma = {
+      client: {
+        findMany: jest.fn().mockResolvedValue([makeClient()]),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const service = new WebhooksService(prisma as any);
+    (service as any).amo = {
+      getLead: jest.fn().mockResolvedValue({
+        id: 123,
+        pipeline_id: 7600542,
+        status_id: 62907282,
+        _embedded: { contacts: [{ id: 700 }] },
+      }),
+    };
+    jest
+      .spyOn((service as any).logger, "log")
+      .mockImplementation(() => undefined);
+
+    await (service as any).syncBrokerAttachmentFromLead(123);
+
+    expect(prisma.client.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          responsibleBroker: expect.any(Object),
+        }),
+      }),
+    );
+    expect(prisma.client.update).toHaveBeenCalledWith({
+      where: { id: "client-delegated" },
+      data: {
+        uniquenessStatus: "REJECTED",
+        uniquenessReason: "Брокер откреплён от лида в amoCRM",
+        uniquenessExpiresAt: null,
+      },
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        entityId: "client-delegated",
+        payload: expect.objectContaining({
+          trigger: "AMO_BROKER_DETACHED",
+          brokerAmoContactId: 701,
+        }),
+      }),
+    });
+  });
+
+  it("restores delegated uniqueness when the selected broker is reattached", async () => {
+    const prisma = {
+      client: {
+        findMany: jest.fn().mockResolvedValue([
+          makeClient({ uniquenessStatus: "REJECTED" }),
+        ]),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const service = new WebhooksService(prisma as any);
+    (service as any).amo = {
+      getLead: jest.fn().mockResolvedValue({
+        id: 123,
+        pipeline_id: 7600542,
+        status_id: 62907282,
+        _embedded: { contacts: [{ id: 701 }] },
+      }),
+    };
+    jest
+      .spyOn((service as any).logger, "log")
+      .mockImplementation(() => undefined);
+
+    await (service as any).syncBrokerAttachmentFromLead(123);
+
+    expect(prisma.client.update).toHaveBeenCalledWith({
+      where: { id: "client-delegated" },
+      data: expect.objectContaining({
+        uniquenessStatus: "CONDITIONALLY_UNIQUE",
+        uniquenessReason: "Брокер прикреплён обратно к лиду в amoCRM",
+      }),
+    });
+  });
+});
+
 describe("WebhooksService Mango authentication and call status", () => {
   const apiKey = "test-vpbx-key";
   const apiSalt = "test-vpbx-salt";
