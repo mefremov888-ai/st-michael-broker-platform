@@ -1,4 +1,4 @@
-name: Monitor broker cabinet health
+name: Проверка работы кабинета брокера
 
 # The public check runs on a GitHub runner, so it still alerts when the
 # production VM or SSH is unavailable. Host-level checks run separately over
@@ -59,7 +59,7 @@ jobs:
             echo "OPS Telegram secrets are not configured"
             exit 1
           fi
-          TEXT="🧪 PROD: тест Telegram-мониторинга КБ прошёл. GitHub Actions видит токен и чат."
+          TEXT="🧪 Проверка Telegram-поддержки прошла успешно. Бот может отправлять сообщения в этот чат."
           curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
             -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$OPS_ALERT_CHAT_ID" \
@@ -73,7 +73,7 @@ jobs:
             echo "OPS Telegram secrets are not configured"
             exit 1
           fi
-          TEXT="🔴 PROD: кабинет брокера недоступен или не готов. ${{ steps.probe.outputs.curl_exit }}. Проверить web, nginx, API, PostgreSQL и Redis."
+          TEXT="🔴 Рабочий сайт: кабинет брокера недоступен. Публичная проверка сайта не прошла. Нужно проверить сервер кабинета и базу данных."
           curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
             -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$OPS_ALERT_CHAT_ID" \
@@ -137,14 +137,21 @@ jobs:
             RUNNING_SERVICES=$(docker compose ps --status running --services 2>/dev/null || true)
             for SERVICE in postgres redis api web nginx; do
               if ! printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$SERVICE"; then
-                add_incident "container-${SERVICE}" "контейнер ${SERVICE} не работает"
+                case "$SERVICE" in
+                  postgres) SERVICE_LABEL="база данных" ;;
+                  redis) SERVICE_LABEL="служба очередей" ;;
+                  api) SERVICE_LABEL="сервер кабинета" ;;
+                  web) SERVICE_LABEL="интерфейс кабинета" ;;
+                  nginx) SERVICE_LABEL="веб-сервер" ;;
+                esac
+                add_incident "container-${SERVICE}" "не работает: ${SERVICE_LABEL}"
               fi
             done
 
             if ! docker compose exec -T api wget -qO- --timeout=10 \
               http://localhost:4000/api/health/ready 2>/dev/null \
               | grep -q '"status":"ok"'; then
-              add_incident "api-ready" "API, PostgreSQL или Redis не прошли readiness-check"
+              add_incident "api-ready" "внутренняя проверка кабинета, базы данных или очереди не прошла"
             fi
 
             QUEUE_RESULT=$(docker compose exec -T api node -e "
@@ -162,7 +169,7 @@ jobs:
             " 2>/dev/null | tail -1)
 
             if ! printf '%s' "$QUEUE_RESULT" | grep -Eq '^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$'; then
-              add_incident "fixation-queue-check" "не удалось проверить очередь фиксаций"
+              add_incident "fixation-queue-check" "не удалось проверить очередь заявок для amoCRM"
             else
               IFS='|' read -r FAILED_COUNT OLDEST_EPOCH EXHAUSTED_COUNT MISSING_CONTACT_COUNT <<EOF
             $QUEUE_RESULT
@@ -173,11 +180,11 @@ jobs:
                 OLDEST_MINUTES=$(( (NOW_EPOCH - OLDEST_EPOCH) / 60 ))
               fi
               if [ "$MISSING_CONTACT_COUNT" -ge 1 ]; then
-                add_incident "fixation-broker-contact" "нет контакта брокера в amoCRM: ${MISSING_CONTACT_COUNT} заявок. Открыть /admin/broker-applications, фильтр «Передача в amoCRM»"
+                add_incident "fixation-broker-contact" "у брокеров нет контактов в amoCRM: ${MISSING_CONTACT_COUNT} заявок. Откройте «Админка → Все заявки от брокеров» и выберите фильтр «Передача в amoCRM»"
               fi
               if [ "$FAILED_COUNT" -ge 10 ] || [ "$EXHAUSTED_COUNT" -ge 1 ] \
                 || { [ "$FAILED_COUNT" -ge 1 ] && [ "$OLDEST_MINUTES" -ge 10 ]; }; then
-                add_incident "fixation-queue" "не передано в amoCRM: ${FAILED_COUNT}; старейшая ${OLDEST_MINUTES} мин; исчерпали retry: ${EXHAUSTED_COUNT}"
+                add_incident "fixation-queue" "не передано в amoCRM: ${FAILED_COUNT}; самая старая заявка ждёт ${OLDEST_MINUTES} мин.; автоматические повторы закончились у ${EXHAUSTED_COUNT} заявок"
               fi
             fi
 
@@ -199,8 +206,8 @@ jobs:
             KEYS_TO_STORE="$PREVIOUS_KEYS"
             ALERT_AT_TO_STORE="$PREVIOUS_ALERT_AT"
             if [ -n "$INCIDENT_KEYS" ] && [ "$SHOULD_ALERT" -eq 1 ]; then
-              if alert "🔴 PROD: проблемы сервиса КБ:${INCIDENT_TEXT}
-            Проверить /admin/broker-applications и состояние сервера."; then
+              if alert "🔴 Рабочий сайт: обнаружены проблемы кабинета брокера:${INCIDENT_TEXT}
+            Что сделать: открыть «Админка → Все заявки от брокеров» и проверить состояние сервера."; then
                 KEYS_TO_STORE="$INCIDENT_KEYS"
                 ALERT_AT_TO_STORE=$NOW_EPOCH
               else
@@ -209,7 +216,7 @@ jobs:
             elif [ -n "$INCIDENT_KEYS" ]; then
               KEYS_TO_STORE="$INCIDENT_KEYS"
             elif [ -z "$INCIDENT_KEYS" ] && [ -n "$PREVIOUS_KEYS" ]; then
-              if alert "🟢 PROD: сервис КБ восстановился; API, БД, Redis, контейнеры и очередь фиксаций в норме."; then
+              if alert "🟢 Рабочий сайт: кабинет брокера восстановлен. Сайт, база данных и очередь заявок работают нормально."; then
                 KEYS_TO_STORE=""
                 ALERT_AT_TO_STORE=$NOW_EPOCH
               else
@@ -231,7 +238,7 @@ jobs:
             echo "OPS Telegram secrets are not configured"
             exit 1
           fi
-          TEXT="🔴 PROD: host-monitor завершился ошибкой. Возможны: недоступность VM/SSH, сбой проверки или отправки Telegram с сервера. Проверить лог workflow."
+          TEXT="🔴 Рабочий сайт: автоматическая проверка сервера завершилась ошибкой. Сервер может быть недоступен либо сама проверка дала сбой. Нужно открыть в GitHub раздел автоматических проверок и журнал «Проверка работы кабинета брокера»."
           curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
             -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="$OPS_ALERT_CHAT_ID" \

@@ -1066,7 +1066,7 @@ export class SchedulerService {
     const contactId = safePositiveAmoContactId(provisioned?.amoContactId);
     if (!contactId) return null;
     await this.sendOpsAlert(
-      `🟢 PROD: контакт брокера создан в amoCRM автоматически\nbrokerId: ${brokerId}\nФиксация уходит в amoCRM без ручного провижининга.`,
+      `🟢 Рабочий сайт: контакт брокера создан в amoCRM автоматически\nНомер брокера: ${brokerId}\nНовые фиксации будут передаваться без ручной настройки.`,
       `scheduler:amo-retry:broker-contact-provisioned:${brokerId}`,
     );
     return contactId;
@@ -1082,7 +1082,7 @@ export class SchedulerService {
     });
     if (queueCount === 0) return;
     await this.sendOpsAlert(
-      `🔴 PROD: фиксации не уходят в amoCRM — нет контакта брокера\nqueueCount: ${queueCount}\nОткрыть /admin/broker-applications, фильтр «Передача в amoCRM».`,
+      `🔴 Рабочий сайт: фиксации не передаются в amoCRM\nПричина: у брокеров нет контактов в amoCRM.\nЗаявок в очереди: ${queueCount}\nЧто сделать: открыть «Админка → Все заявки от брокеров» и выбрать фильтр «Передача в amoCRM».`,
       `scheduler:amo-retry:missing-broker-contact-summary:${queueCount}`,
     );
   }
@@ -1101,7 +1101,7 @@ export class SchedulerService {
     });
     const sampleIds = reconciliationRows.map((row) => String(row.id));
     await this.sendOpsAlert(
-      `🔴 PROD: автоповтор фиксаций заблокирован\nreconciliationCount: ${reconciliationCount}\nnewestClientIds: ${sampleIds.join(', ') || 'none'}\nЛиды могли уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
+      `🔴 Рабочий сайт: автоматический повтор фиксаций остановлен\nЗаявок для ручной проверки: ${reconciliationCount}\nПоследние номера заявок: ${sampleIds.join(', ') || 'нет'}\nСделки могли уже появиться в amoCRM. Перед повторной отправкой нужно вручную сверить их с amoCRM.`,
       `scheduler:amo-retry:reconciliation-summary:${reconciliationCount}:${sampleIds[0] || 'none'}`,
     );
   }
@@ -1266,7 +1266,7 @@ export class SchedulerService {
           continue;
         }
         await this.sendOpsAlert(
-          `🔴 PROD: автоповтор фиксации заблокирован\nclientId: ${clientId}\nbrokerId: ${brokerId}\nЛид мог уже создаться в amoCRM; требуется ручная сверка/reconciliation до любого нового POST.`,
+          `🔴 Рабочий сайт: автоматический повтор фиксации остановлен\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nСделка могла уже появиться в amoCRM. Перед повторной отправкой нужно проверить её вручную.`,
           `scheduler:amo-retry:reconciliation-required:${clientId}`,
         );
         failed++;
@@ -1362,7 +1362,7 @@ export class SchedulerService {
 
         if (!client.fixationAgencyId) {
           await this.sendOpsAlert(
-            `🔴 PROD: фиксацию нельзя повторить\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: не указана компания; требуется ручная проверка.`,
+            `🔴 Рабочий сайт: фиксацию нельзя повторить\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nПричина: у заявки не указано агентство. Нужна ручная проверка.`,
             `scheduler:amo-retry:missing-agency:${clientId}`,
           );
           throw new Error('Fixation agency is not configured; retry cannot continue');
@@ -1370,7 +1370,7 @@ export class SchedulerService {
         const agency = await this.prisma.agency.findUnique({ where: { id: client.fixationAgencyId } });
         if (!agency) {
           await this.sendOpsAlert(
-            `🔴 PROD: фиксацию нельзя повторить\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: привязанная компания не найдена; требуется ручная проверка.`,
+            `🔴 Рабочий сайт: фиксацию нельзя повторить\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nПричина: указанное агентство не найдено. Нужна ручная проверка.`,
             `scheduler:amo-retry:missing-agency:${clientId}`,
           );
           throw new Error('Fixation agency was not found; retry cannot continue');
@@ -1392,7 +1392,7 @@ export class SchedulerService {
             },
           });
           await this.sendOpsAlert(
-            `🟡 PROD: retry фиксации отложен без POST\nclientId: ${clientId}\nbrokerId: ${brokerId}\nПричина: контакт брокера в amoCRM не удалось создать автоматически. Попытка не сожжена, крон повторит.`,
+            `🟡 Рабочий сайт: повторная передача фиксации отложена\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nПричина: контакт брокера в amoCRM не удалось создать автоматически. Система попробует снова позднее.`,
             `scheduler:amo-retry:missing-broker-contact:${clientId}`,
           );
           failed++;
@@ -1484,7 +1484,7 @@ export class SchedulerService {
         });
         if (linked.count !== 1) {
           await this.sendOpsAlert(
-            `🔴 PROD: amoCRM создала лид, но связь не сохранена\nclientId: ${clientId}\nbrokerId: ${brokerId}\namoLeadId: ${createdAmoLeadId}\nТребуется ручная привязка; повтор POST запрещён.`,
+            `🔴 Рабочий сайт: сделка создана в amoCRM, но не связана с заявкой\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nНомер сделки в amoCRM: ${createdAmoLeadId}\nНужно связать их вручную. Повторно отправлять заявку нельзя: появится дубль.`,
             `scheduler:amo-retry:linkage-failed:${clientId}`,
           );
           failed++;
@@ -1517,14 +1517,14 @@ export class SchedulerService {
               .then((result) => {
                 if (result?.ok !== false) return;
                 return this.sendOpsAlert(
-                  `🔴 PROD: MoreKIT не получил фиксацию\nclientId: ${clientId}\nbrokerId: ${brokerId}\ncategory: MOREKIT_DELIVERY_FAILED`,
+                  `🔴 Рабочий сайт: контакт-центр не получил фиксацию\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nСделка уже создана в amoCRM. Нужно вручную проверить назначение менеджера контакт-центра.`,
                   `scheduler:amo-retry:morekit-delivery-failed:${clientId}`,
                 );
               })
               .catch(() => {
                 this.logger.error('[amo-retry] MoreKIT delivery failed');
                 return this.sendOpsAlert(
-                  `🔴 PROD: MoreKIT не получил фиксацию\nclientId: ${clientId}\nbrokerId: ${brokerId}\ncategory: MOREKIT_DELIVERY_FAILED`,
+                  `🔴 Рабочий сайт: контакт-центр не получил фиксацию\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nСделка уже создана в amoCRM. Нужно вручную проверить назначение менеджера контакт-центра.`,
                   `scheduler:amo-retry:morekit-delivery-failed:${clientId}`,
                 );
               });
@@ -1596,7 +1596,7 @@ export class SchedulerService {
           const clientId = String(client.id);
           const brokerId = retryBroker?.id ? String(retryBroker.id) : 'unknown';
           await this.sendOpsAlert(
-            `🔴 PROD: неоднозначный ответ amoCRM при фиксации\nclientId: ${clientId}\nbrokerId: ${brokerId}\ncategory: ${safeError}\nЛид мог уже создаться — перед ручным «Повторить» проверьте amoCRM, иначе будет дубль.`,
+            `🔴 Рабочий сайт: amoCRM не подтвердила результат фиксации\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nСделка могла уже появиться в amoCRM. Перед ручным повтором обязательно проверьте amoCRM, иначе появится дубль.`,
             `scheduler:amo-retry:ambiguous-post:${clientId}`,
           );
         } else if (nextAttempts >= AMO_RETRY_MAX_ATTEMPTS) {
@@ -1604,7 +1604,7 @@ export class SchedulerService {
           const clientId = String(client.id);
           const brokerId = retryBroker?.id ? String(retryBroker.id) : 'unknown';
           await this.sendOpsAlert(
-            `🔴 PROD: фиксация не доставлена в amoCRM\nclientId: ${clientId}\nbrokerId: ${brokerId}\nАвтоматические повторы исчерпаны (${AMO_RETRY_MAX_ATTEMPTS} попыток); требуется ручная проверка.`,
+            `🔴 Рабочий сайт: фиксация не передана в amoCRM\nНомер заявки: ${clientId}\nНомер брокера: ${brokerId}\nСистема безуспешно повторила передачу ${AMO_RETRY_MAX_ATTEMPTS} раз. Нужна ручная проверка.`,
             `scheduler:amo-retry:dead-letter:${clientId}`,
           );
         }
@@ -1763,7 +1763,7 @@ export class SchedulerService {
         this.amoHealthState.lastOk = true;
         if (wasDown) {
           await this.sendOpsAlert(
-            '🟢 PROD: amoCRM снова доступен\nПроверка подключения прошла успешно; безопасные auth-ошибки возвращены в очередь.',
+            '🟢 Рабочий сайт: связь с amoCRM восстановлена\nПроверка подключения прошла успешно. Неотправленные заявки возвращены в очередь.',
             'scheduler:amo:recovered',
           );
         }
@@ -1789,7 +1789,7 @@ export class SchedulerService {
 
   private async alertAmoTokenDead(error: string) {
     await this.sendOpsAlert(
-      '🔴 PROD: токен amoCRM недействителен\namoCRM отклонил авторизацию; требуется обновить токен.',
+      '🔴 Рабочий сайт: amoCRM отклонила подключение\nНужно обновить данные доступа к amoCRM. До этого новые заявки будут сохраняться в кабинете.',
       'scheduler:amo:token-dead',
     );
     // 2026-08-19: раньше здесь ещё рассылались персональные TELEGRAM-нотификации
@@ -1812,7 +1812,7 @@ export class SchedulerService {
 
   private async alertAmoDown(error: string) {
     await this.sendOpsAlert(
-      '🔴 PROD: amoCRM недоступен\nПроверка подключения завершилась ошибкой. Фиксации сохраняются локально и будут повторены автоматически.',
+      '🔴 Рабочий сайт: amoCRM временно недоступна\nФиксации сохраняются в кабинете. После восстановления связи система передаст их автоматически.',
       'scheduler:amo:down',
     );
     try {
@@ -1854,7 +1854,7 @@ export class SchedulerService {
         this.logger.log('smtp health: восстановился ✓');
         this.smtpHealthState.lastOk = true;
         await this.sendOpsAlert(
-          '🟢 PROD: SMTP снова доступен\nПроверка почтового транспорта прошла успешно.',
+          '🟢 Рабочий сайт: отправка электронной почты восстановлена\nСистемные письма снова отправляются.',
           'scheduler:smtp:recovered',
         );
       }
@@ -1877,7 +1877,7 @@ export class SchedulerService {
 
   private async alertSmtpDown(error: string) {
     await this.sendOpsAlert(
-      '🔴 PROD: SMTP недоступен\nПроверка почтового транспорта завершилась ошибкой. Системные письма временно не отправляются.',
+      '🔴 Рабочий сайт: электронная почта временно не отправляется\nРегистрационные письма и восстановление пароля могут приходить с задержкой.',
       'scheduler:smtp:down',
     );
     try {
@@ -1896,7 +1896,7 @@ export class SchedulerService {
 
   private async alertAmoTokenMissing(): Promise<void> {
     await this.sendOpsAlert(
-      '🔴 PROD: amoCRM не настроен\nAMO_ACCESS_TOKEN отсутствует. Автосинхронизация и повторная отправка фиксаций остановлены.',
+      '🔴 Рабочий сайт: подключение к amoCRM не настроено\nДанные доступа отсутствуют. Передача новых и повторная отправка сохранённых фиксаций остановлены.',
       'scheduler:amo:token-missing',
     );
   }

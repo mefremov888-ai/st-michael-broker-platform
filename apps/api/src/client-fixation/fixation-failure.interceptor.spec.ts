@@ -20,8 +20,9 @@ describe('FixationFailureInterceptor', () => {
 
     expect(opsAlerts.sendSafely).toHaveBeenCalledTimes(1);
     const message = opsAlerts.sendSafely.mock.calls[0][0] as string;
-    expect(message).toContain('brokerId: broker-1');
-    expect(message).toContain('category: UNEXPECTED_ERROR');
+    expect(message).toContain('Номер брокера: broker-1');
+    expect(message).toContain('Причина: непредвиденная техническая ошибка');
+    expect(message).not.toContain('category:');
     expect(message).not.toContain('sensitive details');
   });
 

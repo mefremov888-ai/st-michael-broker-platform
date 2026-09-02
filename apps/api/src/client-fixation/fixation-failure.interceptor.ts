@@ -6,7 +6,11 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import { Observable, catchError, throwError } from 'rxjs';
-import { OpsAlertService } from '../ops-alert/ops-alert.service';
+import {
+  OpsAlertService,
+  opsAlertCategoryLabel,
+  opsAlertTime,
+} from '../ops-alert/ops-alert.service';
 
 @Injectable()
 export class FixationFailureInterceptor implements NestInterceptor {
@@ -30,13 +34,13 @@ export class FixationFailureInterceptor implements NestInterceptor {
 
           void this.opsAlerts.sendSafely(
             [
-              '🔴 PROD: техническая ошибка фиксации',
-              `route: ${route}`,
-              `brokerId: ${brokerId}`,
-              `httpStatus: ${status}`,
-              `category: ${category}`,
-              `at: ${new Date().toISOString()}`,
-              'Проверить API и /admin/broker-applications.',
+              '🔴 Рабочий сайт: техническая ошибка при фиксации',
+              `Раздел сайта: ${route}`,
+              `Номер брокера: ${brokerId}`,
+              `Код ответа сайта: ${status}`,
+              `Причина: ${opsAlertCategoryLabel(category)}`,
+              `Время: ${opsAlertTime()}`,
+              'Что сделать: открыть «Админка → Все заявки от брокеров» и проверить заявку.',
             ].join('\n'),
             {
               dedupKey: `fixation-api:${category}`,
