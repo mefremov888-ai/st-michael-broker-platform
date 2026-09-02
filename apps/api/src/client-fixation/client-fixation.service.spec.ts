@@ -1,9 +1,52 @@
-import { ClientFixationService } from "./client-fixation.service";
+import {
+  ClientFixationService,
+  primaryAgencyForBroker,
+} from "./client-fixation.service";
 import {
   AMO_CREATE_IN_PROGRESS_MARKER,
   AMO_CREATE_RECONCILIATION_REQUIRED_MARKER,
   AMO_RETRY_MAX_ATTEMPTS,
 } from "../common/amo-sync-retry";
+
+describe("primaryAgencyForBroker", () => {
+  const creatorAgency = { id: "agency-a", name: "Agency A", inn: "7700000000" };
+  const responsibleAgency = { id: "agency-b", name: "Agency B", inn: "7800000000" };
+
+  it("uses the responsible broker primary agency for delegated fixation", () => {
+    const creator = {
+      brokerAgencies: [{ isPrimary: true, agency: creatorAgency }],
+    };
+    const responsible = {
+      brokerAgencies: [{ isPrimary: true, agency: responsibleAgency }],
+    };
+
+    expect(primaryAgencyForBroker(responsible)).toBe(responsibleAgency);
+    expect(primaryAgencyForBroker(responsible)).not.toBe(
+      primaryAgencyForBroker(creator),
+    );
+  });
+
+  it("uses the broker own primary agency for self-fixation", () => {
+    const broker = {
+      brokerAgencies: [{ isPrimary: true, agency: creatorAgency }],
+    };
+
+    expect(primaryAgencyForBroker(broker)).toBe(creatorAgency);
+  });
+
+  it("does not fall back to a non-primary agency", () => {
+    expect(
+      primaryAgencyForBroker({
+        brokerAgencies: [{ isPrimary: false, agency: responsibleAgency }],
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when broker agency data is unavailable", () => {
+    expect(primaryAgencyForBroker(null)).toBeNull();
+    expect(primaryAgencyForBroker({ brokerAgencies: [] })).toBeNull();
+  });
+});
 
 describe("ClientFixationService amo broker attachment", () => {
   process.env.BROKER_CONTACT_GATE_HMAC_KEY =
@@ -363,7 +406,17 @@ describe("ClientFixationService amo broker attachment", () => {
     expect(amo.createFixationRequest).not.toHaveBeenCalled();
   });
 
-  it("resolves the responsible broker contact before creating a fixation lead", async () => {
+  it("uses the responsible broker company before creating a delegated fixation lead", async () => {
+    const creatorAgency = {
+      id: "agency-a",
+      name: "Agency A",
+      inn: "7700000000",
+    };
+    const responsibleAgency = {
+      id: "agency-b",
+      name: "Agency B",
+      inn: "7800000000",
+    };
     const creator = {
       id: "creator",
       fullName: "Координатор",
@@ -371,7 +424,7 @@ describe("ClientFixationService amo broker attachment", () => {
       email: null,
       amoContactId: BigInt(101),
       funnelStage: "FIXATION",
-      brokerAgencies: [{ agencyId: "a1" }],
+      brokerAgencies: [{ isPrimary: true, agency: creatorAgency }],
     };
     const responsible = {
       id: "responsible",
@@ -383,7 +436,7 @@ describe("ClientFixationService amo broker attachment", () => {
       brokerAgencies: [
         {
           isPrimary: true,
-          agency: { id: "a1", name: "Агентство", inn: "7700000000" },
+          agency: responsibleAgency,
         },
       ],
     };
@@ -393,11 +446,7 @@ describe("ClientFixationService amo broker attachment", () => {
       if (args.where.id === "responsible") return responsible;
       return null;
     });
-    prisma.agency.findUnique.mockResolvedValue({
-      id: "a1",
-      name: "Агентство",
-      inn: "7700000000",
-    });
+    prisma.agency.findUnique.mockResolvedValue(creatorAgency);
     prisma.client.findFirst
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null);
@@ -463,13 +512,18 @@ describe("ClientFixationService amo broker attachment", () => {
     expect(amo.syncAgencyCompanyToAmoContact).toHaveBeenCalledWith(
       777,
       expect.objectContaining({
-        id: "a1",
-        inn: "7700000000",
+        id: "agency-b",
+        inn: "7800000000",
       }),
     );
   });
 
   it("creates the lead with the stored broker contact id when live amo contact sync fails", async () => {
+    const agency = {
+      id: "agency-contact-unavailable-new",
+      name: "Agency",
+      inn: "7744444444",
+    };
     const broker = {
       id: "broker-contact-unavailable-new",
       fullName: "Broker",
@@ -477,12 +531,13 @@ describe("ClientFixationService amo broker attachment", () => {
       email: null,
       amoContactId: BigInt(8131),
       funnelStage: "FIXATION",
-      brokerAgencies: [{ agencyId: "agency-contact-unavailable-new" }],
-    };
-    const agency = {
-      id: "agency-contact-unavailable-new",
-      name: "Agency",
-      inn: "7744444444",
+      brokerAgencies: [
+        {
+          agencyId: agency.id,
+          isPrimary: true,
+          agency,
+        },
+      ],
     };
     const client = { id: "client-contact-unavailable-new" };
     const rawResolutionError =

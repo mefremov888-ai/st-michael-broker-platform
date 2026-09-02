@@ -76,6 +76,21 @@ function isDeferredBrokerContactError(error: unknown): boolean {
   return sanitizeAmoSyncError(error) === "BROKER_AMO_CONTACT_MISSING";
 }
 
+type BrokerWithPrimaryAgency = {
+  brokerAgencies?: Array<{
+    isPrimary?: boolean;
+    agency?: Record<string, any> | null;
+  }>;
+};
+
+export function primaryAgencyForBroker(
+  broker: BrokerWithPrimaryAgency | null | undefined,
+): Record<string, any> | null {
+  return (
+    broker?.brokerAgencies?.find((link) => link.isPrimary)?.agency || null
+  );
+}
+
 function amoCreateOutcomeWrite(
   amoSyncOk: boolean,
   amoSyncError: string | null,
@@ -156,7 +171,13 @@ export class ClientFixationService {
   ) {
     const broker = await this.prisma.broker.findUnique({
       where: { id: brokerId },
-      include: { brokerAgencies: { select: { agencyId: true } } },
+      include: {
+        brokerAgencies: {
+          where: { isPrimary: true },
+          include: { agency: true },
+          take: 1,
+        },
+      },
     });
     if (!broker) throw new BadRequestException("Broker not found");
 
@@ -170,6 +191,13 @@ export class ClientFixationService {
     if (data.responsibleBrokerId && data.responsibleBrokerId !== broker.id) {
       const candidate = await this.prisma.broker.findUnique({
         where: { id: data.responsibleBrokerId },
+        include: {
+          brokerAgencies: {
+            where: { isPrimary: true },
+            include: { agency: true },
+            take: 1,
+          },
+        },
       });
       if (!candidate) {
         throw new BadRequestException(
@@ -304,18 +332,17 @@ export class ClientFixationService {
       );
     }
 
-    // The agency displayed on an amoCRM broker contact follows the broker who
-    // submitted this fixation. For delegated fixation this is the coordinator's
-    // agency; for self-fixation it is the broker's own agency. Do not accept an
-    // arbitrary agencyInn from the request for this company association.
-    const agencyBelongsToCreator = (broker.brokerAgencies || []).some(
-      (link: { agencyId?: string }) => link.agencyId === agency.id,
-    );
-    if (resolvedResponsibleBrokerAmoContactId && agencyBelongsToCreator) {
+    // The company displayed on an amoCRM broker contact follows the broker who
+    // actually handles the client. In delegated fixation this is the selected
+    // responsible broker; in self-fixation it is the creator. The request's
+    // agencyInn still scopes the local fixation, but must never overwrite a
+    // different broker's company association.
+    const responsiblePrimaryAgency = primaryAgencyForBroker(responsibleBroker);
+    if (resolvedResponsibleBrokerAmoContactId && responsiblePrimaryAgency) {
       try {
         await this.amoCrmAdapter.syncAgencyCompanyToAmoContact(
           resolvedResponsibleBrokerAmoContactId,
-          agency,
+          responsiblePrimaryAgency,
         );
       } catch {
         console.error("[fixClient] broker agency company sync failed");
