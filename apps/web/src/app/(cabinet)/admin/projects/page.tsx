@@ -97,7 +97,7 @@ export default function AdminProjectsPage() {
   };
 
   return (
-    <div>
+    <div data-tour={'cms-projects-page'}>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold flex items-center gap-2">

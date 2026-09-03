@@ -394,12 +394,12 @@ export default function CommissionPoliciesPage() {
     p.isActive && new Date(p.startDate) <= today && new Date(p.endDate) >= today;
 
   return (
-    <div>
+    <div data-tour={'cms-commission-page'}>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl md:text-3xl font-bold">Комиссия и рассрочка</h1>
         <button className="btn btn-primary" onClick={() => setCreating(true)}>
           <Plus className="w-4 h-4 mr-1" />
-          Создать политику
+          <span data-tour={'cms-commission-create'}>Создать политику</span>
         </button>
       </div>
 

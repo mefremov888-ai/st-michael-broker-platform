@@ -114,7 +114,7 @@ export default function AdminNewsPage() {
   };
 
   return (
-    <div>
+    <div data-tour={'cms-news-page'}>
       <h1 className="text-2xl md:text-3xl font-bold mb-2 flex items-center gap-2">
         <Newspaper className="w-7 h-7 text-accent" /> Лендинг — Новости
       </h1>

@@ -328,7 +328,7 @@ export default function AdminDocumentsPage() {
   }
 
   return (
-    <div>
+    <div data-tour={'cms-documents-page'}>
       <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold flex items-center gap-2">
