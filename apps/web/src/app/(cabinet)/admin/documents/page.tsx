@@ -43,7 +43,7 @@ const GROUPS: { category: string; title: string; hint: string }[] = [
   {
     category: 'cooperation',
     title: 'Сотрудничество',
-    hint: 'Кнопка «Условия вознаграждения» на главной странице лендинга + раздел «Документы» в кабинете брокера.',
+    hint: 'Кнопка «Условия вознаграждения» на главной открывает файл с бейджем «⭐ Кнопка на главной» — назначается кнопкой «⭐ На кнопку главной» у любого файла этого раздела. Остальные файлы показываются в «Документах» кабинета.',
   },
   {
     category: 'analytics',
@@ -76,6 +76,11 @@ function cleanDescription(desc: string | null): string {
   if (!desc) return '';
   return desc.replace(/^\[[^\]]*\]\s*/, '');
 }
+
+// Маркер «этот файл открывает кнопка "Условия вознаграждения" на главной».
+// Лендинг ищет его в description (LandingClient), назначается кнопкой ниже.
+const REWARDS_MARKER = '[landing-rewards-button]';
+const isRewardsDoc = (d: DocItem) => (d.description || '').includes(REWARDS_MARKER);
 
 function whereShown(d: DocItem): string {
   if (d.category === 'marketing') return 'Нигде не показывается';
@@ -226,15 +231,39 @@ export default function AdminDocumentsPage() {
 
   const handleSave = async (d: DocItem) => {
     try {
+      // Ручное редактирование описания не должно стирать маркер кнопки.
+      const marker = isRewardsDoc(d) ? `${REWARDS_MARKER} ` : '';
       await api(`/admin/documents/${d.id}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          name: d.name, description: d.description, category: d.category,
+          name: d.name, description: `${marker}${cleanDescription(d.description)}`.trim() || null, category: d.category,
           subcategory: d.subcategory, project: d.project || null, isPublic: d.isPublic, sortOrder: d.sortOrder,
         }),
       });
       setEditingId(null);
       setMessage('Сохранено'); setTimeout(() => setMessage(''), 1500);
+    } catch (e: any) { setMessage(e.message || 'Ошибка'); }
+  };
+
+  const handleSetRewardsDoc = async (d: DocItem) => {
+    if (!confirm(`Кнопка «Условия вознаграждения» на главной странице будет открывать «${d.name}». Продолжить?`)) return;
+    try {
+      for (const other of docs.filter((x) => x.id !== d.id && isRewardsDoc(x))) {
+        await api(`/admin/documents/${other.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ description: cleanDescription(other.description) || null }),
+        });
+      }
+      await api(`/admin/documents/${d.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          description: `${REWARDS_MARKER} ${cleanDescription(d.description)}`.trim(),
+          isPublic: true,
+        }),
+      });
+      load();
+      setMessage('Готово — кнопка на главной теперь открывает этот файл');
+      setTimeout(() => setMessage(''), 3000);
     } catch (e: any) { setMessage(e.message || 'Ошибка'); }
   };
 
@@ -538,6 +567,11 @@ export default function AdminDocumentsPage() {
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="font-medium truncate max-w-full">{d.name}</span>
                             <OriginBadge origin={origin} />
+                            {isRewardsDoc(d) && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-accent/15 text-accent text-xs whitespace-nowrap" title="Этот файл открывается кнопкой «Условия вознаграждения» в шапке главной страницы">
+                                ⭐ Кнопка на главной
+                              </span>
+                            )}
                             <span className="px-2 py-0.5 rounded bg-surface-secondary text-xs">{d.type}</span>
                             <span className="text-xs text-text-muted">{formatSize(d.fileSize)}</span>
                             {!d.isPublic && (
@@ -547,6 +581,15 @@ export default function AdminDocumentsPage() {
                               <a href={d.fileUrl} target="_blank" rel="noopener noreferrer" className="btn btn-secondary text-xs flex items-center gap-1">
                                 <ExternalLink className="w-3 h-3" /> Открыть
                               </a>
+                              {isAdmin && d.category === 'cooperation' && !isRewardsDoc(d) && (
+                                <button
+                                  onClick={() => handleSetRewardsDoc(d)}
+                                  className="btn btn-secondary text-xs whitespace-nowrap"
+                                  title="Кнопка «Условия вознаграждения» в шапке главной страницы будет открывать этот файл"
+                                >
+                                  ⭐ На кнопку главной
+                                </button>
+                              )}
                               {isAdmin && origin.kind === 'manual' && (
                                 <button
                                   onClick={() => startReplace(d)}
