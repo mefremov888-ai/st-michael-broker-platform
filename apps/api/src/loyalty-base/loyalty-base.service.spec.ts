@@ -1835,7 +1835,12 @@ describe("LoyaltyBaseService", () => {
     expect(
       prisma.broker.findUnique.mock.calls[0][0].include._count.select.clients
         .where,
-    ).toEqual({ fixationStatus: "FIXED" });
+    ).toEqual({
+      OR: [
+        { fixationStatus: "FIXED" },
+        { uniquenessStatus: "CONDITIONALLY_UNIQUE" },
+      ],
+    });
     expect(prisma.deal.aggregate.mock.calls[0][0].where).toMatchObject({
       brokerId: "broker-1",
       contractType: "DDU",
