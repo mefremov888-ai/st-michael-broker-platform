@@ -115,17 +115,17 @@ export function currentMoscowMonth() {
 }
 
 export function emptyLoyaltyFilters(): LoyaltyFilterFormState {
-  const period = currentMoscowMonth();
+  // Пустой период = «за всё время». Период больше не навязывается по умолчанию.
   return {
     includeLowSignal: false,
     search: "",
     city: "",
     hasAmo: "",
     archived: "exclude",
-    callFrom: period.from,
-    callTo: period.to,
-    activityFrom: period.from,
-    activityTo: period.to,
+    callFrom: "",
+    callTo: "",
+    activityFrom: "",
+    activityTo: "",
     campaignId: "",
     lastCallResult: "",
     scenario: "",
@@ -172,31 +172,42 @@ export function toCanonicalFilter(
   base: LoyaltyBaseKey,
 ): LoyaltyCanonicalFilter {
   const state = sanitizeLoyaltyFilterState(base, entityType, unsafeState);
+  const activityPeriod =
+    base === "anna" &&
+    state.dealsInPeriod !== "" &&
+    state.callFrom &&
+    state.callTo
+      ? { from: state.callFrom, to: state.callTo }
+      : state.activityFrom && state.activityTo
+        ? { from: state.activityFrom, to: state.activityTo }
+        : undefined;
+  // Пустой период = «за всё время»: без периода «сделки в периоде» становится
+  // lifetime-предикатом по количеству сделок, а не ошибкой fail-closed API.
+  const dealsInPeriod = activityPeriod
+    ? boolean(state.dealsInPeriod)
+    : undefined;
+  const dealCount =
+    state.dealsMin || state.dealsMax
+      ? { min: number(state.dealsMin), max: number(state.dealsMax) }
+      : !activityPeriod && state.dealsInPeriod === "true"
+        ? { min: 1 }
+        : !activityPeriod && state.dealsInPeriod === "false"
+          ? { min: 0, max: 0 }
+          : undefined;
   const common: LoyaltyCanonicalFilter = {
     includeLowSignal: state.includeLowSignal,
     callPeriod:
       state.callFrom && state.callTo
         ? { from: state.callFrom, to: state.callTo }
         : undefined,
-    activityPeriod:
-      base === "anna" &&
-      state.dealsInPeriod !== "" &&
-      state.callFrom &&
-      state.callTo
-        ? { from: state.callFrom, to: state.callTo }
-        : state.activityFrom && state.activityTo
-          ? { from: state.activityFrom, to: state.activityTo }
-          : undefined,
+    activityPeriod,
     campaignIds: state.campaignId ? [state.campaignId] : undefined,
     lastCallResults: state.lastCallResult ? [state.lastCallResult] : undefined,
     scenario: state.scenario || undefined,
     assigneeIds: state.assigneeId ? [state.assigneeId] : undefined,
     unassigned: state.unassigned || undefined,
-    dealCount:
-      state.dealsMin || state.dealsMax
-        ? { min: number(state.dealsMin), max: number(state.dealsMax) }
-        : undefined,
-    dealsInPeriod: boolean(state.dealsInPeriod),
+    dealCount,
+    dealsInPeriod,
     bt: boolean(state.bt),
     staleDays: number(state.staleDays),
   };

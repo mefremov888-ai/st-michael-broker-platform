@@ -1231,6 +1231,31 @@ test("keeps Anna's dashboard filters and hides Codex extras", () => {
   );
 });
 
+test("starts with an empty period meaning «за всё время»", () => {
+  const state = emptyLoyaltyFilters();
+  assert.equal(state.callFrom, "");
+  assert.equal(state.callTo, "");
+  assert.equal(state.activityFrom, "");
+  assert.equal(state.activityTo, "");
+  const canonical = toCanonicalFilter(state, "brokers", "anna");
+  assert.equal(canonical.callPeriod, undefined);
+  assert.equal(canonical.activityPeriod, undefined);
+});
+
+test("downgrades deals-in-period to a lifetime deal count without a period", () => {
+  const has = emptyLoyaltyFilters();
+  has.dealsInPeriod = "true";
+  const hasCanonical = toCanonicalFilter(has, "brokers", "anna");
+  assert.equal(hasCanonical.dealsInPeriod, undefined);
+  assert.deepEqual(hasCanonical.dealCount, { min: 1 });
+
+  const none = emptyLoyaltyFilters();
+  none.dealsInPeriod = "false";
+  const noneCanonical = toCanonicalFilter(none, "brokers", "ours");
+  assert.equal(noneCanonical.dealsInPeriod, undefined);
+  assert.deepEqual(noneCanonical.dealCount, { min: 0, max: 0 });
+});
+
 test("uses Anna's call period for deals-in-period on her base", () => {
   const state = emptyLoyaltyFilters();
   state.callFrom = "2026-01-01";

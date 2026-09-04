@@ -206,23 +206,25 @@ function KpiCard({
       disabled={loading}
       onClick={onClick}
       aria-label={`${title}. ${tooltip}`}
-      className="group relative flex min-h-36 flex-col rounded-xl border border-border bg-surface p-4 text-left transition hover:border-accent/50 hover:shadow-sm disabled:cursor-default"
+      className="group relative flex min-h-[4.5rem] flex-col rounded-xl border border-border bg-surface px-4 py-2 text-left transition hover:border-accent/50 hover:shadow-sm disabled:cursor-default"
     >
       <div className="flex w-full items-start justify-between gap-2">
         <h3 className="text-sm text-text-muted">{title}</h3>
-        <span className="flex gap-1">
+        <span className="flex items-center gap-1">
           <Info className="h-4 w-4 text-text-muted" />
-          <span className="rounded-lg bg-accent/10 p-2 text-accent">
+          <span className="rounded-lg bg-accent/10 p-1 text-accent">
             <Icon className="h-4 w-4" />
           </span>
         </span>
       </div>
       {loading ? (
-        <span className="mt-4 h-8 w-24 animate-pulse rounded bg-surface-secondary" />
+        <span className="mt-1 h-6 w-24 animate-pulse rounded bg-surface-secondary" />
       ) : (
-        <strong className="mt-3 text-2xl leading-tight">{value}</strong>
+        <strong className="mt-1 text-xl leading-tight">{value}</strong>
       )}
-      <small className="mt-auto pt-2 text-text-muted">{detail}</small>
+      <small className="mt-auto truncate pt-0.5 text-xs leading-tight text-text-muted">
+        {detail}
+      </small>
       <span
         role="tooltip"
         className="pointer-events-none invisible absolute left-2 right-2 top-[calc(100%-0.5rem)] z-40 whitespace-pre-line rounded-lg bg-text p-3 text-xs font-normal leading-relaxed text-surface opacity-0 shadow-xl group-hover:visible group-hover:opacity-100 group-focus-visible:visible group-focus-visible:opacity-100"
