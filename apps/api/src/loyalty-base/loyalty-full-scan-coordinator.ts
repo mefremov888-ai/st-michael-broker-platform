@@ -1,6 +1,10 @@
 import { ServiceUnavailableException } from "@nestjs/common";
 
-export const MAX_CONCURRENT_LOYALTY_FULL_SCANS = 2;
+// 2026-09-04: 2 → 3. После фикса «пустой период по умолчанию» первая
+// загрузка страницы легитимно шлёт три full-scan запроса параллельно
+// (брокеры + агентства + overview); при бюджете 2 третий стабильно
+// получал 503 LOYALTY_FULL_SCAN_BUSY.
+export const MAX_CONCURRENT_LOYALTY_FULL_SCANS = 3;
 export const LOYALTY_FULL_SCAN_RETRY_AFTER_SECONDS = 2;
 
 export class LoyaltyFullScanBusyException extends ServiceUnavailableException {
