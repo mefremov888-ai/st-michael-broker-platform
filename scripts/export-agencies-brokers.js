@@ -12,15 +12,18 @@
   const { PrismaClient } = require('@st-michael/database');
   const prisma = new PrismaClient();
   try {
+    // Связь брокер↔агентство — many-to-many через broker_agencies.
     const agencies = await prisma.$queryRaw`
       SELECT a.id, a.name, a.inn,
-             count(b.id)::int AS brokers
-      FROM agencies a LEFT JOIN brokers b ON b.agency_id = a.id
+             count(ba.broker_id)::int AS brokers
+      FROM agencies a LEFT JOIN broker_agencies ba ON ba.agency_id = a.id
       GROUP BY a.id, a.name, a.inn`;
     const brokers = await prisma.$queryRaw`
       SELECT b.id, b.full_name, right(regexp_replace(coalesce(b.phone,''),'\\D','','g'), 4) AS phone4,
-             a.name AS agency, (b.amo_contact_id IS NOT NULL) AS has_amo
-      FROM brokers b LEFT JOIN agencies a ON a.id = b.agency_id
+             (SELECT string_agg(a.name, ' | ') FROM broker_agencies ba
+               JOIN agencies a ON a.id = ba.agency_id WHERE ba.broker_id = b.id) AS agency,
+             (b.amo_contact_id IS NOT NULL) AS has_amo
+      FROM brokers b
       WHERE b.merged_into_id IS NULL`;
     console.log(`агентств: ${agencies.length}; брокеров: ${brokers.length}`);
     console.log('===AGENCIES-BEGIN===');
