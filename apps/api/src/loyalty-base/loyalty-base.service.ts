@@ -4253,8 +4253,9 @@ export class LoyaltyBaseService {
         ...shared,
         periodFilterApplied: false,
         formula:
-          "COUNT(active, unmerged BROKER rows with brokerTourVisited=true and no FIXED Client row)",
-        provenance: "Broker.brokerTourVisited / Client.fixationStatus",
+          "COUNT(active, unmerged BROKER rows with brokerTourVisited=true and no fixed Client row (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED))",
+        provenance:
+          "Broker.brokerTourVisited / Client.uniquenessStatus / Client.fixationStatus",
       },
       "brokers.birthdaysToday": {
         source: "LOCAL_PRELIMINARY",
@@ -7628,7 +7629,7 @@ export class LoyaltyBaseService {
       exactness: "APPROXIMATE",
       source: "LOCAL_OPERATIONAL_ROWS",
       methodology:
-        "Batched per-broker aggregates over current local FIXED Client rows, confirmed/completed Meeting rows, qualifying confirmed DDU Deal rows and RegistryDeal rows signed in the selected period.",
+        "Batched per-broker aggregates over current local fixed Client rows (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED), confirmed/completed Meeting rows, qualifying confirmed DDU Deal rows and RegistryDeal rows signed in the selected period.",
       fixations: 0,
       meetings: 0,
       deals: 0,
