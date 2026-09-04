@@ -11,7 +11,8 @@ import {
   Film, Camera, Box, BarChart2, Folder, Building2,
 } from 'lucide-react';
 import { HintIcon } from '@/components/HintIcon';
-import { fileCountUnder, foldersAndFilesAt, materialHref } from '@/lib/materials-folder-tree';
+import { fileCountUnder, foldersAndFilesAt, materialHref, filesUnder, isPhotoDoc, mediaCountsUnder, mediaCountsLabel } from '@/lib/materials-folder-tree';
+import { materialsThumbUrl } from '@/lib/materials-thumb';
 import {
   DEFAULT_MATERIALS_LAYOUT,
   parseMaterialsLayout,
@@ -727,6 +728,13 @@ function folderIcon(name: string, groupTitles: string[]) {
   return <Folder size={54} strokeWidth={1.2} />;
 }
 
+// 2026-09-04: превью-карточки папок в стиле медиатеки (референс пользователя):
+// номер + курсивное название + обложка из первого фото + «N фото · N видео».
+function folderCover(docs: any[], prefix: string[]): string | null {
+  const first = filesUnder(docs, prefix).find(isPhotoDoc);
+  return first ? materialsThumbUrl(first.fileUrl) : null;
+}
+
 function MaterialsSection({ materials, layout }: { materials: any[]; layout: MaterialsFolderLayout }) {
   const mapped = withDisplaySubcategory(materials, layout, 'landing');
   const { folders } = foldersAndFilesAt(mapped, []);
@@ -741,20 +749,37 @@ function MaterialsSection({ materials, layout }: { materials: any[]; layout: Mat
           Материалы ещё загружаются. По вопросам: <a href="tel:+74992262249" style={{color:'var(--gold)'}}>+7 (499) 226-22-49</a>
         </div>
       ) : (
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'1px',background:'rgba(180,147,111,0.2)',borderRadius:12,overflow:'hidden',border:'1px solid rgba(180,147,111,0.25)'}}>
-          {roots.map((cat) => (
-            <a
-              key={cat}
-              href={materialHref([cat])}
-              style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'40px 16px 32px',textDecoration:'none',color:'var(--black)',background:'#f5efe8',gap:12,transition:'background 0.15s'}}
-              onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
-            >
-              <div style={{color:'var(--gold)',opacity:0.9}}>{folderIcon(cat, groupTitles)}</div>
-              <div style={{fontSize:12,fontWeight:600,textAlign:'center',letterSpacing:0.5,marginTop:2}}>{cat}</div>
-              <div style={{fontSize:11,color:'rgba(0,0,0,0.4)'}}>{fileCountUnder(mapped, [cat])} файлов</div>
-            </a>
-          ))}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(230px,1fr))',gap:18}}>
+          {roots.map((cat, idx) => {
+            const cover = folderCover(mapped, [cat]);
+            const counts = mediaCountsUnder(mapped, [cat]);
+            return (
+              <a
+                key={cat}
+                href={materialHref([cat])}
+                style={{display:'flex',flexDirection:'column',textDecoration:'none',color:'var(--black)',background:'#fdfbf8',border:'1px solid rgba(180,147,111,0.35)',borderRadius:6,padding:'12px 14px 10px',gap:10,transition:'box-shadow 0.15s, border-color 0.15s'}}
+                onMouseEnter={(e) => { e.currentTarget.style.boxShadow = '0 6px 18px rgba(0,0,0,0.08)'; e.currentTarget.style.borderColor = 'var(--gold)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.boxShadow = 'none'; e.currentTarget.style.borderColor = 'rgba(180,147,111,0.35)'; }}
+              >
+                <div style={{display:'flex',alignItems:'baseline',gap:10}}>
+                  <span style={{fontFamily:'Georgia,serif',fontStyle:'italic',fontSize:13,color:'var(--gold)'}}>{String(idx + 1).padStart(2, '0')}</span>
+                  <span style={{fontFamily:'Georgia,serif',fontStyle:'italic',fontSize:16,lineHeight:1.25,flex:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{cat}</span>
+                  <span style={{color:'var(--gold)',fontSize:14}}>↗</span>
+                </div>
+                {cover ? (
+                  <div style={{aspectRatio:'16/10',borderRadius:4,overflow:'hidden',background:'#efe7db'}}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={cover} alt={cat} loading="lazy" style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}} />
+                  </div>
+                ) : (
+                  <div style={{aspectRatio:'16/10',borderRadius:4,background:'#f5efe8',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--gold)',opacity:0.9}}>
+                    {folderIcon(cat, groupTitles)}
+                  </div>
+                )}
+                <div style={{fontSize:11,color:'rgba(0,0,0,0.45)',letterSpacing:0.3}}>{mediaCountsLabel(counts)}</div>
+              </a>
+            );
+          })}
         </div>
       )}
     </section>

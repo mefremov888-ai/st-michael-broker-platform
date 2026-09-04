@@ -61,3 +61,45 @@ export function foldersAndFilesAt<T extends { subcategory?: string | null }>(
 export function materialHref(parts: string[]): string {
   return `/materials/${parts.map((part) => encodeURIComponent(part)).join('/')}`;
 }
+
+// 2026-09-04: медиа-счётчики для превью-карточек папок (лендинг + /materials).
+const PHOTO_RE = /\.(jpe?g|png|webp|gif)$/i;
+const VIDEO_RE = /\.(mp4|mov|webm|avi|mkv)$/i;
+
+export function filesUnder<T extends { subcategory?: string | null }>(
+  docs: T[],
+  prefix: string[],
+): T[] {
+  const key = prefix.join('/');
+  return docs.filter((doc) => {
+    const path = splitMaterialPath(doc.subcategory).join('/');
+    return path === key || path.startsWith(`${key}/`);
+  });
+}
+
+export function isPhotoDoc(doc: { fileUrl?: string | null; type?: string | null }): boolean {
+  return PHOTO_RE.test(String(doc.fileUrl || '')) || doc.type === 'JPG' || doc.type === 'PNG';
+}
+
+export function mediaCountsUnder(
+  docs: Array<{ subcategory?: string | null; fileUrl?: string | null; type?: string | null; name?: string | null }>,
+  prefix: string[],
+): { photos: number; videos: number; other: number } {
+  let photos = 0, videos = 0, other = 0;
+  for (const d of filesUnder(docs, prefix)) {
+    const u = String(d.fileUrl || d.name || '');
+    if (isPhotoDoc(d)) photos++;
+    else if (VIDEO_RE.test(u) || d.type === 'MP4' || d.type === 'MOV') videos++;
+    else other++;
+  }
+  return { photos, videos, other };
+}
+
+export function mediaCountsLabel(c: { photos: number; videos: number; other: number }): string {
+  const parts: string[] = [];
+  if (c.photos) parts.push(`${c.photos} фото`);
+  if (c.videos) parts.push(`${c.videos} видео`);
+  if (!parts.length) return `${c.other} файлов`;
+  if (c.other) parts.push(`${c.other} док.`);
+  return parts.join(' · ');
+}
