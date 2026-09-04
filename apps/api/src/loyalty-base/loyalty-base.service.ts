@@ -7149,7 +7149,13 @@ export class LoyaltyBaseService {
           filter.activityPeriod,
         ),
       );
-    if (filter.segment === "NEW_BROKER") {
+    if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
+      // KPI «Не звонили в этом месяце» считает только активных брокеров
+      // (status=ACTIVE) — сегмент-дриллдаун обязан давать то же число.
+      // Сам факт «не звонили» проверяется в matchesOurBroker по единой
+      // модели звонков (легаси CallLog + workflow-попытки).
+      and.push({ status: "ACTIVE" });
+    } else if (filter.segment === "NEW_BROKER") {
       and.push({
         status: "ACTIVE",
         funnelStage: "NEW_BROKER",
@@ -8471,6 +8477,8 @@ export class LoyaltyBaseService {
     }
 
     if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
+      // Как в KPI «Не звонили в этом месяце»: только активные брокеры.
+      if (String(record.status || "") !== "ACTIVE") return false;
       const period = moscowCurrentMonthFilterPeriod();
       if (this.callPresenceInPeriod(calls, 0, period) !== false) return false;
     }
