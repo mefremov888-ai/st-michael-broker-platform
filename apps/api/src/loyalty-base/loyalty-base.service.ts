@@ -780,8 +780,10 @@ export class LoyaltyBaseService {
       canonical?.callPeriod || flatPeriod,
       "callPeriod",
     );
+    // «Период звонков» влияет только на звонки: canonical.callPeriod больше не
+    // подменяет период активности. Легаси flat from/to остаётся общим периодом.
     const activityPeriod = this.parseOptionalFilterPeriod(
-      canonical?.activityPeriod || canonical?.callPeriod || flatPeriod,
+      canonical?.activityPeriod || flatPeriod,
       "activityPeriod",
     );
     const range = (
@@ -5758,15 +5760,30 @@ export class LoyaltyBaseService {
       item,
       filter.activityPeriod,
     );
-    const filteredFixations = filter.activityPeriod
-      ? finiteNumber(item.periodMetrics.fixations)
-      : lifetimeFixations;
-    const filteredMeetings = filter.activityPeriod
-      ? finiteNumber(item.periodMetrics.meetings)
-      : lifetimeMeetings;
-    const filteredDeals = filter.activityPeriod
-      ? finiteNumber(item.periodMetrics.deals)
-      : lifetimeDeals;
+    // Aggregate-only снапшоты (без точных активностей) не умеют считать
+    // метрики за период: periodMetrics приходит UNAVAILABLE (все значения
+    // null). Раньше такие записи всегда отбрасывались фильтрами по сделкам /
+    // встречам / фиксациям, хотя итоговые (lifetime) числа известны из
+    // sourceReportedMetrics — те же числа, что показывает KPI «известно у…».
+    // Поэтому при недоступных периодных данных используем lifetime-значения;
+    // если и их нет (null) — запись остаётся «неизвестной» и отбрасывается
+    // только заданным фильтром. Для EXACT_ACTIVITIES-записей, чей период
+    // наблюдения просто не покрывает запрошенный, ответ остаётся «неизвестно».
+    const periodMetricsUnavailable =
+      item.periodMetrics?.availability === "UNAVAILABLE" &&
+      item.metricSource?.kind !== "EXACT_ACTIVITIES";
+    const filteredFixations =
+      filter.activityPeriod && !periodMetricsUnavailable
+        ? finiteNumber(item.periodMetrics.fixations)
+        : lifetimeFixations;
+    const filteredMeetings =
+      filter.activityPeriod && !periodMetricsUnavailable
+        ? finiteNumber(item.periodMetrics.meetings)
+        : lifetimeMeetings;
+    const filteredDeals =
+      filter.activityPeriod && !periodMetricsUnavailable
+        ? finiteNumber(item.periodMetrics.deals)
+        : lifetimeDeals;
     item.lastCallAt = latestCall
       ? latestCall.occurredAt || this.callSortKey(latestCall) || null
       : null;
@@ -8338,6 +8355,18 @@ export class LoyaltyBaseService {
       relationMetrics,
       filter.activityPeriod,
     );
+    // Единое правило с брокерами нашей базы: период задан → метрики за
+    // период; период не задан → lifetime-числа. Гейт low-signal ниже
+    // намеренно остаётся на lifetime-значениях.
+    const filteredDeals = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics?.deals)
+      : deals;
+    const filteredMeetings = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics?.meetings)
+      : meetings;
+    const filteredFixations = filter.activityPeriod
+      ? finiteNumber(item.periodMetrics?.fixations)
+      : fixations;
     const latestCall = this.applyCallSummary(item, "AGENCY", calls);
     const agencyActivityDates = [
       relationMetrics.lastActivityAt,
@@ -8379,12 +8408,12 @@ export class LoyaltyBaseService {
     }
     if (
       filter.dealCount.min !== undefined &&
-      (deals === null || deals < filter.dealCount.min)
+      (filteredDeals === null || filteredDeals < filter.dealCount.min)
     )
       return false;
     if (
       filter.dealCount.max !== undefined &&
-      (deals === null || deals > filter.dealCount.max)
+      (filteredDeals === null || filteredDeals > filter.dealCount.max)
     )
       return false;
     if (filter.dealsInPeriod !== undefined) {
@@ -8396,15 +8425,12 @@ export class LoyaltyBaseService {
       filter.meetings.min !== undefined ||
       filter.meetings.max !== undefined
     ) {
-      const periodMeetings = filter.activityPeriod
-        ? finiteNumber(item.periodMetrics?.meetings)
-        : meetings;
       if (
-        periodMeetings === null ||
+        filteredMeetings === null ||
         (filter.meetings.min !== undefined &&
-          periodMeetings < filter.meetings.min) ||
+          filteredMeetings < filter.meetings.min) ||
         (filter.meetings.max !== undefined &&
-          periodMeetings > filter.meetings.max)
+          filteredMeetings > filter.meetings.max)
       )
         return false;
     }
@@ -8441,7 +8467,10 @@ export class LoyaltyBaseService {
       return false;
     if (filter.bt !== undefined && (bt === null || bt !== filter.bt))
       return false;
-    if (filter.scenario === "HAS_DEALS" && !(deals !== null && deals > 0))
+    if (
+      filter.scenario === "HAS_DEALS" &&
+      !(filteredDeals !== null && filteredDeals > 0)
+    )
       return false;
     if (filter.campaignIds.length) {
       const campaignAliases = this.campaignAliases(filter.campaignIds).map(
@@ -8520,17 +8549,13 @@ export class LoyaltyBaseService {
         hasPhone: hasPhone,
         statuses: item.computedStatuses,
         bt,
-        fixations: filter.activityPeriod
-          ? finiteNumber(item.periodMetrics?.fixations)
-          : fixations,
-        meetings: filter.activityPeriod
-          ? finiteNumber(item.periodMetrics?.meetings)
-          : meetings,
+        fixations: filteredFixations,
+        meetings: filteredMeetings,
         callPresence: filter.callPeriod
           ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
           : null,
         assignees,
-        deals,
+        deals: filteredDeals,
       })
     )
       return false;
@@ -8565,9 +8590,9 @@ export class LoyaltyBaseService {
         )
           ? this.callPresenceInPeriod(calls, 0, filter.callPeriod!)
           : null,
-        deals,
-        fixations,
-        meetings,
+        deals: filteredDeals,
+        fixations: filteredFixations,
+        meetings: filteredMeetings,
         bt,
         assignee: assignees[0] || "",
         stage: item.normalizedStage,

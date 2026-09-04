@@ -2656,14 +2656,38 @@ describe("LoyaltyBaseService", () => {
       metricSource: { kind: "UNAVAILABLE", exactness: "UNKNOWN" },
     };
 
+    // Aggregate-only records fall back to their lifetime source-reported
+    // numbers when the requested activity period cannot be computed, so the
+    // known totals (17 fixations, 9 meetings, 4 deals) satisfy the filters.
     expect(
       matches({}, sourceOnly, { columns: { activity: "HAS_FIXATIONS" } }),
-    ).toBe(false);
-    expect(matches({}, sourceOnly, {}, { meetings: { min: 1 } })).toBe(false);
+    ).toBe(true);
+    expect(matches({}, sourceOnly, {}, { meetings: { min: 1 } })).toBe(true);
+    expect(matches({}, sourceOnly, {}, { dealCount: { min: 1 } })).toBe(true);
     expect(matches({}, sourceOnly, {}, { dealsInPeriod: false })).toBe(false);
     expect(matches({}, sourceOnly, {}, { scenario: "NO_MEETINGS" })).toBe(
       false,
     );
+    expect(matches({}, sourceOnly, {}, { scenario: "HAS_DEALS" })).toBe(true);
+    const sourceOnlyUnknown = {
+      ...sourceOnly,
+      sourceReportedMetrics: {
+        fixations: null,
+        meetings: null,
+        deals: null,
+        brokerTours: null,
+        calls: null,
+      },
+    };
+    // Without even lifetime numbers the record stays "unknown" and is
+    // rejected by an explicit deal filter.
+    expect(
+      matches({}, sourceOnlyUnknown, {}, { dealCount: { min: 1 } }),
+    ).toBe(false);
+    expect(matches({}, sourceOnlyUnknown, {}, { scenario: "HAS_DEALS" })).toBe(
+      false,
+    );
+    expect(matches({}, sourceOnlyUnknown)).toBe(true);
 
     const exactItem = {
       attributes: {},
@@ -3505,7 +3529,7 @@ describe("LoyaltyBaseService", () => {
     expect(prisma.loyaltySourceFieldValue.createMany).not.toHaveBeenCalled();
   });
 
-  it("canonicalizes legacy call results before hashing and shares the selected period", () => {
+  it("canonicalizes legacy call results and keeps the call period scoped to calls", () => {
     const service = new LoyaltyBaseService(prismaMock());
     const query: any = {
       archived: "exclude",
@@ -3514,18 +3538,45 @@ describe("LoyaltyBaseService", () => {
     };
     const filter = (service as any).normalizeListFilter(query, {
       callPeriod: { from: "2026-08-01", to: "2026-08-31" },
-      dealsInPeriod: true,
       lastCallResults: ["SEND_INFO"],
     });
 
     (service as any).assertFilterForEntity("anna", "BROKER", filter);
 
-    expect(filter.activityPeriod.fromIso).toBe("2026-08-01");
-    expect(filter.activityPeriod.toIso).toBe("2026-08-31");
+    // The call period must only affect call predicates: it no longer leaks
+    // into the activity period silently.
+    expect(filter.callPeriod.fromIso).toBe("2026-08-01");
+    expect(filter.callPeriod.toIso).toBe("2026-08-31");
+    expect(filter.activityPeriod).toBeUndefined();
     expect(filter.lastCallResults).toEqual(["SEND_INFORMATION"]);
     expect((service as any).listFilterHash("anna", "BROKER", filter)).toMatch(
       /^[a-f0-9]{64}$/,
     );
+
+    // dealsInPeriod stays fail-closed: without an activity period the API
+    // refuses the predicate instead of silently borrowing the call period
+    // (the UI downgrades it to a lifetime dealCount before sending).
+    expect(() =>
+      (service as any).normalizeListFilter(query, {
+        callPeriod: { from: "2026-08-01", to: "2026-08-31" },
+        dealsInPeriod: true,
+      }),
+    ).toThrow("dealsInPeriod requires activityPeriod");
+  });
+
+  it("keeps the legacy flat from/to as a shared period for both calls and activity", () => {
+    const service = new LoyaltyBaseService(prismaMock());
+    const query: any = {
+      archived: "exclude",
+      page: 1,
+      pageSize: 30,
+      from: "2026-08-01",
+      to: "2026-08-31",
+    };
+    const filter = (service as any).normalizeListFilter(query);
+    expect(filter.callPeriod.fromIso).toBe("2026-08-01");
+    expect(filter.activityPeriod.fromIso).toBe("2026-08-01");
+    expect(filter.activityPeriod.toIso).toBe("2026-08-31");
   });
 
   it("normalizes manual Anna attributes and fails closed for an unknown site value", () => {
