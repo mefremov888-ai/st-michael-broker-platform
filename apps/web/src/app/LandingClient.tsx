@@ -1527,7 +1527,12 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             <div style={{display:'flex',flexDirection:'column',justifyContent:'center',gap:16,textAlign:'right',alignItems:'flex-end'}}>
               <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
               {(() => {
-                const condDoc = cooperationDocs.find((d: any) => /август 2026/i.test(d.name) || /вознаграждения для брокеров/i.test(d.name));
+                // Явное назначение из админки (кнопка «На кнопку главной», маркер
+                // [landing-rewards-button] в description) — приоритет; иначе
+                // легаси-подбор по названию.
+                const condDoc =
+                  cooperationDocs.find((d: any) => String(d.description || '').includes('[landing-rewards-button]')) ||
+                  cooperationDocs.find((d: any) => /август 2026/i.test(d.name) || /вознаграждения для брокеров/i.test(d.name));
                 return condDoc
                   ? <a href={condDoc.fileUrl} target="_blank" rel="noopener noreferrer" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>
                   : <a href="#cooperation" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>;
