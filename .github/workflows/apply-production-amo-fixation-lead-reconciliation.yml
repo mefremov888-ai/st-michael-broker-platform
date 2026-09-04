@@ -294,7 +294,7 @@ jobs:
             test "${#apply_sha}" -eq 64
             test "${#inspector_sha}" -eq 64
             test "${#source_sha}" -eq 40
-            test "$expected_queue_rows" = "12"
+            test "$expected_queue_rows" = "2"
             test "$expected_requeue_count" = "0"
             test "$expected_shared_strong_count" = "0"
             actual_apply_sha=$(sha256sum "$apply_script"); actual_apply_sha=${actual_apply_sha%% *}

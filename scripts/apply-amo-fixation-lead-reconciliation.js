@@ -21,7 +21,7 @@ const { isAbsolute, resolve } = require("node:path");
 
 const EXACT_CONFIRMATION = "LINK_AMO_FIXATION_LEADS";
 const EXPECTED_DATABASE_NAME = "broker_platform";
-const KNOWN_QUEUE_ROWS = 12;
+const KNOWN_QUEUE_ROWS = 2;
 const EXPECTED_REQUEUE_COUNT = 0;
 const ATTEMPT_LIMIT = 10;
 const QUEUE_STATUSES = Object.freeze(["FAILED", "PENDING"]);
@@ -240,7 +240,7 @@ function readExecutionGate(env = process.env) {
   ]) {
     if (!/^[0-9a-f]{64}$/.test(value)) fail(code);
   }
-  if (String(env.LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS || "") !== "12") {
+  if (String(env.LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS || "") !== "2") {
     fail("EXPECTED_QUEUE_ROWS_INVALID");
   }
   if (String(env.LEAD_RECONCILIATION_EXPECTED_REQUEUE_COUNT || "") !== "0") {

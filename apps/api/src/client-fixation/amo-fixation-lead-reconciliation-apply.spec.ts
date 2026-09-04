@@ -97,7 +97,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
 
   const observedLegacyErrorCohort = (primaryErrorClass = "network_failure") => {
     const remainingCounts: Record<string, number> = {
-      broker_amo_contact_missing: 10,
+      broker_amo_contact_missing: 0,
       network_failure: 1,
       fixation_agency_missing: 1,
     };
@@ -180,7 +180,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
         report.cohortAttestation.hmacSha256,
       LEAD_RECONCILIATION_INSPECTOR_SHA256: metadata.inspectorSha256,
       LEAD_RECONCILIATION_APPLY_SHA256: "c".repeat(64),
-      LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS: "12",
+      LEAD_RECONCILIATION_EXPECTED_QUEUE_ROWS: "2",
       LEAD_RECONCILIATION_EXPECTED_REQUEUE_COUNT: "0",
       LEAD_RECONCILIATION_EXPECTED_CAS_COUNT: "1",
       LEAD_RECONCILIATION_EXPECTED_SHARED_STRONG_COUNT: "0",
@@ -238,9 +238,9 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
           payload: {
             schemaVersion: 1,
             ...common,
-            queueRows: 12,
+            queueRows: 2,
             linked: 1,
-            blocked: 11,
+            blocked: 1,
             requeued: 0,
             amoMutations: 0,
             links: [{ clientId, amoLeadId: "32310587" }],
@@ -326,7 +326,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
         },
       ],
     });
-    expect(plan.blocked).toHaveLength(11);
+    expect(plan.blocked).toHaveLength(1);
   });
 
   it.each(casLinkEligibleErrors)(
@@ -354,11 +354,11 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
         strongCount: 1,
         weakCount: 0,
       });
-      expect(plan.blocked).toHaveLength(11);
+      expect(plan.blocked).toHaveLength(1);
     },
   );
 
-  it("matches the observed signed 10/1/1 legacy error manifest with zero requeue", () => {
+  it("matches the observed signed 1/1 legacy error manifest with zero requeue", () => {
     const rows = observedLegacyErrorCohort();
     const amoEvidence = evidence([leadEnvelope(32310587)]);
     const report = inspector.buildReport(
@@ -369,7 +369,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       aliasKey,
     );
     expect(report.aggregates.errorClass).toMatchObject({
-      broker_amo_contact_missing: 10,
+      broker_amo_contact_missing: 0,
       network_failure: 1,
       fixation_agency_missing: 1,
       create_reconciliation_required: 0,
@@ -771,10 +771,10 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
       schemaVersion: 1,
       sourceSha: "b".repeat(40),
       reviewedRunId: "32960000001",
-      queueRows: 12,
+      queueRows: 2,
       linked: 1,
       alreadyLinked: 0,
-      blocked: 11,
+      blocked: 1,
       requeued: 0,
       amoMutations: 0,
     });
@@ -959,7 +959,7 @@ describe("exact-cohort amo fixation lead reconciliation apply", () => {
     expect(workflow).toContain("group: production-deploy");
     expect(workflow).toContain("environment: production");
     expect(workflow).toContain("flock -x -n 9");
-    expect(workflow).toContain('EXPECTED_QUEUE_ROWS: "12"');
+    expect(workflow).toContain('EXPECTED_QUEUE_ROWS: "2"');
     expect(workflow).toContain('EXPECTED_REQUEUE_COUNT: "0"');
     expect(workflow).not.toContain("inputs.expected_queue_rows");
     expect(workflow).not.toContain("inputs.expected_requeue_count");

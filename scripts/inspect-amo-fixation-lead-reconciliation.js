@@ -22,7 +22,7 @@ const AMO_ORIGIN = "https://stmichael.amocrm.ru";
 const EXPECTED_ACCOUNT_ID = 28552900;
 const KC_PIPELINE_ID = 7600542;
 const ATTEMPT_LIMIT = 10;
-const KNOWN_QUEUE_ROWS = 12;
+const KNOWN_QUEUE_ROWS = 2;
 const QUEUE_STATUSES = Object.freeze(["FAILED", "PENDING"]);
 const STATEMENT_TIMEOUT_MS = 15_000;
 
@@ -1562,7 +1562,7 @@ async function main() {
       ],
       // Twelve exact rows plus one overflow sentinel; any thirteenth row makes
       // the cohort assertion fail closed before amoCRM is queried.
-      take: 13,
+      take: 3,
     });
     assertExpectedQueueRows(queueRows);
 
