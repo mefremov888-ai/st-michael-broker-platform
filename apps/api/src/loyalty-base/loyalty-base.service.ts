@@ -931,18 +931,10 @@ export class LoyaltyBaseService {
         "dealsInPeriod requires activityPeriod (or flat from/to)",
       );
     }
-    if (
-      (["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(
-        result.scenario || "",
-      ) ||
-        query.called !== undefined ||
-        result.columns.calls !== undefined) &&
-      !result.callPeriod
-    ) {
-      throw new BadRequestException(
-        "called/scenario requires callPeriod (or flat from/to)",
-      );
-    }
+    // 2026-09-04: отсутствие callPeriod у звонковых предикатов (called,
+    // сценарии CALLED_IN_PERIOD/NOT_CALLED_IN_PERIOD, колонка «Звонки») — не
+    // ошибка, а «за всё время»: звонили хоть раз / не звонили ни разу.
+    // Раньше здесь был BadRequestException, и фронт получал 400.
     return result;
   }
 
@@ -5552,8 +5544,10 @@ export class LoyaltyBaseService {
 
   private callInPeriod(
     call: LoyaltyCallView,
-    period: LoyaltyFilterPeriod,
+    period?: LoyaltyFilterPeriod,
   ): boolean | null {
+    // Без периода любой известный звонок засчитывается («за всё время»).
+    if (!period) return true;
     const date = dateOnly(call.date);
     if (date)
       return (
@@ -5573,12 +5567,18 @@ export class LoyaltyBaseService {
   private callPresenceInPeriod(
     calls: LoyaltyCallView[],
     knownCallCount: number | null,
-    period: LoyaltyFilterPeriod,
+    period?: LoyaltyFilterPeriod,
     observedThrough?: Date | null,
   ): boolean | null {
     const states = calls.map((call) => this.callInPeriod(call, period));
     if (states.includes(true)) return true;
-    if (observedThrough && period.to.getTime() > observedThrough.getTime()) {
+    // Lifetime-режим (без периода) опирается на все известные данные:
+    // observedThrough ограничивает только периодные утверждения.
+    if (
+      observedThrough &&
+      period &&
+      period.to.getTime() > observedThrough.getTime()
+    ) {
       return null;
     }
     if (knownCallCount === 0) return false;
@@ -6330,14 +6330,12 @@ export class LoyaltyBaseService {
         bt,
         fixations: filteredFixations,
         meetings: filteredMeetings,
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(
-              calls,
-              exactCallCount,
-              filter.callPeriod,
-              exactObservedThrough,
-            )
-          : null,
+        callPresence: this.callPresenceInPeriod(
+          calls,
+          exactCallCount,
+          filter.callPeriod,
+          exactObservedThrough,
+        ),
         assignees,
         deals: filteredDeals,
       })
@@ -6346,14 +6344,12 @@ export class LoyaltyBaseService {
     if (
       filter.scenario &&
       !this.matchesScenario(filter.scenario, {
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(
-              calls,
-              exactCallCount,
-              filter.callPeriod,
-              exactObservedThrough,
-            )
-          : null,
+        callPresence: this.callPresenceInPeriod(
+          calls,
+          exactCallCount,
+          filter.callPeriod,
+          exactObservedThrough,
+        ),
         bt,
         fixations: filteredFixations,
         meetings: filteredMeetings,
@@ -8622,9 +8618,7 @@ export class LoyaltyBaseService {
         bt,
         fixations,
         meetings,
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
-          : null,
+        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod),
         assignees,
         deals,
       })
@@ -8901,9 +8895,7 @@ export class LoyaltyBaseService {
         bt,
         fixations: filteredFixations,
         meetings: filteredMeetings,
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
-          : null,
+        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod),
         assignees,
         deals: filteredDeals,
       })
