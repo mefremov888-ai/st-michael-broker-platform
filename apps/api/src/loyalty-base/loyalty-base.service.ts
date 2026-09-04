@@ -3928,7 +3928,9 @@ export class LoyaltyBaseService {
       fixations,
       meetings,
       deals,
+      registryDeals,
       dealAmount,
+      registryDealAmount,
       notCalled,
       newRows,
       btWithoutFixation,
@@ -3948,10 +3950,23 @@ export class LoyaltyBaseService {
       }),
       this.prisma.meeting.count({ where: acceptedMeetings }),
       this.prisma.deal.count({ where: confirmedDeals }),
+      // «Реестр сделок» — период по дате подписания договора.
+      this.registryDealModel
+        ? this.registryDealModel.count({
+            where: this.registrySignedAtWhere(period),
+          })
+        : Promise.resolve(0),
       this.prisma.deal.aggregate({
         where: confirmedDeals,
         _sum: { amount: true },
       }),
+      // Сумма ₽ «Реестра сделок» за тот же период.
+      this.registryDealModel
+        ? this.registryDealModel.aggregate({
+            where: this.registrySignedAtWhere(period),
+            _sum: { amount: true },
+          })
+        : Promise.resolve({ _sum: { amount: null } }),
       this.prisma.broker.count({
         where: {
           role: "BROKER",
@@ -3984,6 +3999,7 @@ export class LoyaltyBaseService {
           clients: { none: { fixationStatus: "FIXED" } },
           meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
           deals: { none: this.ourConfirmedDealWhere() },
+          registryDeals: { none: {} },
           callLogs: { none: {} },
           loyaltyAssignmentsAsTarget: {
             none: { attempts: { some: {} } },
@@ -4013,6 +4029,18 @@ export class LoyaltyBaseService {
     const newCount = (newRows as any[]).filter((row) =>
       hasLoyaltyAcquisitionPhone([row.phone, ...(row.phones || [])]),
     ).length;
+    // Итог KPI «Сделки» = локальные подтверждённые DDU + строки реестра.
+    const totalDeals = Number(deals || 0) + Number(registryDeals || 0);
+    // Сумма ₽: реестр добавляется, только когда его сумма известна — иначе
+    // строка Deal-суммы остаётся ровно прежней (без переформатирования).
+    const registryAmount = (registryDealAmount as any)?._sum?.amount;
+    const totalDealAmount =
+      registryAmount === null || registryAmount === undefined
+        ? String(dealAmount._sum.amount || "0")
+        : centsToMoney(
+            moneyToCents(String(dealAmount._sum.amount || "0")) +
+              moneyToCents(String(registryAmount)),
+          );
     const today = moscowDateParts().dayMonth;
     const knownBirthdays = (birthdayRows as any[]).filter(
       (row) => row.birthDate,
@@ -4040,8 +4068,8 @@ export class LoyaltyBaseService {
         top: brokerTop,
       },
       agencies: { total: agencyTotal, top: agencyTop },
-      activities: { fixations, meetings, deals },
-      dealAmount: String(dealAmount._sum.amount || "0"),
+      activities: { fixations, meetings, deals: totalDeals },
+      dealAmount: totalDealAmount,
       dataAvailability: {
         exactActivities: false,
         localPreliminary: true,
@@ -4059,7 +4087,7 @@ export class LoyaltyBaseService {
         periodFilterApplied: true,
         requestedPeriod: periodDto,
         contributingRecords:
-          Number(fixations || 0) + Number(meetings || 0) + Number(deals || 0),
+          Number(fixations || 0) + Number(meetings || 0) + totalDeals,
         sourceVersions: ["LOCAL_DB:CURRENT"],
         methodology:
           "Local operational tables with per-KPI definitions below; no amoCRM or Anna snapshot exactness is inferred",
@@ -4096,13 +4124,13 @@ export class LoyaltyBaseService {
       "activities.deals": {
         ...shared,
         formula:
-          "COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID and signedAt in requested period)",
+          "COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID and signedAt in requested period) + COUNT(RegistryDeal rows with signedAt in requested period)",
         provenance: "Deal.id / Deal.signedAt / Deal.status",
       },
       dealAmount: {
         ...shared,
         formula:
-          "Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows",
+          "Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over registry rows signed in the requested period",
         provenance: "Deal.id / Deal.amount",
       },
       "brokers.notCalledCurrentMonth": {
@@ -4147,13 +4175,13 @@ export class LoyaltyBaseService {
       "brokers.top": {
         ...shared,
         formula:
-          "Top five by qualifying local DDU deal count, amount, latest signedAt and stable broker ID",
+          "Top five by combined qualifying local DDU deal count plus RegistryDeal rows signed in the period, then amount, latest signedAt and stable broker ID",
         provenance: "Deal.brokerId / Deal.id / Deal.amount / Deal.signedAt",
       },
       "agencies.top": {
         ...shared,
         formula:
-          "Top five by qualifying local DDU deals with an explicit Deal.agencyId; current BrokerAgency relations are not backfilled into this overview ranking",
+          "Top five by qualifying local DDU deals with an explicit Deal.agencyId plus RegistryDeal rows attributed to agencies via current BrokerAgency relations of their brokers",
         provenance: "Deal.agencyId / Deal.id / Deal.amount / Deal.signedAt",
       },
       "brokers.total": {
@@ -4171,12 +4199,55 @@ export class LoyaltyBaseService {
     };
   }
 
+  /**
+   * Топ-5 «нашей базы» по сделкам за период: Deal-таблица + «Реестр сделок».
+   * Брокер реестра — по registry_deals.brokerId; агентство — через текущие
+   * связи broker_agencies его брокеров (то же правило, что и в
+   * attachOurAgencyRegistryDeals). Слияние и ранжирование — в памяти, объём
+   * ограничен числом строк с продажами за период.
+   */
   private async oursDealLeaders(
     entityType: EntityType,
     period: { from: Date; to: Date },
   ) {
     const groupField = entityType === "BROKER" ? "brokerId" : "agencyId";
-    const groups = await (this.prisma.deal as any).groupBy({
+    const totals = new Map<
+      string,
+      { deals: number; amountCents: bigint; latestAt: Date | null }
+    >();
+    const add = (
+      id: unknown,
+      deals: number,
+      amount: unknown,
+      latest: unknown,
+    ) => {
+      const key = String(id || "");
+      if (!key || !deals) return;
+      const target = totals.get(key) || {
+        deals: 0,
+        amountCents: 0n,
+        latestAt: null,
+      };
+      target.deals += deals;
+      if (amount !== null && amount !== undefined) {
+        target.amountCents += moneyToCents(String(amount));
+      }
+      const latestDate =
+        latest instanceof Date
+          ? latest
+          : latest
+            ? new Date(latest as any)
+            : null;
+      if (
+        latestDate &&
+        Number.isFinite(latestDate.getTime()) &&
+        (!target.latestAt || target.latestAt < latestDate)
+      ) {
+        target.latestAt = latestDate;
+      }
+      totals.set(key, target);
+    };
+    const dealGroups = await (this.prisma.deal as any).groupBy({
       by: [groupField],
       where: {
         ...this.ourConfirmedDealWhere(period),
@@ -4187,16 +4258,86 @@ export class LoyaltyBaseService {
       _count: { [groupField]: true },
       _sum: { amount: true },
       _max: { signedAt: true },
-      orderBy: [
-        { _count: { [groupField]: "desc" } },
-        { _sum: { amount: "desc" } },
-        { _max: { signedAt: "desc" } },
-        { [groupField]: "asc" },
-      ],
-      take: 5,
     });
-    const ids = groups.map((group: any) => group[groupField]).filter(Boolean);
-    if (!ids.length) return [];
+    for (const group of dealGroups as any[]) {
+      add(
+        group[groupField],
+        Number(group._count?.[groupField] || 0),
+        group._sum?.amount,
+        group._max?.signedAt,
+      );
+    }
+    if (this.registryDealModel) {
+      const registryGroups = await this.registryDealModel.groupBy({
+        by: ["brokerId"],
+        where: {
+          brokerId: { not: null },
+          broker: { is: { role: "BROKER", mergedIntoId: null } },
+          ...this.registrySignedAtWhere(period),
+        },
+        _count: { _all: true },
+        _sum: { amount: true },
+        _max: { signedAt: true },
+      });
+      if (entityType === "BROKER") {
+        for (const group of registryGroups as any[]) {
+          add(
+            group.brokerId,
+            Number(group._count?._all || 0),
+            group._sum?.amount,
+            group._max?.signedAt,
+          );
+        }
+      } else if (
+        (registryGroups as any[]).length &&
+        (this.prisma as any).brokerAgency
+      ) {
+        const brokerIds = uniqueSorted(
+          (registryGroups as any[]).map((group) => String(group.brokerId || "")),
+        );
+        const relations = await (this.prisma as any).brokerAgency.findMany({
+          where: { brokerId: { in: brokerIds } },
+          select: { brokerId: true, agencyId: true },
+        });
+        const agenciesByBroker = new Map<string, string[]>();
+        for (const relation of relations as any[]) {
+          const brokerId = String(relation.brokerId || "");
+          const agencyId = String(relation.agencyId || "");
+          if (!brokerId || !agencyId) continue;
+          const list = agenciesByBroker.get(brokerId) || [];
+          list.push(agencyId);
+          agenciesByBroker.set(brokerId, list);
+        }
+        for (const group of registryGroups as any[]) {
+          for (const agencyId of agenciesByBroker.get(
+            String(group.brokerId || ""),
+          ) || []) {
+            add(
+              agencyId,
+              Number(group._count?._all || 0),
+              group._sum?.amount,
+              group._max?.signedAt,
+            );
+          }
+        }
+      }
+    }
+    const ranked = [...totals.entries()]
+      .map(([id, value]) => ({ id, ...value }))
+      .sort(
+        (left, right) =>
+          right.deals - left.deals ||
+          (left.amountCents === right.amountCents
+            ? 0
+            : right.amountCents > left.amountCents
+              ? 1
+              : -1) ||
+          (right.latestAt?.getTime() || 0) - (left.latestAt?.getTime() || 0) ||
+          left.id.localeCompare(right.id),
+      )
+      .slice(0, 5);
+    if (!ranked.length) return [];
+    const ids = ranked.map((entry) => entry.id);
     const entities =
       entityType === "BROKER"
         ? await this.prisma.broker.findMany({
@@ -4213,13 +4354,13 @@ export class LoyaltyBaseService {
         entity.fullName || entity.name,
       ]),
     );
-    return groups.map((group: any) => ({
-      id: group[groupField],
-      name: names.get(group[groupField]) || "—",
+    return ranked.map((entry) => ({
+      id: entry.id,
+      name: names.get(entry.id) || "—",
       entityType,
-      deals: Number(group._count?.[groupField] || 0),
-      dealAmount: String(group._sum?.amount || "0"),
-      latestDealAt: group._max?.signedAt || null,
+      deals: entry.deals,
+      dealAmount: centsToMoney(entry.amountCents),
+      latestDealAt: entry.latestAt,
     }));
   }
 
@@ -4230,6 +4371,122 @@ export class LoyaltyBaseService {
       status: { in: ["SIGNED", "PAID", "COMMISSION_PAID"] },
       signedAt: period ? { gte: period.from, lte: period.to } : { not: null },
     };
+  }
+
+  /**
+   * 2026-09-04: «Реестр сделок» (registry_deals) — второй источник сделок
+   * нашей базы. Локальная Deal-таблица фактически пуста (12 строк, не DDU),
+   * поэтому итоговое число сделок брокера/агентства = Deal + RegistryDeal;
+   * дедупликация между источниками сознательно не делается.
+   * В старых тестовых prisma-моках модели registryDeal нет — тогда источник
+   * считается пустым (нулевые счётчики), чтобы не менять чужие фикстуры.
+   */
+  private get registryDealModel(): any {
+    return (this.prisma as any).registryDeal ?? null;
+  }
+
+  /** Период по дате подписания; без периода — все строки реестра. */
+  private registrySignedAtWhere(period?: { from: Date; to: Date }): any {
+    return period ? { signedAt: { gte: period.from, lte: period.to } } : {};
+  }
+
+  /**
+   * Lifetime-счётчики реестровых сделок брокеров списка «наша база».
+   * Мутирует record._count.deals (и последнюю дату сделки в record.deals[0]),
+   * чтобы все существующие потребители — колонки, статусы SELLER/TOP_SELLER,
+   * фильтр «Количество сделок», HAS_DEALS — увидели суммарное число.
+   */
+  private async attachOurBrokerRegistryDeals(records: any[]) {
+    if (!records.length || !this.registryDealModel) return;
+    const byId = new Map<string, any>(
+      records.map((record) => [String(record.id), record]),
+    );
+    const ids = uniqueSorted([...byId.keys()]);
+    for (
+      let offset = 0;
+      offset < ids.length;
+      offset += CANDIDATE_QUERY_BATCH_SIZE
+    ) {
+      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const groups = await this.registryDealModel.groupBy({
+        by: ["brokerId"],
+        where: { brokerId: { in: batch } },
+        _count: { _all: true },
+        _max: { signedAt: true },
+      });
+      for (const group of groups as any[]) {
+        const record = byId.get(String(group.brokerId));
+        if (!record) continue;
+        const count = finiteNumber(group._count?._all) || 0;
+        if (!count) continue;
+        record._count = {
+          ...(record._count || {}),
+          deals: Number(record._count?.deals || 0) + count,
+        };
+        const registryLast = group._max?.signedAt || null;
+        const currentLast = record.deals?.[0]?.signedAt || null;
+        if (
+          registryLast &&
+          (!currentLast || new Date(currentLast) < new Date(registryLast))
+        ) {
+          record.deals = [
+            { signedAt: registryLast },
+            ...(Array.isArray(record.deals) ? record.deals : []),
+          ];
+        }
+      }
+    }
+  }
+
+  /**
+   * Реестровые сделки агентств нашей базы: у Agency нет прямой связи с
+   * registry_deals, поэтому агентские строки — те, чей brokerId входит в
+   * текущих брокеров агентства (broker_agencies). Прикрепляются как
+   * record.__registryDeals; ourAgencyRelationMetrics вливает их в общий
+   * массив сделок (счётчик, сумма, даты и периодные метрики — единообразно).
+   */
+  private async attachOurAgencyRegistryDeals(records: any[]) {
+    if (!records.length || !this.registryDealModel) return;
+    const brokerToRecords = new Map<string, any[]>();
+    for (const record of records) {
+      record.__registryDeals = [];
+      const relations = Array.isArray(record?.brokerAgencies)
+        ? record.brokerAgencies
+        : [];
+      for (const relation of relations) {
+        const brokerId = String(relation?.broker?.id || "");
+        if (!brokerId) continue;
+        const list = brokerToRecords.get(brokerId) || [];
+        list.push(record);
+        brokerToRecords.set(brokerId, list);
+      }
+    }
+    const ids = uniqueSorted([...brokerToRecords.keys()]);
+    for (
+      let offset = 0;
+      offset < ids.length;
+      offset += CANDIDATE_QUERY_BATCH_SIZE
+    ) {
+      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const rows = await this.registryDealModel.findMany({
+        where: { brokerId: { in: batch } },
+        select: { id: true, brokerId: true, signedAt: true, amount: true },
+      });
+      for (const row of rows as any[]) {
+        for (const record of brokerToRecords.get(String(row.brokerId)) || []) {
+          record.__registryDeals.push({
+            id: `REGISTRY:${String(row.id)}`,
+            signedAt: row.signedAt || null,
+            // Неизвестная сумма считается нулём: сумма остаётся нижней
+            // границей вместо схлопывания всей агрегатной суммы в null.
+            amount:
+              row.amount === null || row.amount === undefined
+                ? "0"
+                : String(row.amount),
+          });
+        }
+      }
+    }
   }
 
   private emptyOverview(base: BaseSlug, period: { from: string; to: string }) {
@@ -6893,6 +7150,7 @@ export class LoyaltyBaseService {
         clients: { none: { fixationStatus: "FIXED" } },
         meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
         deals: { none: this.ourConfirmedDealWhere() },
+        registryDeals: { none: {} },
         callLogs: { none: {} },
         loyaltyAssignmentsAsTarget: { none: { attempts: { some: {} } } },
         lastCallAt: null,
@@ -6930,13 +7188,23 @@ export class LoyaltyBaseService {
     // Campaign/called predicates are evaluated after workflow attempts and
     // legacy call logs have been combined into one call read model.
     if (filter.dealsInPeriod !== undefined) {
-      and.push({
-        deals: {
-          [filter.dealsInPeriod ? "some" : "none"]: this.ourConfirmedDealWhere(
-            filter.activityPeriod,
-          ),
-        },
-      });
+      // Сделка за период — из любого источника: локальная Deal-таблица или
+      // «Реестр сделок» (registry_deals, период по signedAt).
+      const dealWhere = this.ourConfirmedDealWhere(filter.activityPeriod);
+      const registryWhere = this.registrySignedAtWhere(filter.activityPeriod);
+      and.push(
+        filter.dealsInPeriod
+          ? {
+              OR: [
+                { deals: { some: dealWhere } },
+                { registryDeals: { some: registryWhere } },
+              ],
+            }
+          : {
+              deals: { none: dealWhere },
+              registryDeals: { none: registryWhere },
+            },
+      );
     }
     if (and.length) where.AND = and;
     const callLogWhere = {
@@ -7019,6 +7287,7 @@ export class LoyaltyBaseService {
         },
       },
     });
+    await this.attachOurBrokerRegistryDeals(records as any[]);
     const workflowCalls = await this.workflowCallReadModels(
       "ours",
       "BROKER",
@@ -7106,7 +7375,7 @@ export class LoyaltyBaseService {
       exactness: "APPROXIMATE",
       source: "LOCAL_OPERATIONAL_ROWS",
       methodology:
-        "Batched per-broker aggregates over current local FIXED Client rows, confirmed/completed Meeting rows and qualifying confirmed DDU Deal rows in the selected period.",
+        "Batched per-broker aggregates over current local FIXED Client rows, confirmed/completed Meeting rows, qualifying confirmed DDU Deal rows and RegistryDeal rows signed in the selected period.",
       fixations: 0,
       meetings: 0,
       deals: 0,
@@ -7123,8 +7392,9 @@ export class LoyaltyBaseService {
       offset += CANDIDATE_QUERY_BATCH_SIZE
     ) {
       const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
-      const [fixationGroups, meetingGroups, dealGroups] = await Promise.all([
-        (this.prisma.client as any).groupBy({
+      const [fixationGroups, meetingGroups, dealGroups, registryGroups] =
+        await Promise.all([
+          (this.prisma.client as any).groupBy({
           by: ["brokerId"],
           where: {
             brokerId: { in: batch },
@@ -7154,6 +7424,21 @@ export class LoyaltyBaseService {
           _sum: { amount: true },
           _max: { signedAt: true },
         }),
+        this.registryDealModel
+          ? this.registryDealModel.groupBy({
+              by: ["brokerId"],
+              where: {
+                brokerId: { in: batch },
+                ...this.registrySignedAtWhere({
+                  from: period.from,
+                  to: period.to,
+                }),
+              },
+              _count: { _all: true },
+              _sum: { amount: true },
+              _max: { signedAt: true },
+            })
+          : Promise.resolve([]),
       ]);
 
       for (const group of fixationGroups as any[]) {
@@ -7183,6 +7468,28 @@ export class LoyaltyBaseService {
             ? null
             : String(group._sum.amount);
         target.lastDealAt = dateOnly(group._max?.signedAt);
+      }
+      // «Реестр сделок»: добавляется к Deal-счётчику (после цикла выше,
+      // который перезаписывает target.deals значением из Deal-таблицы).
+      for (const group of registryGroups as any[]) {
+        const target = result.get(String(group.brokerId));
+        if (!target) continue;
+        const count = finiteNumber(group._count?._all) || 0;
+        if (!count) continue;
+        target.deals = (finiteNumber(target.deals) || 0) + count;
+        if (group._sum?.amount !== null && group._sum?.amount !== undefined) {
+          target.dealAmount = centsToMoney(
+            moneyToCents(String(target.dealAmount ?? "0")) +
+              moneyToCents(String(group._sum.amount)),
+          );
+        }
+        const registryLast = dateOnly(group._max?.signedAt);
+        if (
+          registryLast &&
+          (!target.lastDealAt || target.lastDealAt < registryLast)
+        ) {
+          target.lastDealAt = registryLast;
+        }
       }
     }
 
@@ -7245,6 +7552,7 @@ export class LoyaltyBaseService {
       where,
       include: this.ourAgencyReadInclude(),
     });
+    await this.attachOurAgencyRegistryDeals(records as any[]);
     const workflowCalls = await this.workflowCallReadModels(
       "ours",
       "AGENCY",
@@ -7398,6 +7706,26 @@ export class LoyaltyBaseService {
         String(group._sum?.amount || "0"),
       ]),
     );
+    // Суммы «Реестра сделок» брокеров добавляются к Deal-суммам, чтобы
+    // колонка «Сумма сделок» соответствовала комбинированному счётчику.
+    if (groupField === "brokerId" && this.registryDealModel) {
+      const registryGroups = await this.registryDealModel.groupBy({
+        by: ["brokerId"],
+        where: { brokerId: { in: ids } },
+        _sum: { amount: true },
+      });
+      for (const group of registryGroups as any[]) {
+        if (group._sum?.amount === null || group._sum?.amount === undefined)
+          continue;
+        const current = amounts.get(group.brokerId) || "0";
+        amounts.set(
+          group.brokerId,
+          centsToMoney(
+            moneyToCents(current) + moneyToCents(String(group._sum.amount)),
+          ),
+        );
+      }
+    }
     for (const candidate of candidates) {
       candidate.item.metrics.dealAmount = amounts.get(candidate.item.id) || "0";
     }
@@ -7629,9 +7957,19 @@ export class LoyaltyBaseService {
       : null;
     const directDealsKnown = Array.isArray(record?.deals);
     const relationDealsKnown = fieldKnown("deals");
+    // Реестровые сделки брокеров агентства (см. attachOurAgencyRegistryDeals):
+    // вливаются в общий массив — id уникален (REGISTRY:<id>), поэтому
+    // uniqueById не схлопнет их с Deal-строками.
+    const registryRows = Array.isArray(record?.__registryDeals)
+      ? record.__registryDeals
+      : [];
     const deals =
       directDealsKnown && relationDealsKnown
-        ? uniqueById([...record.deals, ...relationRows("deals")])
+        ? uniqueById([
+            ...record.deals,
+            ...relationRows("deals"),
+            ...registryRows,
+          ])
         : null;
     const directCallsKnown = Array.isArray(record?.__workflowCalls?.effective);
     const relationCallsKnown =
@@ -8820,7 +9158,18 @@ export class LoyaltyBaseService {
         },
       };
     if (type === "DEAL")
-      return { deals: { some: this.ourConfirmedDealWhere(period) } };
+      // AND-обёртка: некоторые вызывающие делают Object.assign(where, …) и
+      // затем сами пишут where.OR — прямой OR-ключ там был бы затёрт.
+      return {
+        AND: [
+          {
+            OR: [
+              { deals: { some: this.ourConfirmedDealWhere(period) } },
+              { registryDeals: { some: this.registrySignedAtWhere(period) } },
+            ],
+          },
+        ],
+      };
     if (type === "BROKER_TOUR")
       return {
         brokerTourVisited: true,
@@ -9613,6 +9962,29 @@ export class LoyaltyBaseService {
         where: { ...this.ourConfirmedDealWhere(), brokerId: id },
         _sum: { amount: true },
       });
+      // «Реестр сделок» в карточке брокера: тот же комбинированный счётчик
+      // и сумма, что и в списке нашей базы.
+      let registryAmountCents = 0n;
+      if (this.registryDealModel) {
+        const registry = await this.registryDealModel.aggregate({
+          where: { brokerId: id },
+          _count: { _all: true },
+          _sum: { amount: true },
+        });
+        const registryCount = Number(registry?._count?._all || 0);
+        if (registryCount > 0) {
+          (broker as any)._count = {
+            ...((broker as any)._count || {}),
+            deals: Number((broker as any)._count?.deals || 0) + registryCount,
+          };
+        }
+        if (
+          registry?._sum?.amount !== null &&
+          registry?._sum?.amount !== undefined
+        ) {
+          registryAmountCents = moneyToCents(String(registry._sum.amount));
+        }
+      }
       const workflowCalls = await this.workflowCallReadModels(
         "ours",
         "BROKER",
@@ -9638,7 +10010,10 @@ export class LoyaltyBaseService {
         entityType,
         item: this.mapOurBroker(
           broker,
-          String(dealAmount._sum.amount || "0"),
+          centsToMoney(
+            moneyToCents(String(dealAmount._sum.amount || "0")) +
+              registryAmountCents,
+          ),
           true,
         ),
       };
@@ -9648,6 +10023,7 @@ export class LoyaltyBaseService {
       include: this.ourAgencyReadInclude(),
     });
     if (!agency) throw new NotFoundException("Agency not found");
+    await this.attachOurAgencyRegistryDeals([agency as any]);
     const workflowCalls = await this.workflowCallReadModels("ours", "AGENCY", [
       String(agency.id),
     ]);
