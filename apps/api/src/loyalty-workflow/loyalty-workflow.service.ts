@@ -349,7 +349,12 @@ export class LoyaltyWorkflowService {
         throw new BadRequestException("Некорректный выбор записей");
       }
       selectedIds = this.uniqueIds(body.selection.ids);
-      if (selectedIds.some((id) => !resolvedSet.has(id))) this.selectionDrift();
+      // Задача A: выбранный вручную doNotCall-брокер не «дрейф выборки», а
+      // понятная бизнес-ошибка — резолв для обзвона его уже исключил.
+      if (selectedIds.some((id) => !resolvedSet.has(id))) {
+        this.doNotCallSelectionGuard(resolved.excludedDoNotCall);
+        this.selectionDrift();
+      }
       if (
         body.selection.expectedCount !== undefined &&
         body.selection.expectedCount !== selectedIds.length
@@ -369,11 +374,18 @@ export class LoyaltyWorkflowService {
         throw new BadRequestException("Некорректный выбор записей");
       }
       const excludedIds = this.uniqueIds(body.selection.excludedIds ?? []);
-      if (excludedIds.some((id) => !resolvedSet.has(id))) this.selectionDrift();
+      if (excludedIds.some((id) => !resolvedSet.has(id))) {
+        this.doNotCallSelectionGuard(resolved.excludedDoNotCall);
+        this.selectionDrift();
+      }
       const excluded = new Set(excludedIds);
       selectedIds = resolvedIds.filter((id) => !excluded.has(id));
-      if (body.selection.expectedCount !== selectedIds.length)
+      if (body.selection.expectedCount !== selectedIds.length) {
+        // Задача A: фронт посчитал выборку по списку (где doNotCall видны),
+        // а обзвон их исключает — просим включить фильтр «Без "не звонить"».
+        this.doNotCallSelectionGuard(resolved.excludedDoNotCall);
         this.selectionDrift();
+      }
       frozenSelection = {
         mode: "FILTER",
         expectedCount: selectedIds.length,
@@ -2057,8 +2069,11 @@ export class LoyaltyWorkflowService {
         );
       }
     } else if (campaign.entityType === "BROKER") {
+      // 2026-09-04 (задача A): «не звонить» — жёсткий стоп и на назначении:
+      // брокер, помеченный doNotCall после создания кампании, делает цель
+      // недоступной (нужно пересобрать выборку).
       found = await database.broker.findMany({
-        where: { id: { in: ids }, mergedIntoId: null },
+        where: { id: { in: ids }, mergedIntoId: null, doNotCall: false },
         select: { id: true },
       });
     } else {
@@ -2659,12 +2674,17 @@ export class LoyaltyWorkflowService {
     total: number;
     filterHash: string;
     snapshotId: string | null;
+    excludedDoNotCall?: number;
   }> {
     try {
+      // 2026-09-04 (задача A): резолв выборки для ОБЗВОНА всегда исключает
+      // брокеров с doNotCall=true — независимо от фильтров пользователя.
+      // filterHash при этом не меняется (исключение после вычисления списка).
       return await this.loyaltyBase.resolveSelection(
         this.responseBase(base),
         entityType as any,
         filterSnapshot as any,
+        { excludeDoNotCall: true },
       );
     } catch (error) {
       if (error instanceof BadRequestException) {
@@ -2808,6 +2828,18 @@ export class LoyaltyWorkflowService {
   private selectionDrift(): never {
     throw new ConflictException(
       "Выбор записей изменился. Обновите список и повторите действие",
+    );
+  }
+
+  // 2026-09-04 (задача A): если несовпадение выборки вызвано исключением
+  // брокеров «не звонить», отдаём понятную бизнес-ошибку вместо общего
+  // «дрейфа выборки». Вызывается перед selectionDrift().
+  private doNotCallSelectionGuard(excludedDoNotCall?: number): void {
+    if (!excludedDoNotCall) return;
+    throw new BadRequestException(
+      `В выборке ${excludedDoNotCall} брокер(ов) с пометкой «не звонить» — ` +
+        "они не могут попасть в обзвон. Включите фильтр «Без “не звонить”», " +
+        "обновите список и повторите выбор.",
     );
   }
 

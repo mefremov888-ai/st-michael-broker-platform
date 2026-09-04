@@ -6,6 +6,7 @@ import {
 import {
   LoyaltyBaseService,
   MAX_LOYALTY_CLI_IMPORT_BYTES,
+  activeFixationClientWhere,
   explicitGeography,
   isLoyaltyAcquisitionPhone,
   loyaltyContentHash,
@@ -3991,6 +3992,286 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
+  // 2026-09-04 (аудит фильтров, задача A): резолв выборки для обзвона
+  // всегда исключает брокеров «не звонить» и не меняет filterHash.
+  it("resolveSelection для обзвона исключает брокеров doNotCall", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    jest.spyOn(service, "list").mockResolvedValue({
+      _selectionIds: ["broker-1", "broker-2", "broker-3"],
+      total: 3,
+      filterHash: "b".repeat(64),
+      snapshotId: null,
+    } as any);
+    prisma.broker.findMany.mockResolvedValue([{ id: "broker-2" }]);
+
+    await expect(
+      service.resolveSelection(
+        "ours",
+        "BROKER",
+        { archived: "exclude", search: "" } as any,
+        { excludeDoNotCall: true },
+      ),
+    ).resolves.toEqual({
+      ids: ["broker-1", "broker-3"],
+      total: 2,
+      filterHash: "b".repeat(64),
+      snapshotId: null,
+      excludedDoNotCall: 1,
+    });
+    expect(prisma.broker.findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["broker-1", "broker-2", "broker-3"] },
+        doNotCall: true,
+      },
+      select: { id: true },
+    });
+
+    // Без опции (экспорт/список) выборка не меняется.
+    prisma.broker.findMany.mockClear();
+    await expect(
+      service.resolveSelection("ours", "BROKER", {
+        archived: "exclude",
+        search: "",
+      } as any),
+    ).resolves.toMatchObject({
+      ids: ["broker-1", "broker-2", "broker-3"],
+      total: 3,
+    });
+    expect(prisma.broker.findMany).not.toHaveBeenCalled();
+  });
+
+  // 2026-09-04 (задача A): фильтр «не звонить» в списке «Нашей базы» —
+  // по умолчанию показываются все, exclude/only сужают выборку в БД.
+  it("фильтр doNotCall списка брокеров и его недоступность вне «Нашей базы»", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findMany.mockResolvedValue([]);
+
+    await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { doNotCall: "exclude" } as any,
+    );
+    expect(prisma.broker.findMany.mock.calls[0][0].where.doNotCall).toBe(false);
+
+    prisma.broker.findMany.mockClear();
+    await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { doNotCall: "only" } as any,
+    );
+    expect(prisma.broker.findMany.mock.calls[0][0].where.doNotCall).toBe(true);
+
+    prisma.broker.findMany.mockClear();
+    await service.list("ours", "BROKER", { page: 1, pageSize: 30 } as any);
+    expect(
+      prisma.broker.findMany.mock.calls[0][0].where.doNotCall,
+    ).toBeUndefined();
+
+    // Вне «Нашей базы»/брокеров фильтр fail-closed.
+    await expect(
+      service.list(
+        "anna",
+        "BROKER",
+        { page: 1, pageSize: 30 } as any,
+        undefined,
+        { doNotCall: "exclude" } as any,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  // 2026-09-04 (задача B, вариант В): «Действующая фиксация» — протухшая
+  // фиксация не проходит, живая (или бессрочная) проходит.
+  it("«действующая фиксация»: семантика сроков и включение в where списка", async () => {
+    const now = new Date("2026-09-04T12:00:00.000Z");
+    const where = activeFixationClientWhere(now);
+    // Мини-интерпретатор ровно тех операторов, что использует where
+    // (равенство null и gt) — фиксирует семантику предиката.
+    const matches = (client: Record<string, unknown>) =>
+      where.OR.some((branch: any) => {
+        const statusField =
+          "fixationStatus" in branch ? "fixationStatus" : "uniquenessStatus";
+        if (client[statusField] !== branch[statusField]) return false;
+        return branch.OR.some((expiry: any) => {
+          const [field, condition] = Object.entries(expiry)[0] as [
+            string,
+            { gt: Date } | null,
+          ];
+          const value = client[field] as Date | null;
+          return condition === null
+            ? value === null
+            : value instanceof Date && value > condition.gt;
+        });
+      });
+
+    const live = new Date("2026-10-01T00:00:00.000Z");
+    const expired = new Date("2026-08-01T00:00:00.000Z");
+    // Живая условная уникальность проходит; протухшая — нет.
+    expect(
+      matches({ uniquenessStatus: "CONDITIONALLY_UNIQUE", uniquenessExpiresAt: live }),
+    ).toBe(true);
+    expect(
+      matches({ uniquenessStatus: "CONDITIONALLY_UNIQUE", uniquenessExpiresAt: expired }),
+    ).toBe(false);
+    // FIXED живёт по своему сроку fixationExpiresAt; null = бессрочно.
+    expect(
+      matches({ fixationStatus: "FIXED", fixationExpiresAt: live }),
+    ).toBe(true);
+    expect(
+      matches({ fixationStatus: "FIXED", fixationExpiresAt: expired }),
+    ).toBe(false);
+    expect(
+      matches({ fixationStatus: "FIXED", fixationExpiresAt: null }),
+    ).toBe(true);
+    expect(
+      matches({ fixationStatus: "NOT_FIXED", uniquenessStatus: "NOT_UNIQUE" }),
+    ).toBe(false);
+
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findMany.mockResolvedValue([]);
+    await service.list("ours", "BROKER", {
+      page: 1,
+      pageSize: 30,
+      columns: { activity: "HAS_ACTIVE_FIXATIONS" },
+    } as any);
+    const and = prisma.broker.findMany.mock.calls[0][0].where.AND;
+    const clause = and.find((entry: any) => entry?.clients?.some?.OR);
+    expect(clause.clients.some.OR).toEqual([
+      expect.objectContaining({ fixationStatus: "FIXED" }),
+      expect.objectContaining({ uniquenessStatus: "CONDITIONALLY_UNIQUE" }),
+    ]);
+
+    // Для базы Анны «действующая фиксация» недоступна (нет сроков).
+    await expect(
+      service.list("anna", "BROKER", {
+        page: 1,
+        pageSize: 30,
+        columns: { activity: "HAS_ACTIVE_FIXATIONS" },
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  // 2026-09-04 (задача C): частичный номер находит брокера — условия
+  // buildPhoneSearchConditions и их зеркало на дополнительные телефоны.
+  it("поиск брокера по частичному телефону использует digits-условия", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findMany.mockResolvedValue([]);
+    await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      "5724188",
+    );
+    const and = prisma.broker.findMany.mock.calls[0][0].where.AND;
+    const search = and.find((entry: any) => Array.isArray(entry?.OR));
+    expect(search.OR).toEqual(
+      expect.arrayContaining([
+        { phone: { contains: "5724188" } },
+        { phones: { some: { phone: { contains: "5724188" } } } },
+      ]),
+    );
+
+    // «8912…» дополнительно ищется с префиксом 7 (в БД номера +79…).
+    prisma.broker.findMany.mockClear();
+    await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      "8912455",
+    );
+    const prefixed = prisma.broker.findMany.mock.calls[0][0].where.AND.find(
+      (entry: any) => Array.isArray(entry?.OR),
+    );
+    expect(prefixed.OR).toEqual(
+      expect.arrayContaining([{ phone: { contains: "7912455" } }]),
+    );
+  });
+
+  // 2026-09-04 (задача E): activityType=CALL видит workflow-звонки — where
+  // содержит OR по легаси CallLog и попыткам кампаний лояльности.
+  it("activityType=CALL у брокеров учитывает workflow-звонки", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findMany.mockResolvedValue([]);
+    await service.list("ours", "BROKER", {
+      page: 1,
+      pageSize: 30,
+      activityType: "CALL",
+    } as any);
+    const and = prisma.broker.findMany.mock.calls[0][0].where.AND;
+    const clause = and.find((entry: any) => entry?.AND?.[0]?.OR);
+    expect(clause.AND[0].OR).toEqual([
+      { callLogs: { some: {} } },
+      { loyaltyAssignmentsAsTarget: { some: { attempts: { some: {} } } } },
+    ]);
+  });
+
+  // 2026-09-04 (задача F): «тип активности» у агентств без периода работает
+  // lifetime, а не возвращает пустой список через UNAVAILABLE-метрики.
+  it("агентский activityType без периода работает lifetime", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const agency: any = {
+      id: "agency-activity",
+      name: "Active agency",
+      inn: "7700000002",
+      phone: "+7 (495) 000-11-22",
+      email: null,
+      brokerAgencies: [
+        {
+          isPrimary: true,
+          broker: {
+            id: "broker-1",
+            fullName: "Broker 1",
+            phone: "+79990000001",
+            email: null,
+            lastCallAt: null,
+            brokerTourVisited: false,
+            brokerTourDate: null,
+            clients: [],
+            meetings: [
+              {
+                id: "meeting-1",
+                date: new Date("2026-05-03T10:00:00.000Z"),
+                status: "COMPLETED",
+                type: "OFFICE",
+              },
+            ],
+            deals: [],
+            callLogs: [],
+          },
+        },
+      ],
+      deals: [],
+      _count: { brokerAgencies: 1 },
+    };
+    prisma.agency.findMany.mockResolvedValue([agency]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+
+    const withMeetings: any = await service.list("ours", "AGENCY", {
+      page: 1,
+      pageSize: 30,
+      activityType: "MEETING",
+    } as any);
+    expect(withMeetings.total).toBe(1);
+    expect(withMeetings.items[0].id).toBe("agency-activity");
+
+    const withFixations: any = await service.list("ours", "AGENCY", {
+      page: 1,
+      pageSize: 30,
+      activityType: "FIXATION",
+    } as any);
+    expect(withFixations.total).toBe(0);
+  });
+
   it.each([
     ["BROKER", { partnershipStatuses: ["VIP_PARTNER"] }],
     ["BROKER", { agencySizes: ["LARGE"] }],
@@ -4457,7 +4738,9 @@ describe("LoyaltyBaseService", () => {
       lastCallResult: "SEND_INFORMATION",
       lastCallCampaignId: campaignId,
     });
-    expect(ourBrokerList.items[0].metrics.calls).toBe(0);
+    // 2026-09-04 (задача E): metrics.calls = легаси CallLog + workflow-звонки
+    // (единая семантика ourCalls) — workflow-звонок теперь учитывается.
+    expect(ourBrokerList.items[0].metrics.calls).toBe(1);
     expect(ourAgencyList.items[0]).toMatchObject({
       lastCallResult: "AGREEMENTS_EXIST",
       rewardPresent: true,

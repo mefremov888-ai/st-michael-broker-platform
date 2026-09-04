@@ -1144,7 +1144,9 @@ describe("LoyaltyWorkflowService security and concurrency", () => {
       campaignRemaining: 7,
     });
     expect(prisma.broker.findMany).toHaveBeenCalledWith({
-      where: { id: { in: ["target-1"] }, mergedIntoId: null },
+      // 2026-09-04 (задача A): «не звонить» — жёсткий стоп при валидации
+      // целей обзвона.
+      where: { id: { in: ["target-1"] }, mergedIntoId: null, doNotCall: false },
       select: { id: true },
     });
   });
@@ -1352,6 +1354,47 @@ describe("LoyaltyWorkflowService security and concurrency", () => {
     });
     expect(data.filterSnapshot.selectionDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(data.filterSnapshot)).not.toContain("+7 999");
+  });
+
+  // 2026-09-04 (аудит фильтров, задача A): кампания обзвона резолвит выборку
+  // с исключением брокеров «не звонить»; несовпадение счётчика из-за них —
+  // понятная бизнес-ошибка, а не общий «дрейф выборки».
+  it("создание кампании исключает doNotCall и объясняет несовпадение выборки", async () => {
+    const { loyaltyBase, service } = harness();
+    loyaltyBase.resolveSelection.mockResolvedValue({
+      ids: ["target-1"],
+      total: 1,
+      filterHash: "b".repeat(64),
+      snapshotId: null,
+      excludedDoNotCall: 1,
+    });
+
+    await expect(
+      service.createCampaign(
+        {
+          name: "С «не звонить»",
+          message: "Message",
+          base: "ours",
+          entityType: "brokers",
+          filterSnapshot: {},
+          filterHash: "b".repeat(64),
+          snapshotId: null,
+          selection: {
+            mode: "FILTER",
+            filterHash: "b".repeat(64),
+            expectedCount: 2,
+            excludedIds: [],
+          },
+        } as any,
+        admin,
+      ),
+    ).rejects.toThrow(/не звонить/);
+    expect(loyaltyBase.resolveSelection).toHaveBeenCalledWith(
+      "ours",
+      "BROKER",
+      expect.anything(),
+      { excludeDoNotCall: true },
+    );
   });
 
   it("returns 409 when a live FILTER result set drifts without changing its count", async () => {

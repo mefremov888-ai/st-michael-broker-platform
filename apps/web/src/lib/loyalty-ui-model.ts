@@ -88,6 +88,9 @@ export interface LoyaltyFilterFormState {
   specialTermsProposed: TriState;
   staleDays: string;
   rewardPresent: TriState;
+  // «Не звонить»: "" — показать всех (по умолчанию), exclude — без
+  // «не звонить», only — только «не звонить». Наша база / брокеры.
+  doNotCall: "" | "exclude" | "only";
   sortBy: LoyaltySortField;
   sortOrder: "asc" | "desc";
 }
@@ -152,6 +155,7 @@ export function emptyLoyaltyFilters(): LoyaltyFilterFormState {
     specialTermsProposed: "",
     staleDays: "",
     rewardPresent: "",
+    doNotCall: "",
     sortBy: "name",
     sortOrder: "asc",
   };
@@ -172,15 +176,13 @@ export function toCanonicalFilter(
   base: LoyaltyBaseKey,
 ): LoyaltyCanonicalFilter {
   const state = sanitizeLoyaltyFilterState(base, entityType, unsafeState);
+  // 2026-09-04 (задача D): «период звонков» больше НЕ подменяет период
+  // активности для базы Анны при dealsInPeriod — сделки фильтруются только
+  // по явно выбранному периоду активности.
   const activityPeriod =
-    base === "anna" &&
-    state.dealsInPeriod !== "" &&
-    state.callFrom &&
-    state.callTo
-      ? { from: state.callFrom, to: state.callTo }
-      : state.activityFrom && state.activityTo
-        ? { from: state.activityFrom, to: state.activityTo }
-        : undefined;
+    state.activityFrom && state.activityTo
+      ? { from: state.activityFrom, to: state.activityTo }
+      : undefined;
   // Пустой период = «за всё время»: без периода «сделки в периоде» становится
   // lifetime-предикатом по количеству сделок, а не ошибкой fail-closed API.
   const dealsInPeriod = activityPeriod
@@ -225,6 +227,7 @@ export function toCanonicalFilter(
   if (entityType === "brokers") {
     return {
       ...common,
+      doNotCall: state.doNotCall || undefined,
       specializations: state.specialization
         ? [state.specialization]
         : undefined,
@@ -303,6 +306,9 @@ export interface LoyaltyFilterCapabilities {
   agencySize: boolean;
   websitePresent: boolean;
   projectsOnSite: boolean;
+  // «Не звонить» и «Действующая фиксация»: только «Наша база» / брокеры.
+  doNotCall: boolean;
+  activeFixation: boolean;
   archivedModes: ReadonlyArray<LoyaltyArchiveMode>;
   scenarios: ReadonlyArray<readonly [LoyaltyCallScenario, string]>;
   segments: ReadonlyArray<LoyaltySegment>;
@@ -380,6 +386,11 @@ const SORT_ORDER_VALUES: ReadonlyArray<LoyaltyFilterFormState["sortOrder"]> = [
   "asc",
   "desc",
 ];
+const DO_NOT_CALL_VALUES: ReadonlyArray<LoyaltyFilterFormState["doNotCall"]> = [
+  "",
+  "exclude",
+  "only",
+];
 const DATE_ONLY_INPUT = /^\d{4}-\d{2}-\d{2}$/;
 const NON_NEGATIVE_INTEGER_INPUT = /^\d+$/;
 
@@ -411,12 +422,15 @@ export function loyaltyFilterCapabilities(
 ): LoyaltyFilterCapabilities {
   const ourAgency = base === "ours" && entityType === "agencies";
   const agencyWithSourceFields = entityType === "agencies" && !ourAgency;
+  const ourBroker = base === "ours" && entityType === "brokers";
   return {
     hasAmo: !ourAgency,
     dataQuality: !ourAgency,
     agencySize: agencyWithSourceFields,
     websitePresent: agencyWithSourceFields,
     projectsOnSite: agencyWithSourceFields,
+    doNotCall: ourBroker,
+    activeFixation: ourBroker,
     archivedModes: ourAgency ? OUR_AGENCY_ARCHIVE_MODES : ALL_ARCHIVE_MODES,
     scenarios:
       entityType === "brokers"
@@ -523,6 +537,12 @@ export function sanitizeLoyaltyFilterState(
   if (!capabilities.projectsOnSite && state.projectsOnSite !== "") {
     patch.projectsOnSite = "";
   }
+  if (
+    (!capabilities.doNotCall && state.doNotCall !== "") ||
+    !DO_NOT_CALL_VALUES.includes(state.doNotCall)
+  ) {
+    patch.doNotCall = "";
+  }
 
   return Object.keys(patch).length ? { ...state, ...patch } : state;
 }
@@ -543,6 +563,7 @@ const objectRecord = (value: unknown): Record<string, unknown> =>
   isObjectRecord(value) ? value : {};
 
 function sanitizeLoyaltyColumnFilters(
+  base: LoyaltyBaseKey,
   entityType: LoyaltyEntityType,
   value: unknown,
 ): LoyaltyColumnFilters {
@@ -569,6 +590,11 @@ function sanitizeLoyaltyColumnFilters(
       "NO_FIXATIONS",
       "HAS_MEETINGS",
       "NO_MEETINGS",
+      // «Действующая фиксация» — только «Наша база» / брокеры (сроки
+      // фиксаций есть только у локальных клиентов).
+      ...(loyaltyFilterCapabilities(base, entityType).activeFixation
+        ? ["HAS_ACTIVE_FIXATIONS"]
+        : []),
     ].includes(String(candidate.activity || ""))
   ) {
     output.activity = candidate.activity as LoyaltyColumnFilters["activity"];
@@ -641,6 +667,7 @@ export function restoreLoyaltySavedView(
     formStateFromSavedView(savedFilters),
   );
   const columns = sanitizeLoyaltyColumnFilters(
+    base,
     entityType,
     isObjectRecord(ui.columns) ? ui.columns : snapshot.columns,
   );
