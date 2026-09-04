@@ -2432,6 +2432,28 @@ export async function getLoyaltyOverview(
   return normalizeLoyaltyOverview(value, base);
 }
 
+// 2026-09-04: при пустом периоде (дефолт после фикса) страница шлёт три
+// full-scan запроса параллельно, а сервер допускает ограниченное число
+// одновременных полных сканов (LOYALTY_FULL_SCAN_BUSY, 503 + retryAfter).
+// Такой ответ — не ошибка, а «подожди»: повторяем сами до 3 раз.
+async function postWithScanRetry<T>(url: string, body: unknown): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await apiPost<T>(url, body);
+    } catch (error: any) {
+      lastError = error;
+      const message = String(error?.message || "");
+      const busy =
+        message.includes("LOYALTY_FULL_SCAN_BUSY") ||
+        message.includes("safe number of full scans");
+      if (!busy || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 export async function getLoyaltyList(
   base: LoyaltyBaseKey,
   entityType: LoyaltyEntityType,
@@ -2444,7 +2466,7 @@ export async function getLoyaltyList(
       : filters.hasAmo === "true";
   // Search text and the full canonical filter live in the POST body so names,
   // phones and emails never leak into proxy/access-log URLs.
-  const value = await apiPost<unknown>(
+  const value = await postWithScanRetry<unknown>(
     `/loyalty-base/${base}/${entityType}/search`,
     {
       search,
