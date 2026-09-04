@@ -106,6 +106,9 @@ jobs:
             move_if_exists ".env.bak.1781523085"
             move_if_exists ".env.bak.1781523182"
             move_if_exists ".env.bak.1781779686"
+            # 2026-09-04: бэкап от update-smtp-creds (seed-data.yml) в день
+            # починки почты; сама задача теперь пишет бэкапы в /var/backups.
+            move_if_exists ".env.bak.1788503041"
             move_if_exists ".env.tmp.4gJGKo"
             move_if_exists ".env.tmp.OmEGXO"
             move_if_exists "docker-compose.override.yml.bak.2026-05-30-012943"

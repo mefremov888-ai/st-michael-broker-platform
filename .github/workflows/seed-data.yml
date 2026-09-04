@@ -258,8 +258,12 @@ jobs:
                 echo "ERROR: .env не найден в $(pwd)"
                 exit 1
               fi
-              # Бэкап перед правкой — на случай отката.
-              cp .env ".env.bak.$(date +%s)"
+              # Бэкап перед правкой — на случай отката. НЕ в папку деплоя:
+              # deploy-update.sh фейлит выкладку на неожиданных untracked-файлах
+              # (2026-09-04 один такой .env.bak заблокировал деплой).
+              ENV_BAK_DIR="/var/backups/stmichael/env-backups"
+              sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ENV_BAK_DIR"
+              install -m 600 .env "$ENV_BAK_DIR/.env.bak.$(date +%s)"
               # Экранирование значений для sed replacement: \, &, |, / → \X.
               # Для Exchange логина 'stmichael\broker_st' это критично, иначе \b сожрётся.
               SMTP_USER_NEW='${{ inputs.smtp_user }}'
@@ -291,7 +295,10 @@ jobs:
               AMO_TASK_TYPE_ID='${{ inputs.amo_meeting_task_type_id }}'
               test -n "$AMO_USER_ID" || { echo "ERROR: amo_user_id is required"; exit 1; }
               test -f .env || { echo "ERROR: .env not found in $(pwd)"; exit 1; }
-              cp .env ".env.bak.$(date +%s)"
+              # Бэкап вне папки деплоя — см. комментарий в update-smtp-creds.
+              ENV_BAK_DIR="/var/backups/stmichael/env-backups"
+              sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ENV_BAK_DIR"
+              install -m 600 .env "$ENV_BAK_DIR/.env.bak.$(date +%s)"
               grep -q '^AMO_BROKER_MEETINGS_MANAGER_ID=' .env \
                 && sed -i "s|^AMO_BROKER_MEETINGS_MANAGER_ID=.*|AMO_BROKER_MEETINGS_MANAGER_ID=$AMO_USER_ID|" .env \
                 || printf '\nAMO_BROKER_MEETINGS_MANAGER_ID=%s\n' "$AMO_USER_ID" >> .env
