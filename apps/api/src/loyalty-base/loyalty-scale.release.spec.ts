@@ -248,17 +248,26 @@ describe("loyalty production-scale release gate", () => {
     expectWithinReleaseBudget(measurement);
   });
 
-  it("admits two full scans, fails the third loudly, and releases both successful slots", async () => {
+  // 2026-09-04: бюджет 2 -> 3 (первая загрузка страницы шлёт три full-scan
+  // запроса параллельно при пустом периоде по умолчанию).
+  it("admits three full scans, fails the fourth loudly, and releases the slots", async () => {
     const prisma = prismaScaleMock();
     const first = deferred<any[]>();
     const second = deferred<any[]>();
+    const third = deferred<any[]>();
     prisma.broker.findMany
       .mockImplementationOnce(() => first.promise)
       .mockImplementationOnce(() => second.promise)
+      .mockImplementationOnce(() => third.promise)
       .mockResolvedValue([]);
     const service = new LoyaltyBaseService(prisma);
     const firstScan = service.list("ours", "BROKER", new LoyaltyListQueryDto());
     const secondScan = service.list(
+      "ours",
+      "BROKER",
+      new LoyaltyListQueryDto(),
+    );
+    const thirdScan = service.list(
       "ours",
       "BROKER",
       new LoyaltyListQueryDto(),
@@ -270,7 +279,8 @@ describe("loyalty production-scale release gate", () => {
 
     first.resolve([]);
     second.resolve([]);
-    await Promise.all([firstScan, secondScan]);
+    third.resolve([]);
+    await Promise.all([firstScan, secondScan, thirdScan]);
     await expect(
       service.list("ours", "BROKER", new LoyaltyListQueryDto()),
     ).resolves.toMatchObject({ total: 0, items: [] });
