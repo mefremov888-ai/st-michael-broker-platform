@@ -40,19 +40,36 @@ const isTruthy = (v) =>
   v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true' || String(v).toLowerCase() === 'да';
 
 (async () => {
-  const { NestFactory } = require('@nestjs/core');
-  let AppModule;
-  try {
-    ({ AppModule } = require('/app/apps/api/dist/app.module'));
-  } catch (e) {
-    console.error('Cannot load Nest:', e?.message);
-    process.exit(1);
-  }
-  const { AmoCrmAdapter } = require('/app/packages/integrations/dist/amo-crm.adapter');
+  // Без NestFactory(AppModule): полный контекст запускает шедулеры (кроны
+  // синка) внутри скрипта — дублирование и записи в БД из read-only выгрузки.
+  // Токены amo загружаем напрямую из SystemSetting (как amo-token-bootstrap),
+  // hook на refresh обязателен — refresh_token ротируется при каждом использовании.
+  const {
+    AmoCrmAdapter, setAmoTokens, setAmoTokenRefreshHook,
+  } = require('/app/packages/integrations/dist/amo-crm.adapter');
   const { PrismaClient } = require('@st-michael/database');
-
-  const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn'] });
   const prisma = new PrismaClient();
+
+  const rows = await prisma.systemSetting.findMany({
+    where: { key: { in: ['AMO_ACCESS_TOKEN', 'AMO_REFRESH_TOKEN'] } },
+    select: { key: true, value: true },
+  });
+  const byKey = new Map(rows.map((r) => [r.key, r.value]));
+  setAmoTokens(
+    byKey.get('AMO_ACCESS_TOKEN') || process.env.AMO_ACCESS_TOKEN || '',
+    byKey.get('AMO_REFRESH_TOKEN') || process.env.AMO_REFRESH_TOKEN || '',
+  );
+  setAmoTokenRefreshHook(async (tokens) => {
+    for (const [key, value] of [['AMO_ACCESS_TOKEN', tokens.access], ['AMO_REFRESH_TOKEN', tokens.refresh]]) {
+      await prisma.systemSetting.upsert({
+        where: { key },
+        update: { value, updatedBy: 'export-amo-deals' },
+        create: { key, value, updatedBy: 'export-amo-deals' },
+      });
+    }
+    console.error('amo tokens refreshed and persisted');
+  });
+
   const amo = new AmoCrmAdapter();
 
   try {
@@ -169,7 +186,6 @@ const isTruthy = (v) =>
     console.log('===EXPORT-END===');
   } finally {
     await prisma.$disconnect();
-    await app.close();
   }
 })().catch((e) => {
   console.error('FATAL:', e);
