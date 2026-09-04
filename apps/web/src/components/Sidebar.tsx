@@ -12,6 +12,7 @@ import {
   Calculator,
   BookOpen,
   FileText,
+  FileSpreadsheet,
   Shield,
   Calendar,
   Sparkles,
@@ -42,6 +43,8 @@ const adminNavigation = [
   { name: 'Инструкции сотрудникам', href: '/admin/instructions', icon: ClipboardList },
   // 2026-08-28: «Аналитика платформы» скрыта — отчёт падает, пункт убран из меню.
   { name: 'База лояльности', href: '/admin/loyalty-base', icon: Database },
+  // 2026-09-04: аналитика агентств по таблице registry_deals (реестр ДДУ).
+  { name: 'Реестр сделок', href: '/admin/registry-deals', icon: FileSpreadsheet },
   { name: 'Колл-центр', href: '/admin/call-center', icon: PhoneCall },
   { name: 'Конфликты уникальности', href: '/admin/uniqueness-conflicts', icon: AlertTriangle },
   // 2026-07-09: заменяет «Заявки без amoCRM» — теперь тут все типы

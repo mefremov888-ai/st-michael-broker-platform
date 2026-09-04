@@ -47,6 +47,17 @@ function prismaMock() {
     client: { count: fn(), groupBy: fn() },
     meeting: { count: fn(), groupBy: fn() },
     deal: { count: fn(), aggregate: fn(), groupBy: fn() },
+    // «Реестр сделок» (registry_deals): по умолчанию пустой источник, чтобы
+    // существующие тесты видели прежние числа.
+    registryDeal: {
+      count: jest.fn().mockResolvedValue(0),
+      groupBy: jest.fn().mockResolvedValue([]),
+      findMany: jest.fn().mockResolvedValue([]),
+      aggregate: jest
+        .fn()
+        .mockResolvedValue({ _count: { _all: 0 }, _sum: { amount: null } }),
+    },
+    brokerAgency: { findMany: jest.fn().mockResolvedValue([]) },
     loyaltyDataset: { findUnique: fn(), upsert: fn(), update: fn() },
     loyaltySnapshot: { findUnique: fn(), create: fn(), update: fn() },
     loyaltyPerson: {
@@ -4652,6 +4663,274 @@ describe("LoyaltyBaseService", () => {
     );
     expect(periodFixationsOnly.items.map((item: any) => item.id)).toEqual([
       "period",
+    ]);
+  });
+
+  it("passes the OUR broker deal-count filter from registry deals alone", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const broker = (id: string, phoneSuffix: string) => ({
+      id,
+      fullName: `Broker ${id}`,
+      phone: `+7999000${phoneSuffix}`,
+      email: null,
+      status: "ACTIVE",
+      funnelStage: "NEW_BROKER",
+      region: "MSK",
+      isRegional: false,
+      isCoordinator: false,
+      specialization: null,
+      category: null,
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      lastCallAt: null,
+      updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      assignedManagerId: null,
+      assignedManager: null,
+      phones: [],
+      brokerAgencies: [],
+      callLogs: [],
+      clients: [],
+      meetings: [],
+      deals: [],
+      _count: { clients: 0, deals: 0, meetings: 0, callLogs: 0 },
+    });
+    prisma.broker.findMany.mockResolvedValue([
+      broker("registry-only", "0011"),
+      broker("no-deals", "0012"),
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.registryDeal.groupBy.mockResolvedValue([
+      {
+        brokerId: "registry-only",
+        _count: { _all: 2 },
+        _sum: { amount: "500000.00" },
+        _max: { signedAt: new Date("2026-07-10T00:00:00.000Z") },
+      },
+    ]);
+
+    const result: any = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { dealCount: { min: 1 } } as any,
+    );
+
+    expect(result.items.map((item: any) => item.id)).toEqual([
+      "registry-only",
+    ]);
+    expect(result.items[0].metrics.deals).toBe(2);
+    expect(result.items[0].metrics.dealAmount).toBe("500000.00");
+    expect(result.items[0].computedStatuses).toContain("SELLER");
+  });
+
+  it("applies the selected period to registry deals by signedAt", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const broker = (id: string, phoneSuffix: string) => ({
+      id,
+      fullName: `Broker ${id}`,
+      phone: `+7999000${phoneSuffix}`,
+      email: null,
+      status: "ACTIVE",
+      funnelStage: "NEW_BROKER",
+      region: "MSK",
+      isRegional: false,
+      isCoordinator: false,
+      specialization: null,
+      category: null,
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      lastCallAt: null,
+      updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      assignedManagerId: null,
+      assignedManager: null,
+      phones: [],
+      brokerAgencies: [],
+      callLogs: [],
+      clients: [],
+      meetings: [],
+      deals: [],
+      _count: { clients: 0, deals: 0, meetings: 0, callLogs: 0 },
+    });
+    prisma.broker.findMany.mockResolvedValue([
+      broker("in-period", "0021"),
+      broker("out-of-period", "0022"),
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.client.groupBy.mockResolvedValue([]);
+    prisma.meeting.groupBy.mockResolvedValue([]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.registryDeal.groupBy.mockImplementation((args: any) => {
+      if (args?.where?.signedAt) {
+        // Периодный агрегат: только сделка, подписанная в августе.
+        return Promise.resolve([
+          {
+            brokerId: "in-period",
+            _count: { _all: 1 },
+            _sum: { amount: "100.00" },
+            _max: { signedAt: new Date("2026-08-15T00:00:00.000Z") },
+          },
+        ]);
+      }
+      // Lifetime: у обоих брокеров есть по одной строке реестра.
+      return Promise.resolve([
+        {
+          brokerId: "in-period",
+          _count: { _all: 1 },
+          _max: { signedAt: new Date("2026-08-15T00:00:00.000Z") },
+        },
+        {
+          brokerId: "out-of-period",
+          _count: { _all: 1 },
+          _max: { signedAt: new Date("2026-01-15T00:00:00.000Z") },
+        },
+      ]);
+    });
+
+    const result: any = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      {
+        activityPeriod: { from: "2026-08-01", to: "2026-08-31" },
+        dealCount: { min: 1 },
+      } as any,
+    );
+
+    expect(result.items.map((item: any) => item.id)).toEqual(["in-period"]);
+    expect(result.items[0].periodMetrics).toMatchObject({
+      deals: 1,
+      dealAmount: "100.00",
+      lastDealAt: "2026-08-15",
+    });
+  });
+
+  it("feeds OUR agency deal metrics from registry deals of its current brokers", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.agency.findMany.mockResolvedValue([
+      {
+        id: "agency-1",
+        name: "Registry Agency",
+        legalName: null,
+        inn: null,
+        phone: "+74950000000",
+        email: null,
+        brokerAgencies: [
+          {
+            isPrimary: true,
+            broker: {
+              id: "broker-1",
+              fullName: "Broker",
+              phone: "+79990000001",
+              email: null,
+              lastCallAt: null,
+              brokerTourVisited: false,
+              brokerTourDate: null,
+              clients: [],
+              meetings: [],
+              deals: [],
+              callLogs: [],
+            },
+          },
+        ],
+        deals: [],
+        _count: { brokerAgencies: 1 },
+      },
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.registryDeal.findMany.mockResolvedValue([
+      {
+        id: "rd-1",
+        brokerId: "broker-1",
+        signedAt: new Date("2026-08-10T00:00:00.000Z"),
+        amount: "300000.00",
+      },
+    ]);
+
+    const result: any = await service.list(
+      "ours",
+      "AGENCY",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { dealCount: { min: 1 } } as any,
+    );
+
+    expect(result.items.map((item: any) => item.id)).toEqual(["agency-1"]);
+    expect(result.items[0].metrics.deals).toBe(1);
+    expect(result.items[0].metrics.dealAmount).toBe("300000.00");
+  });
+
+  it("builds OUR overview deal leaders and deal amount from registry deals", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.count.mockResolvedValue(0);
+    prisma.agency.count.mockResolvedValue(0);
+    prisma.client.count.mockResolvedValue(0);
+    prisma.meeting.count.mockResolvedValue(0);
+    prisma.deal.count.mockResolvedValue(0);
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+    prisma.deal.groupBy.mockResolvedValue([]);
+    // broker.findMany: выборки newRows/birthdayRows пустые, лидерам — имя.
+    prisma.broker.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.select?.fullName
+          ? [{ id: "broker-1", fullName: "Registry Leader" }]
+          : [],
+      ),
+    );
+    prisma.agency.findMany.mockResolvedValue([
+      { id: "agency-1", name: "Registry Agency" },
+    ]);
+    prisma.registryDeal.count.mockResolvedValue(2);
+    prisma.registryDeal.aggregate.mockResolvedValue({
+      _sum: { amount: "300000.00" },
+    });
+    prisma.registryDeal.groupBy.mockResolvedValue([
+      {
+        brokerId: "broker-1",
+        _count: { _all: 2 },
+        _sum: { amount: "300000.00" },
+        _max: { signedAt: new Date("2026-08-20T00:00:00.000Z") },
+      },
+    ]);
+    prisma.brokerAgency.findMany.mockResolvedValue([
+      { brokerId: "broker-1", agencyId: "agency-1" },
+    ]);
+
+    const result: any = await service.overview("ours", {
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+
+    expect(result.activities.deals).toBe(2);
+    expect(result.dealAmount).toBe("300000.00");
+    expect(result.brokers.top).toEqual([
+      expect.objectContaining({
+        id: "broker-1",
+        name: "Registry Leader",
+        deals: 2,
+        dealAmount: "300000.00",
+      }),
+    ]);
+    expect(result.agencies.top).toEqual([
+      expect.objectContaining({
+        id: "agency-1",
+        name: "Registry Agency",
+        deals: 2,
+        dealAmount: "300000.00",
+      }),
     ]);
   });
 
