@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { X, ArrowLeft } from 'lucide-react';
 
-interface Step {
+export interface OnboardingStep {
   // route === null → шаг без перехода (вступление/финал), центрированная карточка.
   route: string | null;
   // data-tour атрибут элемента, который нужно подсветить на этой странице.
@@ -13,7 +13,7 @@ interface Step {
   text: string;
 }
 
-const baseSteps: Step[] = [
+const baseSteps: OnboardingStep[] = [
   {
     route: null,
     selector: null,
@@ -70,18 +70,97 @@ const baseSteps: Step[] = [
   },
 ];
 
-const dealsStep: Step = {
+const dealsStep: OnboardingStep = {
   route: '/deals',
   selector: 'deals-summary',
   title: 'Мои сделки',
   text: 'Сумма, статус и комиссия к выплате по вашим сделкам.',
 };
 
-export function getOnboardingSteps(showDeals: boolean): Step[] {
+export function getOnboardingSteps(showDeals: boolean): OnboardingStep[] {
   if (!showDeals) return baseSteps;
   // Вставляем «Мои сделки» после каталога, перед комиссией.
   const catalogIdx = baseSteps.findIndex((s) => s.route === '/catalog');
   return [...baseSteps.slice(0, catalogIdx + 1), dealsStep, ...baseSteps.slice(catalogIdx + 1)];
+}
+
+const cmsSteps: OnboardingStep[] = [
+  {
+    route: null,
+    selector: null,
+    title: 'Инструкция по CMS',
+    text: 'Покажем, где менять расчётные условия, документы и содержимое лендинга. Тур ничего не сохраняет и не удаляет.',
+  },
+  {
+    route: '/admin/commission-policies',
+    selector: 'cms-commission-page',
+    title: 'Комиссия и рассрочка',
+    text: 'Здесь находятся рабочие проценты и условия оплаты. Эти данные одновременно используются в расчётах, кабинете брокера и на лендинге.',
+  },
+  {
+    route: '/admin/commission-policies',
+    selector: 'cms-commission-create',
+    title: 'Новые условия на месяц',
+    text: 'Для сентября создайте новую политику: выберите проект, период 01.09–30.09, ставку и условия рассрочки. Активные периоды одного проекта не должны пересекаться.',
+  },
+  {
+    route: '/admin/documents',
+    selector: 'cms-documents-page',
+    title: 'Файлы и документы',
+    text: 'У каждого файла написано, откуда он и где показывается. Файлы с меткой «Яндекс.Диск (авто)» — например, условия рассрочки — меняются в папке на Диске (ссылка есть у файла), сайт обновится ночью сам.',
+  },
+  {
+    route: '/admin/documents',
+    selector: 'cms-documents-page',
+    title: 'Замена и кнопка на главной',
+    text: 'Файлы «Загружен вручную» меняются кнопкой «Заменить» — место на сайте сохранится. Кнопку «Условия вознаграждения» на главной назначает «⭐ На кнопку главной» у файла раздела «Сотрудничество». Не нашли файл — поиск сверху.',
+  },
+  {
+    route: '/admin/content',
+    selector: 'cms-content-page',
+    title: 'Тексты лендинга',
+    text: 'Вкладки переключают смысловые блоки лендинга. Здесь меняются заголовки и описания, но не расчётные проценты и не PDF-файлы.',
+  },
+  {
+    route: '/admin/content',
+    selector: 'cms-content-page',
+    title: 'Сохранение и история',
+    text: 'Отредактируйте поля выбранного блока, нажмите «Сохранить», затем проверьте лендинг. Через «Историю правок» можно восстановить предыдущую версию.',
+  },
+  {
+    route: '/admin/promos',
+    selector: 'cms-promos-page',
+    title: 'Акции',
+    text: 'Здесь создаются и редактируются промо-слайды: тексты, изображения, ссылки, порядок и период показа.',
+  },
+  {
+    route: '/admin/events',
+    selector: 'cms-events-page',
+    title: 'События',
+    text: 'Здесь публикуются мероприятия и управляется их видимость на сайте.',
+  },
+  {
+    route: '/admin/projects',
+    selector: 'cms-projects-page',
+    title: 'Проекты',
+    text: 'Карточки объектов, их описание и отображение на лендинге редактируются в этом разделе.',
+  },
+  {
+    route: '/admin/news',
+    selector: 'cms-news-page',
+    title: 'Новости',
+    text: 'Новости можно синхронизировать, добавлять и редактировать здесь. После изменения обязательно откройте публичную страницу и проверьте текст и изображение.',
+  },
+  {
+    route: null,
+    selector: null,
+    title: 'Инструкция завершена',
+    text: 'Повторно открыть CMS-инструкцию можно в любом из этих разделов кнопкой со знаком вопроса в правом верхнем углу.',
+  },
+];
+
+export function getCmsOnboardingSteps(): OnboardingStep[] {
+  return cmsSteps;
 }
 
 const FIND_TIMEOUT_MS = 3000;
@@ -93,7 +172,7 @@ export function OnboardingTour({
   open,
   onClose,
 }: {
-  steps: Step[];
+  steps: OnboardingStep[];
   open: boolean;
   onClose: () => void;
 }) {

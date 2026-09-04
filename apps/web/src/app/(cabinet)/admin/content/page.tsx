@@ -107,7 +107,7 @@ export default function AdminContentPage() {
   if (loading) return <div className="text-center py-8 text-text-muted">Загрузка...</div>;
 
   return (
-    <div>
+    <div data-tour={'cms-content-page'}>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold flex items-center gap-2">

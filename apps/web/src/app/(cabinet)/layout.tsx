@@ -1,14 +1,25 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { Sidebar } from '@/components/Sidebar';
 import { TopBar } from '@/components/TopBar';
 import { Breadcrumbs } from '@/components/Breadcrumbs';
 import { BottomNav } from '@/components/BottomNav';
-import { OnboardingTour, getOnboardingSteps } from '@/components/OnboardingTour';
+import { OnboardingTour, getCmsOnboardingSteps, getOnboardingSteps } from '@/components/OnboardingTour';
 import { useAuth } from '@/lib/auth';
 
 const ONBOARDING_KEY_PREFIX = 'stm_onboarding_seen_';
+const CMS_ONBOARDING_KEY_PREFIX = 'stm_cms_onboarding_seen_';
+const CMS_ROUTES = [
+  '/admin/commission-policies',
+  '/admin/content',
+  '/admin/documents',
+  '/admin/promos',
+  '/admin/events',
+  '/admin/projects',
+  '/admin/news',
+];
 
 export default function CabinetLayout({
   children,
@@ -16,17 +27,19 @@ export default function CabinetLayout({
   children: React.ReactNode;
 }) {
   const { broker, loading } = useAuth();
+  const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [tourOpen, setTourOpen] = useState(false);
+  const isCmsArea = broker?.role === 'ADMIN' && CMS_ROUTES.some((route) => pathname.startsWith(route));
 
   useEffect(() => {
     if (!broker) return;
-    const key = ONBOARDING_KEY_PREFIX + broker.id;
+    const key = (isCmsArea ? CMS_ONBOARDING_KEY_PREFIX : ONBOARDING_KEY_PREFIX) + broker.id;
     if (!localStorage.getItem(key)) {
       setTourOpen(true);
       localStorage.setItem(key, '1');
     }
-  }, [broker]);
+  }, [broker, isCmsArea]);
 
   if (loading) {
     return (
@@ -50,7 +63,7 @@ export default function CabinetLayout({
       </div>
       <BottomNav />
       <OnboardingTour
-        steps={getOnboardingSteps(broker.role !== 'BROKER')}
+        steps={isCmsArea ? getCmsOnboardingSteps() : getOnboardingSteps(broker.role !== 'BROKER')}
         open={tourOpen}
         onClose={() => setTourOpen(false)}
       />

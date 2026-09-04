@@ -127,7 +127,7 @@ export default function AdminEventsPage() {
   };
 
   return (
-    <div>
+    <div data-tour={'cms-events-page'}>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold flex items-center gap-2">
