@@ -1,0 +1,41 @@
+name: Set landing rewards document
+
+# 2026-09-04: назначить документ на кнопку «Условия вознаграждения» главной
+# (маркер [landing-rewards-button], механика PR #386) без ручной работы в
+# админке. По умолчанию ищет документ «…сотрудничества сентябрь…».
+
+on:
+  workflow_dispatch:
+    inputs:
+      name_contains:
+        description: Подстрока названия документа (категория cooperation)
+        required: false
+        type: string
+        default: 'сотрудничества сентябрь'
+
+jobs:
+  set:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          NAME_CONTAINS: ${{ inputs.name_contains }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          envs: NAME_CONTAINS
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/set-rewards-doc.js > /tmp/set-rewards-doc.js
+            docker cp /tmp/set-rewards-doc.js st-michael-api:/app/scripts/set-rewards-doc.js
+            docker compose exec -T api node /app/scripts/set-rewards-doc.js "$NAME_CONTAINS"
+            echo "=== Готово ==="
