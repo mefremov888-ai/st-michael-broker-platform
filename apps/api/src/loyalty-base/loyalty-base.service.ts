@@ -720,6 +720,42 @@ const FIXATION_CLIENT_WHERE = {
   ],
 };
 
+// 2026-09-04 (реестр → агентства по названию): в кодовой базе нет готового
+// нормализатора названий (registry_deals.agency_canonical готовится офлайн
+// при заливке), поэтому обе стороны — Agency.name/legalName и
+// RegistryDeal.agencyCanonical/agencyNameRaw — приводятся к одному ключу:
+// NFKC + нижний регистр, без кавычек, организационно-правовых форм
+// (ООО/АО/ЗАО/ИП/…), слов «агентство недвижимости»/«АН» и всех разделителей.
+// Стоп-слова отбрасываются токенами (JS \b не работает с кириллицей); если
+// название состоит из одних стоп-слов («АН»), ключ строится из полного
+// набора токенов, чтобы разные вырожденные названия не схлопывались в пустоту.
+const AGENCY_NAME_STOP_TOKENS = new Set([
+  "ооо",
+  "оао",
+  "зао",
+  "пао",
+  "ао",
+  "ип",
+  "ан",
+  "агентство",
+  "недвижимости",
+  "llc",
+  "ltd",
+]);
+
+export function normalizeAgencyMatchKey(value: unknown): string | null {
+  const tokens = String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  if (!tokens.length) return null;
+  const meaningful = tokens.filter(
+    (token) => !AGENCY_NAME_STOP_TOKENS.has(token),
+  );
+  return (meaningful.length ? meaningful : tokens).join("") || null;
+}
+
 @Injectable()
 export class LoyaltyBaseService {
   constructor(@Inject("PrismaClient") private readonly prisma: PrismaClient) {}
@@ -4501,14 +4537,42 @@ export class LoyaltyBaseService {
 
   /**
    * Реестровые сделки агентств нашей базы: у Agency нет прямой связи с
-   * registry_deals, поэтому агентские строки — те, чей brokerId входит в
-   * текущих брокеров агентства (broker_agencies). Прикрепляются как
-   * record.__registryDeals; ourAgencyRelationMetrics вливает их в общий
-   * массив сделок (счётчик, сумма, даты и периодные метрики — единообразно).
+   * registry_deals, поэтому агентские строки собираются по двум каналам:
+   * 1) brokerId входит в текущих брокеров агентства (broker_agencies);
+   * 2) 2026-09-04: текстовое совпадение названия — normalizeAgencyMatchKey
+   *    (Agency.name/legalName) === normalizeAgencyMatchKey
+   *    (RegistryDeal.agencyCanonical/agencyNameRaw). Так сделки реестра без
+   *    привязанного брокера всё равно попадают в аналитику агентства.
+   * Дедуп по id строки реестра: сделка, уже пришедшая через брокера
+   * агентства, второй раз по названию не добавляется.
+   * Прикрепляются как record.__registryDeals; ourAgencyRelationMetrics
+   * вливает их в общий массив сделок (счётчик, сумма, даты и периодные
+   * метрики — единообразно), поэтому фильтр «Есть сделки», KPI-топ и
+   * карточка агентства сходятся.
    */
   private async attachOurAgencyRegistryDeals(records: any[]) {
     if (!records.length || !this.registryDealModel) return;
+    const attachedIds = new Map<any, Set<string>>();
+    const pushRow = (record: any, row: any) => {
+      const rowId = String(row?.id || "");
+      if (!rowId) return;
+      const seen = attachedIds.get(record) || new Set<string>();
+      if (seen.has(rowId)) return;
+      seen.add(rowId);
+      attachedIds.set(record, seen);
+      record.__registryDeals.push({
+        id: `REGISTRY:${rowId}`,
+        signedAt: row.signedAt || null,
+        // Неизвестная сумма считается нулём: сумма остаётся нижней
+        // границей вместо схлопывания всей агрегатной суммы в null.
+        amount:
+          row.amount === null || row.amount === undefined
+            ? "0"
+            : String(row.amount),
+      });
+    };
     const brokerToRecords = new Map<string, any[]>();
+    const nameToRecords = new Map<string, any[]>();
     for (const record of records) {
       record.__registryDeals = [];
       const relations = Array.isArray(record?.brokerAgencies)
@@ -4520,6 +4584,13 @@ export class LoyaltyBaseService {
         const list = brokerToRecords.get(brokerId) || [];
         list.push(record);
         brokerToRecords.set(brokerId, list);
+      }
+      for (const value of [record?.name, record?.legalName]) {
+        const key = normalizeAgencyMatchKey(value);
+        if (!key) continue;
+        const list = nameToRecords.get(key) || [];
+        if (!list.includes(record)) list.push(record);
+        nameToRecords.set(key, list);
       }
     }
     const ids = uniqueSorted([...brokerToRecords.keys()]);
@@ -4535,17 +4606,35 @@ export class LoyaltyBaseService {
       });
       for (const row of rows as any[]) {
         for (const record of brokerToRecords.get(String(row.brokerId)) || []) {
-          record.__registryDeals.push({
-            id: `REGISTRY:${String(row.id)}`,
-            signedAt: row.signedAt || null,
-            // Неизвестная сумма считается нулём: сумма остаётся нижней
-            // границей вместо схлопывания всей агрегатной суммы в null.
-            amount:
-              row.amount === null || row.amount === undefined
-                ? "0"
-                : String(row.amount),
-          });
+          pushRow(record, row);
         }
+      }
+    }
+    if (!nameToRecords.size) return;
+    // Канал по названию: строк реестра мало (порядок 1-2 тыс.), сопоставление
+    // выполняется в памяти — canonical в БД мог быть нормализован иначе.
+    const namedRows = await this.registryDealModel.findMany({
+      where: {
+        OR: [
+          { agencyCanonical: { not: null } },
+          { agencyNameRaw: { not: null } },
+        ],
+      },
+      select: {
+        id: true,
+        agencyCanonical: true,
+        agencyNameRaw: true,
+        signedAt: true,
+        amount: true,
+      },
+    });
+    for (const row of namedRows as any[]) {
+      const key =
+        normalizeAgencyMatchKey(row.agencyCanonical) ??
+        normalizeAgencyMatchKey(row.agencyNameRaw);
+      if (!key) continue;
+      for (const record of nameToRecords.get(key) || []) {
+        pushRow(record, row);
       }
     }
   }
@@ -9546,11 +9635,11 @@ export class LoyaltyBaseService {
           brokers:
             "Current BrokerAgency memberships, deduplicated by broker ID",
           fixations:
-            "FIXED Client rows owned by currently related brokers, deduplicated by Client ID",
+            "Fixed Client rows (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED) owned by currently related brokers, deduplicated by Client ID",
           meetings:
             "CONFIRMED/COMPLETED Meeting rows owned by currently related brokers, deduplicated by Meeting ID",
           deals:
-            "Confirmed positive DDU Deal rows linked directly to the agency or owned by currently related brokers, deduplicated by Deal ID",
+            "Confirmed positive DDU Deal rows linked directly to the agency or owned by currently related brokers, plus RegistryDeal rows of those brokers or with a matching normalized agency name, deduplicated by row ID",
           calls:
             "Legacy CallLog and effective loyalty workflow attempts of the agency/currently related brokers, deduplicated by source and row ID",
           brokerTours:

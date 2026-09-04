@@ -10,6 +10,7 @@ import {
   isLoyaltyAcquisitionPhone,
   loyaltyContentHash,
   moscowCurrentMonthFilterPeriod,
+  normalizeAgencyMatchKey,
   normalizeLoyaltyContactPoint,
   positivePostgresBigIntOrNull,
 } from "./loyalty-base.service";
@@ -30,6 +31,21 @@ describe("loyalty filter boundary helpers", () => {
     expect(explicitGeography(["Тула"])).toBe("REGION");
     expect(explicitGeography([], true)).toBe("REGION");
     expect(explicitGeography([], false)).toBe("MOSCOW");
+  });
+
+  it("normalizes agency names to one match key across legal forms and quotes", () => {
+    expect(normalizeAgencyMatchKey('ООО "Ромашка"')).toBe("ромашка");
+    expect(normalizeAgencyMatchKey("АН «Ромашка»")).toBe("ромашка");
+    expect(normalizeAgencyMatchKey("  ромашка  ")).toBe("ромашка");
+    expect(normalizeAgencyMatchKey("Этажи Москва")).toBe("этажимосква");
+    // Название из одних стоп-слов не схлопывается в пустой ключ.
+    expect(normalizeAgencyMatchKey("АН")).toBe("ан");
+    expect(normalizeAgencyMatchKey("")).toBeNull();
+    expect(normalizeAgencyMatchKey(null)).toBeNull();
+    // Разные названия не совпадают.
+    expect(normalizeAgencyMatchKey("ООО Ромашка")).not.toBe(
+      normalizeAgencyMatchKey("ООО Василёк"),
+    );
   });
 
   it("excludes Moscow landlines from broker acquisition", () => {
