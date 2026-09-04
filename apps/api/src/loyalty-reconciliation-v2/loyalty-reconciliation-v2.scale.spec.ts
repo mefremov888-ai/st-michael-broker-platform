@@ -183,19 +183,21 @@ describe("loyalty reconciliation V2 production-scale release gate", () => {
     expect(heapDelta).toBeLessThan(SCALE_PIPELINE_HEAP_BUDGET_BYTES);
   });
 
-  it("enforces two process-wide V2 universe slots and rejects a third scan loudly", async () => {
+  // 2026-09-04: бюджет full-scan слотов 2 -> 3.
+  it("enforces three process-wide V2 universe slots and rejects a fourth scan loudly", async () => {
     const dataset = deferred<any>();
-    const twoScansStarted = deferred<void>();
+    const threeScansStarted = deferred<void>();
     const prisma = reconciliationPrisma();
     let started = 0;
     prisma.loyaltyDataset.findUnique.mockImplementation(() => {
       started += 1;
-      if (started === 2) twoScansStarted.resolve();
+      if (started === 3) threeScansStarted.resolve();
       return dataset.promise;
     });
     const firstService = reconciliationService(prisma);
     const secondService = reconciliationService(prisma);
     const thirdService = reconciliationService(prisma);
+    const fourthService = reconciliationService(prisma);
 
     const firstScan = firstService.coverage(
       { base: "anna" } as any,
@@ -205,25 +207,29 @@ describe("loyalty reconciliation V2 production-scale release gate", () => {
       { base: "anna" } as any,
       admin as any,
     );
-    await twoScansStarted.promise;
+    const thirdScan = thirdService.coverage(
+      { base: "anna" } as any,
+      admin as any,
+    );
+    await threeScansStarted.promise;
 
     await expect(
-      thirdService.coverage({ base: "anna" } as any, admin as any),
+      fourthService.coverage({ base: "anna" } as any, admin as any),
     ).rejects.toBeInstanceOf(LoyaltyFullScanBusyException);
-    expect(prisma.loyaltyDataset.findUnique).toHaveBeenCalledTimes(2);
+    expect(prisma.loyaltyDataset.findUnique).toHaveBeenCalledTimes(3);
 
     dataset.resolve({
       id: "anna-dataset",
       base: "ANNA",
       activeSnapshotId: "anna-snapshot",
     });
-    await Promise.all([firstScan, secondScan]);
+    await Promise.all([firstScan, secondScan, thirdScan]);
     await expect(
-      thirdService.coverage({ base: "anna" } as any, admin as any),
+      fourthService.coverage({ base: "anna" } as any, admin as any),
     ).resolves.toMatchObject({ total: 0 });
   });
 
-  it("shares the same two process-wide slots between base and V2 scans", async () => {
+  it("shares the same three process-wide slots between base and V2 scans", async () => {
     const baseRows = deferred<any[]>();
     const baseStarted = deferred<void>();
     const basePrisma: any = {
@@ -258,6 +264,13 @@ describe("loyalty reconciliation V2 production-scale release gate", () => {
     await baseStarted.promise;
     const v2Scan = v2Service.coverage({ base: "anna" } as any, admin as any);
     await v2Started.promise;
+    // Третий слот (бюджет = 3) занимаем ещё одним V2-сканом; четвёртый обязан
+    // получить отказ — слоты общие между base и V2.
+    const v2ScanSecond = v2Service.coverage(
+      { base: "anna" } as any,
+      admin as any,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
 
     await expect(
       reconciliationService(v2Prisma).coverage(
@@ -265,7 +278,7 @@ describe("loyalty reconciliation V2 production-scale release gate", () => {
         admin as any,
       ),
     ).rejects.toBeInstanceOf(LoyaltyFullScanBusyException);
-    expect(v2Prisma.loyaltyDataset.findUnique).toHaveBeenCalledTimes(1);
+    expect(v2Prisma.loyaltyDataset.findUnique).toHaveBeenCalledTimes(2);
 
     baseRows.resolve([]);
     dataset.resolve({
@@ -273,7 +286,7 @@ describe("loyalty reconciliation V2 production-scale release gate", () => {
       base: "ANNA",
       activeSnapshotId: "anna-snapshot",
     });
-    await Promise.all([baseScan, v2Scan]);
+    await Promise.all([baseScan, v2Scan, v2ScanSecond]);
   });
 
   it("binds the existing Retry-After exception filter to the V2 controller", () => {

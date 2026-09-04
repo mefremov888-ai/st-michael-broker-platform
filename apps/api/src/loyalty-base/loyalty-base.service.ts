@@ -708,6 +708,18 @@ export function loyaltyFilterHash(value: unknown): string {
   return loyaltyContentHash(value);
 }
 
+// 2026-09-04: «фиксация» в метриках = закреплённый клиент. Заявка на
+// уникальность создаёт uniquenessStatus=CONDITIONALLY_UNIQUE (массовый
+// случай), а fixationStatus=FIXED ставится только редкой ручной кнопкой
+// «отметить зафиксированным» после акта осмотра. Раньше метрики считали
+// только FIXED — и «Фиксации: 0» у всех (жалоба пользователя).
+const FIXATION_CLIENT_WHERE = {
+  OR: [
+    { fixationStatus: "FIXED" as const },
+    { uniquenessStatus: "CONDITIONALLY_UNIQUE" as const },
+  ],
+};
+
 @Injectable()
 export class LoyaltyBaseService {
   constructor(@Inject("PrismaClient") private readonly prisma: PrismaClient) {}
@@ -3944,7 +3956,7 @@ export class LoyaltyBaseService {
       this.prisma.agency.count(),
       this.prisma.client.count({
         where: {
-          fixationStatus: "FIXED",
+          ...FIXATION_CLIENT_WHERE,
           createdAt: { gte: period.from, lte: period.to },
         },
       }),
@@ -3996,7 +4008,7 @@ export class LoyaltyBaseService {
           funnelStage: "NEW_BROKER",
           brokerTourVisited: false,
           brokerTourDate: null,
-          clients: { none: { fixationStatus: "FIXED" } },
+          clients: { none: FIXATION_CLIENT_WHERE },
           meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
           deals: { none: this.ourConfirmedDealWhere() },
           registryDeals: { none: {} },
@@ -4016,7 +4028,7 @@ export class LoyaltyBaseService {
           role: "BROKER",
           mergedIntoId: null,
           brokerTourVisited: true,
-          clients: { none: { fixationStatus: "FIXED" } },
+          clients: { none: FIXATION_CLIENT_WHERE },
         },
       }),
       this.prisma.broker.findMany({
@@ -4112,7 +4124,7 @@ export class LoyaltyBaseService {
       "activities.fixations": {
         ...shared,
         formula:
-          "COUNT(Client rows with fixationStatus=FIXED and createdAt in requested period)",
+          "COUNT(Client rows fixed for a broker (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED) with createdAt in requested period)",
         provenance: "Client.id / Client.createdAt",
       },
       "activities.meetings": {
@@ -7147,7 +7159,7 @@ export class LoyaltyBaseService {
         funnelStage: "NEW_BROKER",
         brokerTourVisited: false,
         brokerTourDate: null,
-        clients: { none: { fixationStatus: "FIXED" } },
+        clients: { none: FIXATION_CLIENT_WHERE },
         meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
         deals: { none: this.ourConfirmedDealWhere() },
         registryDeals: { none: {} },
@@ -7158,7 +7170,7 @@ export class LoyaltyBaseService {
     } else if (filter.segment === "BT_WITHOUT_FIXATION") {
       and.push({
         brokerTourVisited: true,
-        clients: { none: { fixationStatus: "FIXED" } },
+        clients: { none: FIXATION_CLIENT_WHERE },
       });
     } else if (filter.segment === "BIRTHDAY_TODAY") {
       and.push({ id: { in: await this.ourBirthdayBrokerIds() } });
@@ -7258,7 +7270,7 @@ export class LoyaltyBaseService {
           },
         },
         clients: {
-          where: { fixationStatus: "FIXED" },
+          where: FIXATION_CLIENT_WHERE,
           orderBy: { createdAt: "desc" },
           take: 1,
           select: { createdAt: true },
@@ -7277,7 +7289,7 @@ export class LoyaltyBaseService {
         },
         _count: {
           select: {
-            clients: { where: { fixationStatus: "FIXED" } },
+            clients: { where: FIXATION_CLIENT_WHERE },
             deals: { where: this.ourConfirmedDealWhere() },
             meetings: {
               where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
@@ -7398,7 +7410,7 @@ export class LoyaltyBaseService {
           by: ["brokerId"],
           where: {
             brokerId: { in: batch },
-            fixationStatus: "FIXED",
+            ...FIXATION_CLIENT_WHERE,
             createdAt: { gte: period.from, lte: period.to },
           },
           _count: { _all: true },
@@ -7632,7 +7644,7 @@ export class LoyaltyBaseService {
               brokerTourVisited: true,
               brokerTourDate: true,
               clients: {
-                where: { fixationStatus: "FIXED" },
+                where: FIXATION_CLIENT_WHERE,
                 select: {
                   id: true,
                   createdAt: true,
@@ -8975,14 +8987,14 @@ export class LoyaltyBaseService {
           funnelStage: "NEW_BROKER",
           brokerTourVisited: false,
           brokerTourDate: null,
-          clients: { none: { fixationStatus: "FIXED" } },
+          clients: { none: FIXATION_CLIENT_WHERE },
           meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
           deals: { none: this.ourConfirmedDealWhere() },
         });
       } else if (query.segment === "BT_WITHOUT_FIXATION") {
         Object.assign(where, {
           brokerTourVisited: true,
-          clients: { none: { fixationStatus: "FIXED" } },
+          clients: { none: FIXATION_CLIENT_WHERE },
         });
       } else if (query.segment === "BIRTHDAY_TODAY") {
         where.id = { in: await this.ourBirthdayBrokerIds() };
@@ -9016,7 +9028,7 @@ export class LoyaltyBaseService {
             brokerAgencies: { include: { agency: true } },
             _count: {
               select: {
-                clients: { where: { fixationStatus: "FIXED" } },
+                clients: { where: FIXATION_CLIENT_WHERE },
                 deals: { where: this.ourConfirmedDealWhere() },
                 meetings: {
                   where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
@@ -9143,7 +9155,7 @@ export class LoyaltyBaseService {
       return {
         clients: {
           some: {
-            fixationStatus: "FIXED",
+            ...FIXATION_CLIENT_WHERE,
             ...(dateRange ? { createdAt: dateRange } : {}),
           },
         },
@@ -9909,7 +9921,7 @@ export class LoyaltyBaseService {
             },
           },
           clients: {
-            where: { fixationStatus: "FIXED" },
+            where: FIXATION_CLIENT_WHERE,
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             take: OUR_ACTIVITY_EVIDENCE_LIMIT,
             select: {
@@ -9947,7 +9959,7 @@ export class LoyaltyBaseService {
           },
           _count: {
             select: {
-              clients: { where: { fixationStatus: "FIXED" } },
+              clients: { where: FIXATION_CLIENT_WHERE },
               deals: { where: this.ourConfirmedDealWhere() },
               meetings: {
                 where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
