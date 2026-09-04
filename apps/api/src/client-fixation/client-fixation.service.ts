@@ -56,6 +56,26 @@ import {
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
 
+// 2026-09-04: секундные отказы amo (rate limit в пиках) дважды заблокировали
+// живому брокеру фиксацию через ServiceUnavailableException. Проверка
+// уникальности — читающий GET (findContactByPhone/getLeadsByContact/
+// getContactsByIds), повтор безопасен: до 3 попыток с паузами 2с и 5с.
+const UNIQUENESS_RETRY_DELAYS_MS = [2000, 5000];
+
+// Ретраим ТОЛЬКО временные ошибки (классификация из common/amo-sync-retry):
+// таймаут/сеть, HTTP 429, 5xx/temporary unavailable. НЕ ретраим:
+// AMBIGUOUS_EXACT_CONTACT (бизнес-ответ, обрабатывается выше), 401/403 и
+// прочие 4xx, ошибки конфигурации.
+const TRANSIENT_AMO_LOOKUP_ERRORS = new Set([
+  "AMO_RATE_LIMIT_429",
+  "AMO_TEMPORARY_UNAVAILABLE",
+  "AMO_NETWORK_ERROR",
+]);
+
+function isTransientAmoLookupError(error: unknown): boolean {
+  return TRANSIENT_AMO_LOOKUP_ERRORS.has(sanitizeAmoSyncError(error));
+}
+
 function safePositiveAmoContactId(value: unknown): number | null {
   const contactId =
     typeof value === "number" || typeof value === "bigint"
@@ -137,6 +157,40 @@ export class ClientFixationService {
     @InjectQueue("notifications") private notificationQueue: Queue,
     @Optional() private readonly opsAlerts?: OpsAlertService,
   ) {}
+
+  // Injectable для тестов (fake timers не нужны — тесты подменяют sleep).
+  private sleep = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * Проверка уникальности в amoCRM с ретраем временных ошибок: до 3 попыток
+   * суммарно, паузы 2с/5с. Внутри — только читающие GET-вызовы amo, пишущих
+   * нет (createLead и пр. происходят позже), поэтому повтор безопасен.
+   * AMBIGUOUS_EXACT_CONTACT и авторизационные/прочие 4xx-ошибки пробрасываются
+   * сразу без ретраев.
+   */
+  private async checkUniquenessWithRetry(phone: string) {
+    const totalAttempts = UNIQUENESS_RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.amoCrmAdapter.checkUniqueness(phone);
+      } catch (e: any) {
+        const rawMessage = String(e?.message || e || "");
+        if (
+          rawMessage === "AMBIGUOUS_EXACT_CONTACT" ||
+          attempt >= totalAttempts ||
+          !isTransientAmoLookupError(e)
+        ) {
+          throw e;
+        }
+        const delayMs = UNIQUENESS_RETRY_DELAYS_MS[attempt - 1];
+        console.error(
+          `[fixClient] amo checkUniqueness attempt ${attempt}/${totalAttempts} failed (${sanitizeAmoSyncError(e)}), retrying in ${delayMs}ms`,
+        );
+        await this.sleep(delayMs);
+      }
+    }
+  }
 
   async fixClient(
     brokerId: string,
@@ -312,7 +366,7 @@ export class ClientFixationService {
       triggerLeadId?: number;
     } | null = null;
     try {
-      amoVerdict = await this.amoCrmAdapter.checkUniqueness(data.phone);
+      amoVerdict = await this.checkUniquenessWithRetry(data.phone);
       console.log(
         `[fixClient] amo uniqueness rule=${amoVerdict.rule} — ${amoVerdict.reason}${amoVerdict.triggerLeadId ? ` — triggerLeadId=${amoVerdict.triggerLeadId}` : ""}`,
       );

@@ -58,6 +58,7 @@ describe("ClientFixationService amo broker attachment", () => {
   let service: ClientFixationService;
   let consoleError: jest.SpyInstance;
   let assertAmoCreateLeaseOwned: jest.Mock;
+  let sleepSpy: jest.Mock;
 
   beforeEach(() => {
     prisma = {
@@ -111,6 +112,9 @@ describe("ClientFixationService amo broker attachment", () => {
     queue = { add: jest.fn().mockResolvedValue(undefined) };
     opsAlerts = { sendSafely: jest.fn().mockResolvedValue(true) };
     service = new ClientFixationService(prisma, amo, queue, opsAlerts);
+    // Ретрай-паузы (2с/5с) в тестах не спим — подменяем injectable sleep.
+    sleepSpy = jest.fn().mockResolvedValue(undefined);
+    (service as any).sleep = sleepSpy;
     assertAmoCreateLeaseOwned = jest.fn().mockResolvedValue(undefined);
     consoleError = jest
       .spyOn(console, "error")
@@ -1134,6 +1138,114 @@ describe("ClientFixationService amo broker attachment", () => {
     expect(loggedText).toContain("AMO_TEMPORARY_UNAVAILABLE");
     expect(loggedText).not.toContain("TOP-SECRET");
     expect(loggedText).not.toContain(rawError);
+  });
+
+  describe("uniqueness lookup retry", () => {
+    const broker = {
+      id: "broker-uniqueness-retry",
+      fullName: "Broker",
+      phone: "+79990000031",
+      email: null,
+      amoContactId: BigInt(831),
+      funnelStage: "FIXATION",
+      brokerAgencies: [],
+    };
+    const agency = {
+      id: "agency-uniqueness-retry",
+      name: "Agency",
+      inn: "7700000031",
+    };
+    const fixRequest = {
+      phone: "+79991110031",
+      fullName: "Client",
+      project: "ZORGE9" as any,
+      agencyInn: agency.inn,
+    };
+
+    beforeEach(() => {
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.agency.findUnique.mockResolvedValue(agency);
+      (service as any).ensureBrokerAmoContact = jest
+        .fn()
+        .mockResolvedValue(broker);
+    });
+
+    it("retries a transient failure and continues when the second attempt succeeds", async () => {
+      const alarmResult = { id: "client-after-retry" };
+      (service as any).handleRule1Or2Alarm = jest
+        .fn()
+        .mockResolvedValue(alarmResult);
+      amo.checkUniqueness
+        .mockRejectedValueOnce(new Error("amoCRM 429 rate limit"))
+        .mockResolvedValueOnce({
+          rule: "RULE_1",
+          verdict: "ALARM",
+          reason: "Лид уже в работе КЦ",
+          contactId: 1031,
+        });
+
+      await expect(
+        service.fixClient(broker.id, fixRequest, assertAmoCreateLeaseOwned),
+      ).resolves.toBe(alarmResult);
+
+      expect(amo.checkUniqueness).toHaveBeenCalledTimes(2);
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+      expect(sleepSpy).toHaveBeenCalledWith(2000);
+      const loggedText = consoleError.mock.calls.flat().join(" ");
+      expect(loggedText).toContain(
+        "[fixClient] amo checkUniqueness attempt 1/3",
+      );
+      expect(loggedText).toContain("AMO_RATE_LIMIT_429");
+    });
+
+    it("throws ServiceUnavailable after three transient failures with 2s/5s pauses", async () => {
+      amo.checkUniqueness.mockRejectedValue(
+        new Error("amoCRM 503 temporary unavailable"),
+      );
+
+      await expect(
+        service.fixClient(broker.id, fixRequest, assertAmoCreateLeaseOwned),
+      ).rejects.toMatchObject({ status: 503 });
+
+      expect(amo.checkUniqueness).toHaveBeenCalledTimes(3);
+      expect(sleepSpy.mock.calls.map((call: any[]) => call[0])).toEqual([
+        2000, 5000,
+      ]);
+      expect(prisma.client.create).not.toHaveBeenCalled();
+      expect(amo.createFixationRequest).not.toHaveBeenCalled();
+      const loggedText = consoleError.mock.calls.flat().join(" ");
+      expect(loggedText).toContain("attempt 1/3");
+      expect(loggedText).toContain("attempt 2/3");
+      expect(loggedText).toContain(
+        "amo checkUniqueness failed; lead creation is blocked",
+      );
+    });
+
+    it("does not retry AMBIGUOUS_EXACT_CONTACT and throws Conflict immediately", async () => {
+      amo.checkUniqueness.mockRejectedValue(
+        new Error("AMBIGUOUS_EXACT_CONTACT"),
+      );
+
+      await expect(
+        service.fixClient(broker.id, fixRequest, assertAmoCreateLeaseOwned),
+      ).rejects.toMatchObject({ status: 409 });
+
+      expect(amo.checkUniqueness).toHaveBeenCalledTimes(1);
+      expect(sleepSpy).not.toHaveBeenCalled();
+    });
+
+    it("does not retry an authorization failure (403)", async () => {
+      amo.checkUniqueness.mockRejectedValue(new Error("amoCRM 403 Forbidden"));
+
+      await expect(
+        service.fixClient(broker.id, fixRequest, assertAmoCreateLeaseOwned),
+      ).rejects.toMatchObject({ status: 503 });
+
+      expect(amo.checkUniqueness).toHaveBeenCalledTimes(1);
+      expect(sleepSpy).not.toHaveBeenCalled();
+      const loggedText = consoleError.mock.calls.flat().join(" ");
+      expect(loggedText).toContain("AMO_FORBIDDEN_403");
+    });
   });
 
   it("does not classify a successful sales-meeting exception as REFIX_AMO_DOWN", async () => {
