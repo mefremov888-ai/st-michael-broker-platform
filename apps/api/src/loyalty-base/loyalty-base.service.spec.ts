@@ -10,6 +10,7 @@ import {
   isLoyaltyAcquisitionPhone,
   loyaltyContentHash,
   moscowCurrentMonthFilterPeriod,
+  normalizeAgencyMatchKey,
   normalizeLoyaltyContactPoint,
   positivePostgresBigIntOrNull,
 } from "./loyalty-base.service";
@@ -32,6 +33,21 @@ describe("loyalty filter boundary helpers", () => {
     expect(explicitGeography([], false)).toBe("MOSCOW");
   });
 
+  it("normalizes agency names to one match key across legal forms and quotes", () => {
+    expect(normalizeAgencyMatchKey('ООО "Ромашка"')).toBe("ромашка");
+    expect(normalizeAgencyMatchKey("АН «Ромашка»")).toBe("ромашка");
+    expect(normalizeAgencyMatchKey("  ромашка  ")).toBe("ромашка");
+    expect(normalizeAgencyMatchKey("Этажи Москва")).toBe("этажимосква");
+    // Название из одних стоп-слов не схлопывается в пустой ключ.
+    expect(normalizeAgencyMatchKey("АН")).toBe("ан");
+    expect(normalizeAgencyMatchKey("")).toBeNull();
+    expect(normalizeAgencyMatchKey(null)).toBeNull();
+    // Разные названия не совпадают.
+    expect(normalizeAgencyMatchKey("ООО Ромашка")).not.toBe(
+      normalizeAgencyMatchKey("ООО Василёк"),
+    );
+  });
+
   it("excludes Moscow landlines from broker acquisition", () => {
     expect(isLoyaltyAcquisitionPhone("+7 495 123-45-67")).toBe(false);
     expect(isLoyaltyAcquisitionPhone("8 (499) 123-45-67")).toBe(false);
@@ -46,7 +62,14 @@ function prismaMock() {
     agency: { findMany: fn(), findUnique: fn(), count: fn(), update: fn() },
     client: { count: fn(), groupBy: fn() },
     meeting: { count: fn(), groupBy: fn() },
-    deal: { count: fn(), aggregate: fn(), groupBy: fn() },
+    deal: {
+      count: fn(),
+      aggregate: fn(),
+      groupBy: fn(),
+      // Топ-агентство считается правилом карточки (union строк) — по
+      // умолчанию сделок нет, чтобы старые тесты видели прежние числа.
+      findMany: jest.fn().mockResolvedValue([]),
+    },
     // «Реестр сделок» (registry_deals): по умолчанию пустой источник, чтобы
     // существующие тесты видели прежние числа.
     registryDeal: {
@@ -4505,7 +4528,7 @@ describe("LoyaltyBaseService", () => {
     expect(result.kpiMetadata["activities.deals"]).toMatchObject({
       source: "LOCAL_PRELIMINARY",
       exactness: "APPROXIMATE",
-      provenance: "Deal.id / Deal.signedAt / Deal.status",
+      provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.brokerId",
     });
     expect(result.kpiMetadata["agencies.top"].formula).toContain(
       "explicit Deal.agencyId",
@@ -4910,6 +4933,28 @@ describe("LoyaltyBaseService", () => {
         _max: { signedAt: new Date("2026-08-20T00:00:00.000Z") },
       },
     ]);
+    // Топ-агентство берёт строки реестра через findMany (правило карточки):
+    // канал по brokerId отдаёт обе строки, канал по названию — пустой.
+    prisma.registryDeal.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? [
+              {
+                id: "rd-1",
+                brokerId: "broker-1",
+                amount: "150000.00",
+                signedAt: new Date("2026-08-20T00:00:00.000Z"),
+              },
+              {
+                id: "rd-2",
+                brokerId: "broker-1",
+                amount: "150000.00",
+                signedAt: new Date("2026-08-10T00:00:00.000Z"),
+              },
+            ]
+          : [],
+      ),
+    );
     prisma.brokerAgency.findMany.mockResolvedValue([
       { brokerId: "broker-1", agencyId: "agency-1" },
     ]);
@@ -4936,6 +4981,377 @@ describe("LoyaltyBaseService", () => {
         deals: 2,
         dealAmount: "300000.00",
       }),
+    ]);
+  });
+
+  it("attributes registry deals to an OUR agency by normalized name with dedup", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.agency.findMany.mockResolvedValue([
+      {
+        id: "agency-1",
+        name: 'ООО "Ромашка"',
+        legalName: null,
+        inn: null,
+        phone: "+74950000000",
+        email: null,
+        brokerAgencies: [
+          {
+            isPrimary: true,
+            broker: {
+              id: "broker-1",
+              fullName: "Broker",
+              phone: "+79990000001",
+              email: null,
+              lastCallAt: null,
+              brokerTourVisited: false,
+              brokerTourDate: null,
+              clients: [],
+              meetings: [],
+              deals: [],
+              callLogs: [],
+            },
+          },
+        ],
+        deals: [],
+        _count: { brokerAgencies: 1 },
+      },
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.registryDeal.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? // Канал по брокеру: строка rd-1 привязана к broker-1.
+            [
+              {
+                id: "rd-1",
+                brokerId: "broker-1",
+                signedAt: new Date("2026-08-10T00:00:00.000Z"),
+                amount: "100000.00",
+              },
+            ]
+          : // Канал по названию: rd-1 (дубль, не должен добавиться второй
+            // раз) и rd-2 без брокера — добавляется по названию.
+            [
+              {
+                id: "rd-1",
+                agencyCanonical: "Ромашка",
+                agencyNameRaw: 'ООО "Ромашка"',
+                signedAt: new Date("2026-08-10T00:00:00.000Z"),
+                amount: "100000.00",
+              },
+              {
+                id: "rd-2",
+                agencyCanonical: "ромашка",
+                agencyNameRaw: "АН «Ромашка»",
+                signedAt: new Date("2026-08-12T00:00:00.000Z"),
+                amount: "200000.00",
+              },
+              {
+                id: "rd-3",
+                agencyCanonical: "Василёк",
+                agencyNameRaw: null,
+                signedAt: new Date("2026-08-13T00:00:00.000Z"),
+                amount: "999999.00",
+              },
+            ],
+      ),
+    );
+
+    const result: any = await service.list(
+      "ours",
+      "AGENCY",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { dealCount: { min: 1 } } as any,
+    );
+
+    expect(result.items.map((item: any) => item.id)).toEqual(["agency-1"]);
+    // rd-1 (через брокера) + rd-2 (по названию); rd-1 не задвоен, rd-3 чужой.
+    expect(result.items[0].metrics.deals).toBe(2);
+    expect(result.items[0].metrics.dealAmount).toBe("300000.00");
+  });
+
+  it("counts the OUR top agency by the agency-card union rule with dedup", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.count.mockResolvedValue(0);
+    prisma.agency.count.mockResolvedValue(1);
+    prisma.client.count.mockResolvedValue(0);
+    prisma.meeting.count.mockResolvedValue(0);
+    prisma.deal.count.mockResolvedValue(1);
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: "500000.00" } });
+    prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.broker.findMany.mockResolvedValue([]);
+    // Сделка с явным agencyId, чей брокер тоже входит в agency-1: не должна
+    // посчитаться дважды (через agencyId и через брокера).
+    prisma.deal.findMany.mockResolvedValue([
+      {
+        id: "d-1",
+        agencyId: "agency-1",
+        brokerId: "broker-1",
+        amount: "500000.00",
+        signedAt: new Date("2026-08-05T00:00:00.000Z"),
+      },
+    ]);
+    prisma.registryDeal.count.mockResolvedValue(0);
+    prisma.registryDeal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+    prisma.registryDeal.groupBy.mockResolvedValue([]);
+    // Реестр: строка без брокера, совпадающая по названию с agency-1.
+    prisma.registryDeal.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? []
+          : [
+              {
+                id: "rd-name",
+                agencyCanonical: "Ромашка",
+                agencyNameRaw: null,
+                amount: "250000.00",
+                signedAt: new Date("2026-08-20T00:00:00.000Z"),
+              },
+            ],
+      ),
+    );
+    prisma.brokerAgency.findMany.mockResolvedValue([
+      { brokerId: "broker-1", agencyId: "agency-1" },
+    ]);
+    prisma.agency.findMany.mockResolvedValue([
+      { id: "agency-1", name: 'ООО "Ромашка"', legalName: null },
+    ]);
+
+    const result: any = await service.overview("ours", {
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+
+    expect(result.agencies.top).toEqual([
+      expect.objectContaining({
+        id: "agency-1",
+        deals: 2,
+        dealAmount: "750000.00",
+      }),
+    ]);
+  });
+
+  it("keeps unattributed registry deals out of the OUR deals KPI but reports them in metadata", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.count.mockResolvedValue(0);
+    prisma.agency.count.mockResolvedValue(0);
+    prisma.client.count.mockResolvedValue(0);
+    prisma.meeting.count.mockResolvedValue(0);
+    prisma.deal.count.mockResolvedValue(0);
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+    prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.broker.findMany.mockResolvedValue([]);
+    prisma.agency.findMany.mockResolvedValue([]);
+    // Всего в периоде 3 строки реестра, из них 1 привязана к действующему
+    // брокеру: KPI показывает 1, «+2 без брокера» уходит в метаданные.
+    prisma.registryDeal.count.mockImplementation((args: any) =>
+      Promise.resolve(args?.where?.brokerId ? 1 : 3),
+    );
+    prisma.registryDeal.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? { _sum: { amount: "100.00" } }
+          : { _sum: { amount: "300.00" } },
+      ),
+    );
+
+    const result: any = await service.overview("ours", {
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+
+    expect(result.activities.deals).toBe(1);
+    expect(result.dealAmount).toBe("100.00");
+    expect(result.kpiMetadata["activities.deals"]).toMatchObject({
+      unattributedRegistryDeals: 2,
+    });
+    expect(result.kpiMetadata["activities.deals"].formula).toContain(
+      "excludes 2 registry deal(s)",
+    );
+    expect(result.kpiMetadata.dealAmount).toMatchObject({
+      unattributedRegistryDeals: 2,
+      unattributedRegistryAmount: "200.00",
+    });
+    // KPI брокерского блока считают только владельцев role=BROKER без
+    // слияния — как списки при дрилл-дауне.
+    const ownerWhere = {
+      broker: { is: { role: "BROKER", mergedIntoId: null } },
+    };
+    expect(prisma.client.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining(ownerWhere),
+      }),
+    );
+    expect(prisma.meeting.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining(ownerWhere),
+      }),
+    );
+    expect(prisma.deal.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining(ownerWhere),
+      }),
+    );
+  });
+
+  it("limits the OUR NOT_CALLED_CURRENT_MONTH segment to ACTIVE brokers like the KPI", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const broker = (id: string, status: string, phoneSuffix: string) => ({
+      id,
+      fullName: `Broker ${id}`,
+      phone: `+7999000${phoneSuffix}`,
+      email: null,
+      status,
+      funnelStage: "NEW_BROKER",
+      region: "MSK",
+      isRegional: false,
+      isCoordinator: false,
+      specialization: null,
+      category: null,
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      lastCallAt: null,
+      updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      assignedManagerId: null,
+      assignedManager: null,
+      phones: [],
+      brokerAgencies: [],
+      callLogs: [],
+      clients: [],
+      meetings: [],
+      deals: [],
+      _count: { clients: 0, deals: 0, meetings: 0, callLogs: 0 },
+    });
+    // В реальной БД неактивных отсечёт where; мок возвращает обоих, чтобы
+    // проверить и in-memory предикат.
+    prisma.broker.findMany.mockResolvedValue([
+      broker("active-idle", "ACTIVE", "0031"),
+      broker("inactive-idle", "INACTIVE", "0032"),
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.registryDeal.groupBy.mockResolvedValue([]);
+
+    const result: any = await service.list("ours", "BROKER", {
+      page: 1,
+      pageSize: 30,
+      segment: "NOT_CALLED_CURRENT_MONTH",
+    } as any);
+
+    expect(result.items.map((item: any) => item.id)).toEqual(["active-idle"]);
+    // where списка тоже требует status=ACTIVE — как KPI «Не звонили».
+    const findManyArgs = prisma.broker.findMany.mock.calls[0][0];
+    expect(findManyArgs.where.AND).toEqual(
+      expect.arrayContaining([{ status: "ACTIVE" }]),
+    );
+  });
+
+  it("supports OUR call filters without callPeriod as lifetime predicates", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const broker = (id: string, phoneSuffix: string, callLogs: any[]) => ({
+      id,
+      fullName: `Broker ${id}`,
+      phone: `+7999000${phoneSuffix}`,
+      email: null,
+      status: "ACTIVE",
+      funnelStage: "NEW_BROKER",
+      region: "MSK",
+      isRegional: false,
+      isCoordinator: false,
+      specialization: null,
+      category: null,
+      amoContactId: null,
+      mergedIntoId: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      lastCallAt: null,
+      updatedAt: new Date("2026-08-20T00:00:00.000Z"),
+      assignedManagerId: null,
+      assignedManager: null,
+      phones: [],
+      brokerAgencies: [],
+      callLogs,
+      clients: [],
+      meetings: [],
+      deals: [],
+      _count: {
+        clients: 0,
+        deals: 0,
+        meetings: 0,
+        callLogs: callLogs.length,
+      },
+    });
+    const call = {
+      createdAt: new Date("2025-02-01T10:00:00.000Z"),
+      campaign: null,
+      result: "CONNECTED",
+      operatorId: null,
+      comment: null,
+      nextCallAt: null,
+    };
+    const load = () => {
+      prisma.broker.findMany.mockResolvedValue([
+        broker("called-once", "0041", [call]),
+        broker("never-called", "0042", []),
+      ]);
+      prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+      prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+      prisma.deal.groupBy.mockResolvedValue([]);
+      prisma.registryDeal.groupBy.mockResolvedValue([]);
+    };
+
+    load();
+    const calledEver: any = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { scenario: "CALLED_IN_PERIOD" } as any,
+    );
+    expect(calledEver.items.map((item: any) => item.id)).toEqual([
+      "called-once",
+    ]);
+
+    load();
+    const neverCalled: any = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { scenario: "NOT_CALLED_IN_PERIOD" } as any,
+    );
+    expect(neverCalled.items.map((item: any) => item.id)).toEqual([
+      "never-called",
+    ]);
+
+    load();
+    const columnNotCalled: any = await service.list("ours", "BROKER", {
+      page: 1,
+      pageSize: 30,
+      columns: { calls: "NOT_CALLED_IN_PERIOD" },
+    } as any);
+    expect(columnNotCalled.items.map((item: any) => item.id)).toEqual([
+      "never-called",
+    ]);
+
+    load();
+    const calledFlag: any = await service.list("ours", "BROKER", {
+      page: 1,
+      pageSize: 30,
+      called: true,
+    } as any);
+    expect(calledFlag.items.map((item: any) => item.id)).toEqual([
+      "called-once",
     ]);
   });
 

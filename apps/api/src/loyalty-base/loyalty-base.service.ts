@@ -720,6 +720,42 @@ const FIXATION_CLIENT_WHERE = {
   ],
 };
 
+// 2026-09-04 (реестр → агентства по названию): в кодовой базе нет готового
+// нормализатора названий (registry_deals.agency_canonical готовится офлайн
+// при заливке), поэтому обе стороны — Agency.name/legalName и
+// RegistryDeal.agencyCanonical/agencyNameRaw — приводятся к одному ключу:
+// NFKC + нижний регистр, без кавычек, организационно-правовых форм
+// (ООО/АО/ЗАО/ИП/…), слов «агентство недвижимости»/«АН» и всех разделителей.
+// Стоп-слова отбрасываются токенами (JS \b не работает с кириллицей); если
+// название состоит из одних стоп-слов («АН»), ключ строится из полного
+// набора токенов, чтобы разные вырожденные названия не схлопывались в пустоту.
+const AGENCY_NAME_STOP_TOKENS = new Set([
+  "ооо",
+  "оао",
+  "зао",
+  "пао",
+  "ао",
+  "ип",
+  "ан",
+  "агентство",
+  "недвижимости",
+  "llc",
+  "ltd",
+]);
+
+export function normalizeAgencyMatchKey(value: unknown): string | null {
+  const tokens = String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+  if (!tokens.length) return null;
+  const meaningful = tokens.filter(
+    (token) => !AGENCY_NAME_STOP_TOKENS.has(token),
+  );
+  return (meaningful.length ? meaningful : tokens).join("") || null;
+}
+
 @Injectable()
 export class LoyaltyBaseService {
   constructor(@Inject("PrismaClient") private readonly prisma: PrismaClient) {}
@@ -931,18 +967,10 @@ export class LoyaltyBaseService {
         "dealsInPeriod requires activityPeriod (or flat from/to)",
       );
     }
-    if (
-      (["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(
-        result.scenario || "",
-      ) ||
-        query.called !== undefined ||
-        result.columns.calls !== undefined) &&
-      !result.callPeriod
-    ) {
-      throw new BadRequestException(
-        "called/scenario requires callPeriod (or flat from/to)",
-      );
-    }
+    // 2026-09-04: отсутствие callPeriod у звонковых предикатов (called,
+    // сценарии CALLED_IN_PERIOD/NOT_CALLED_IN_PERIOD, колонка «Звонки») — не
+    // ошибка, а «за всё время»: звонили хоть раз / не звонили ни разу.
+    // Раньше здесь был BadRequestException, и фронт получал 400.
     return result;
   }
 
@@ -3929,10 +3957,26 @@ export class LoyaltyBaseService {
       from: period.from.toISOString(),
       to: period.to.toISOString(),
     };
-    const confirmedDeals = this.ourConfirmedDealWhere(period);
+    // 2026-09-04: KPI блока брокеров считают только строки, чей владелец —
+    // действующий брокер (role=BROKER, mergedIntoId=null) — ровно как список
+    // брокеров при клике по плитке (дриллдаун openActivityDrilldown).
+    const brokerOwner = { is: { role: "BROKER" as const, mergedIntoId: null } };
+    const confirmedDeals = {
+      ...this.ourConfirmedDealWhere(period),
+      broker: brokerOwner,
+    };
     const acceptedMeetings: any = {
       status: { in: ["CONFIRMED", "COMPLETED"] },
       date: { gte: period.from, lte: period.to },
+      broker: brokerOwner,
+    };
+    // Реестровые сделки: в основной KPI попадают только привязанные к
+    // действующему брокеру (иначе клик по плитке не найдёт их в списке);
+    // остальные показываются отдельно как «+N без брокера» в метаданных.
+    const registryAttributedWhere = {
+      ...this.registrySignedAtWhere(period),
+      brokerId: { not: null },
+      broker: brokerOwner,
     };
     const [
       brokerTotal,
@@ -3941,8 +3985,10 @@ export class LoyaltyBaseService {
       meetings,
       deals,
       registryDeals,
+      registryDealsTotal,
       dealAmount,
       registryDealAmount,
+      registryDealAmountTotal,
       notCalled,
       newRows,
       btWithoutFixation,
@@ -3958,11 +4004,15 @@ export class LoyaltyBaseService {
         where: {
           ...FIXATION_CLIENT_WHERE,
           createdAt: { gte: period.from, lte: period.to },
+          broker: brokerOwner,
         },
       }),
       this.prisma.meeting.count({ where: acceptedMeetings }),
       this.prisma.deal.count({ where: confirmedDeals }),
       // «Реестр сделок» — период по дате подписания договора.
+      this.registryDealModel
+        ? this.registryDealModel.count({ where: registryAttributedWhere })
+        : Promise.resolve(0),
       this.registryDealModel
         ? this.registryDealModel.count({
             where: this.registrySignedAtWhere(period),
@@ -3972,7 +4022,13 @@ export class LoyaltyBaseService {
         where: confirmedDeals,
         _sum: { amount: true },
       }),
-      // Сумма ₽ «Реестра сделок» за тот же период.
+      // Сумма ₽ «Реестра сделок» за тот же период (только привязанные).
+      this.registryDealModel
+        ? this.registryDealModel.aggregate({
+            where: registryAttributedWhere,
+            _sum: { amount: true },
+          })
+        : Promise.resolve({ _sum: { amount: null } }),
       this.registryDealModel
         ? this.registryDealModel.aggregate({
             where: this.registrySignedAtWhere(period),
@@ -4041,8 +4097,15 @@ export class LoyaltyBaseService {
     const newCount = (newRows as any[]).filter((row) =>
       hasLoyaltyAcquisitionPhone([row.phone, ...(row.phones || [])]),
     ).length;
-    // Итог KPI «Сделки» = локальные подтверждённые DDU + строки реестра.
+    // Итог KPI «Сделки» = локальные подтверждённые DDU + привязанные к
+    // брокеру строки реестра. Строки реестра без действующего брокера в
+    // основное число не входят (плитка кликабельна и ведёт в список брокеров,
+    // где таких строк нет) — их количество уходит в metadata как «+N».
     const totalDeals = Number(deals || 0) + Number(registryDeals || 0);
+    const unattributedRegistryDeals = Math.max(
+      0,
+      Number(registryDealsTotal || 0) - Number(registryDeals || 0),
+    );
     // Сумма ₽: реестр добавляется, только когда его сумма известна — иначе
     // строка Deal-суммы остаётся ровно прежней (без переформатирования).
     const registryAmount = (registryDealAmount as any)?._sum?.amount;
@@ -4052,6 +4115,18 @@ export class LoyaltyBaseService {
         : centsToMoney(
             moneyToCents(String(dealAmount._sum.amount || "0")) +
               moneyToCents(String(registryAmount)),
+          );
+    const registryAmountTotal = (registryDealAmountTotal as any)?._sum?.amount;
+    const unattributedRegistryAmount =
+      registryAmountTotal === null || registryAmountTotal === undefined
+        ? null
+        : centsToMoney(
+            moneyToCents(String(registryAmountTotal)) -
+              moneyToCents(
+                registryAmount === null || registryAmount === undefined
+                  ? "0"
+                  : String(registryAmount),
+              ),
           );
     const today = moscowDateParts().dayMonth;
     const knownBirthdays = (birthdayRows as any[]).filter(
@@ -4104,11 +4179,20 @@ export class LoyaltyBaseService {
         methodology:
           "Local operational tables with per-KPI definitions below; no amoCRM or Anna snapshot exactness is inferred",
       },
-      kpiMetadata: this.oursKpiMetadata(periodDto),
+      kpiMetadata: this.oursKpiMetadata(periodDto, {
+        unattributedRegistryDeals,
+        unattributedRegistryAmount,
+      }),
     };
   }
 
-  private oursKpiMetadata(period: { from: string; to: string }) {
+  private oursKpiMetadata(
+    period: { from: string; to: string },
+    registryGap: {
+      unattributedRegistryDeals: number;
+      unattributedRegistryAmount: string | null;
+    } = { unattributedRegistryDeals: 0, unattributedRegistryAmount: null },
+  ) {
     const shared = {
       source: "LOCAL_PRELIMINARY",
       ruleVersion: "ours-local-preliminary-v1",
@@ -4124,26 +4208,27 @@ export class LoyaltyBaseService {
       "activities.fixations": {
         ...shared,
         formula:
-          "COUNT(Client rows fixed for a broker (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED) with createdAt in requested period)",
-        provenance: "Client.id / Client.createdAt",
+          "COUNT(Client rows fixed for an active broker (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED, owner role=BROKER without merge) with createdAt in requested period)",
+        provenance: "Client.id / Client.createdAt / Broker.role",
       },
       "activities.meetings": {
         ...shared,
         formula:
-          "COUNT(Meeting rows with status CONFIRMED or COMPLETED and date in requested period)",
-        provenance: "Meeting.id / Meeting.date / Meeting.status",
+          "COUNT(Meeting rows with status CONFIRMED or COMPLETED, date in requested period and owner role=BROKER without merge)",
+        provenance: "Meeting.id / Meeting.date / Meeting.status / Broker.role",
       },
       "activities.deals": {
         ...shared,
-        formula:
-          "COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID and signedAt in requested period) + COUNT(RegistryDeal rows with signedAt in requested period)",
-        provenance: "Deal.id / Deal.signedAt / Deal.status",
+        formula: `COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID, signedAt in requested period and owner role=BROKER without merge) + COUNT(RegistryDeal rows with signedAt in requested period linked to such a broker)${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker (не видны в списке брокеров)` : ""}`,
+        provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.brokerId",
+        unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
       },
       dealAmount: {
         ...shared,
-        formula:
-          "Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over registry rows signed in the requested period",
-        provenance: "Deal.id / Deal.amount",
+        formula: `Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over broker-attributed registry rows signed in the requested period${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker${registryGap.unattributedRegistryAmount ? ` totalling ${registryGap.unattributedRegistryAmount}` : ""}` : ""}`,
+        provenance: "Deal.id / Deal.amount / RegistryDeal.brokerId",
+        unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
+        unattributedRegistryAmount: registryGap.unattributedRegistryAmount,
       },
       "brokers.notCalledCurrentMonth": {
         ...shared,
@@ -4168,8 +4253,9 @@ export class LoyaltyBaseService {
         ...shared,
         periodFilterApplied: false,
         formula:
-          "COUNT(active, unmerged BROKER rows with brokerTourVisited=true and no FIXED Client row)",
-        provenance: "Broker.brokerTourVisited / Client.fixationStatus",
+          "COUNT(active, unmerged BROKER rows with brokerTourVisited=true and no fixed Client row (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED))",
+        provenance:
+          "Broker.brokerTourVisited / Client.uniquenessStatus / Client.fixationStatus",
       },
       "brokers.birthdaysToday": {
         source: "LOCAL_PRELIMINARY",
@@ -4193,8 +4279,9 @@ export class LoyaltyBaseService {
       "agencies.top": {
         ...shared,
         formula:
-          "Top five by qualifying local DDU deals with an explicit Deal.agencyId plus RegistryDeal rows attributed to agencies via current BrokerAgency relations of their brokers",
-        provenance: "Deal.agencyId / Deal.id / Deal.amount / Deal.signedAt",
+          "Top five by the agency-card rule: union of qualifying local DDU deals with an explicit Deal.agencyId, deals owned by current BrokerAgency brokers, and RegistryDeal rows attributed via those brokers or via a normalized agency-name match, deduplicated by row ID",
+        provenance:
+          "Deal.agencyId / Deal.brokerId / Deal.id / RegistryDeal.brokerId / RegistryDeal.agencyCanonical",
       },
       "brokers.total": {
         ...shared,
@@ -4213,10 +4300,12 @@ export class LoyaltyBaseService {
 
   /**
    * Топ-5 «нашей базы» по сделкам за период: Deal-таблица + «Реестр сделок».
-   * Брокер реестра — по registry_deals.brokerId; агентство — через текущие
-   * связи broker_agencies его брокеров (то же правило, что и в
-   * attachOurAgencyRegistryDeals). Слияние и ранжирование — в памяти, объём
-   * ограничен числом строк с продажами за период.
+   * Брокер реестра — по registry_deals.brokerId. Агентство — по правилу
+   * карточки: Deal с явным agencyId + Deal брокеров агентства + реестр через
+   * broker_agencies его брокеров и по нормализованному названию (то же
+   * правило, что и в attachOurAgencyRegistryDeals), с дедупом по id строки.
+   * Слияние и ранжирование — в памяти, объём ограничен числом строк с
+   * продажами за период.
    */
   private async oursDealLeaders(
     entityType: EntityType,
@@ -4259,39 +4348,37 @@ export class LoyaltyBaseService {
       }
       totals.set(key, target);
     };
-    const dealGroups = await (this.prisma.deal as any).groupBy({
-      by: [groupField],
-      where: {
-        ...this.ourConfirmedDealWhere(period),
-        ...(entityType === "AGENCY"
-          ? { agencyId: { not: null } }
-          : { broker: { is: { role: "BROKER", mergedIntoId: null } } }),
-      },
-      _count: { [groupField]: true },
-      _sum: { amount: true },
-      _max: { signedAt: true },
-    });
-    for (const group of dealGroups as any[]) {
-      add(
-        group[groupField],
-        Number(group._count?.[groupField] || 0),
-        group._sum?.amount,
-        group._max?.signedAt,
-      );
-    }
-    if (this.registryDealModel) {
-      const registryGroups = await this.registryDealModel.groupBy({
-        by: ["brokerId"],
+    if (entityType === "BROKER") {
+      const dealGroups = await (this.prisma.deal as any).groupBy({
+        by: [groupField],
         where: {
-          brokerId: { not: null },
+          ...this.ourConfirmedDealWhere(period),
           broker: { is: { role: "BROKER", mergedIntoId: null } },
-          ...this.registrySignedAtWhere(period),
         },
-        _count: { _all: true },
+        _count: { [groupField]: true },
         _sum: { amount: true },
         _max: { signedAt: true },
       });
-      if (entityType === "BROKER") {
+      for (const group of dealGroups as any[]) {
+        add(
+          group[groupField],
+          Number(group._count?.[groupField] || 0),
+          group._sum?.amount,
+          group._max?.signedAt,
+        );
+      }
+      if (this.registryDealModel) {
+        const registryGroups = await this.registryDealModel.groupBy({
+          by: ["brokerId"],
+          where: {
+            brokerId: { not: null },
+            broker: { is: { role: "BROKER", mergedIntoId: null } },
+            ...this.registrySignedAtWhere(period),
+          },
+          _count: { _all: true },
+          _sum: { amount: true },
+          _max: { signedAt: true },
+        });
         for (const group of registryGroups as any[]) {
           add(
             group.brokerId,
@@ -4300,37 +4387,129 @@ export class LoyaltyBaseService {
             group._max?.signedAt,
           );
         }
-      } else if (
-        (registryGroups as any[]).length &&
-        (this.prisma as any).brokerAgency
-      ) {
-        const brokerIds = uniqueSorted(
-          (registryGroups as any[]).map((group) => String(group.brokerId || "")),
-        );
-        const relations = await (this.prisma as any).brokerAgency.findMany({
-          where: { brokerId: { in: brokerIds } },
-          select: { brokerId: true, agencyId: true },
+      }
+    } else {
+      // 2026-09-04: KPI «Топ-агентство» считается тем же правилом, что и
+      // карточка агентства (ourAgencyRelationMetrics + attachOurAgency-
+      // RegistryDeals): union из Deal с явным agencyId, Deal брокеров
+      // агентства (broker_agencies) и строк реестра — по brokerId этих
+      // брокеров И по нормализованному названию (normalizeAgencyMatchKey).
+      // Дедуп по id строки: сделка не считается дважды, если пришла и через
+      // agencyId, и через брокера, или через брокера и название.
+      const seenByAgency = new Map<string, Set<string>>();
+      const addRow = (
+        agencyId: unknown,
+        rowKey: string,
+        amount: unknown,
+        signedAt: unknown,
+      ) => {
+        const id = String(agencyId || "");
+        if (!id) return;
+        const seen = seenByAgency.get(id) || new Set<string>();
+        if (seen.has(rowKey)) return;
+        seen.add(rowKey);
+        seenByAgency.set(id, seen);
+        add(id, 1, amount, signedAt);
+      };
+      const dealRows = await (this.prisma.deal as any).findMany({
+        where: this.ourConfirmedDealWhere(period),
+        select: {
+          id: true,
+          agencyId: true,
+          brokerId: true,
+          amount: true,
+          signedAt: true,
+        },
+      });
+      const registryBrokerRows = this.registryDealModel
+        ? await this.registryDealModel.findMany({
+            where: {
+              brokerId: { not: null },
+              broker: { is: { role: "BROKER", mergedIntoId: null } },
+              ...this.registrySignedAtWhere(period),
+            },
+            select: { id: true, brokerId: true, amount: true, signedAt: true },
+          })
+        : [];
+      const registryNamedRows = this.registryDealModel
+        ? await this.registryDealModel.findMany({
+            where: {
+              ...this.registrySignedAtWhere(period),
+              OR: [
+                { agencyCanonical: { not: null } },
+                { agencyNameRaw: { not: null } },
+              ],
+            },
+            select: {
+              id: true,
+              agencyCanonical: true,
+              agencyNameRaw: true,
+              amount: true,
+              signedAt: true,
+            },
+          })
+        : [];
+      const brokerIds = uniqueSorted([
+        ...(dealRows as any[]).map((row) => String(row.brokerId || "")),
+        ...(registryBrokerRows as any[]).map((row) =>
+          String(row.brokerId || ""),
+        ),
+      ]).filter(Boolean);
+      const relations =
+        brokerIds.length && (this.prisma as any).brokerAgency
+          ? await (this.prisma as any).brokerAgency.findMany({
+              where: { brokerId: { in: brokerIds } },
+              select: { brokerId: true, agencyId: true },
+            })
+          : [];
+      const agenciesByBroker = new Map<string, string[]>();
+      for (const relation of relations as any[]) {
+        const brokerId = String(relation.brokerId || "");
+        const agencyId = String(relation.agencyId || "");
+        if (!brokerId || !agencyId) continue;
+        const list = agenciesByBroker.get(brokerId) || [];
+        list.push(agencyId);
+        agenciesByBroker.set(brokerId, list);
+      }
+      const nameKeyToAgencies = new Map<string, string[]>();
+      if ((registryNamedRows as any[]).length) {
+        const agencies = await this.prisma.agency.findMany({
+          select: { id: true, name: true, legalName: true },
         });
-        const agenciesByBroker = new Map<string, string[]>();
-        for (const relation of relations as any[]) {
-          const brokerId = String(relation.brokerId || "");
-          const agencyId = String(relation.agencyId || "");
-          if (!brokerId || !agencyId) continue;
-          const list = agenciesByBroker.get(brokerId) || [];
-          list.push(agencyId);
-          agenciesByBroker.set(brokerId, list);
-        }
-        for (const group of registryGroups as any[]) {
-          for (const agencyId of agenciesByBroker.get(
-            String(group.brokerId || ""),
-          ) || []) {
-            add(
-              agencyId,
-              Number(group._count?._all || 0),
-              group._sum?.amount,
-              group._max?.signedAt,
-            );
+        for (const agency of agencies as any[]) {
+          for (const value of [agency.name, agency.legalName]) {
+            const key = normalizeAgencyMatchKey(value);
+            if (!key) continue;
+            const list = nameKeyToAgencies.get(key) || [];
+            if (!list.includes(String(agency.id))) list.push(String(agency.id));
+            nameKeyToAgencies.set(key, list);
           }
+        }
+      }
+      for (const row of dealRows as any[]) {
+        if (row.agencyId) {
+          addRow(row.agencyId, `D:${String(row.id)}`, row.amount, row.signedAt);
+        }
+        for (const agencyId of agenciesByBroker.get(
+          String(row.brokerId || ""),
+        ) || []) {
+          addRow(agencyId, `D:${String(row.id)}`, row.amount, row.signedAt);
+        }
+      }
+      for (const row of registryBrokerRows as any[]) {
+        for (const agencyId of agenciesByBroker.get(
+          String(row.brokerId || ""),
+        ) || []) {
+          addRow(agencyId, `R:${String(row.id)}`, row.amount, row.signedAt);
+        }
+      }
+      for (const row of registryNamedRows as any[]) {
+        const key =
+          normalizeAgencyMatchKey(row.agencyCanonical) ??
+          normalizeAgencyMatchKey(row.agencyNameRaw);
+        if (!key) continue;
+        for (const agencyId of nameKeyToAgencies.get(key) || []) {
+          addRow(agencyId, `R:${String(row.id)}`, row.amount, row.signedAt);
         }
       }
     }
@@ -4452,14 +4631,42 @@ export class LoyaltyBaseService {
 
   /**
    * Реестровые сделки агентств нашей базы: у Agency нет прямой связи с
-   * registry_deals, поэтому агентские строки — те, чей brokerId входит в
-   * текущих брокеров агентства (broker_agencies). Прикрепляются как
-   * record.__registryDeals; ourAgencyRelationMetrics вливает их в общий
-   * массив сделок (счётчик, сумма, даты и периодные метрики — единообразно).
+   * registry_deals, поэтому агентские строки собираются по двум каналам:
+   * 1) brokerId входит в текущих брокеров агентства (broker_agencies);
+   * 2) 2026-09-04: текстовое совпадение названия — normalizeAgencyMatchKey
+   *    (Agency.name/legalName) === normalizeAgencyMatchKey
+   *    (RegistryDeal.agencyCanonical/agencyNameRaw). Так сделки реестра без
+   *    привязанного брокера всё равно попадают в аналитику агентства.
+   * Дедуп по id строки реестра: сделка, уже пришедшая через брокера
+   * агентства, второй раз по названию не добавляется.
+   * Прикрепляются как record.__registryDeals; ourAgencyRelationMetrics
+   * вливает их в общий массив сделок (счётчик, сумма, даты и периодные
+   * метрики — единообразно), поэтому фильтр «Есть сделки», KPI-топ и
+   * карточка агентства сходятся.
    */
   private async attachOurAgencyRegistryDeals(records: any[]) {
     if (!records.length || !this.registryDealModel) return;
+    const attachedIds = new Map<any, Set<string>>();
+    const pushRow = (record: any, row: any) => {
+      const rowId = String(row?.id || "");
+      if (!rowId) return;
+      const seen = attachedIds.get(record) || new Set<string>();
+      if (seen.has(rowId)) return;
+      seen.add(rowId);
+      attachedIds.set(record, seen);
+      record.__registryDeals.push({
+        id: `REGISTRY:${rowId}`,
+        signedAt: row.signedAt || null,
+        // Неизвестная сумма считается нулём: сумма остаётся нижней
+        // границей вместо схлопывания всей агрегатной суммы в null.
+        amount:
+          row.amount === null || row.amount === undefined
+            ? "0"
+            : String(row.amount),
+      });
+    };
     const brokerToRecords = new Map<string, any[]>();
+    const nameToRecords = new Map<string, any[]>();
     for (const record of records) {
       record.__registryDeals = [];
       const relations = Array.isArray(record?.brokerAgencies)
@@ -4471,6 +4678,13 @@ export class LoyaltyBaseService {
         const list = brokerToRecords.get(brokerId) || [];
         list.push(record);
         brokerToRecords.set(brokerId, list);
+      }
+      for (const value of [record?.name, record?.legalName]) {
+        const key = normalizeAgencyMatchKey(value);
+        if (!key) continue;
+        const list = nameToRecords.get(key) || [];
+        if (!list.includes(record)) list.push(record);
+        nameToRecords.set(key, list);
       }
     }
     const ids = uniqueSorted([...brokerToRecords.keys()]);
@@ -4486,17 +4700,35 @@ export class LoyaltyBaseService {
       });
       for (const row of rows as any[]) {
         for (const record of brokerToRecords.get(String(row.brokerId)) || []) {
-          record.__registryDeals.push({
-            id: `REGISTRY:${String(row.id)}`,
-            signedAt: row.signedAt || null,
-            // Неизвестная сумма считается нулём: сумма остаётся нижней
-            // границей вместо схлопывания всей агрегатной суммы в null.
-            amount:
-              row.amount === null || row.amount === undefined
-                ? "0"
-                : String(row.amount),
-          });
+          pushRow(record, row);
         }
+      }
+    }
+    if (!nameToRecords.size) return;
+    // Канал по названию: строк реестра мало (порядок 1-2 тыс.), сопоставление
+    // выполняется в памяти — canonical в БД мог быть нормализован иначе.
+    const namedRows = await this.registryDealModel.findMany({
+      where: {
+        OR: [
+          { agencyCanonical: { not: null } },
+          { agencyNameRaw: { not: null } },
+        ],
+      },
+      select: {
+        id: true,
+        agencyCanonical: true,
+        agencyNameRaw: true,
+        signedAt: true,
+        amount: true,
+      },
+    });
+    for (const row of namedRows as any[]) {
+      const key =
+        normalizeAgencyMatchKey(row.agencyCanonical) ??
+        normalizeAgencyMatchKey(row.agencyNameRaw);
+      if (!key) continue;
+      for (const record of nameToRecords.get(key) || []) {
+        pushRow(record, row);
       }
     }
   }
@@ -5552,8 +5784,10 @@ export class LoyaltyBaseService {
 
   private callInPeriod(
     call: LoyaltyCallView,
-    period: LoyaltyFilterPeriod,
+    period?: LoyaltyFilterPeriod,
   ): boolean | null {
+    // Без периода любой известный звонок засчитывается («за всё время»).
+    if (!period) return true;
     const date = dateOnly(call.date);
     if (date)
       return (
@@ -5573,12 +5807,18 @@ export class LoyaltyBaseService {
   private callPresenceInPeriod(
     calls: LoyaltyCallView[],
     knownCallCount: number | null,
-    period: LoyaltyFilterPeriod,
+    period?: LoyaltyFilterPeriod,
     observedThrough?: Date | null,
   ): boolean | null {
     const states = calls.map((call) => this.callInPeriod(call, period));
     if (states.includes(true)) return true;
-    if (observedThrough && period.to.getTime() > observedThrough.getTime()) {
+    // Lifetime-режим (без периода) опирается на все известные данные:
+    // observedThrough ограничивает только периодные утверждения.
+    if (
+      observedThrough &&
+      period &&
+      period.to.getTime() > observedThrough.getTime()
+    ) {
       return null;
     }
     if (knownCallCount === 0) return false;
@@ -6330,14 +6570,12 @@ export class LoyaltyBaseService {
         bt,
         fixations: filteredFixations,
         meetings: filteredMeetings,
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(
-              calls,
-              exactCallCount,
-              filter.callPeriod,
-              exactObservedThrough,
-            )
-          : null,
+        callPresence: this.callPresenceInPeriod(
+          calls,
+          exactCallCount,
+          filter.callPeriod,
+          exactObservedThrough,
+        ),
         assignees,
         deals: filteredDeals,
       })
@@ -6346,14 +6584,12 @@ export class LoyaltyBaseService {
     if (
       filter.scenario &&
       !this.matchesScenario(filter.scenario, {
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(
-              calls,
-              exactCallCount,
-              filter.callPeriod,
-              exactObservedThrough,
-            )
-          : null,
+        callPresence: this.callPresenceInPeriod(
+          calls,
+          exactCallCount,
+          filter.callPeriod,
+          exactObservedThrough,
+        ),
         bt,
         fixations: filteredFixations,
         meetings: filteredMeetings,
@@ -7153,7 +7389,13 @@ export class LoyaltyBaseService {
           filter.activityPeriod,
         ),
       );
-    if (filter.segment === "NEW_BROKER") {
+    if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
+      // KPI «Не звонили в этом месяце» считает только активных брокеров
+      // (status=ACTIVE) — сегмент-дриллдаун обязан давать то же число.
+      // Сам факт «не звонили» проверяется в matchesOurBroker по единой
+      // модели звонков (легаси CallLog + workflow-попытки).
+      and.push({ status: "ACTIVE" });
+    } else if (filter.segment === "NEW_BROKER") {
       and.push({
         status: "ACTIVE",
         funnelStage: "NEW_BROKER",
@@ -7387,7 +7629,7 @@ export class LoyaltyBaseService {
       exactness: "APPROXIMATE",
       source: "LOCAL_OPERATIONAL_ROWS",
       methodology:
-        "Batched per-broker aggregates over current local FIXED Client rows, confirmed/completed Meeting rows, qualifying confirmed DDU Deal rows and RegistryDeal rows signed in the selected period.",
+        "Batched per-broker aggregates over current local fixed Client rows (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED), confirmed/completed Meeting rows, qualifying confirmed DDU Deal rows and RegistryDeal rows signed in the selected period.",
       fixations: 0,
       meetings: 0,
       deals: 0,
@@ -8475,6 +8717,8 @@ export class LoyaltyBaseService {
     }
 
     if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
+      // Как в KPI «Не звонили в этом месяце»: только активные брокеры.
+      if (String(record.status || "") !== "ACTIVE") return false;
       const period = moscowCurrentMonthFilterPeriod();
       if (this.callPresenceInPeriod(calls, 0, period) !== false) return false;
     }
@@ -8622,9 +8866,7 @@ export class LoyaltyBaseService {
         bt,
         fixations,
         meetings,
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
-          : null,
+        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod),
         assignees,
         deals,
       })
@@ -8901,9 +9143,7 @@ export class LoyaltyBaseService {
         bt,
         fixations: filteredFixations,
         meetings: filteredMeetings,
-        callPresence: filter.callPeriod
-          ? this.callPresenceInPeriod(calls, 0, filter.callPeriod)
-          : null,
+        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod),
         assignees,
         deals: filteredDeals,
       })
@@ -9489,11 +9729,11 @@ export class LoyaltyBaseService {
           brokers:
             "Current BrokerAgency memberships, deduplicated by broker ID",
           fixations:
-            "FIXED Client rows owned by currently related brokers, deduplicated by Client ID",
+            "Fixed Client rows (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED) owned by currently related brokers, deduplicated by Client ID",
           meetings:
             "CONFIRMED/COMPLETED Meeting rows owned by currently related brokers, deduplicated by Meeting ID",
           deals:
-            "Confirmed positive DDU Deal rows linked directly to the agency or owned by currently related brokers, deduplicated by Deal ID",
+            "Confirmed positive DDU Deal rows linked directly to the agency or owned by currently related brokers, plus RegistryDeal rows of those brokers or with a matching normalized agency name, deduplicated by row ID",
           calls:
             "Legacy CallLog and effective loyalty workflow attempts of the agency/currently related brokers, deduplicated by source and row ID",
           brokerTours:
