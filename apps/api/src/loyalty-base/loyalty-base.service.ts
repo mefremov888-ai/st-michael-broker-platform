@@ -4278,8 +4278,9 @@ export class LoyaltyBaseService {
       "agencies.top": {
         ...shared,
         formula:
-          "Top five by qualifying local DDU deals with an explicit Deal.agencyId plus RegistryDeal rows attributed to agencies via current BrokerAgency relations of their brokers",
-        provenance: "Deal.agencyId / Deal.id / Deal.amount / Deal.signedAt",
+          "Top five by the agency-card rule: union of qualifying local DDU deals with an explicit Deal.agencyId, deals owned by current BrokerAgency brokers, and RegistryDeal rows attributed via those brokers or via a normalized agency-name match, deduplicated by row ID",
+        provenance:
+          "Deal.agencyId / Deal.brokerId / Deal.id / RegistryDeal.brokerId / RegistryDeal.agencyCanonical",
       },
       "brokers.total": {
         ...shared,
@@ -4298,10 +4299,12 @@ export class LoyaltyBaseService {
 
   /**
    * Топ-5 «нашей базы» по сделкам за период: Deal-таблица + «Реестр сделок».
-   * Брокер реестра — по registry_deals.brokerId; агентство — через текущие
-   * связи broker_agencies его брокеров (то же правило, что и в
-   * attachOurAgencyRegistryDeals). Слияние и ранжирование — в памяти, объём
-   * ограничен числом строк с продажами за период.
+   * Брокер реестра — по registry_deals.brokerId. Агентство — по правилу
+   * карточки: Deal с явным agencyId + Deal брокеров агентства + реестр через
+   * broker_agencies его брокеров и по нормализованному названию (то же
+   * правило, что и в attachOurAgencyRegistryDeals), с дедупом по id строки.
+   * Слияние и ранжирование — в памяти, объём ограничен числом строк с
+   * продажами за период.
    */
   private async oursDealLeaders(
     entityType: EntityType,
@@ -4344,39 +4347,37 @@ export class LoyaltyBaseService {
       }
       totals.set(key, target);
     };
-    const dealGroups = await (this.prisma.deal as any).groupBy({
-      by: [groupField],
-      where: {
-        ...this.ourConfirmedDealWhere(period),
-        ...(entityType === "AGENCY"
-          ? { agencyId: { not: null } }
-          : { broker: { is: { role: "BROKER", mergedIntoId: null } } }),
-      },
-      _count: { [groupField]: true },
-      _sum: { amount: true },
-      _max: { signedAt: true },
-    });
-    for (const group of dealGroups as any[]) {
-      add(
-        group[groupField],
-        Number(group._count?.[groupField] || 0),
-        group._sum?.amount,
-        group._max?.signedAt,
-      );
-    }
-    if (this.registryDealModel) {
-      const registryGroups = await this.registryDealModel.groupBy({
-        by: ["brokerId"],
+    if (entityType === "BROKER") {
+      const dealGroups = await (this.prisma.deal as any).groupBy({
+        by: [groupField],
         where: {
-          brokerId: { not: null },
+          ...this.ourConfirmedDealWhere(period),
           broker: { is: { role: "BROKER", mergedIntoId: null } },
-          ...this.registrySignedAtWhere(period),
         },
-        _count: { _all: true },
+        _count: { [groupField]: true },
         _sum: { amount: true },
         _max: { signedAt: true },
       });
-      if (entityType === "BROKER") {
+      for (const group of dealGroups as any[]) {
+        add(
+          group[groupField],
+          Number(group._count?.[groupField] || 0),
+          group._sum?.amount,
+          group._max?.signedAt,
+        );
+      }
+      if (this.registryDealModel) {
+        const registryGroups = await this.registryDealModel.groupBy({
+          by: ["brokerId"],
+          where: {
+            brokerId: { not: null },
+            broker: { is: { role: "BROKER", mergedIntoId: null } },
+            ...this.registrySignedAtWhere(period),
+          },
+          _count: { _all: true },
+          _sum: { amount: true },
+          _max: { signedAt: true },
+        });
         for (const group of registryGroups as any[]) {
           add(
             group.brokerId,
@@ -4385,37 +4386,129 @@ export class LoyaltyBaseService {
             group._max?.signedAt,
           );
         }
-      } else if (
-        (registryGroups as any[]).length &&
-        (this.prisma as any).brokerAgency
-      ) {
-        const brokerIds = uniqueSorted(
-          (registryGroups as any[]).map((group) => String(group.brokerId || "")),
-        );
-        const relations = await (this.prisma as any).brokerAgency.findMany({
-          where: { brokerId: { in: brokerIds } },
-          select: { brokerId: true, agencyId: true },
+      }
+    } else {
+      // 2026-09-04: KPI «Топ-агентство» считается тем же правилом, что и
+      // карточка агентства (ourAgencyRelationMetrics + attachOurAgency-
+      // RegistryDeals): union из Deal с явным agencyId, Deal брокеров
+      // агентства (broker_agencies) и строк реестра — по brokerId этих
+      // брокеров И по нормализованному названию (normalizeAgencyMatchKey).
+      // Дедуп по id строки: сделка не считается дважды, если пришла и через
+      // agencyId, и через брокера, или через брокера и название.
+      const seenByAgency = new Map<string, Set<string>>();
+      const addRow = (
+        agencyId: unknown,
+        rowKey: string,
+        amount: unknown,
+        signedAt: unknown,
+      ) => {
+        const id = String(agencyId || "");
+        if (!id) return;
+        const seen = seenByAgency.get(id) || new Set<string>();
+        if (seen.has(rowKey)) return;
+        seen.add(rowKey);
+        seenByAgency.set(id, seen);
+        add(id, 1, amount, signedAt);
+      };
+      const dealRows = await (this.prisma.deal as any).findMany({
+        where: this.ourConfirmedDealWhere(period),
+        select: {
+          id: true,
+          agencyId: true,
+          brokerId: true,
+          amount: true,
+          signedAt: true,
+        },
+      });
+      const registryBrokerRows = this.registryDealModel
+        ? await this.registryDealModel.findMany({
+            where: {
+              brokerId: { not: null },
+              broker: { is: { role: "BROKER", mergedIntoId: null } },
+              ...this.registrySignedAtWhere(period),
+            },
+            select: { id: true, brokerId: true, amount: true, signedAt: true },
+          })
+        : [];
+      const registryNamedRows = this.registryDealModel
+        ? await this.registryDealModel.findMany({
+            where: {
+              ...this.registrySignedAtWhere(period),
+              OR: [
+                { agencyCanonical: { not: null } },
+                { agencyNameRaw: { not: null } },
+              ],
+            },
+            select: {
+              id: true,
+              agencyCanonical: true,
+              agencyNameRaw: true,
+              amount: true,
+              signedAt: true,
+            },
+          })
+        : [];
+      const brokerIds = uniqueSorted([
+        ...(dealRows as any[]).map((row) => String(row.brokerId || "")),
+        ...(registryBrokerRows as any[]).map((row) =>
+          String(row.brokerId || ""),
+        ),
+      ]).filter(Boolean);
+      const relations =
+        brokerIds.length && (this.prisma as any).brokerAgency
+          ? await (this.prisma as any).brokerAgency.findMany({
+              where: { brokerId: { in: brokerIds } },
+              select: { brokerId: true, agencyId: true },
+            })
+          : [];
+      const agenciesByBroker = new Map<string, string[]>();
+      for (const relation of relations as any[]) {
+        const brokerId = String(relation.brokerId || "");
+        const agencyId = String(relation.agencyId || "");
+        if (!brokerId || !agencyId) continue;
+        const list = agenciesByBroker.get(brokerId) || [];
+        list.push(agencyId);
+        agenciesByBroker.set(brokerId, list);
+      }
+      const nameKeyToAgencies = new Map<string, string[]>();
+      if ((registryNamedRows as any[]).length) {
+        const agencies = await this.prisma.agency.findMany({
+          select: { id: true, name: true, legalName: true },
         });
-        const agenciesByBroker = new Map<string, string[]>();
-        for (const relation of relations as any[]) {
-          const brokerId = String(relation.brokerId || "");
-          const agencyId = String(relation.agencyId || "");
-          if (!brokerId || !agencyId) continue;
-          const list = agenciesByBroker.get(brokerId) || [];
-          list.push(agencyId);
-          agenciesByBroker.set(brokerId, list);
-        }
-        for (const group of registryGroups as any[]) {
-          for (const agencyId of agenciesByBroker.get(
-            String(group.brokerId || ""),
-          ) || []) {
-            add(
-              agencyId,
-              Number(group._count?._all || 0),
-              group._sum?.amount,
-              group._max?.signedAt,
-            );
+        for (const agency of agencies as any[]) {
+          for (const value of [agency.name, agency.legalName]) {
+            const key = normalizeAgencyMatchKey(value);
+            if (!key) continue;
+            const list = nameKeyToAgencies.get(key) || [];
+            if (!list.includes(String(agency.id))) list.push(String(agency.id));
+            nameKeyToAgencies.set(key, list);
           }
+        }
+      }
+      for (const row of dealRows as any[]) {
+        if (row.agencyId) {
+          addRow(row.agencyId, `D:${String(row.id)}`, row.amount, row.signedAt);
+        }
+        for (const agencyId of agenciesByBroker.get(
+          String(row.brokerId || ""),
+        ) || []) {
+          addRow(agencyId, `D:${String(row.id)}`, row.amount, row.signedAt);
+        }
+      }
+      for (const row of registryBrokerRows as any[]) {
+        for (const agencyId of agenciesByBroker.get(
+          String(row.brokerId || ""),
+        ) || []) {
+          addRow(agencyId, `R:${String(row.id)}`, row.amount, row.signedAt);
+        }
+      }
+      for (const row of registryNamedRows as any[]) {
+        const key =
+          normalizeAgencyMatchKey(row.agencyCanonical) ??
+          normalizeAgencyMatchKey(row.agencyNameRaw);
+        if (!key) continue;
+        for (const agencyId of nameKeyToAgencies.get(key) || []) {
+          addRow(agencyId, `R:${String(row.id)}`, row.amount, row.signedAt);
         }
       }
     }

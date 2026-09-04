@@ -62,7 +62,14 @@ function prismaMock() {
     agency: { findMany: fn(), findUnique: fn(), count: fn(), update: fn() },
     client: { count: fn(), groupBy: fn() },
     meeting: { count: fn(), groupBy: fn() },
-    deal: { count: fn(), aggregate: fn(), groupBy: fn() },
+    deal: {
+      count: fn(),
+      aggregate: fn(),
+      groupBy: fn(),
+      // Топ-агентство считается правилом карточки (union строк) — по
+      // умолчанию сделок нет, чтобы старые тесты видели прежние числа.
+      findMany: jest.fn().mockResolvedValue([]),
+    },
     // «Реестр сделок» (registry_deals): по умолчанию пустой источник, чтобы
     // существующие тесты видели прежние числа.
     registryDeal: {
@@ -4926,6 +4933,28 @@ describe("LoyaltyBaseService", () => {
         _max: { signedAt: new Date("2026-08-20T00:00:00.000Z") },
       },
     ]);
+    // Топ-агентство берёт строки реестра через findMany (правило карточки):
+    // канал по brokerId отдаёт обе строки, канал по названию — пустой.
+    prisma.registryDeal.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? [
+              {
+                id: "rd-1",
+                brokerId: "broker-1",
+                amount: "150000.00",
+                signedAt: new Date("2026-08-20T00:00:00.000Z"),
+              },
+              {
+                id: "rd-2",
+                brokerId: "broker-1",
+                amount: "150000.00",
+                signedAt: new Date("2026-08-10T00:00:00.000Z"),
+              },
+            ]
+          : [],
+      ),
+    );
     prisma.brokerAgency.findMany.mockResolvedValue([
       { brokerId: "broker-1", agencyId: "agency-1" },
     ]);
