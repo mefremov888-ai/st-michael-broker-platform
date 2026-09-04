@@ -1,0 +1,36 @@
+name: Export agencies and brokers (match dicts)
+
+# 2026-09-04: read-only выгрузка справочников агентств и брокеров для сшивки
+# сделок (атрибуция «чья сделка»). Полные телефоны не выгружаются (последние
+# 4 цифры). Результат — NDJSON в логе рана между маркерами.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: export-agencies-brokers
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Run export on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run export
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 5m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/export-agencies-brokers.js > /tmp/export-agencies-brokers.js
+            docker cp /tmp/export-agencies-brokers.js st-michael-api:/app/scripts/export-agencies-brokers.js
+            docker compose exec -T api node /app/scripts/export-agencies-brokers.js
+            echo "=== Готово ==="
