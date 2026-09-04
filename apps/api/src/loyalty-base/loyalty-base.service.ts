@@ -8,7 +8,7 @@ import {
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
 import { Readable } from "stream";
-import { PrismaClient } from "@st-michael/database";
+import { Prisma, PrismaClient } from "@st-michael/database";
 import {
   LoyaltyCanonicalFilterDto,
   LoyaltyChangesQueryDto,
@@ -25,6 +25,7 @@ import {
   LoyaltySearchDto,
 } from "./loyalty-base.dto";
 import { withLoyaltyFullScanSlot } from "./loyalty-full-scan-coordinator";
+import { buildPhoneSearchConditions } from "../admin/brokers-import.helper";
 
 export {
   LOYALTY_FULL_SCAN_RETRY_AFTER_SECONDS,
@@ -94,6 +95,7 @@ interface CanonicalLoyaltyFilter {
   specialTermsProposed?: boolean;
   rewardPresent?: boolean;
   staleDays?: number;
+  doNotCall?: "exclude" | "only";
   columns: {
     contact?: string;
     statusStage?: string;
@@ -168,6 +170,8 @@ export interface LoyaltyResolvedSelection {
   total: number;
   filterHash: string;
   snapshotId: string | null;
+  // Сколько брокеров «не звонить» исключено (только при excludeDoNotCall).
+  excludedDoNotCall?: number;
 }
 
 const BROKER_CALL_RESULT_ALIASES: Record<string, string[]> = {
@@ -720,6 +724,33 @@ const FIXATION_CLIENT_WHERE = {
   ],
 };
 
+// 2026-09-04 (решение владельца, вариант В): «Действующая фиксация» —
+// отдельный фильтр рядом с «Есть фиксации» (который остаётся lifetime и
+// НЕ меняется). Клиент считается действующей фиксацией, если он проходит
+// FIXATION_CLIENT_WHERE И срок соответствующей ветки не истёк:
+//   - fixationStatus=FIXED → смотрим fixationExpiresAt (ручная фиксация
+//     после акта осмотра живёт по своему сроку);
+//   - uniquenessStatus=CONDITIONALLY_UNIQUE → смотрим uniquenessExpiresAt
+//     (массовый случай: заявка на уникальность).
+// null-срок в обеих ветках = бессрочно (считается действующей).
+export function activeFixationClientWhere(now: Date = new Date()) {
+  return {
+    OR: [
+      {
+        fixationStatus: "FIXED" as const,
+        OR: [{ fixationExpiresAt: null }, { fixationExpiresAt: { gt: now } }],
+      },
+      {
+        uniquenessStatus: "CONDITIONALLY_UNIQUE" as const,
+        OR: [
+          { uniquenessExpiresAt: null },
+          { uniquenessExpiresAt: { gt: now } },
+        ],
+      },
+    ],
+  };
+}
+
 // 2026-09-04 (реестр → агентства по названию): в кодовой базе нет готового
 // нормализатора названий (registry_deals.agency_canonical готовится офлайн
 // при заливке), поэтому обе стороны — Agency.name/legalName и
@@ -944,6 +975,7 @@ export class LoyaltyBaseService {
         canonical?.specialTermsProposed ?? query.specialTermsProposed,
       rewardPresent: canonical?.rewardPresent ?? query.rewardPresent,
       staleDays: canonical?.staleDays ?? query.staleDays,
+      doNotCall: canonical?.doNotCall ?? query.doNotCall,
       columns: {
         contact: columnInput.contact,
         statusStage: columnInput.statusStage,
@@ -4803,6 +4835,7 @@ export class LoyaltyBaseService {
     base: string,
     entityType: EntityType,
     dto: LoyaltySearchDto | LoyaltyExportDto,
+    options?: { excludeDoNotCall?: boolean },
   ): Promise<LoyaltyResolvedSelection> {
     const query = Object.assign(
       new LoyaltyListQueryDto(),
@@ -4818,14 +4851,45 @@ export class LoyaltyBaseService {
       dto.filter,
       true,
     );
+    let ids: string[] = Array.isArray(result._selectionIds)
+      ? result._selectionIds.map(String)
+      : [];
+    let excludedDoNotCall = 0;
+    // 2026-09-04 (задача A): брокеры с doNotCall=true никогда не попадают в
+    // обзвон (как в admin.service call-queue). Исключение выполняется ПОСЛЕ
+    // вычисления списка и не меняет filterHash — список в UI по-прежнему
+    // показывает всех, а кампании обзвона получают выборку без «не звонить».
+    if (
+      options?.excludeDoNotCall &&
+      base === "ours" &&
+      entityType === "BROKER" &&
+      ids.length
+    ) {
+      const blockedIds = new Set<string>();
+      for (
+        let offset = 0;
+        offset < ids.length;
+        offset += CANDIDATE_QUERY_BATCH_SIZE
+      ) {
+        const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+        const blocked = await this.prisma.broker.findMany({
+          where: { id: { in: batch }, doNotCall: true },
+          select: { id: true },
+        });
+        for (const row of blocked) blockedIds.add(String(row.id));
+      }
+      if (blockedIds.size) {
+        ids = ids.filter((id) => !blockedIds.has(id));
+        excludedDoNotCall = blockedIds.size;
+      }
+    }
     return {
-      ids: Array.isArray(result._selectionIds)
-        ? result._selectionIds.map(String)
-        : [],
-      total: Number(result.total || 0),
+      ids,
+      total: excludedDoNotCall ? ids.length : Number(result.total || 0),
       filterHash: String(result.filterHash || ""),
       snapshotId:
         typeof result.snapshotId === "string" ? result.snapshotId : null,
+      ...(excludedDoNotCall ? { excludedDoNotCall } : {}),
     };
   }
 
@@ -4895,6 +4959,30 @@ export class LoyaltyBaseService {
       throw new BadRequestException(
         "assigneeIds and unassigned=true are mutually exclusive",
       );
+    }
+    // «Не звонить» (Broker.doNotCall) и «Действующая фиксация» (сроки
+    // Client.fixationExpiresAt/uniquenessExpiresAt) существуют только в
+    // «Нашей базе» у брокеров — для остальных моделей фильтр fail-closed.
+    const ourBrokerOnlyFields = uniqueSorted(
+      base === "ours" && entityType === "BROKER"
+        ? []
+        : [
+            filter.doNotCall !== undefined ? "doNotCall" : undefined,
+            filter.columns.activity === "HAS_ACTIVE_FIXATIONS"
+              ? "columns.activity"
+              : undefined,
+          ],
+    );
+    if (ourBrokerOnlyFields.length) {
+      throw new BadRequestException({
+        code: "LOYALTY_FILTER_UNAVAILABLE",
+        message:
+          "The selected filter is only available for OUR brokers (doNotCall / active fixation)",
+        base,
+        entityType,
+        fields: ourBrokerOnlyFields,
+        unknownValuesRemainNull: true,
+      });
     }
     if (base !== "ours") return;
 
@@ -7382,6 +7470,16 @@ export class LoyaltyBaseService {
     }
     if (filter.hasAmo !== undefined)
       where.amoContactId = filter.hasAmo ? { not: null } : null;
+    // «Не звонить»: по умолчанию список показывает всех (фильтр не
+    // применяется); кампании обзвона исключают doNotCall отдельно и всегда
+    // (см. resolveSelection excludeDoNotCall).
+    if (filter.doNotCall === "exclude") where.doNotCall = false;
+    if (filter.doNotCall === "only") where.doNotCall = true;
+    // «Действующая фиксация» (вариант В): lifetime-фильтр «Есть фиксации»
+    // не меняется, действующая проверяет ещё и срок (см. комментарий у
+    // activeFixationClientWhere).
+    if (filter.columns.activity === "HAS_ACTIVE_FIXATIONS")
+      and.push({ clients: { some: activeFixationClientWhere() } });
     if (filter.activityType)
       and.push(
         this.ourBrokerActivityFilter(
@@ -7418,7 +7516,11 @@ export class LoyaltyBaseService {
       and.push({ id: { in: await this.ourBirthdayBrokerIds() } });
     }
     if (search) {
-      const normalizedPhone = normalizeLoyaltyContactPoint("PHONE", search);
+      // 2026-09-04 (аудит фильтров): поиск по телефону — через общий
+      // buildPhoneSearchConditions (как admin.service.listBrokers), чтобы
+      // частичный номер («5724188», «8912…») находил брокера. Условия
+      // дублируются и на дополнительные телефоны (BrokerPhone.phone).
+      const phoneConditions = buildPhoneSearchConditions(search);
       and.push({
         OR: [
           { fullName: { contains: search, mode: "insensitive" } },
@@ -7430,12 +7532,10 @@ export class LoyaltyBaseService {
               },
             },
           },
-          ...(normalizedPhone
-            ? [
-                { phone: normalizedPhone },
-                { phones: { some: { phone: normalizedPhone } } },
-              ]
-            : []),
+          ...phoneConditions,
+          ...phoneConditions.map((condition) => ({
+            phones: { some: condition },
+          })),
         ],
       });
     }
@@ -7490,6 +7590,7 @@ export class LoyaltyBaseService {
         category: true,
         amoContactId: true,
         mergedIntoId: true,
+        doNotCall: true,
         brokerTourVisited: true,
         brokerTourDate: true,
         lastCallAt: true,
@@ -7542,6 +7643,13 @@ export class LoyaltyBaseService {
       },
     });
     await this.attachOurBrokerRegistryDeals(records as any[]);
+    // 2026-09-04 (задача D): callLogWhere сузил загруженные callLogs под
+    // «период звонков»/кампанию, но статус DORMANT, lastActivity и staleDays
+    // считаются по последнему звонку ЗА ВСЁ ВРЕМЯ — подгружаем его отдельно.
+    await this.attachOurBrokerLifetimeLastCall(
+      records as any[],
+      Boolean(filter.callPeriod || filter.campaignIds.length),
+    );
     const workflowCalls = await this.workflowCallReadModels(
       "ours",
       "BROKER",
@@ -7791,16 +7899,23 @@ export class LoyaltyBaseService {
     // Agency activity predicates are evaluated after loading the complete
     // selected BrokerAgency relation rows. A direct Agency.deals predicate
     // would incorrectly discard relation-derived local activity.
-    if (search)
+    if (search) {
+      // 2026-09-04 (задача C): Agency.phone хранится в свободном формате
+      // («+7 (912) 45-67», «8912…»), поэтому и ввод, и хранимое значение
+      // сравниваются по одним цифрам (см. ourAgencyIdsByPhoneDigits);
+      // ИНН ищется тоже по цифрам из ввода.
+      const digits = search.replace(/\D/g, "");
+      const phoneAgencyIds = await this.ourAgencyIdsByPhoneDigits(digits);
       and.push({
         OR: [
           { name: { contains: search, mode: "insensitive" } },
           { legalName: { contains: search, mode: "insensitive" } },
-          { inn: { contains: search } },
-          { phone: { contains: search } },
+          ...(digits.length ? [{ inn: { contains: digits } }] : []),
+          ...(phoneAgencyIds.length ? [{ id: { in: phoneAgencyIds } }] : []),
           { email: { contains: search, mode: "insensitive" } },
         ],
       });
+    }
     if (and.length) where.AND = and;
     const records = await this.prisma.agency.findMany({
       where,
@@ -7869,6 +7984,39 @@ export class LoyaltyBaseService {
       },
       includeSelectionIds,
     );
+  }
+
+  /**
+   * Задача C (аудит 04.09): поиск агентства по телефону. Из ввода и из
+   * Agency.phone удаляются все не-цифры, затем частичное совпадение
+   * (минимум 4 цифры — как в buildPhoneSearchConditions). Префиксы 8/7
+   * взаимозаменяемы: «8912…» находит «+7 912 …» и наоборот.
+   */
+  private async ourAgencyIdsByPhoneDigits(digits: string): Promise<string[]> {
+    if (digits.length < 4) return [];
+    const variants = uniqueSorted([
+      digits,
+      digits.startsWith("8") && digits.length < 12
+        ? `7${digits.slice(1)}`
+        : undefined,
+      digits.startsWith("7") && digits.length < 12
+        ? `8${digits.slice(1)}`
+        : undefined,
+    ]);
+    const conditions = variants.map(
+      (variant) =>
+        Prisma.sql`regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') LIKE ${`%${variant}%`}`,
+    );
+    try {
+      const rows: Array<{ id: string }> = await (this.prisma as any).$queryRaw(
+        Prisma.sql`SELECT id FROM agencies WHERE ${Prisma.join(conditions, " OR ")}`,
+      );
+      return Array.isArray(rows) ? rows.map((row) => String(row.id)) : [];
+    } catch {
+      // In-memory/тестовые окружения без $queryRaw: телефонный поиск просто
+      // не сужает выборку (имя/ИНН/email продолжают работать).
+      return [];
+    }
   }
 
   private ourAgencyReadInclude(): any {
@@ -8038,15 +8186,70 @@ export class LoyaltyBaseService {
     };
   }
 
+  /**
+   * Последний звонок «за всё время» (задача D, аудит 04.09): максимум из
+   * объединённой модели звонков (легаси CallLog + workflow), отдельно
+   * подгруженного lifetime-максимума CallLog (__lifetimeLastCallAt — он
+   * есть, когда callLogs загружены с фильтром периода/кампании) и
+   * денормализованного Broker.lastCallAt. «Период звонков» на это значение
+   * не влияет — оно питает статус DORMANT, lastActivity и staleDays.
+   */
+  private ourLastCallLifetime(record: any): string | null {
+    const values = [
+      this.callSortKey(this.lastCall(this.ourCalls(record)) || {}),
+      record.__lifetimeLastCallAt,
+      record.lastCallAt,
+    ]
+      .map(dateOnly)
+      .filter(Boolean) as string[];
+    return values.sort().at(-1) || null;
+  }
+
+  /**
+   * Задача D (аудит 04.09): когда callLogs загружены с where по периоду /
+   * кампании, последний звонок за всё время подгружается отдельным groupBy
+   * и прикрепляется как record.__lifetimeLastCallAt.
+   */
+  private async attachOurBrokerLifetimeLastCall(
+    records: any[],
+    callLogsAreFiltered: boolean,
+  ): Promise<void> {
+    if (!callLogsAreFiltered || !records.length) return;
+    const delegate = (this.prisma as any).callLog;
+    if (typeof delegate?.groupBy !== "function") return;
+    const ids = uniqueSorted(records.map((record) => String(record.id)));
+    const lastByBroker = new Map<string, unknown>();
+    for (
+      let offset = 0;
+      offset < ids.length;
+      offset += CANDIDATE_QUERY_BATCH_SIZE
+    ) {
+      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const groups = await delegate.groupBy({
+        by: ["brokerId"],
+        where: { brokerId: { in: batch } },
+        _max: { createdAt: true },
+      });
+      for (const group of groups as any[]) {
+        if (group?._max?.createdAt) {
+          lastByBroker.set(String(group.brokerId), group._max.createdAt);
+        }
+      }
+    }
+    for (const record of records) {
+      record.__lifetimeLastCallAt =
+        lastByBroker.get(String(record.id)) || null;
+    }
+  }
+
   private ourBrokerStatusCodes(record: any): string[] {
     const fixations = Number(record._count?.clients || 0);
     const meetings = Number(record._count?.meetings || 0);
     const deals = Number(record._count?.deals || 0);
     const bt = record.brokerTourVisited === true;
-    const lastCallAt =
-      this.callSortKey(this.lastCall(this.ourCalls(record)) || {}) ||
-      record.lastCallAt ||
-      null;
+    // Задача D: DORMANT определяется по последнему звонку за всё время,
+    // а не по callLogs, суженным «периодом звонков».
+    const lastCallAt = this.ourLastCallLifetime(record);
     const lastDates = [
       lastCallAt,
       record.brokerTourDate,
@@ -8163,8 +8366,8 @@ export class LoyaltyBaseService {
 
   private ourLastActivity(record: any): string | null {
     const values = [
-      record.lastCallAt,
-      this.callSortKey(this.lastCall(this.ourCalls(record)) || {}),
+      // Задача D: последний звонок — lifetime, без влияния «периода звонков».
+      this.ourLastCallLifetime(record),
       record.brokerTourDate,
       record.clients?.[0]?.createdAt,
       record.meetings?.[0]?.date,
@@ -9027,21 +9230,39 @@ export class LoyaltyBaseService {
         return false;
     }
     if (filter.activityType) {
-      const periodValue =
+      // 2026-09-04 (задача F): без activityPeriod «тип активности» работает
+      // lifetime (как у брокеров) — раньше periodMetrics был UNAVAILABLE и
+      // вкладка агентств всегда возвращала пустой список. CALL проверяется
+      // по объединённой модели звонков; период для CALL — activityPeriod,
+      // затем callPeriod, иначе «за всё время».
+      const lifetimeValue =
         filter.activityType === "FIXATION"
-          ? finiteNumber(item.periodMetrics?.fixations)
+          ? fixations
           : filter.activityType === "MEETING"
-            ? finiteNumber(item.periodMetrics?.meetings)
+            ? meetings
             : filter.activityType === "DEAL"
-              ? finiteNumber(item.periodMetrics?.deals)
-              : filter.activityType === "CALL"
-                ? filter.callPeriod
-                  ? this.callPresenceInPeriod(calls, 0, filter.callPeriod) ===
-                    true
-                    ? 1
-                    : 0
-                  : null
+              ? deals
+              : filter.activityType === "BROKER_TOUR"
+                ? brokerTours
                 : null;
+      const periodValue =
+        filter.activityType === "CALL"
+          ? this.callPresenceInPeriod(
+              calls,
+              0,
+              filter.activityPeriod ?? filter.callPeriod,
+            ) === true
+            ? 1
+            : 0
+          : filter.activityPeriod
+            ? filter.activityType === "FIXATION"
+              ? finiteNumber(item.periodMetrics?.fixations)
+              : filter.activityType === "MEETING"
+                ? finiteNumber(item.periodMetrics?.meetings)
+                : filter.activityType === "DEAL"
+                  ? finiteNumber(item.periodMetrics?.deals)
+                  : null
+            : lifetimeValue;
       if (periodValue === null || periodValue <= 0) return false;
     }
     if (
@@ -9428,8 +9649,28 @@ export class LoyaltyBaseService {
         ...(dateRange ? { brokerTourDate: dateRange } : {}),
       };
     if (type === "CALL")
+      // 2026-09-04 (задача E): объединённая модель звонков — как в ourCalls:
+      // легаси CallLog ИЛИ workflow-попытка обзвона (LoyaltyCallAttempt через
+      // назначение кампании). Раньше учитывался только CallLog, и брокер,
+      // которого обзванивали только через кампании лояльности, не находился.
+      // AND-обёртка — как у DEAL (Object.assign-вызывающие пишут свой OR).
       return {
-        callLogs: { some: dateRange ? { createdAt: dateRange } : {} },
+        AND: [
+          {
+            OR: [
+              { callLogs: { some: dateRange ? { createdAt: dateRange } : {} } },
+              {
+                loyaltyAssignmentsAsTarget: {
+                  some: {
+                    attempts: {
+                      some: dateRange ? { occurredAt: dateRange } : {},
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
       };
     return {};
   }
@@ -9523,11 +9764,23 @@ export class LoyaltyBaseService {
         displayName: relation.agency.name,
         isPrimary: relation.isPrimary,
       })),
+      // Красный бейдж «не звонить» на фронте; null — поле не загружено.
+      doNotCall:
+        typeof item.doNotCall === "boolean" ? item.doNotCall : null,
       metrics: {
         fixations: item._count?.clients || 0,
         deals: item._count?.deals || 0,
         meetings: item._count?.meetings || 0,
-        calls: item._count?.callLogs ?? item._count?.calls ?? 0,
+        // 2026-09-04 (задача E): единый источник числа звонков в списке и
+        // карточке — легаси CallLog + workflow-звонки (семантика ourCalls).
+        // Раньше карточка показывала _count.calls (телефония Mango), а
+        // список — _count.callLogs; теперь оба — callLogs + workflow.
+        // Фолбэк на _count.calls остаётся только для легаси-списка.
+        calls:
+          Number(item._count?.callLogs ?? item._count?.calls ?? 0) +
+          (Array.isArray(item.__workflowCalls?.effective)
+            ? item.__workflowCalls.effective.length
+            : 0),
         dealAmount,
       },
       periodMetrics: this.unavailablePeriodMetrics(),
@@ -10204,7 +10457,9 @@ export class LoyaltyBaseService {
               meetings: {
                 where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
               },
-              calls: true,
+              // Задача E: карточка считает звонки как список — легаси
+              // CallLog (+ workflow в mapOurBroker), а не телефонию (calls).
+              callLogs: true,
             },
           },
         },

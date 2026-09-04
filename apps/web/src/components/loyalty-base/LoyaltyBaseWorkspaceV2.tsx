@@ -399,14 +399,24 @@ function LoyaltyTable({
   columnDraft: LoyaltyColumnFilters;
   onColumnDraft: (next: LoyaltyColumnFilters) => void;
 }) {
+  // «Не звонить» (задача A): в «Нашей базе» такие брокеры видны в списке,
+  // но недоступны для ручного выбора — кампании обзвона их всегда исключают.
+  const selectable = (item: LoyaltyRecord) =>
+    !(
+      data.base === "ours" &&
+      entityType === "brokers" &&
+      item.doNotCall === true
+    );
   const isChecked = (id: string) =>
     allFilterSelected ? !excluded.has(id) : selected.has(id);
+  const selectableItems = data.items.filter((item) => selectable(item));
   const allPage =
-    data.items.length > 0 && data.items.every((item) => isChecked(item.id));
+    selectableItems.length > 0 &&
+    selectableItems.every((item) => isChecked(item.id));
   const toggleAll = () => {
     if (allFilterSelected) {
       const next = new Set(excluded);
-      data.items.forEach((item) => {
+      selectableItems.forEach((item) => {
         if (allPage) next.add(item.id);
         else next.delete(item.id);
       });
@@ -414,7 +424,7 @@ function LoyaltyTable({
       return;
     }
     const next = new Set(selected);
-    data.items.forEach((item) => {
+    selectableItems.forEach((item) => {
       if (allPage) next.delete(item.id);
       else next.add(item.id);
     });
@@ -494,6 +504,11 @@ function LoyaltyTable({
                 <option value="BT_VISITED">Был БТ</option>
                 <option value="BT_NOT_VISITED">Не было БТ</option>
                 <option value="HAS_FIXATIONS">Есть фиксации</option>
+                {data.base === "ours" && entityType === "brokers" && (
+                  <option value="HAS_ACTIVE_FIXATIONS">
+                    Действующая фиксация
+                  </option>
+                )}
                 <option value="NO_FIXATIONS">Нет фиксаций</option>
                 <option value="HAS_MEETINGS">Есть встречи</option>
                 <option value="NO_MEETINGS">Нет встреч</option>
@@ -589,7 +604,13 @@ function LoyaltyTable({
                 <td className="py-3 pr-2">
                   <input
                     type="checkbox"
-                    checked={isChecked(item.id)}
+                    checked={selectable(item) && isChecked(item.id)}
+                    disabled={!selectable(item)}
+                    title={
+                      selectable(item)
+                        ? undefined
+                        : "В списке «не звонить» — недоступен для обзвона"
+                    }
                     onChange={() => {
                       if (allFilterSelected) {
                         const next = new Set(excluded);
@@ -614,6 +635,11 @@ function LoyaltyTable({
                     onClick={() => onOpen(item.id)}
                   >
                     <b className="block truncate">{item.name}</b>
+                    {item.doNotCall === true && (
+                      <span className="mt-0.5 inline-block rounded bg-error/10 px-1.5 py-0.5 text-[11px] font-semibold text-error">
+                        не звонить
+                      </span>
+                    )}
                     <span className="block truncate text-xs text-text-muted">
                       {item.company || item.phone || "Нет контактных данных"}
                     </span>
@@ -1036,6 +1062,14 @@ export function LoyaltyBaseWorkspaceV2() {
       active = false;
     };
   }, [base, canReadAll, detailId, entityType, list]);
+  // Задача A: «выбрано всё по фильтру» для обзвона в «Нашей базе» требует
+  // фильтр «Без “не звонить”» — иначе счётчик фронта включал бы брокеров,
+  // которых бэкенд из обзвона всегда исключает (несовпадение выборки).
+  const campaignNeedsDoNotCallFilter =
+    base === "ours" &&
+    entityType === "brokers" &&
+    allFilterSelected &&
+    filters.doNotCall !== "exclude";
   const scrollToList = () =>
     window.setTimeout(
       () =>
@@ -1422,6 +1456,7 @@ export function LoyaltyBaseWorkspaceV2() {
             className="btn btn-secondary"
             disabled={
               !canAssign ||
+              campaignNeedsDoNotCallFilter ||
               (!selected.size &&
                 (!allFilterSelected ||
                   !list ||
@@ -1429,7 +1464,11 @@ export function LoyaltyBaseWorkspaceV2() {
             }
             onClick={() => setCampaignOpen(true)}
             title={
-              !canAssign ? "Нет права назначать обзвон" : "Выберите контакты"
+              !canAssign
+                ? "Нет права назначать обзвон"
+                : campaignNeedsDoNotCallFilter
+                  ? "Для выбора всей базы в обзвон включите фильтр «Без “не звонить”» — брокеры из списка «не звонить» не обзваниваются"
+                  : "Выберите контакты"
             }
           >
             <ListChecks className="h-4 w-4" /> Сформировать список

@@ -301,6 +301,9 @@ export interface LoyaltyCanonicalFilter {
   specialTermsProposed?: boolean;
   rewardPresent?: boolean;
   staleDays?: number;
+  // «Не звонить» (Broker.doNotCall) — только «Наша база»/брокеры.
+  // Отсутствие значения = показать всех (по умолчанию).
+  doNotCall?: "exclude" | "only";
 }
 
 export interface LoyaltyColumnFilters {
@@ -310,6 +313,8 @@ export interface LoyaltyColumnFilters {
     | "BT_VISITED"
     | "BT_NOT_VISITED"
     | "HAS_FIXATIONS"
+    // «Действующая фиксация»: срок не истёк; только «Наша база»/брокеры.
+    | "HAS_ACTIVE_FIXATIONS"
     | "NO_FIXATIONS"
     | "HAS_MEETINGS"
     | "NO_MEETINGS";
@@ -536,6 +541,8 @@ export interface LoyaltyRecord {
   assignee: string;
   dataQuality: string;
   hasAmo: boolean | null;
+  // Красный бейдж «не звонить» (Broker.doNotCall, только «Наша база»).
+  doNotCall: boolean | null;
   amoContactUrl: string;
   archived: boolean;
   updatedAt: string;
@@ -1779,6 +1786,7 @@ export function normalizeLoyaltyRecord(
       ),
     ),
     hasAmo: hasAmoRaw !== undefined ? booleanValue(hasAmoRaw) : hasAmoIdentity,
+    doNotCall: booleanValue(pick(item, "doNotCall")),
     amoContactUrl: safeAmoContactUrl(externalIdentities),
     archived:
       Boolean(pick(item, "archivedAt")) ||

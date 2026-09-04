@@ -387,6 +387,25 @@ export function LoyaltyFilterPanel({
                   ))}
                 </select>
               </Field>
+              {capabilities.doNotCall && (
+                <Field label="«Не звонить»">
+                  <select
+                    className="input"
+                    value={draft.doNotCall}
+                    onChange={(event) =>
+                      update(
+                        "doNotCall",
+                        event.target
+                          .value as LoyaltyFilterFormState["doNotCall"],
+                      )
+                    }
+                  >
+                    <option value="">Все</option>
+                    <option value="exclude">Без «не звонить»</option>
+                    <option value="only">Только «не звонить»</option>
+                  </select>
+                </Field>
+              )}
             </>
           )}
 

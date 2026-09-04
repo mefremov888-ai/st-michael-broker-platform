@@ -215,10 +215,18 @@ const LOYALTY_COLUMN_ACTIVITY_FILTERS = [
   "BT_VISITED",
   "BT_NOT_VISITED",
   "HAS_FIXATIONS",
+  // 2026-09-04 (решение владельца, вариант В): «Есть фиксации» остаётся
+  // lifetime-фильтром; «Действующая фиксация» — отдельное значение, где
+  // срок фиксации/уникальности ещё не истёк. Поддержано только в «Нашей
+  // базе» для брокеров (у Анны и агентств нет сроков фиксаций).
+  "HAS_ACTIVE_FIXATIONS",
   "NO_FIXATIONS",
   "HAS_MEETINGS",
   "NO_MEETINGS",
 ] as const;
+// «Не звонить»: exclude — скрыть doNotCall-брокеров, only — показать только
+// их, отсутствие значения — показать всех (по умолчанию).
+const LOYALTY_DO_NOT_CALL_FILTERS = ["exclude", "only"] as const;
 const LOYALTY_COLUMN_CALL_FILTERS = [
   "CALLED_IN_PERIOD",
   "NOT_CALLED_IN_PERIOD",
@@ -439,6 +447,12 @@ export class LoyaltyListFiltersDto {
   )
   @IsBoolean()
   rewardPresent?: boolean;
+
+  // Плоский транспорт фильтра «не звонить» (канонический — в
+  // LoyaltyCanonicalFilterDto.doNotCall). Только «Наша база» / брокеры.
+  @IsOptional()
+  @IsIn(LOYALTY_DO_NOT_CALL_FILTERS)
+  doNotCall?: (typeof LOYALTY_DO_NOT_CALL_FILTERS)[number];
 }
 
 export class LoyaltyListQueryDto extends LoyaltyListFiltersDto {
@@ -622,6 +636,12 @@ export class LoyaltyCanonicalFilterDto {
   @Min(1)
   @Max(3650)
   staleDays?: number;
+
+  // «Не звонить» (Broker.doNotCall): только «Наша база» / брокеры.
+  // По умолчанию фильтр НЕ применяется — список показывает всех.
+  @IsOptional()
+  @IsIn(LOYALTY_DO_NOT_CALL_FILTERS)
+  doNotCall?: (typeof LOYALTY_DO_NOT_CALL_FILTERS)[number];
 }
 
 export class LoyaltyColumnFiltersDto {
