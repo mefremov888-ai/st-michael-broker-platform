@@ -38,7 +38,7 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
           # This inspector is valid only for the reviewed exhausted cohort.
           # It is deliberately not operator-configurable.
-          EXPECTED_QUEUE_ROWS: "12"
+          EXPECTED_QUEUE_ROWS: "2"
           CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
           HEALTH_URL: https://broker.stmichael.ru/api/health
           GH_TOKEN: ${{ github.token }}
@@ -54,7 +54,7 @@ jobs:
           test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Inspector is restricted to the canonical repository"; exit 1; }
           test "$EXPECTED_REF" = "refs/heads/master" || { echo "Inspector is restricted to master"; exit 1; }
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid inspector SHA"; exit 1; }
-          test "$EXPECTED_QUEUE_ROWS" = "12" || { echo "Expected queue row count is invalid"; exit 1; }
+          test "$EXPECTED_QUEUE_ROWS" = "2" || { echo "Expected queue row count is invalid"; exit 1; }
           test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
           case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
           [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }

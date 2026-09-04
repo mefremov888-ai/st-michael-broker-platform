@@ -75,7 +75,7 @@ jobs:
           EXPECTED_REPOSITORY: ${{ github.repository }}
           EXPECTED_REF: ${{ github.ref }}
           EXPECTED_CHECKOUT_SHA: ${{ github.sha }}
-          EXPECTED_QUEUE_ROWS: "12"
+          EXPECTED_QUEUE_ROWS: "2"
           EXPECTED_REQUEUE_COUNT: "0"
           CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
           INSPECTOR_WORKFLOW_PATH: .github/workflows/inspect-production-amo-fixation-lead-reconciliation.yml
@@ -101,7 +101,7 @@ jobs:
           [[ "$EXPECTED_ERROR_MANIFEST" =~ ^[a-z_]+=(0|[1-9][0-9]{0,2})(,[a-z_]+=(0|[1-9][0-9]{0,2})){13}$ ]] || { echo "Invalid error manifest encoding"; exit 1; }
           [[ "$EXPECTED_CAS_COUNT" =~ ^([1-9]|1[0-2])$ ]] || { echo "Expected CAS count must be 1..12"; exit 1; }
           test "$EXPECTED_SHARED_STRONG_COUNT" = "0" || { echo "Shared strong count must be zero"; exit 1; }
-          test "$EXPECTED_QUEUE_ROWS" = "12" || { echo "Queue count must remain exactly 12"; exit 1; }
+          test "$EXPECTED_QUEUE_ROWS" = "2" || { echo "Queue count must remain exactly 2"; exit 1; }
           test "$EXPECTED_REQUEUE_COUNT" = "0" || { echo "Requeue count must remain zero"; exit 1; }
           test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
           case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
