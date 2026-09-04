@@ -1256,7 +1256,9 @@ test("downgrades deals-in-period to a lifetime deal count without a period", () 
   assert.deepEqual(noneCanonical.dealCount, { min: 0, max: 0 });
 });
 
-test("uses Anna's call period for deals-in-period on her base", () => {
+// 2026-09-04: подмена периода сделок периодом звонков на базе Анны удалена
+// (аудит фильтров, находка №12): период звонков влияет только на звонки.
+test("keeps Anna's deal period independent from the call period", () => {
   const state = emptyLoyaltyFilters();
   state.callFrom = "2026-01-01";
   state.callTo = "2026-01-31";
@@ -1265,8 +1267,8 @@ test("uses Anna's call period for deals-in-period on her base", () => {
   state.dealsInPeriod = "true";
   const anna = toCanonicalFilter(state, "brokers", "anna");
   assert.deepEqual(anna.activityPeriod, {
-    from: "2026-01-01",
-    to: "2026-01-31",
+    from: "2026-08-01",
+    to: "2026-08-31",
   });
   assert.equal(anna.dealsInPeriod, true);
   const ours = toCanonicalFilter(state, "brokers", "ours");
