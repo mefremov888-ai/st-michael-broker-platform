@@ -141,7 +141,7 @@ jobs:
           case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
           [[ "$expected_script_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
           [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid expected production SHA"; exit 1; }
-          test "$expected_queue_rows" = "12" || { echo "Expected queue row count is invalid"; exit 1; }
+          test "$expected_queue_rows" = "2" || { echo "Expected queue row count is invalid"; exit 1; }
 
           deploy_root=$(readlink -f -- "$deploy_path")
           test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing absolute non-root directory"; exit 1; }
@@ -218,7 +218,7 @@ jobs:
             case "$expected_key_sha" in ""|*[!0-9a-f]*) exit 1;; esac
             test "${#expected_script_sha}" -eq 64
             test "${#expected_deployed_sha}" -eq 40
-            test "$expected_queue_rows" = "12"
+            test "$expected_queue_rows" = "2"
             test "${#expected_key_sha}" -eq 64
             actual_script_sha=$(sha256sum "$inspector")
             actual_script_sha=${actual_script_sha%% *}

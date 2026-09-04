@@ -196,9 +196,9 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     expect(script.match(/process\.stderr\.write\s*\(/g) || []).toHaveLength(1);
     expect(script).not.toMatch(/console\.(?:log|info|warn|error)/);
     expect(script).toContain("amoSyncAttempts: { gte: ATTEMPT_LIMIT }");
-    expect(inspector.KNOWN_QUEUE_ROWS).toBe(12);
-    expect(script).toContain("const KNOWN_QUEUE_ROWS = 12");
-    expect(script).toContain("take: 13");
+    expect(inspector.KNOWN_QUEUE_ROWS).toBe(2);
+    expect(script).toContain("const KNOWN_QUEUE_ROWS = 2");
+    expect(script).toContain("take: 3");
     expect(script).not.toContain("take: runtime.metadata.expectedQueueRows");
     expect(script).toContain(
       "leads.set(leadId, reduceLeadEvidence(lead, leadId))",
@@ -534,8 +534,8 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
     );
     const serialized = JSON.stringify(report);
     expect(report.aggregates).toMatchObject({
-      exhaustedQueueRows: 12,
-      exactClientContacts: { none: 11, one: 1, multiple: 0 },
+      exhaustedQueueRows: 2,
+      exactClientContacts: { none: 1, one: 1, multiple: 0 },
       candidates: { strong: 1, weak: 0 },
       rowsWithCasLinkCandidate: 1,
       resolution: { single_strong_candidate: 1 },
@@ -567,7 +567,7 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
       hmacSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       bindsInspectorSha256: metadata.inspectorSha256,
       bindsDeployedGitSha: metadata.deployedGitSha,
-      expectedQueueRows: 12,
+      expectedQueueRows: 2,
     });
     const repeat = inspector.buildReport(
       fixedCohort(row),
@@ -970,14 +970,14 @@ describe("PII-safe GET-only amo fixation lead reconciliation inspector", () => {
 
     expect(workflow).toContain("group: production-deploy");
     expect(workflow).toContain("environment: production");
-    expect(workflow).toContain('EXPECTED_QUEUE_ROWS: "12"');
+    expect(workflow).toContain('EXPECTED_QUEUE_ROWS: "2"');
     expect(workflow).not.toContain("inputs.expected_queue_rows");
     expect(workflow).not.toMatch(/expected_queue_rows:[\s\S]*default:/);
     expect(workflow).toContain(
-      'test "$EXPECTED_QUEUE_ROWS" = "12" || { echo "Expected queue row count is invalid"; exit 1; }',
+      'test "$EXPECTED_QUEUE_ROWS" = "2" || { echo "Expected queue row count is invalid"; exit 1; }',
     );
     expect(
-      workflow.match(/test "\$expected_queue_rows" = "12"/g) || [],
+      workflow.match(/test "\$expected_queue_rows" = "2"/g) || [],
     ).toHaveLength(2);
     expect(workflow).not.toMatch(/expected_queue_rows[^\n]*1-100|\[1-9\].*100/);
     expect(workflow).toContain(
