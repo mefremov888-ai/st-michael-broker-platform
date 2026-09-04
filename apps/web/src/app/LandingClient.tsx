@@ -1377,12 +1377,16 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
    схлопывается в одну колонку. */
 .hero-compact{max-width:none;margin:0;text-align:left}
 .hero-tag{display:inline-flex;align-items:center;gap:10px;margin-bottom:18px}.hero-tag::before{content:'';width:28px;height:1px;background:var(--gold)}.hero-tag span{font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:var(--gold)}
-.hero-2col{display:grid;grid-template-columns:1.2fr 1fr;gap:48px;align-items:start;margin-bottom:24px}
+.hero-2col{display:grid;grid-template-columns:1.2fr 1fr;gap:48px;align-items:stretch;margin-bottom:24px}
 .hero h1{font-size:var(--fs-h1);font-weight:300;line-height:1;letter-spacing:-1.5px;margin:0;text-wrap:balance}
 .hero h1 strong{font-weight:700}.hero h1 em{font-style:normal;color:var(--gold);font-weight:700}
 .hero-desc{font-size:15px;color:var(--light);line-height:1.65;font-weight:400;margin:8px 0 0;max-width:520px}
 .hero-btns{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
-.btn-lg{padding:18px 40px;font-size:12px}
+.btn-lg{padding:18px 40px;font-size:12px;white-space:nowrap}
+/* 2026-09-04: на средних ширинах три кнопки хиро съезжали в два ряда —
+   сжимаем паддинги ступенями, текст не переносим. */
+@media(max-width:1500px){.hero-btns .btn-lg{padding:16px 26px}}
+@media(max-width:1280px){.hero-btns .btn-lg{padding:14px 18px;font-size:11px;letter-spacing:.06em}.hero-btns{gap:10px}}
 /* Stats-band — карточка со скруглёнными углами (правка 2026-05-08).
    Раньше: прямоугольная полоса с border-top/bottom. Теперь: рамка
    border + radius:16px вокруг всего блока, аккуратнее. */
@@ -1524,7 +1528,9 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 >Записаться на встречу</button>
               </div>
             </div>
-            <div style={{display:'flex',flexDirection:'column',justifyContent:'center',gap:16,textAlign:'right',alignItems:'flex-end'}}>
+            {/* 2026-09-04: space-between + stretch колонок — кнопка «Условия
+                вознаграждения» встаёт на один уровень с рядом левых кнопок. */}
+            <div style={{display:'flex',flexDirection:'column',justifyContent:'space-between',gap:16,textAlign:'right',alignItems:'flex-end'}}>
               <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
               {(() => {
                 // Явное назначение из админки (кнопка «На кнопку главной», маркер
