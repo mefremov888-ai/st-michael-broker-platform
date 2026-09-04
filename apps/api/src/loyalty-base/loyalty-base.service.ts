@@ -3921,10 +3921,26 @@ export class LoyaltyBaseService {
       from: period.from.toISOString(),
       to: period.to.toISOString(),
     };
-    const confirmedDeals = this.ourConfirmedDealWhere(period);
+    // 2026-09-04: KPI блока брокеров считают только строки, чей владелец —
+    // действующий брокер (role=BROKER, mergedIntoId=null) — ровно как список
+    // брокеров при клике по плитке (дриллдаун openActivityDrilldown).
+    const brokerOwner = { is: { role: "BROKER" as const, mergedIntoId: null } };
+    const confirmedDeals = {
+      ...this.ourConfirmedDealWhere(period),
+      broker: brokerOwner,
+    };
     const acceptedMeetings: any = {
       status: { in: ["CONFIRMED", "COMPLETED"] },
       date: { gte: period.from, lte: period.to },
+      broker: brokerOwner,
+    };
+    // Реестровые сделки: в основной KPI попадают только привязанные к
+    // действующему брокеру (иначе клик по плитке не найдёт их в списке);
+    // остальные показываются отдельно как «+N без брокера» в метаданных.
+    const registryAttributedWhere = {
+      ...this.registrySignedAtWhere(period),
+      brokerId: { not: null },
+      broker: brokerOwner,
     };
     const [
       brokerTotal,
@@ -3933,8 +3949,10 @@ export class LoyaltyBaseService {
       meetings,
       deals,
       registryDeals,
+      registryDealsTotal,
       dealAmount,
       registryDealAmount,
+      registryDealAmountTotal,
       notCalled,
       newRows,
       btWithoutFixation,
@@ -3950,11 +3968,15 @@ export class LoyaltyBaseService {
         where: {
           ...FIXATION_CLIENT_WHERE,
           createdAt: { gte: period.from, lte: period.to },
+          broker: brokerOwner,
         },
       }),
       this.prisma.meeting.count({ where: acceptedMeetings }),
       this.prisma.deal.count({ where: confirmedDeals }),
       // «Реестр сделок» — период по дате подписания договора.
+      this.registryDealModel
+        ? this.registryDealModel.count({ where: registryAttributedWhere })
+        : Promise.resolve(0),
       this.registryDealModel
         ? this.registryDealModel.count({
             where: this.registrySignedAtWhere(period),
@@ -3964,7 +3986,13 @@ export class LoyaltyBaseService {
         where: confirmedDeals,
         _sum: { amount: true },
       }),
-      // Сумма ₽ «Реестра сделок» за тот же период.
+      // Сумма ₽ «Реестра сделок» за тот же период (только привязанные).
+      this.registryDealModel
+        ? this.registryDealModel.aggregate({
+            where: registryAttributedWhere,
+            _sum: { amount: true },
+          })
+        : Promise.resolve({ _sum: { amount: null } }),
       this.registryDealModel
         ? this.registryDealModel.aggregate({
             where: this.registrySignedAtWhere(period),
@@ -4033,8 +4061,15 @@ export class LoyaltyBaseService {
     const newCount = (newRows as any[]).filter((row) =>
       hasLoyaltyAcquisitionPhone([row.phone, ...(row.phones || [])]),
     ).length;
-    // Итог KPI «Сделки» = локальные подтверждённые DDU + строки реестра.
+    // Итог KPI «Сделки» = локальные подтверждённые DDU + привязанные к
+    // брокеру строки реестра. Строки реестра без действующего брокера в
+    // основное число не входят (плитка кликабельна и ведёт в список брокеров,
+    // где таких строк нет) — их количество уходит в metadata как «+N».
     const totalDeals = Number(deals || 0) + Number(registryDeals || 0);
+    const unattributedRegistryDeals = Math.max(
+      0,
+      Number(registryDealsTotal || 0) - Number(registryDeals || 0),
+    );
     // Сумма ₽: реестр добавляется, только когда его сумма известна — иначе
     // строка Deal-суммы остаётся ровно прежней (без переформатирования).
     const registryAmount = (registryDealAmount as any)?._sum?.amount;
@@ -4044,6 +4079,18 @@ export class LoyaltyBaseService {
         : centsToMoney(
             moneyToCents(String(dealAmount._sum.amount || "0")) +
               moneyToCents(String(registryAmount)),
+          );
+    const registryAmountTotal = (registryDealAmountTotal as any)?._sum?.amount;
+    const unattributedRegistryAmount =
+      registryAmountTotal === null || registryAmountTotal === undefined
+        ? null
+        : centsToMoney(
+            moneyToCents(String(registryAmountTotal)) -
+              moneyToCents(
+                registryAmount === null || registryAmount === undefined
+                  ? "0"
+                  : String(registryAmount),
+              ),
           );
     const today = moscowDateParts().dayMonth;
     const knownBirthdays = (birthdayRows as any[]).filter(
@@ -4096,11 +4143,20 @@ export class LoyaltyBaseService {
         methodology:
           "Local operational tables with per-KPI definitions below; no amoCRM or Anna snapshot exactness is inferred",
       },
-      kpiMetadata: this.oursKpiMetadata(periodDto),
+      kpiMetadata: this.oursKpiMetadata(periodDto, {
+        unattributedRegistryDeals,
+        unattributedRegistryAmount,
+      }),
     };
   }
 
-  private oursKpiMetadata(period: { from: string; to: string }) {
+  private oursKpiMetadata(
+    period: { from: string; to: string },
+    registryGap: {
+      unattributedRegistryDeals: number;
+      unattributedRegistryAmount: string | null;
+    } = { unattributedRegistryDeals: 0, unattributedRegistryAmount: null },
+  ) {
     const shared = {
       source: "LOCAL_PRELIMINARY",
       ruleVersion: "ours-local-preliminary-v1",
@@ -4116,26 +4172,27 @@ export class LoyaltyBaseService {
       "activities.fixations": {
         ...shared,
         formula:
-          "COUNT(Client rows fixed for a broker (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED) with createdAt in requested period)",
-        provenance: "Client.id / Client.createdAt",
+          "COUNT(Client rows fixed for an active broker (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED, owner role=BROKER without merge) with createdAt in requested period)",
+        provenance: "Client.id / Client.createdAt / Broker.role",
       },
       "activities.meetings": {
         ...shared,
         formula:
-          "COUNT(Meeting rows with status CONFIRMED or COMPLETED and date in requested period)",
-        provenance: "Meeting.id / Meeting.date / Meeting.status",
+          "COUNT(Meeting rows with status CONFIRMED or COMPLETED, date in requested period and owner role=BROKER without merge)",
+        provenance: "Meeting.id / Meeting.date / Meeting.status / Broker.role",
       },
       "activities.deals": {
         ...shared,
-        formula:
-          "COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID and signedAt in requested period) + COUNT(RegistryDeal rows with signedAt in requested period)",
-        provenance: "Deal.id / Deal.signedAt / Deal.status",
+        formula: `COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID, signedAt in requested period and owner role=BROKER without merge) + COUNT(RegistryDeal rows with signedAt in requested period linked to such a broker)${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker (не видны в списке брокеров)` : ""}`,
+        provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.brokerId",
+        unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
       },
       dealAmount: {
         ...shared,
-        formula:
-          "Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over registry rows signed in the requested period",
-        provenance: "Deal.id / Deal.amount",
+        formula: `Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over broker-attributed registry rows signed in the requested period${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker${registryGap.unattributedRegistryAmount ? ` totalling ${registryGap.unattributedRegistryAmount}` : ""}` : ""}`,
+        provenance: "Deal.id / Deal.amount / RegistryDeal.brokerId",
+        unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
+        unattributedRegistryAmount: registryGap.unattributedRegistryAmount,
       },
       "brokers.notCalledCurrentMonth": {
         ...shared,

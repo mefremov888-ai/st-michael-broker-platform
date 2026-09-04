@@ -4505,7 +4505,7 @@ describe("LoyaltyBaseService", () => {
     expect(result.kpiMetadata["activities.deals"]).toMatchObject({
       source: "LOCAL_PRELIMINARY",
       exactness: "APPROXIMATE",
-      provenance: "Deal.id / Deal.signedAt / Deal.status",
+      provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.brokerId",
     });
     expect(result.kpiMetadata["agencies.top"].formula).toContain(
       "explicit Deal.agencyId",
