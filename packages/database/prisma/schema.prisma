@@ -537,6 +537,7 @@ model Broker {
   mergedInto                        Broker?                      @relation("BrokerMergedInto", fields: [mergedIntoId], references: [id])
   mergedBrokers                     Broker[]                     @relation("BrokerMergedInto")
   mergedAt                          DateTime?                    @map("merged_at")
+  registryDeals                     RegistryDeal[]
 
   @@index([category])
   @@index([nextCallAt])
@@ -1961,4 +1962,33 @@ model CommissionPolicy {
 
   @@index([project, startDate, endDate])
   @@map("commission_policies")
+}
+
+// 2026-09-04: «Реестр сделок» — сквозная аналитика ДДУ. Сшивка трёх источников:
+// Google-реестр продаж (source=REGISTRY), amoCRM (source=AMO_ONLY) и их
+// пересечение (source=BOTH). Заливается скриптом scripts/upload-registry-deals.js
+// (upsert по rowKey, ничего не удаляет). Не участвует в бизнес-логике кабинета —
+// только чтение через /admin/registry-deals/*.
+model RegistryDeal {
+  id                 String    @id @default(uuid())
+  // canonicalKey строки реестра либо amo:<leadId> для сделок, найденных только в amo
+  rowKey             String    @unique @map("row_key")
+  source             String // REGISTRY | BOTH | AMO_ONLY
+  contractNumber     String    @map("contract_number")
+  project            Project?
+  signedAt           DateTime? @map("signed_at") @db.Date
+  amount             Decimal?  @db.Decimal(14, 2)
+  agencyNameRaw      String?   @map("agency_name_raw")
+  agencyCanonical    String?   @map("agency_canonical")
+  amoLeadId          BigInt?   @map("amo_lead_id")
+  brokerId           String?   @map("broker_id")
+  broker             Broker?   @relation(fields: [brokerId], references: [id])
+  brokerAmoContactId BigInt?   @map("broker_amo_contact_id")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([agencyCanonical])
+  @@index([brokerId])
+  @@index([project, signedAt])
+  @@map("registry_deals")
 }
