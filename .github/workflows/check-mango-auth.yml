@@ -1,0 +1,36 @@
+name: Check Mango auth (live)
+
+# 2026-09-04: живая проверка ключей Mango (read-only, без звонков):
+# POST /vpbx/config/users/request. Дополняет check-mango-settings.yml,
+# который проверяет только URL-поля.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: check-mango-auth
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Run auth check on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and run check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/check-mango-auth.js > /tmp/check-mango-auth.js
+            docker cp /tmp/check-mango-auth.js st-michael-api:/app/scripts/check-mango-auth.js
+            docker compose exec -T api node /app/scripts/check-mango-auth.js
+            echo "=== Готово ==="
