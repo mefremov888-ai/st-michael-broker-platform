@@ -17,8 +17,12 @@ import {
 import {
   decodeMaterialsSegments,
   fileCountUnder,
+  filesUnder,
   foldersAndFilesAt,
+  isPhotoDoc,
   materialHref,
+  mediaCountsLabel,
+  mediaCountsUnder,
 } from '@/lib/materials-folder-tree';
 import { materialsThumbUrl } from '@/lib/materials-thumb';
 import {
@@ -225,18 +229,35 @@ export default function MaterialsFolderPage() {
                   <Folder size={14} /> Папки ({folders.length})
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
-                  {folders.map((folder) => {
+                  {folders.map((folder, folderIdx) => {
                     const nested = [...parts, folder];
-                    const count = fileCountUnder(countDocs, nested);
+                    // 2026-09-04: превью-карточка в стиле медиатеки — номер,
+                    // курсивное название, обложка из первого фото, счётчик.
+                    const counts = mediaCountsUnder(countDocs, nested);
+                    const coverDoc = filesUnder(countDocs, nested).find(isPhotoDoc);
+                    const cover = coverDoc ? materialsThumbUrl((coverDoc as any).fileUrl) : null;
                     return (
                       <a
                         key={folder}
                         href={materialHref(nested)}
-                        style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 10, padding: '18px 16px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, textDecoration: 'none', color: '#fff' }}
+                        style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '12px 14px 10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, textDecoration: 'none', color: '#fff' }}
                       >
-                        <Folder size={22} color="var(--gold, #B4936F)" />
-                        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.3 }}>{folder}</div>
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>{count} файлов</div>
+                        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                          <span style={{ fontFamily: 'Georgia,serif', fontStyle: 'italic', fontSize: 12, color: 'var(--gold, #B4936F)' }}>{String(folderIdx + 1).padStart(2, '0')}</span>
+                          <span style={{ fontFamily: 'Georgia,serif', fontStyle: 'italic', fontSize: 15, lineHeight: 1.25, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{folder}</span>
+                          <span style={{ color: 'var(--gold, #B4936F)', fontSize: 13 }}>↗</span>
+                        </div>
+                        {cover ? (
+                          <div style={{ aspectRatio: '16/10', borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,0.06)' }}>
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={cover} alt={folder} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                          </div>
+                        ) : (
+                          <div style={{ aspectRatio: '16/10', borderRadius: 4, background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <Folder size={30} color="var(--gold, #B4936F)" />
+                          </div>
+                        )}
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>{mediaCountsLabel(counts)}</div>
                       </a>
                     );
                   })}
