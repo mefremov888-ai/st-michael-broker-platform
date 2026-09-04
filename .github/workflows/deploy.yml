@@ -435,14 +435,33 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Telegram alert (best-effort, ok if secrets are missing)
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}${{ secrets.TELEGRAM_BOT_TOKEN }}" ] || [ -z "${{ secrets.OPS_ALERT_CHAT_ID }}" ]; then
             echo "OPS Telegram secrets are not configured — skipping alert (see job summary above)."
+            exit 0
+          fi
+          # 2026-09-04: антиспам. При активной работе каждый merge в master
+          # рождал отдельное «не опубликовано» — за день приходило 5-6 штук.
+          # 1) Если сайт уже работает ровно на этом коммите — молчим.
+          DEPLOYED_SHA=$(curl -s --max-time 10 https://broker.stmichael.ru/api/health | grep -o '"deployedSha":"[0-9a-f]*"' | cut -d'"' -f4 || true)
+          if [ "$DEPLOYED_SHA" = "${{ github.sha }}" ]; then
+            echo "Сайт уже на этом коммите — алерт не нужен."
+            exit 0
+          fi
+          # 2) Дебаунс: если такой же алерт уже уходил за последние 6 часов —
+          #    молчим (там уже написано, что делать; summary всё равно пишется).
+          SINCE=$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          RECENT=$(gh api "/repos/${{ github.repository }}/actions/workflows/deploy.yml/runs?event=push&status=success&created=>${SINCE}&per_page=20" \
+            --jq "[.workflow_runs[] | select(.id != ${{ github.run_id }})] | length" 2>/dev/null || echo 0)
+          if [ "${RECENT:-0}" -gt 0 ]; then
+            echo "Похожий алерт уже был за последние 6 часов ($RECENT ранов) — пропускаем."
             exit 0
           fi
           TOKEN="${{ secrets.OPS_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}"
           curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             -d chat_id="${{ secrets.OPS_ALERT_CHAT_ID }}" \
             -d parse_mode=HTML \
-            --data-urlencode text="⚠️ Обновление кабинета проверено, но ещё не опубликовано на рабочем сайте. Для публикации откройте в GitHub раздел автоматических действий, выберите «Публикация кабинета на рабочем сайте», запустите её вручную и подтвердите выкладку." \
+            --data-urlencode text="⚠️ Обновление кабинета проверено, но ещё не опубликовано на рабочем сайте. Для публикации откройте в GitHub раздел автоматических действий, выберите «Публикация кабинета на рабочем сайте», запустите её вручную и подтвердите выкладку. (Повторные обновления в ближайшие 6 часов не будут дублировать это сообщение.)" \
             > /dev/null || echo "Telegram alert failed to send (non-fatal)."
