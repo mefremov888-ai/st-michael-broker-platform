@@ -1,8 +1,8 @@
 name: Inspect fixation failure logs (one-off, read-only)
 
-# Разовая диагностика 05.09.2026 (v2): в логах api замечены ошибки валидации
-# Prisma с полями uniqueness*. Смотрим полный контекст этих ошибок с таймстампами,
-# плюс все [fixClient] строки. Ничего не меняем.
+# v3 (05.09.2026): client.create починен; в логах остались Invalid
+# prisma.$executeRaw() каждые 10 минут и Invalid prisma.broker.update().
+# Смотрим полный контекст этих двух ошибок. Ничего не меняем.
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   inspect:
-    name: SSH and grep fixation errors with context (read-only)
+    name: SSH and print raw error contexts (read-only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -28,16 +28,13 @@ jobs:
           command_timeout: 3m
           script: |
             set -eu
-            echo "=== [fixClient] строки с таймстампами за 48 часов ==="
-            docker logs -t st-michael-api --since 48h 2>&1 | grep -F "[fixClient]" | tail -30 || echo "(нет)"
+            echo "=== Контекст ПОСЛЕДНЕЙ ошибки \$executeRaw: 8 строк до + 40 после ==="
+            docker logs st-michael-api --since 6h 2>&1 | grep -A40 -B8 'Invalid `prisma.\$executeRaw()` invocation' | tail -55 || echo "(нет)"
             echo ""
-            echo "=== PrismaClientValidationError: заголовки с таймстампами (какая операция) ==="
-            docker logs -t st-michael-api --since 48h 2>&1 | grep -nE "PrismaClientValidationError|Invalid .* invocation|Unknown arg|Unknown argument|Argument .* is missing" | tail -30 || echo "(нет)"
+            echo "=== Контекст ПОСЛЕДНЕЙ ошибки broker.update: 8 строк до + 40 после ==="
+            docker logs st-michael-api --since 6h 2>&1 | grep -A40 -B8 'Invalid `prisma.broker.update()` invocation' | tail -55 || echo "(нет)"
             echo ""
-            echo "=== Контекст ПОСЛЕДНЕЙ Prisma-ошибки: 35 строк до первого 'uniquenessReason' с конца ==="
-            docker logs st-michael-api --since 48h 2>&1 | grep -B35 "uniquenessReason" | tail -60 || echo "(нет)"
-            echo ""
-            echo "=== 500/503 ошибки Nest с таймстампами за 24 часа (до 30) ==="
-            docker logs -t st-michael-api --since 24h 2>&1 | grep -iE "ServiceUnavailable|Internal server error|ERROR \[" | tail -30 || echo "(нет)"
+            echo "=== Успехи amo-синка за 3 часа (created/synced/totalClients) ==="
+            docker logs st-michael-api --since 3h 2>&1 | grep -iE "amo.*sync.*(done|created|total)|totalClients|clients created" | tail -15 || echo "(нет)"
             echo ""
             echo "=== Готово (ничего не изменено) ==="
