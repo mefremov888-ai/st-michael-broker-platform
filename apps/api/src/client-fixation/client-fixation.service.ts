@@ -62,18 +62,19 @@ const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
 // getContactsByIds), повтор безопасен: до 3 попыток с паузами 2с и 5с.
 const UNIQUENESS_RETRY_DELAYS_MS = [2000, 5000];
 
-// Ретраим ТОЛЬКО временные ошибки (классификация из common/amo-sync-retry):
-// таймаут/сеть, HTTP 429, 5xx/temporary unavailable. НЕ ретраим:
-// AMBIGUOUS_EXACT_CONTACT (бизнес-ответ, обрабатывается выше), 401/403 и
-// прочие 4xx, ошибки конфигурации.
-const TRANSIENT_AMO_LOOKUP_ERRORS = new Set([
-  "AMO_RATE_LIMIT_429",
-  "AMO_TEMPORARY_UNAVAILABLE",
-  "AMO_NETWORK_ERROR",
+// 2026-09-05: проверка уникальности — чисто читающие GET-запросы, поэтому
+// ретраим ЛЮБУЮ ошибку, кроме бизнес-ответов и битой авторизации. Прошлый
+// «белый список» (429/5xx/сеть) пропускал AMO_SYNC_FAILED — мусорные ответы
+// amo в пиковые окна часового синка (падения у Кшнякина 16:01 и 16:14 два
+// дня подряд), и брокер получал 503 без единого повтора.
+const NON_RETRYABLE_AMO_LOOKUP_ERRORS = new Set([
+  "AMO_AUTH_401", // авторизация мертва — повтор бесполезен
 ]);
 
 function isTransientAmoLookupError(error: unknown): boolean {
-  return TRANSIENT_AMO_LOOKUP_ERRORS.has(sanitizeAmoSyncError(error));
+  const raw = String((error as any)?.message || error || "");
+  if (raw === "AMBIGUOUS_EXACT_CONTACT") return false; // бизнес-ответ, наверх
+  return !NON_RETRYABLE_AMO_LOOKUP_ERRORS.has(sanitizeAmoSyncError(error));
 }
 
 function safePositiveAmoContactId(value: unknown): number | null {
@@ -181,6 +182,11 @@ export class ClientFixationService {
           attempt >= totalAttempts ||
           !isTransientAmoLookupError(e)
         ) {
+          // Диагностика без PII: класс ошибки и HTTP-статус, чтобы по коду
+          // AMO_SYNC_FAILED в логе было видно фактическую природу отказа.
+          console.error(
+            `[fixClient] amo checkUniqueness giving up on attempt ${attempt}/${totalAttempts}: ${sanitizeAmoSyncError(e)} (errClass=${e?.constructor?.name || typeof e}, httpStatus=${e?.status ?? e?.response?.status ?? "n/a"})`,
+          );
           throw e;
         }
         const delayMs = UNIQUENESS_RETRY_DELAYS_MS[attempt - 1];
