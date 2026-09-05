@@ -1234,8 +1234,10 @@ describe("ClientFixationService amo broker attachment", () => {
       expect(sleepSpy).not.toHaveBeenCalled();
     });
 
-    it("does not retry an authorization failure (403)", async () => {
-      amo.checkUniqueness.mockRejectedValue(new Error("amoCRM 403 Forbidden"));
+    it("does not retry a dead authorization (401)", async () => {
+      amo.checkUniqueness.mockRejectedValue(
+        new Error("amoCRM 401 Unauthorized"),
+      );
 
       await expect(
         service.fixClient(broker.id, fixRequest, assertAmoCreateLeaseOwned),
@@ -1244,7 +1246,34 @@ describe("ClientFixationService amo broker attachment", () => {
       expect(amo.checkUniqueness).toHaveBeenCalledTimes(1);
       expect(sleepSpy).not.toHaveBeenCalled();
       const loggedText = consoleError.mock.calls.flat().join(" ");
-      expect(loggedText).toContain("AMO_FORBIDDEN_403");
+      expect(loggedText).toContain("AMO_AUTH_401");
+    });
+
+    // 2026-09-05: проверка уникальности — читающие GET-запросы, поэтому
+    // «прочие» ошибки (AMO_SYNC_FAILED — мусорный ответ amo в пиковые окна
+    // часового синка) и 403 (WAF-заслон) теперь тоже ретраятся.
+    it("retries an unclassified amo failure and succeeds on the second try", async () => {
+      const alarmResult = { id: "client-after-unclassified-retry" };
+      (service as any).handleRule1Or2Alarm = jest
+        .fn()
+        .mockResolvedValue(alarmResult);
+      amo.checkUniqueness
+        .mockRejectedValueOnce(new Error("amoCRM returned unexpected payload"))
+        .mockResolvedValueOnce({
+          rule: "RULE_1",
+          verdict: "ALARM",
+          reason: "Лид уже в работе КЦ",
+          contactId: 1032,
+        });
+
+      await expect(
+        service.fixClient(broker.id, fixRequest, assertAmoCreateLeaseOwned),
+      ).resolves.toBe(alarmResult);
+
+      expect(amo.checkUniqueness).toHaveBeenCalledTimes(2);
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+      const loggedText = consoleError.mock.calls.flat().join(" ");
+      expect(loggedText).toContain("AMO_SYNC_FAILED");
     });
   });
 
