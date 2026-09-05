@@ -1,8 +1,9 @@
 name: Inspect fixation failure logs (one-off, read-only)
 
-# v3 (05.09.2026): client.create починен; в логах остались Invalid
-# prisma.$executeRaw() каждые 10 минут и Invalid prisma.broker.update().
-# Смотрим полный контекст этих двух ошибок. Ничего не меняем.
+# v4 (05.09.2026): пользователь сообщает о новых ошибках при фиксации.
+# Смотрим за последние 8 часов: все [fixClient], все ops-алерты фиксаций
+# (тот же текст, что бот шлёт в TG), ошибки /api/clients/fix и контексты.
+# Ничего не меняем.
 
 on:
   workflow_dispatch:
@@ -13,7 +14,7 @@ concurrency:
 
 jobs:
   inspect:
-    name: SSH and print raw error contexts (read-only)
+    name: SSH and print recent fixation errors (read-only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -28,13 +29,16 @@ jobs:
           command_timeout: 3m
           script: |
             set -eu
-            echo "=== Контекст ПОСЛЕДНЕЙ ошибки \$executeRaw: 8 строк до + 40 после ==="
-            docker logs st-michael-api --since 6h 2>&1 | grep -A40 -B8 'Invalid `prisma.\$executeRaw()` invocation' | tail -55 || echo "(нет)"
+            echo "=== [fixClient] за 8 часов ==="
+            docker logs -t st-michael-api --since 8h 2>&1 | grep -F "[fixClient]" | tail -40 || echo "(нет)"
             echo ""
-            echo "=== Контекст ПОСЛЕДНЕЙ ошибки broker.update: 8 строк до + 40 после ==="
-            docker logs st-michael-api --since 6h 2>&1 | grep -A40 -B8 'Invalid `prisma.broker.update()` invocation' | tail -55 || echo "(нет)"
+            echo "=== Алерты фиксаций (interceptor/OpsAlert) за 8 часов ==="
+            docker logs -t st-michael-api --since 8h 2>&1 | grep -iE "fixation-failure|OpsAlert|техническая ошибка|clients/fix" | tail -40 || echo "(нет)"
             echo ""
-            echo "=== Успехи amo-синка за 3 часа (created/synced/totalClients) ==="
-            docker logs st-michael-api --since 3h 2>&1 | grep -iE "amo.*sync.*(done|created|total)|totalClients|clients created" | tail -15 || echo "(нет)"
+            echo "=== ERROR-строки Nest за 4 часа (до 40) ==="
+            docker logs -t st-michael-api --since 4h 2>&1 | grep -E "ERROR" | tail -40 || echo "(нет)"
+            echo ""
+            echo "=== ConflictException/BadRequest/Unprocessable за 8 часов ==="
+            docker logs -t st-michael-api --since 8h 2>&1 | grep -iE "Conflict|уникальн|неоднозначно|заблокирован" | tail -30 || echo "(нет)"
             echo ""
             echo "=== Готово (ничего не изменено) ==="
