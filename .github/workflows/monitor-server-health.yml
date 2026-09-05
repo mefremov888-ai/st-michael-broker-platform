@@ -179,27 +179,40 @@ jobs:
               if [ "$OLDEST_EPOCH" -gt 0 ]; then
                 OLDEST_MINUTES=$(( (NOW_EPOCH - OLDEST_EPOCH) / 60 ))
               fi
+              # 2026-09-05 (антиспам): ключ инцидента = «отпечаток» состояния.
+              # Количества входят в ключ (изменилось число заявок — новый алерт),
+              # а минуты ожидания НЕ входят — они растут сами по себе и не
+              # должны считаться изменением состояния.
               if [ "$MISSING_CONTACT_COUNT" -ge 1 ]; then
-                add_incident "fixation-broker-contact" "у брокеров нет контактов в amoCRM: ${MISSING_CONTACT_COUNT} заявок. Откройте «Админка → Все заявки от брокеров» и выберите фильтр «Передача в amoCRM»"
+                add_incident "fixation-broker-contact:${MISSING_CONTACT_COUNT}" "у брокеров нет контактов в amoCRM: ${MISSING_CONTACT_COUNT} заявок. Откройте «Админка → Все заявки от брокеров» и выберите фильтр «Передача в amoCRM»"
               fi
               if [ "$FAILED_COUNT" -ge 10 ] || [ "$EXHAUSTED_COUNT" -ge 1 ] \
                 || { [ "$FAILED_COUNT" -ge 1 ] && [ "$OLDEST_MINUTES" -ge 10 ]; }; then
-                add_incident "fixation-queue" "не передано в amoCRM: ${FAILED_COUNT}; самая старая заявка ждёт ${OLDEST_MINUTES} мин.; автоматические повторы закончились у ${EXHAUSTED_COUNT} заявок"
+                add_incident "fixation-queue:${FAILED_COUNT}:${EXHAUSTED_COUNT}" "не передано в amoCRM: ${FAILED_COUNT}; самая старая заявка ждёт ${OLDEST_MINUTES} мин.; автоматические повторы закончились у ${EXHAUSTED_COUNT} заявок"
               fi
             fi
 
-            STATE_FILE=".ops-monitor-state"
+            # 2026-09-05 (антиспам): маркер переехал из рабочей папки в
+            # /var/tmp — он не должен зависеть от git-состояния репозитория.
+            # Формат прежний: «отпечаток|epoch последней отправки».
+            # Повтор того же отпечатка — не чаще раза в 24 часа (было раз в
+            # час, владельца заваливало одинаковыми сообщениями). Любое
+            # ИЗМЕНЕНИЕ отпечатка по-прежнему шлётся сразу.
+            STATE_FILE="/var/tmp/stmichael-health-alert.state"
             PREVIOUS_KEYS=""
             PREVIOUS_ALERT_AT=0
             if [ -f "$STATE_FILE" ]; then
               IFS='|' read -r PREVIOUS_KEYS PREVIOUS_ALERT_AT < "$STATE_FILE" || true
+            fi
+            if ! printf '%s' "$PREVIOUS_ALERT_AT" | grep -Eq '^[0-9]+$'; then
+              PREVIOUS_ALERT_AT=0
             fi
             NOW_EPOCH=$(date +%s)
             SHOULD_ALERT=0
             ALERT_DELIVERY_FAILED=0
             if [ "$INCIDENT_KEYS" != "$PREVIOUS_KEYS" ]; then
               SHOULD_ALERT=1
-            elif [ -n "$INCIDENT_KEYS" ] && [ $((NOW_EPOCH - PREVIOUS_ALERT_AT)) -ge 3600 ]; then
+            elif [ -n "$INCIDENT_KEYS" ] && [ $((NOW_EPOCH - PREVIOUS_ALERT_AT)) -ge 86400 ]; then
               SHOULD_ALERT=1
             fi
 

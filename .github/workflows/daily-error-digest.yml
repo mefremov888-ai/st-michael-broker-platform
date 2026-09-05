@@ -1,0 +1,80 @@
+name: Ежедневный дайджест ошибок
+
+# 2026-09-05: владельца заваливают одиночные алерты — несрочное собираем в
+# одну утреннюю записку. Раз в сутки (10:00 МСК) читает логи контейнера api
+# за 24 часа, строит сводку (всего ERROR-строк, топ повторяющихся ошибок,
+# отказы проверки уникальности, свободное место на диске) и шлёт её во ВСЕ
+# ops-чаты тем же приёмом, что ops-send-note-all: чаты из серверного .env
+# (OPS_ALERT_CHAT_IDS / OPS_ALERT_CHAT_ID) + чат из GH-секрета
+# OPS_ALERT_CHAT_ID, дедуп, curl sendMessage прямо с сервера.
+#
+# ГРАБЛИ ssh-action: многострочный case/awk ломается (line-wrap) — только
+# if/elif и однострочный sed/awk; heredoc в ssh-script не использовать.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: daily-error-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    name: Collect 24h error summary and fan out
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH, build digest, send to all chats
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 5m
+          envs: BOT,GH_CHAT
+          script: |
+            set -eu
+            test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
+            cd "${{ secrets.DEPLOY_PATH }}"
+            TMP_LOG=$(mktemp /tmp/stmichael-error-digest.XXXXXX)
+            trap 'rm -f -- "$TMP_LOG"' EXIT
+            docker logs st-michael-api --since 24h > "$TMP_LOG" 2>&1 || true
+            ERR_TOTAL=$(grep -c 'ERROR' "$TMP_LOG" || true)
+            ERR_TOTAL=${ERR_TOTAL:-0}
+            GIVEUP=$(grep -c '\[fixClient\].*giving up' "$TMP_LOG" || true)
+            GIVEUP=${GIVEUP:-0}
+            DISK=$(df -h / | awk 'NR==2 {print "занято "$3" из "$2" ("$5"), свободно "$4}')
+            if [ "$ERR_TOTAL" -eq 0 ]; then
+              TEXT=$(printf '🟢 За сутки ни одной ошибки в логах кабинета брокера.\nДиск: %s' "$DISK")
+            else
+              TOP=$(grep -o 'ERROR \[[^]]*\].*' "$TMP_LOG" | sed 's/[0-9a-f-]\{8,\}/#/g' | cut -c1-160 | sort | uniq -c | sort -rn | head -10)
+              if [ -z "$TOP" ]; then TOP='(строки ERROR без контекста [Имя] — смотреть docker logs st-michael-api)'; fi
+              TEXT=$(printf '📊 Дайджест ошибок за сутки (кабинет брокера)\n\nВсего ERROR-строк: %s\nОтказов проверки уникальности ([fixClient] giving up): %s\nДиск: %s\n\nТоп повторяющихся ошибок (число × текст):\n%s' "$ERR_TOTAL" "$GIVEUP" "$DISK" "$TOP")
+            fi
+            BYTES=$(printf '%s' "$TEXT" | wc -c)
+            if [ "$BYTES" -gt 3800 ]; then
+              TEXT=$(printf '%s' "$TEXT" | head -c 3500 | iconv -f utf-8 -t utf-8 -c 2>/dev/null || printf '%s' "$TEXT" | head -c 3500)
+              TEXT=$(printf '%s\n…(сообщение обрезано, полный лог: docker logs st-michael-api --since 24h)' "$TEXT")
+            fi
+            server_ids=$(grep -hE 'OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | sed -e 's/^[^=]*=//' -e "s/[\"']//g" -e 's/\r//g' | tr ',;' '\n' | tr -d ' \t' | grep -E '^-?[0-9]+$' || true)
+            all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
+            test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
+            echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
+            fail=0
+            for chat in $all; do
+              ok=$(curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${BOT}/sendMessage" --data-urlencode chat_id="$chat" --data-urlencode text="$TEXT" | head -c 120)
+              tail4=$(printf '%s' "$chat" | tail -c 4)
+              if printf '%s' "$ok" | grep -q '"ok":true'; then
+                echo "chat ...$tail4: отправлено"
+              else
+                echo "chat ...$tail4: ОШИБКА: $ok"
+                fail=1
+              fi
+            done
+            exit $fail

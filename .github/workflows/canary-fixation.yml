@@ -1,0 +1,80 @@
+name: Канарейка фиксаций (связь с amoCRM)
+
+# 2026-09-05: раз в час делает с продакшн-сервера один читающий запрос к
+# amoCRM тем же путём, каким форма фиксации проверяет уникальность клиента
+# (поиск контакта по несуществующему номеру). Успех (в т.ч. пустой ответ) —
+# полное молчание. Провал — немедленный алерт во все ops-чаты (приём
+# ops-send-note-all: серверный .env + GH-секрет, дедуп, curl с сервера).
+#
+# Скрипт scripts/canary-amo-check.js доставляется через git show из
+# канонического master (приём apply-*/deploy.yml) и подаётся контейнеру api
+# на stdin — инлайн node -e в ssh-script ломается на кавычках.
+#
+# git fetch пишет FETCH_HEAD; редкая гонка с деплоем безопасна — деплой
+# сам перепроверяет точный SHA и падает с понятной ошибкой при расхождении.
+#
+# ГРАБЛИ ssh-action: многострочный case/awk ломается — только if/elif;
+# heredoc в ssh-script не использовать; sed только однострочный.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: canary-fixation
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Read-only amo probe from production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH, run canary, alert only on failure
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 8m
+          envs: BOT,GH_CHAT
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git fetch https://github.com/sereganikitin/st-michael-broker-platform.git master
+            MASTER_SHA=$(git rev-parse FETCH_HEAD)
+            CANARY_SRC=$(git show "${MASTER_SHA}:scripts/canary-amo-check.js" 2>/dev/null || true)
+            if [ -z "$CANARY_SRC" ]; then
+              echo "scripts/canary-amo-check.js ещё не в master — пропуск"
+              exit 0
+            fi
+            set +e
+            OUT=$(printf '%s\n' "$CANARY_SRC" | docker compose exec -T api node 2>&1)
+            RC=$?
+            set -e
+            printf '%s\n' "$OUT" | tail -5
+            if [ "$RC" -eq 0 ]; then
+              echo "канарейка: amo отвечает — молчим"
+              exit 0
+            fi
+            test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
+            CODE=$(printf '%s\n' "$OUT" | grep -o 'CANARY_CODE=.*' | head -1 | sed 's/^CANARY_CODE=//' | head -c 80)
+            TEXT="🔴 Канарейка: amo не отвечает на проверку уникальности (код: ${CODE:-неизвестен}). Форма фиксации клиентов сейчас, скорее всего, не может проверять дубли — заявки будут копиться в очереди. Проверить amoCRM и «Админка → Все заявки от брокеров»."
+            server_ids=$(grep -hE 'OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | sed -e 's/^[^=]*=//' -e "s/[\"']//g" -e 's/\r//g' | tr ',;' '\n' | tr -d ' \t' | grep -E '^-?[0-9]+$' || true)
+            all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
+            test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
+            for chat in $all; do
+              ok=$(curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${BOT}/sendMessage" --data-urlencode chat_id="$chat" --data-urlencode text="$TEXT" | head -c 120)
+              tail4=$(printf '%s' "$chat" | tail -c 4)
+              if printf '%s' "$ok" | grep -q '"ok":true'; then
+                echo "chat ...$tail4: отправлено"
+              else
+                echo "chat ...$tail4: ОШИБКА: $ok"
+              fi
+            done
+            exit 1
