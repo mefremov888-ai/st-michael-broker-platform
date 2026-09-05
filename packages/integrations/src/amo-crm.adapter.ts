@@ -1,5 +1,11 @@
 import { Project } from "@st-michael/shared";
 import {
+  backgroundThrottle,
+  isInteractiveAmoContext,
+  noteInteractiveAmoActivity,
+  runInteractive,
+} from "./amo-traffic-light";
+import {
   AMO_LEAD_FIELDS,
   AMO_LEAD_ENUMS,
   AMO_CONTACT_FIELDS,
@@ -386,6 +392,16 @@ export class AmoCrmAdapter {
 
   constructor() {}
 
+  /**
+   * 2026-09-05: пометить живую операцию брокера интерактивной — все
+   * запросы к amo внутри fn идут без ожиданий, а фоновый трафик в это
+   * время (и AMO_BG_HOLD_AFTER_INTERACTIVE_MS после) стоит.
+   * Делегат runInteractive из amo-traffic-light (процесс-глобально).
+   */
+  asInteractive<T>(fn: () => Promise<T>): Promise<T> {
+    return runInteractive(fn);
+  }
+
   private get token(): string {
     return amoTokens.access;
   }
@@ -484,6 +500,15 @@ export class AmoCrmAdapter {
         options.maxResponseBytes <= 0)
     ) {
       throw new Error("AMO_READONLY_RESPONSE_LIMIT_INVALID");
+    }
+    // 2026-09-05: «светофор» — живым запросам приоритет. Контекст по
+    // умолчанию «background»: перед каждым запросом (и каждым retry)
+    // фон ждёт backgroundThrottle(). Интерактивные (см. asInteractive /
+    // runInteractive) идут сразу и продлевают «зелёный» интерактиву.
+    if (isInteractiveAmoContext()) {
+      noteInteractiveAmoActivity();
+    } else {
+      await backgroundThrottle();
     }
     if (!this.token) {
       if (
