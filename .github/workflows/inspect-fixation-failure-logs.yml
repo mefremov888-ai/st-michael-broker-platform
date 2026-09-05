@@ -1,0 +1,39 @@
+name: Inspect fixation failure logs (one-off, read-only)
+
+# Разовая диагностика 05.09.2026: у одного и того же брокера раз за разом
+# падает проверка уникальности при фиксации (503 «Полную проверку уникальности
+# в amoCRM завершить не удалось»). Смотрим санитизированные коды ошибок
+# [fixClient] в логах api-контейнера. Ничего не меняем; телефоны и имена в эти
+# строки не попадают (sanitizeAmoSyncError печатает только код).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: SSH and grep fixClient error codes (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect logs
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          script: |
+            set -eu
+            echo "=== [fixClient] строки за последние 48 часов (коды ошибок, до 80 строк) ==="
+            docker logs st-michael-api --since 48h 2>&1 | grep -F "[fixClient]" | tail -80 || echo "(строк [fixClient] нет)"
+            echo ""
+            echo "=== checkUniqueness / uniqueness строки за 48 часов (до 40) ==="
+            docker logs st-michael-api --since 48h 2>&1 | grep -iE "uniqueness|AMBIGUOUS_EXACT_CONTACT|BROKER_AMO_CONTACT" | grep -vF "[fixClient]" | tail -40 || echo "(нет)"
+            echo ""
+            echo "=== Готово (ничего не изменено) ==="
