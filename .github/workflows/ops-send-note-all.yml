@@ -1,9 +1,11 @@
 name: Ops note to ALL chats (mine + server-configured)
 
-# Отправка текстовой записки СРАЗУ ВО ВСЕ ops-чаты бота: чат(ы) из серверного
-# .env (OPS_ALERT_CHAT_IDS / OPS_ALERT_CHAT_ID — туда сайт шлёт свои алерты)
-# плюс чат из GH-секрета OPS_ALERT_CHAT_ID (туда ходят workflow-алерты и PDF).
-# Дедуп по chat_id. Ничего на сервере не меняет: .env читается, не пишется.
+# Отправка текстовой записки во все ops-чаты бота: чаты из серверного .env
+# (OPS_ALERT_CHAT_IDS / OPS_ALERT_CHAT_ID) + чат из GH-секрета OPS_ALERT_CHAT_ID.
+# Всё в одном ssh-шаге (v2: appleboy/ssh-action не передаёт stdout между шагами),
+# отправка curl-ом прямо с сервера. Дедуп chat_id. .env читается, не пишется.
+#
+# send_to=server_only досылает только в серверные чаты (GH-чат уже уведомлён).
 
 on:
   workflow_dispatch:
@@ -12,6 +14,11 @@ on:
         description: Текст записки (до ~3500 символов)
         required: true
         type: string
+      send_to:
+        description: Куда слать — all | server_only (без GH-чата) | gh_only
+        required: false
+        default: all
+        type: string
 
 concurrency:
   group: ops-send-note-all
@@ -19,48 +26,45 @@ concurrency:
 
 jobs:
   send:
-    name: Read server chat ids and fan out the note
+    name: Merge chat ids on server and fan out the note
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Collect server-side chat ids
-        id: server
+      - name: SSH, merge ids, send
         uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+          NOTE: ${{ inputs.text }}
+          SEND_TO: ${{ inputs.send_to }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
-          command_timeout: 2m
+          command_timeout: 3m
+          envs: BOT,GH_CHAT,NOTE,SEND_TO
           script: |
             set -eu
+            test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
             cd "${{ secrets.DEPLOY_PATH }}"
-            ids=$(grep -hE '^OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr ',; ' '\n' | grep -E '^-?[0-9]+$' | sort -u | tr '\n' ' ')
-            echo "SERVER_CHAT_IDS=${ids}"
-
-      - name: Send note to every chat
-        shell: bash
-        env:
-          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
-          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
-          NOTE: ${{ inputs.text }}
-          SERVER_OUT: ${{ steps.server.outputs.stdout || '' }}
-        run: |
-          set -euo pipefail
-          test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
-          server_ids=$(printf '%s\n' "$SERVER_OUT" | grep -oE 'SERVER_CHAT_IDS=.*' | cut -d= -f2- || true)
-          all=$(printf '%s %s\n' "$GH_CHAT" "$server_ids" | tr ' ' '\n' | grep -E '^-?[0-9]+$' | sort -u)
-          test -n "$all" || { echo "не найдено ни одного chat_id"; exit 1; }
-          echo "чатов к отправке: $(echo "$all" | wc -l)"
-          fail=0
-          for chat in $all; do
-            ok=$(curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
-              --data-urlencode chat_id="$chat" \
-              --data-urlencode text="$NOTE" | head -c 200)
-            case "$ok" in
-              '{"ok":true'*) echo "chat ${chat:0:4}***: отправлено" ;;
-              *) echo "chat ${chat:0:4}***: ОШИБКА: $ok"; fail=1 ;;
+            server_ids=$(grep -hE '^OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr ',; ' '\n' | grep -E '^-?[0-9]+$' || true)
+            case "${SEND_TO:-all}" in
+              server_only) all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true) ;;
+              gh_only)     all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true) ;;
+              *)           all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u) ;;
             esac
-          done
-          exit $fail
+            test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
+            echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
+            fail=0
+            for chat in $all; do
+              ok=$(curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
+                --data-urlencode chat_id="$chat" \
+                --data-urlencode text="$NOTE" | head -c 120)
+              case "$ok" in
+                '{"ok":true'*) echo "chat ...${chat#${chat%????}}: отправлено" ;;
+                *) echo "chat ...${chat#${chat%????}}: ОШИБКА: $ok"; fail=1 ;;
+              esac
+            done
+            exit $fail
