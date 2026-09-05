@@ -11,6 +11,7 @@ import { PrismaClient, UniquenessStatus } from "@st-michael/database";
 import { Project } from "@st-michael/shared";
 import {
   AmoCrmAdapter,
+  runInteractive,
   MorekitAdapter,
   morekitPhone,
   morekitProjectName,
@@ -198,7 +199,22 @@ export class ClientFixationService {
     }
   }
 
+  // 2026-09-05: «живым запросам приоритет» — ВЕСЬ fixClient (проверка
+  // уникальности + создание контакта/лида) идёт как одна интерактивная
+  // операция: фоновый трафик к amo (часовой синк, крон-пачки, отчёты)
+  // стоит от первого до последнего запроса фиксации, чтобы между
+  // checkUniqueness и созданием лида фон не успевал вклиниться.
   async fixClient(
+    brokerId: string,
+    data: Parameters<ClientFixationService["fixClientInner"]>[1],
+    assertAmoCreateLeaseOwned: () => Promise<void>,
+  ) {
+    return runInteractive(() =>
+      this.fixClientInner(brokerId, data, assertAmoCreateLeaseOwned),
+    );
+  }
+
+  private async fixClientInner(
     brokerId: string,
     data: {
       phone: string;
