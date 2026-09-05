@@ -50,8 +50,11 @@ jobs:
             test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
             cd "${{ secrets.DEPLOY_PATH }}"
             server_ids=$(grep -hE '^OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr ',; ' '\n' | grep -E '^-?[0-9]+$' || true)
-            all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
-            if [ -n "$SKIP_CHAT" ]; then all=$(printf '%s\n' "$all" | grep -vFx "$SKIP_CHAT" || true); fi
+            case "${SEND_TO:-all}" in
+              server_only) all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true) ;;
+              gh_only)     all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true) ;;
+              *)           all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u) ;;
+            esac
             test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
             echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
             fail=0
