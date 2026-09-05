@@ -49,7 +49,12 @@ jobs:
             set -eu
             test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
             cd "${{ secrets.DEPLOY_PATH }}"
-            server_ids=$(grep -hE '^OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr ',; ' '\n' | grep -E '^-?[0-9]+$' || true)
+            echo "env-файлы в рабочей папке:"
+            ls -la .env* 2>/dev/null || echo "(нет .env файлов)"
+            echo "строки OPS_ALERT в env-файлах (значения замаскированы):"
+            grep -hE 'OPS_ALERT' .env .env.* 2>/dev/null | sed 's/=.*/=***/' || echo "(совпадений нет)"
+            server_ids=$(grep -hE '^OPS_ALERT_CHAT_IDS?=' .env .env.* 2>/dev/null | cut -d= -f2- | tr -d '"' | tr ',; ' '\n' | grep -E '^-?[0-9]+$' || true)
+            echo "распознано серверных chat_id: $(printf '%s\n' "$server_ids" | grep -c . || true)"
             if [ "${SEND_TO:-all}" = "server_only" ]; then
               all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true)
             elif [ "${SEND_TO:-all}" = "gh_only" ]; then
