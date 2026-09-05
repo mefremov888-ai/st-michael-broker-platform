@@ -821,10 +821,13 @@ export class SchedulerService {
               }
             }
             if (!client) {
-              client = await (this.prisma.client.create as any)({
+              // 2026-09-05: у модели Client нет колонки `source` — поле, добавленное
+              // сюда 12.08 под `as any`, роняло КАЖДЫЙ create с 12 августа, и новые
+              // лиды из amo не появлялись в кабинете. Каст `as any` убран, чтобы
+              // компилятор ловил такие расхождения.
+              client = await this.prisma.client.create({
                 data: {
                   brokerId: broker.id, fullName, phone, email,
-                  source: 'AMO_IMPORT',
                   project: project as any,
                   amoLeadId: BigInt(lead.id),
                   uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
