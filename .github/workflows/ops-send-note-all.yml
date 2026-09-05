@@ -50,11 +50,13 @@ jobs:
             test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
             cd "${{ secrets.DEPLOY_PATH }}"
             server_ids=$(grep -hE '^OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' | tr ',; ' '\n' | grep -E '^-?[0-9]+$' || true)
-            case "${SEND_TO:-all}" in
-              server_only) all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true) ;;
-              gh_only)     all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true) ;;
-              *)           all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u) ;;
-            esac
+            if [ "${SEND_TO:-all}" = "server_only" ]; then
+              all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true)
+            elif [ "${SEND_TO:-all}" = "gh_only" ]; then
+              all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true)
+            else
+              all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
+            fi
             test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
             echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
             fail=0
@@ -62,9 +64,12 @@ jobs:
               ok=$(curl -sS --max-time 20 -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
                 --data-urlencode chat_id="$chat" \
                 --data-urlencode text="$NOTE" | head -c 120)
-              case "$ok" in
-                '{"ok":true'*) echo "chat ...${chat#${chat%????}}: отправлено" ;;
-                *) echo "chat ...${chat#${chat%????}}: ОШИБКА: $ok"; fail=1 ;;
-              esac
+              tail4=$(printf '%s' "$chat" | tail -c 4)
+              if printf '%s' "$ok" | grep -q '"ok":true'; then
+                echo "chat ...$tail4: отправлено"
+              else
+                echo "chat ...$tail4: ОШИБКА: $ok"
+                fail=1
+              fi
             done
             exit $fail
