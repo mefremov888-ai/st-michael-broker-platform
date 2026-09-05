@@ -1,10 +1,8 @@
 name: Inspect fixation failure logs (one-off, read-only)
 
-# Разовая диагностика 05.09.2026: у одного и того же брокера раз за разом
-# падает проверка уникальности при фиксации (503 «Полную проверку уникальности
-# в amoCRM завершить не удалось»). Смотрим санитизированные коды ошибок
-# [fixClient] в логах api-контейнера. Ничего не меняем; телефоны и имена в эти
-# строки не попадают (sanitizeAmoSyncError печатает только код).
+# Разовая диагностика 05.09.2026 (v2): в логах api замечены ошибки валидации
+# Prisma с полями uniqueness*. Смотрим полный контекст этих ошибок с таймстампами,
+# плюс все [fixClient] строки. Ничего не меняем.
 
 on:
   workflow_dispatch:
@@ -15,7 +13,7 @@ concurrency:
 
 jobs:
   inspect:
-    name: SSH and grep fixClient error codes (read-only)
+    name: SSH and grep fixation errors with context (read-only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,10 +28,16 @@ jobs:
           command_timeout: 3m
           script: |
             set -eu
-            echo "=== [fixClient] строки за последние 48 часов (коды ошибок, до 80 строк) ==="
-            docker logs st-michael-api --since 48h 2>&1 | grep -F "[fixClient]" | tail -80 || echo "(строк [fixClient] нет)"
+            echo "=== [fixClient] строки с таймстампами за 48 часов ==="
+            docker logs -t st-michael-api --since 48h 2>&1 | grep -F "[fixClient]" | tail -30 || echo "(нет)"
             echo ""
-            echo "=== checkUniqueness / uniqueness строки за 48 часов (до 40) ==="
-            docker logs st-michael-api --since 48h 2>&1 | grep -iE "uniqueness|AMBIGUOUS_EXACT_CONTACT|BROKER_AMO_CONTACT" | grep -vF "[fixClient]" | tail -40 || echo "(нет)"
+            echo "=== PrismaClientValidationError: заголовки с таймстампами (какая операция) ==="
+            docker logs -t st-michael-api --since 48h 2>&1 | grep -nE "PrismaClientValidationError|Invalid .* invocation|Unknown arg|Unknown argument|Argument .* is missing" | tail -30 || echo "(нет)"
+            echo ""
+            echo "=== Контекст ПОСЛЕДНЕЙ Prisma-ошибки: 35 строк до первого 'uniquenessReason' с конца ==="
+            docker logs st-michael-api --since 48h 2>&1 | grep -B35 "uniquenessReason" | tail -60 || echo "(нет)"
+            echo ""
+            echo "=== 500/503 ошибки Nest с таймстампами за 24 часа (до 30) ==="
+            docker logs -t st-michael-api --since 24h 2>&1 | grep -iE "ServiceUnavailable|Internal server error|ERROR \[" | tail -30 || echo "(нет)"
             echo ""
             echo "=== Готово (ничего не изменено) ==="
