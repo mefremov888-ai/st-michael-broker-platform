@@ -1,0 +1,41 @@
+name: Analytics broker tour (read-only)
+
+# 2026-07-22: сквозная аналитика по брокер-турам — кто был на туре и кто
+# из них зафиксировал уникальность. Read-only: гоняет
+# scripts/analytics-broker-tour.sql через psql в контейнере postgres на
+# проде. Ничего не пишет в БД, контейнеры не трогает.
+#
+# Запуск: Actions → "Analytics broker tour (read-only)" → Run workflow,
+# или: gh workflow run analytics-broker-tour.yml
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: analytics-broker-tour
+  cancel-in-progress: false
+
+jobs:
+  analytics:
+    name: Run broker-tour analytics SQL on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run read-only analytics
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 10m
+          # SQL берём из origin/master через git show — не зависит от того,
+          # успел ли деплой обновить рабочую директорию на сервере.
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== SQL из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/analytics-broker-tour.sql | docker compose exec -T postgres psql -U postgres -d broker_platform -v ON_ERROR_STOP=0
+            echo "=== Отчёт завершён ==="

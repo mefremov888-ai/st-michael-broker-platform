@@ -1,0 +1,54 @@
+name: Check SMTP mail server
+
+# 2026-08-18: диагностика почтового сервера кабинета (welcome/forgot-password
+# письма, auth.service.ts). Проверяет конфигурацию + verify(), опционально
+# шлёт тестовое письмо.
+#
+# Запуск: Actions → "Check SMTP mail server" → Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_to:
+        description: 'Email для тестового письма (пусто = только проверка соединения)'
+        required: false
+        default: ''
+      phone:
+        description: 'Телефон брокера — найти его email и отправить тест туда (переопределяет send_to)'
+        required: false
+        default: ''
+
+concurrency:
+  group: check-smtp
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Run SMTP check on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 5m
+          script: |
+            set -e
+            ARGS=""
+            if [ -n "${{ inputs.send_to }}" ]; then
+              ARGS="$ARGS --send-to ${{ inputs.send_to }}"
+            fi
+            if [ -n "${{ inputs.phone }}" ]; then
+              ARGS="$ARGS --phone ${{ inputs.phone }}"
+            fi
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/check-smtp.js > /tmp/check-smtp.js
+            docker cp /tmp/check-smtp.js st-michael-api:/app/scripts/check-smtp.js
+            eval "docker compose exec -T api node /app/scripts/check-smtp.js $ARGS"
+            echo "=== Готово ==="

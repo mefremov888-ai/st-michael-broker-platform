@@ -1,0 +1,65 @@
+name: Apply registry deals (DDU analytics)
+
+# 2026-09-04: заливка «Реестра сделок» (таблица registry_deals) на прод.
+# Данные лежат в data-ветке (data/registry-deals-upload.json), скрипт —
+# в master (scripts/upload-registry-deals.js). Upsert по rowKey, ничего
+# не удаляет. По умолчанию apply=false → скрипт идёт с --dry-run и только
+# считает created/updated/skippedBrokerMissing, не записывая ни строки.
+#
+# ВАЖНО: таблица registry_deals должна уже существовать — миграция
+# 20260904000100_add_registry_deals применяется обычным подтверждённым
+# Deploy to production (prisma migrate deploy), НЕ этим workflow.
+#
+# Запуск: Actions → "Apply registry deals (DDU analytics)" → Run workflow
+# (сначала с apply=false, проверить счётчики в логе, затем apply=true).
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_branch:
+        description: Branch with data/registry-deals-upload.json
+        required: true
+        default: data/registry-deals-20260904
+        type: string
+      apply:
+        description: Actually write to the database (false = dry-run)
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-registry-deals
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Upload registry deals on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run upload
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DATA_BRANCH: ${{ inputs.data_branch }}
+          APPLY: ${{ inputs.apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: DATA_BRANCH,APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin "$DATA_BRANCH"
+            git fetch origin master
+            git show "origin/$DATA_BRANCH:data/registry-deals-upload.json" > /tmp/rd.json
+            git show origin/master:scripts/upload-registry-deals.js > /tmp/up.js
+            docker cp /tmp/rd.json st-michael-api:/app/rd.json
+            docker cp /tmp/up.js st-michael-api:/app/scripts/upload-registry-deals.js
+            FLAG="--dry-run"
+            if [ "$APPLY" = "true" ]; then FLAG=""; fi
+            docker compose exec -T api node /app/scripts/upload-registry-deals.js /app/rd.json $FLAG
+            echo "=== Готово (apply=$APPLY) ==="

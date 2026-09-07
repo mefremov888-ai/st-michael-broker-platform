@@ -1,0 +1,53 @@
+name: Enrich brokers from amoCRM (names)
+
+# 2026-07-17: обогащение «безымянных» брокеров из amoCRM по телефону.
+# По аудиту: 1098 «(без имени)» + 168 телефон-вместо-имени. Ничего не удаляет,
+# пишет только пустые/плохие поля. По умолчанию dry-run.
+#
+# Запуск: Actions → "Enrich brokers from amoCRM (names)" → Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только показать, без записи в БД)'
+        required: true
+        type: boolean
+        default: true
+      limit:
+        description: 'Ограничить N брокеров (для теста). Пусто = все.'
+        required: false
+        default: ''
+
+concurrency:
+  group: enrich-brokers-amo
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    name: Run enrichment on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: SSH and run enrichment script
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 115m
+          script: |
+            set -e
+            ARGS=""
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              ARGS="$ARGS --apply"
+            fi
+            if [ -n "${{ inputs.limit }}" ]; then
+              ARGS="$ARGS --limit ${{ inputs.limit }}"
+            fi
+            echo "=== Args: $ARGS ==="
+            cd ${{ secrets.DEPLOY_PATH }}
+            eval "docker compose exec -T api node /app/scripts/enrich-brokers-from-amo.js $ARGS"
+            echo "=== Готово ==="

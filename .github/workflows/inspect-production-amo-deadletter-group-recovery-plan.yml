@@ -1,0 +1,199 @@
+name: Inspect production amo deadletter phone-group recovery plan
+
+# GET-only, read-only, PII-safe exact-cohort plan. The HMAC binds the complete
+# private evidence while stdout contains only counters and per-run aliases.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: production
+    steps:
+      - name: Checkout exact plan source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run signed GET-only plan
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          HEALTH_URL: https://broker.stmichael.ru/api/health
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Canonical repository required"; exit 1; }
+          test "$EXPECTED_REF" = "refs/heads/master" || { echo "Master required"; exit 1; }
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid source SHA"; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA" || { echo "Checkout SHA mismatch"; exit 1; }
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "SSH configuration incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Invalid SSH fingerprint"; exit 1; }
+
+          core_path=scripts/amo-deadletter-group-recovery-core.js
+          plan_path=scripts/inspect-amo-deadletter-group-recovery-plan.js
+          legacy_path=scripts/inspect-amo-fixation-lead-reconciliation.js
+          for source in "$core_path" "$plan_path" "$legacy_path"; do
+            test -f "$source" -a ! -L "$source" || { echo "Unsafe plan source"; exit 1; }
+          done
+          core_sha=$(sha256sum -- "$core_path" | awk '{print $1}')
+          plan_sha=$(sha256sum -- "$plan_path" | awk '{print $1}')
+          legacy_sha=$(sha256sum -- "$legacy_path" | awk '{print $1}')
+          for digest in "$core_sha" "$plan_sha" "$legacy_sha"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid source digest"; exit 1; }
+          done
+          for tool in awk base64 cp curl docker find flock jq mkdir mktemp readlink sed sha256sum ssh ssh-keygen ssh-keyscan tar timeout wc; do
+            command -v "$tool" >/dev/null || { echo "Required tool missing"; exit 1; }
+          done
+          health=$(curl --fail --silent --show-error --max-time 15 --proto '=https' --tlsv1.2 "$HEALTH_URL")
+          deployed_sha=$(printf '%s' "$health" | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')
+          unset health
+          test "$deployed_sha" = "$SOURCE_SHA" || { echo "Signed plan source must equal deployed production"; exit 1; }
+
+          runner_temp=${RUNNER_TEMP:-/tmp}
+          test -d "$runner_temp" -a ! -L "$runner_temp" || { echo "Unsafe runner temp"; exit 1; }
+          work=$(mktemp -d "$runner_temp/amo-deadletter-plan.XXXXXX")
+          payload="$work/payload"
+          archive="$work/plan.tar"
+          known_hosts="$work/known_hosts"
+          private_key="$work/deploy-key"
+          cleanup_runner() {
+            rm -f -- "$known_hosts" "$private_key" \
+              "$payload/amo-deadletter-group-recovery-core.js" \
+              "$payload/inspect-amo-deadletter-group-recovery-plan.js" \
+              "$payload/inspect-amo-fixation-lead-reconciliation.js" \
+              "$payload/attestation.key" "$payload/manifest" "$archive"
+            rmdir -- "$payload" 2>/dev/null || true
+            rmdir -- "$work" 2>/dev/null || true
+          }
+          trap cleanup_runner EXIT
+          umask 077
+          mkdir "$payload"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          printf '%s' "$COHORT_ATTESTATION_KEY" > "$payload/attestation.key"
+          unset COHORT_ATTESTATION_KEY
+          test "$(wc -c < "$payload/attestation.key")" -ge 32 || { echo "Attestation key too short"; exit 1; }
+          key_sha=$(sha256sum -- "$payload/attestation.key" | awk '{print $1}')
+          cp -- "$core_path" "$payload/amo-deadletter-group-recovery-core.js"
+          cp -- "$plan_path" "$payload/inspect-amo-deadletter-group-recovery-plan.js"
+          cp -- "$legacy_path" "$payload/inspect-amo-fixation-lead-reconciliation.js"
+          printf 'source_sha=%s\ndeployed_sha=%s\ncore_sha=%s\nplan_sha=%s\nlegacy_sha=%s\nkey_sha=%s\nqueue_rows=12\nphone_groups=9\n' \
+            "$SOURCE_SHA" "$deployed_sha" "$core_sha" "$plan_sha" "$legacy_sha" "$key_sha" > "$payload/manifest"
+          chmod 600 "$payload"/*
+          tar --format=ustar -C "$payload" -cf "$archive" \
+            amo-deadletter-group-recovery-core.js \
+            inspect-amo-deadletter-group-recovery-plan.js \
+            inspect-amo-fixation-lead-reconciliation.js \
+            attestation.key manifest
+          archive_sha=$(sha256sum -- "$archive" | awk '{print $1}')
+
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 -a "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "SSH fingerprint mismatch"; exit 1; }
+
+          {
+            cat <<'REMOTE_PREFIX'
+          set -euo pipefail
+          export LC_ALL=C
+          deploy_path=$1
+          expected_deployed_sha=$2
+          expected_archive_sha=$3
+          canonical_origin=https://github.com/sereganikitin/st-michael-broker-platform.git
+          [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$expected_archive_sha" =~ ^[0-9a-f]{64}$ ]]
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != / -a -d "$deploy_root"
+          test -f /tmp/st-michael-production-deploy.lock -a ! -L /tmp/st-michael-production-deploy.lock
+          exec 9</tmp/st-michael-production-deploy.lock
+          flock -s -n 9 || { echo "Production lock busy"; exit 1; }
+          cd -- "$deploy_root"
+          test "$(git rev-parse --show-toplevel)" = "$deploy_root"
+          test "$(git remote get-url origin)" = "$canonical_origin"
+          test "$(git symbolic-ref --short HEAD)" = master
+          test "$(git rev-parse HEAD)" = "$expected_deployed_sha"
+          test "$(git rev-parse refs/heads/master)" = "$expected_deployed_sha"
+          test "$(docker inspect --format '{{.State.Running}}' st-michael-api)" = true
+          test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' st-michael-api)" = api
+          test "$(docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')" = "$expected_deployed_sha"
+          archive=$(mktemp /tmp/amo-deadletter-plan.XXXXXX)
+          trap 'rm -f -- "$archive"' EXIT HUP INT TERM
+          base64 -d > "$archive" <<'SIGNED_DEADLETTER_PLAN_PAYLOAD'
+          REMOTE_PREFIX
+            base64 -w 0 -- "$archive"
+            printf '\nSIGNED_DEADLETTER_PLAN_PAYLOAD\n'
+            cat <<'REMOTE_SUFFIX'
+          actual_archive_sha=$(sha256sum "$archive"); actual_archive_sha=${actual_archive_sha%% *}
+          test "$actual_archive_sha" = "$expected_archive_sha" || { echo "Archive hash mismatch"; exit 1; }
+          mapfile -t entries < <(tar -tf "$archive")
+          test "${#entries[@]}" -eq 5
+          test "${entries[0]}" = amo-deadletter-group-recovery-core.js
+          test "${entries[1]}" = inspect-amo-deadletter-group-recovery-plan.js
+          test "${entries[2]}" = inspect-amo-fixation-lead-reconciliation.js
+          test "${entries[3]}" = attestation.key
+          test "${entries[4]}" = manifest
+          docker exec -i st-michael-api sh -c '
+            set -eu
+            umask 077
+            root=$(mktemp -d /app/scripts/.amo-deadletter-plan.XXXXXX)
+            core="$root/amo-deadletter-group-recovery-core.js"
+            plan="$root/inspect-amo-deadletter-group-recovery-plan.js"
+            legacy="$root/inspect-amo-fixation-lead-reconciliation.js"
+            key="$root/attestation.key"
+            manifest="$root/manifest"
+            cleanup() { rm -f -- "$core" "$plan" "$legacy" "$key" "$manifest"; rmdir -- "$root" 2>/dev/null || true; }
+            trap cleanup EXIT HUP INT TERM
+            tar -xf - -C "$root"
+            test "$(find "$root" -maxdepth 1 -type f | wc -l)" -eq 5
+            for file in "$core" "$plan" "$legacy" "$key" "$manifest"; do test -f "$file" -a ! -L "$file"; done
+            test "$(wc -l < "$manifest")" -eq 8
+            value() { sed -n "s/^$1=//p" "$manifest"; }
+            source_sha=$(value source_sha); core_sha=$(value core_sha); plan_sha=$(value plan_sha)
+            deployed_sha=$(value deployed_sha); legacy_sha=$(value legacy_sha); key_sha=$(value key_sha)
+            test "$source_sha" = "$GIT_SHA" -a "$deployed_sha" = "$GIT_SHA"
+            test "$(value queue_rows)" = 12 -a "$(value phone_groups)" = 9
+            test "$(sha256sum "$core" | cut -d" " -f1)" = "$core_sha"
+            test "$(sha256sum "$plan" | cut -d" " -f1)" = "$plan_sha"
+            test "$(sha256sum "$legacy" | cut -d" " -f1)" = "$legacy_sha"
+            test "$(sha256sum "$key" | cut -d" " -f1)" = "$key_sha"
+            test "$(wc -c < "$key")" -ge 32
+            export RECOVERY_SOURCE_SHA="$source_sha"
+            export RECOVERY_CORE_SHA256="$core_sha"
+            export RECOVERY_PLAN_SHA256="$plan_sha"
+            export RECOVERY_LEGACY_INSPECTOR_SHA256="$legacy_sha"
+            export RECOVERY_COHORT_ATTESTATION_KEY_FILE="$key"
+            node "$plan"
+          ' < "$archive"
+          REMOTE_SUFFIX
+          } | timeout --foreground 32m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$deployed_sha' '$archive_sha'"

@@ -1,0 +1,103 @@
+name: Export one obsolete rollback pair (no delete)
+
+# Copy the 20260821-121353 rollback api/web images off the server to a GitHub
+# Actions artifact so they can be saved to a laptop (D:\). Streams `docker save`
+# over SSH — nothing is written to production disk. Does not rmi, prune, restart,
+# or touch volumes/databases.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_export:
+        description: Confirm streaming only rollback tags 20260821-121353 to an artifact
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  export:
+    name: Stream obsolete rollback pair off production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Verify host and stream docker save to the runner
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          CONFIRM_EXPORT: ${{ inputs.confirm_export }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          EXPECTED_API_ID: sha256:dcac4b4619a4ef336b4658d5754f8f91fa0201de2c23a62e3ebb83277ff780cb
+          EXPECTED_WEB_ID: sha256:82594645efc68fcb1d7fefd0b28f2227c1b54a52fc53e51934f648a4937a9fe5
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_EXPORT" = "true" || { echo "Explicit export confirmation is required"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Export is restricted to the canonical repository"; exit 1; }
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          ssh_cmd=(ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=20)
+
+          mkdir -p "$HOME/rollback-export"
+          echo "Streaming docker save (no file written on production)..." >&2
+          "${ssh_cmd[@]}" "${SSH_USER}@${SSH_HOST}" "bash -s -- '$EXPECTED_API_ID' '$EXPECTED_WEB_ID'" <<'REMOTE' | gzip -c > "$HOME/rollback-export/st-michael-rollback-20260821-121353.tar.gz"
+          set -euo pipefail
+          export LC_ALL=C
+          expected_api=$1
+          expected_web=$2
+          command -v docker >/dev/null
+          command -v flock >/dev/null
+          exec 9>/tmp/st-michael-production-deploy.lock
+          flock -n 9 || { echo "Another production deploy holds the server lock" >&2; exit 1; }
+          api_id=$(docker inspect --format '{{.Id}}' st-michael-rollback-api:20260821-121353)
+          web_id=$(docker inspect --format '{{.Id}}' st-michael-rollback-web:20260821-121353)
+          test "$api_id" = "$expected_api" || { echo "API image id mismatch" >&2; exit 1; }
+          test "$web_id" = "$expected_web" || { echo "Web image id mismatch" >&2; exit 1; }
+          running=$(docker ps --format '{{.Image}}' | grep -c '20260821-121353' || true)
+          test "$running" = "0" || { echo "Target rollback pair is running; refuse export" >&2; exit 1; }
+          echo "export_ids_verified=true" >&2
+          exec docker save "$expected_api" "$expected_web"
+          REMOTE
+          ls -lh "$HOME/rollback-export/st-michael-rollback-20260821-121353.tar.gz"
+          test -s "$HOME/rollback-export/st-michael-rollback-20260821-121353.tar.gz"
+          gzip -t "$HOME/rollback-export/st-michael-rollback-20260821-121353.tar.gz"
+          echo "export_gzip_ok=true"
+
+      - name: Upload archive for D-drive backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: st-michael-rollback-20260821-121353
+          path: /home/runner/rollback-export/st-michael-rollback-20260821-121353.tar.gz
+          if-no-files-found: error
+          retention-days: 14

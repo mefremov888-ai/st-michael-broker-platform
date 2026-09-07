@@ -1,0 +1,51 @@
+name: Import TG brokers (Etalon + A101)
+
+# 2026-07-22: импорт контактов брокеров из Telegram-чатов застройщиков.
+# Данные: scripts/data/tg-brokers-2026-07-22.json. Только новые номера
+# (сверка по телефону), пометка baseSource=tg_etalon_pro/tg_a101,
+# без пароля (в «Заходы» не попадают). По умолчанию dry-run.
+#
+# Запуск: gh workflow run import-tg-brokers.yml [-f apply=true]
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Записать в БД (false = dry-run)'
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: import-tg-brokers
+  cancel-in-progress: false
+
+jobs:
+  import:
+    name: Run TG brokers import on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run import
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/import-tg-brokers.js > /tmp/import-tg-brokers.js
+            git show origin/master:scripts/data/tg-brokers-2026-07-22.json > /tmp/tg-brokers-2026-07-22.json
+            docker cp /tmp/import-tg-brokers.js st-michael-api:/app/scripts/import-tg-brokers.js
+            docker compose exec -T api mkdir -p /app/scripts/data
+            docker cp /tmp/tg-brokers-2026-07-22.json st-michael-api:/app/scripts/data/tg-brokers-2026-07-22.json
+            ARGS=""
+            if [ "${{ inputs.apply }}" = "true" ]; then ARGS="--apply"; fi
+            docker compose exec -T api node /app/scripts/import-tg-brokers.js $ARGS
+            echo "=== Импорт завершён ==="

@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1.6
+FROM mirror.gcr.io/library/node:20.20.2-alpine AS builder
+WORKDIR /app
+# python3/make/g++ нужны для нативной компиляции bcrypt из workspace apps/api,
+# когда prebuilt-бинарник не качается. Эти пакеты живут только в throwaway-builder-stage.
+RUN apk add --no-cache python3 make g++
+
+# 1) Сначала только манифесты — слой npm install кешируется.
+COPY package.json package-lock.json* ./
+COPY apps/api/package.json apps/api/
+COPY apps/telegram/package.json apps/telegram/
+COPY apps/web/package.json apps/web/
+COPY packages/database/package.json packages/database/
+COPY packages/integrations/package.json packages/integrations/
+COPY packages/shared/package.json packages/shared/
+
+# 2) npm install с BuildKit cache mount.
+# 2026-06-25: добавлена проверка наличия next-бинарника. Без неё битый
+# кеш-слой от упавшего ранее build'а (PR #178 → run 28107132638 — npm
+# install оборвался на середине, SSH сдох) попадал в CACHE → следующий
+# build пропускал установку, потом падал на `sh: next: not found`.
+# Проверка делает две вещи: (а) меняет cache-key слоя — Buildkit пересоберёт
+# с нуля; (б) если npm install снова не доустановится — упадёт здесь, а
+# не на туманном этапе позже.
+RUN --mount=type=cache,target=/root/.npm npm install && test -x node_modules/.bin/next
+
+# 3) Остальной код.
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED=1
+# 2026-06-09: то же что в Dockerfile.api — чистим .next + tsbuildinfo,
+# убираем 2>/dev/null. Без этого Next.js incremental build переиспользовал
+# .next/cache от прошлого образа и новые правки в page.tsx не попадали в
+# JS-bundle (проявилось как «брокеру всё ещё видны скрытые поля карточки
+# клиента» даже после жёсткой перезагрузки браузера).
+RUN rm -rf apps/web/.next apps/web/tsconfig.tsbuildinfo \
+ && npm run build --workspace=apps/web
+
+# ─── runtime ───
+FROM mirror.gcr.io/library/node:20.20.2-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.next/static
+# В standalone-режиме public/ НЕ копируется автоматически — нужно отдельно.
+# Без этой строки stmichael-logo.png, sw.js и другие статики из public/
+# отдают 404. См. https://nextjs.org/docs/app/api-reference/next-config-js/output#caveats
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/public ./apps/web/public
+# 2026-06-24: точка монтирования для shared volume web-data (см. docker-compose.yml).
+# Создаём заранее с правами nextjs, чтобы при первом запуске named volume
+# унаследовал владельца и SSR-код смог писать cms-snapshot.json.
+RUN mkdir -p /app/data && chown nextjs:nodejs /app/data
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+CMD ["node", "apps/web/server.js"]

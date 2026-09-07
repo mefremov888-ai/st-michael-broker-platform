@@ -1,0 +1,49 @@
+name: Send document to ops Telegram
+
+# 2026-09-04: отправка ФАЙЛА (PDF/таблица) в ops-чат Телеграма тем же ботом,
+# что и алерты. Файл берётся из ветки репозитория (base64-inputs дispatch
+# не вмещают файлы >~35 КБ). Дополняет ops-send-note.yml (текст).
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Ветка, где лежит файл
+        required: true
+        type: string
+      path:
+        description: Путь к файлу внутри ветки
+        required: true
+        type: string
+      caption:
+        description: Подпись к файлу (необязательно)
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 1
+      - name: Send via sendDocument
+        env:
+          TG_TOKEN: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+          FILE_PATH: ${{ inputs.path }}
+          CAPTION: ${{ inputs.caption }}
+        run: |
+          set -euo pipefail
+          test -n "$TG_TOKEN" || { echo "нет токена бота"; exit 1; }
+          test -n "$TG_CHAT" || { echo "нет OPS_ALERT_CHAT_ID"; exit 1; }
+          test -f "$FILE_PATH" || { echo "файл не найден: $FILE_PATH"; exit 1; }
+          RESP=$(curl -s --max-time 30 -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" \
+            -F chat_id="$TG_CHAT" \
+            -F caption="$CAPTION" \
+            -F document=@"$FILE_PATH")
+          echo "$RESP" | grep -q '"ok":true' || { echo "Telegram ответил ошибкой: $RESP" | head -c 300; exit 1; }
+          echo "Отправлено."

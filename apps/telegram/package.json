@@ -1,0 +1,23 @@
+{
+  "name": "@st-michael/telegram",
+  "version": "1.0.0",
+  "description": "Telegram bot for ST Michael Broker Platform",
+  "main": "dist/bot.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/bot.js",
+    "dev": "tsx watch src/bot.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@grammyjs/conversations": "^1.1.2",
+    "@grammyjs/menu": "^1.2.1",
+    "grammy": "^1.21.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.6.2",
+    "typescript": "^5.3.3"
+  }
+}

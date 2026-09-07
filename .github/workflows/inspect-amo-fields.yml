@@ -1,0 +1,58 @@
+name: Inspect amoCRM fields
+
+# Ручной запуск из Actions UI. Печатает custom_fields лида и/или контакта
+# по фильтру (или все). Используется чтобы узнать field_id для маппинга
+# в scripts/inspect-amo-fields.js и amo-crm.fields.ts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: 'Фильтр по подстроке в name (пусто = все поля)'
+        required: false
+        default: ''
+      entity:
+        description: 'Что инспектировать'
+        required: true
+        type: choice
+        default: 'both'
+        options:
+          - both
+          - leads
+          - contacts
+          - companies
+          - pipelines
+          - task_types
+
+concurrency:
+  group: inspect-amo
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Run inspector on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run inspector
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 5m
+          script: |
+            set -e
+            GREP="${{ inputs.grep }}"
+            ENTITY="${{ inputs.entity }}"
+            ARGS=""
+            if [ -n "$GREP" ]; then
+              ARGS="--grep \"$GREP\""
+            fi
+            if [ "$ENTITY" != "both" ]; then
+              ARGS="$ARGS --entity $ENTITY"
+            fi
+            cd ${{ secrets.DEPLOY_PATH }}
+            eval "docker compose exec -T api node /app/scripts/inspect-amo-fields.js $ARGS"

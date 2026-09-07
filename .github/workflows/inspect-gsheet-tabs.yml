@@ -1,0 +1,44 @@
+name: Inspect Google Sheet tabs
+
+# Ручной запуск из Actions UI. Read-only: печатает список вкладок таблицы
+# брокеров (тот же service account, что уже использует import-brokers.yml),
+# ничего не пишет и не импортирует. Нужно, чтобы понять, какие вкладки в
+# файле относятся к нашей КЦ-синхронизации, а какие — отдельные данные
+# Анны Скибицкой (загрузка базы лояльности).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet_id:
+        description: 'ID таблицы (пусто = дефолтная, та же что в import-brokers)'
+        required: false
+        default: ''
+
+concurrency:
+  group: inspect-gsheet
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: List tabs on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and list tabs
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          script: |
+            set -e
+            SHEET_ID="${{ inputs.sheet_id }}"
+            ARGS="--list-tabs"
+            if [ -n "$SHEET_ID" ]; then
+              ARGS="$ARGS --sheet-id $SHEET_ID"
+            fi
+            cd ${{ secrets.DEPLOY_PATH }}
+            eval "docker compose exec -T api node /app/scripts/import-brokers-from-gsheet.js $ARGS"

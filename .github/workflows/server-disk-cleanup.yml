@@ -1,0 +1,74 @@
+name: Server disk cleanup (safe)
+
+# 2026-07-22: диск на проде заполнился на 100%, postgres упал.
+# Виновники: 12GB лог контейнера api (json-log без ротации), 12GB
+# build-кэш docker, ~13GB мусорных образов, 1.8GB journald.
+#
+# Что делает (безопасно, данные НЕ трогает):
+#   - docker builder prune -af  (build-кэш; следующая сборка просто дольше)
+#   - docker image prune -f     (только dangling <none>-образы)
+#   - truncate логов контейнеров (это stdout-логи, не данные)
+#   - journalctl --vacuum-size=300M
+#   - поднимает упавший postgres и перезапускает api/redis
+# НЕ трогает: volumes (БД, uploads), рабочие образы, containerd.
+#
+# Запуск: gh workflow run server-disk-cleanup.yml
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: server-disk-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Clean disk and restore services
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: SSH and clean up
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 15m
+          script: |
+            echo '=== ДО очистки ==='
+            df -h /
+            echo ''
+            echo '=== 1. Build-кэш docker ==='
+            docker builder prune -af || true
+            echo ''
+            echo '=== 2. Dangling-образы ==='
+            docker image prune -f || true
+            echo ''
+            echo '=== 3. Обрезка json-логов контейнеров ==='
+            for f in /var/lib/docker/containers/*/*-json.log; do
+              sz=$(du -sh "$f" | cut -f1)
+              echo "truncate $sz  $f"
+              truncate -s 0 "$f" || sudo truncate -s 0 "$f" || true
+            done
+            echo ''
+            echo '=== 4. journald vacuum ==='
+            journalctl --vacuum-size=300M || sudo journalctl --vacuum-size=300M || true
+            echo ''
+            echo '=== ПОСЛЕ очистки ==='
+            df -h /
+            echo ''
+            echo '=== 5. Поднимаем postgres и перезапускаем зависимые сервисы ==='
+            cd ${{ secrets.DEPLOY_PATH }}
+            docker compose up -d postgres || docker start st-michael-postgres || true
+            sleep 15
+            docker compose restart api redis || docker restart st-michael-api st-michael-redis || true
+            sleep 20
+            echo ''
+            echo '=== Статус контейнеров ==='
+            docker compose ps || docker ps -a
+            echo ''
+            echo '=== Проверка БД ==='
+            docker compose exec -T postgres psql -U postgres -d broker_platform -c 'SELECT count(*) AS brokers FROM brokers;' || true
+            echo ''
+            echo '=== Очистка завершена ==='

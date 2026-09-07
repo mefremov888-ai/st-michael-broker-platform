@@ -1,0 +1,301 @@
+name: Create production loyalty predeploy backup
+
+# Creates one fresh, SHA-bound PostgreSQL custom-format dump for the loyalty
+# release. The dump remains on the production host in a dedicated mode-700
+# directory. This workflow never deletes earlier backups, changes database
+# contents, restarts services, or uploads the PII-bearing archive elsewhere.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_backup:
+        description: Confirm creation and full decode verification of a fresh production DB backup
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    name: Create and verify exact-SHA production DB backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Validate canonical backup request
+        shell: bash
+        env:
+          CONFIRM_BACKUP: ${{ inputs.confirm_backup }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_BACKUP" = "true" || { echo "Explicit backup confirmation is required"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Backup is restricted to the canonical repository"; exit 1; }
+          test "$EXPECTED_REF" = "refs/heads/master" || { echo "Backup is restricted to master"; exit 1; }
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || {
+            echo "Production SSH ED25519 fingerprint variable is missing or invalid"
+            exit 1
+          }
+
+      - name: Create and fully decode-verify server-local backup
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_BACKUP_SHA: ${{ github.sha }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PRODUCTION_PG_SYSTEM_IDENTIFIER: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_BACKUP_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid backup SHA"; exit 1; }
+          [[ "$EXPECTED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid workflow run id"; exit 1; }
+          [[ "$EXPECTED_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid workflow run attempt"; exit 1; }
+          [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]] || { echo "Production database identity variable is missing or invalid"; exit 1; }
+          [[ "$PRODUCTION_MIN_BROKER_ROWS" =~ ^[1-9][0-9]*$ ]] || { echo "Production broker-row floor is missing or invalid"; exit 1; }
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          timeout --foreground 15m ssh -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$EXPECTED_BACKUP_SHA' '$EXPECTED_RUN_ID' '$EXPECTED_RUN_ATTEMPT' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'" <<'REMOTE'
+            set -euo pipefail
+            DEPLOY_PATH=$1
+            EXPECTED_BACKUP_SHA=$2
+            EXPECTED_RUN_ID=$3
+            EXPECTED_RUN_ATTEMPT=$4
+            PRODUCTION_PG_SYSTEM_IDENTIFIER=$5
+            PRODUCTION_MIN_BROKER_ROWS=$6
+            export LC_ALL=C
+            umask 077
+            MIN_AVAILABLE_BYTES=8589934592
+            BACKUP_SIZE_OVERHEAD_BYTES=67108864
+            CANONICAL_REPOSITORY="https://github.com/sereganikitin/st-michael-broker-platform.git"
+            BACKUP_DIR="/var/backups/stmichael/loyalty-predeploy"
+
+            for required_tool in awk chmod df docker flock git grep id install mktemp mv readlink rm sha256sum stat sudo sync; do
+              command -v "$required_tool" >/dev/null || { echo "Required backup tool is missing"; exit 1; }
+            done
+            [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+            case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+            [[ "$EXPECTED_BACKUP_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid backup SHA"; exit 1; }
+            [[ "$EXPECTED_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid workflow run id"; exit 1; }
+            [[ "$EXPECTED_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid workflow run attempt"; exit 1; }
+            [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]] || { echo "Production database identity variable is missing or invalid"; exit 1; }
+            [[ "$PRODUCTION_MIN_BROKER_ROWS" =~ ^[1-9][0-9]*$ ]] || { echo "Production broker-row floor is missing or invalid"; exit 1; }
+
+            deploy_root=$(readlink -f -- "$DEPLOY_PATH")
+            test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing absolute non-root directory"; exit 1; }
+
+            exec 8>/tmp/st-michael-production-deploy.lock
+            flock -n 8 || { echo "Another production deploy/migration process holds the server lock"; exit 1; }
+
+            cd "$deploy_root"
+            git fetch --quiet "$CANONICAL_REPOSITORY" master
+            trusted_backup_sha=$(git rev-parse FETCH_HEAD)
+            test "$trusted_backup_sha" = "$EXPECTED_BACKUP_SHA" || {
+              echo "Canonical master changed or this backup was not dispatched for current master"
+              exit 1
+            }
+
+            test "$(docker inspect --format '{{.State.Running}}' st-michael-postgres 2>/dev/null)" = "true" || {
+              echo "Production PostgreSQL container is not running"
+              exit 1
+            }
+            docker exec st-michael-postgres pg_isready -U postgres -d broker_platform >/dev/null
+            actual_database=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT current_database()")
+            actual_system_identifier=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT system_identifier FROM pg_control_system()")
+            broker_rows=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT COUNT(*) FROM public.brokers")
+            database_size_bytes=$(docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -Atqc "SELECT pg_database_size(current_database())")
+            test "$actual_database" = "broker_platform" || { echo "Production database name mismatch"; exit 1; }
+            test "$actual_system_identifier" = "$PRODUCTION_PG_SYSTEM_IDENTIFIER" || { echo "Production database system identifier mismatch"; exit 1; }
+            [[ "$broker_rows" =~ ^[0-9]+$ ]] && [ "$broker_rows" -ge "$PRODUCTION_MIN_BROKER_ROWS" ] || {
+              echo "Production broker-row invariant failed"
+              exit 1
+            }
+            [[ "$database_size_bytes" =~ ^[1-9][0-9]{0,17}$ ]] || {
+              echo "Production database size is missing, zero, or outside the safe arithmetic range"
+              exit 1
+            }
+
+            if sudo -n test -L "$BACKUP_DIR"; then
+              echo "Backup directory must not be a symlink"
+              exit 1
+            fi
+            sudo -n install -d -m 0700 -o "$(id -u)" -g "$(id -g)" -- "$BACKUP_DIR"
+            resolved_backup_dir=$(readlink -f -- "$BACKUP_DIR")
+            test "$resolved_backup_dir" = "$BACKUP_DIR" || { echo "Backup directory resolution mismatch"; exit 1; }
+
+            available_bytes() {
+              df -P -B1 -- "$1" | awk 'NR == 2 { print $4 }'
+            }
+            require_uint() {
+              [[ "$1" =~ ^[0-9]+$ ]] || { echo "Backup metric is not an unsigned integer"; exit 1; }
+            }
+            require_headroom() {
+              available=$(available_bytes "$1")
+              require_uint "$available"
+              [ "$available" -ge "$MIN_AVAILABLE_BYTES" ] || {
+                echo "Production has less than 8 GiB available before a safe release"
+                exit 1
+              }
+            }
+
+            docker_root_reported=$(docker info --format '{{.DockerRootDir}}')
+            [[ "$docker_root_reported" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "DockerRootDir is not a safe absolute path"; exit 1; }
+            case "$docker_root_reported/" in *"/../"*|*"/./"*|*"//"*) echo "DockerRootDir contains an unsafe segment"; exit 1;; esac
+            docker_root=$(readlink -f -- "$docker_root_reported")
+            test -n "$docker_root" -a "$docker_root" != "/" -a -d "$docker_root" || { echo "Resolved DockerRootDir must be an existing absolute non-root directory"; exit 1; }
+
+            require_headroom /
+            require_headroom "$deploy_root"
+            require_headroom /tmp
+            require_headroom "$docker_root"
+            require_headroom "$BACKUP_DIR"
+
+            backup_available_before=$(available_bytes "$BACKUP_DIR")
+            require_uint "$backup_available_before"
+            required_backup_available_bytes=$((MIN_AVAILABLE_BYTES + database_size_bytes + BACKUP_SIZE_OVERHEAD_BYTES))
+            [ "$required_backup_available_bytes" -gt "$MIN_AVAILABLE_BYTES" ] \
+              && [ "$backup_available_before" -ge "$required_backup_available_bytes" ] || {
+                echo "Insufficient conservative headroom for a temporary production backup"
+                exit 1
+              }
+            backup_output_limit_bytes=$((backup_available_before - MIN_AVAILABLE_BYTES - BACKUP_SIZE_OVERHEAD_BYTES))
+            backup_output_limit_blocks=$((backup_output_limit_bytes / 1024))
+            [ "$backup_output_limit_blocks" -gt 0 ] || {
+              echo "Cannot establish a safe hard output limit for the production backup"
+              exit 1
+            }
+            ulimit -f "$backup_output_limit_blocks"
+
+            backup_final="$BACKUP_DIR/loyalty-predeploy-${EXPECTED_BACKUP_SHA}-run${EXPECTED_RUN_ID}-attempt${EXPECTED_RUN_ATTEMPT}.dump"
+            backup_checksum="$backup_final.sha256"
+            backup_temp=""
+            checksum_temp=""
+            cleanup_backup_temp() {
+              if [ -n "${backup_temp:-}" ]; then
+                case "$backup_temp" in
+                  "$BACKUP_DIR"/.partial."$EXPECTED_BACKUP_SHA"."$EXPECTED_RUN_ID"."$EXPECTED_RUN_ATTEMPT".??????) rm -f -- "$backup_temp" ;;
+                  *) echo "Refusing to remove an unexpected backup temp path" >&2 ;;
+                esac
+              fi
+              if [ -n "${checksum_temp:-}" ]; then
+                case "$checksum_temp" in
+                  "$BACKUP_DIR"/.partial-checksum."$EXPECTED_BACKUP_SHA"."$EXPECTED_RUN_ID"."$EXPECTED_RUN_ATTEMPT".??????) rm -f -- "$checksum_temp" ;;
+                  *) echo "Refusing to remove an unexpected checksum temp path" >&2 ;;
+                esac
+              fi
+            }
+            trap cleanup_backup_temp EXIT
+            if test -e "$backup_final" || test -e "$backup_checksum"; then
+              echo "This exact workflow backup already exists"
+              exit 1
+            fi
+            backup_temp=$(mktemp --tmpdir="$BACKUP_DIR" \
+              ".partial.${EXPECTED_BACKUP_SHA}.${EXPECTED_RUN_ID}.${EXPECTED_RUN_ATTEMPT}.XXXXXX")
+            chmod 0600 -- "$backup_temp"
+
+            docker exec st-michael-postgres pg_dump \
+              --username=postgres \
+              --dbname=broker_platform \
+              --format=custom \
+              --no-owner > "$backup_temp"
+            test -s "$backup_temp" || { echo "Backup dump is empty"; exit 1; }
+
+            docker exec -i st-michael-postgres pg_restore --list \
+              < "$backup_temp" >/dev/null
+            docker exec -i st-michael-postgres pg_restore \
+              --exit-on-error --no-owner --file=/dev/null < "$backup_temp"
+
+            backup_size_bytes=$(stat -c %s -- "$backup_temp")
+            backup_sha256=$(sha256sum -- "$backup_temp" | awk '{print $1}')
+            require_uint "$backup_size_bytes"
+            [ "$backup_size_bytes" -gt 0 ] || { echo "Backup size is zero"; exit 1; }
+            [ "$backup_size_bytes" -le "$backup_output_limit_bytes" ] || { echo "Backup exceeded its hard safety bound"; exit 1; }
+            [[ "$backup_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "Backup SHA-256 is invalid"; exit 1; }
+
+            checksum_temp=$(mktemp --tmpdir="$BACKUP_DIR" \
+              ".partial-checksum.${EXPECTED_BACKUP_SHA}.${EXPECTED_RUN_ID}.${EXPECTED_RUN_ATTEMPT}.XXXXXX")
+            chmod 0600 -- "$checksum_temp"
+            printf '%s\n' "$backup_sha256" > "$checksum_temp"
+            test "$(< "$checksum_temp")" = "$backup_sha256" || { echo "Backup checksum sidecar verification failed"; exit 1; }
+
+            sync -f -- "$backup_temp"
+            sync -f -- "$checksum_temp"
+
+            require_headroom /
+            require_headroom "$deploy_root"
+            require_headroom /tmp
+            require_headroom "$docker_root"
+            require_headroom "$BACKUP_DIR"
+
+            mv -n -T -- "$checksum_temp" "$backup_checksum"
+            test ! -e "$checksum_temp" \
+              && test -f "$backup_checksum" \
+              && test ! -L "$backup_checksum" || {
+              echo "Atomic backup checksum publication failed"
+              exit 1
+              }
+            checksum_temp=""
+            mv -n -T -- "$backup_temp" "$backup_final"
+            test ! -e "$backup_temp" \
+              && test -f "$backup_final" \
+              && test ! -L "$backup_final" || {
+              echo "Atomic backup publication failed"
+              exit 1
+            }
+            backup_temp=""
+            sync -f -- "$BACKUP_DIR"
+            chmod 0600 -- "$backup_final"
+            chmod 0600 -- "$backup_checksum"
+            final_size_bytes=$(stat -c %s -- "$backup_final")
+            final_sha256=$(sha256sum -- "$backup_final" | awk '{print $1}')
+            test "$final_size_bytes" = "$backup_size_bytes" || { echo "Published backup size changed"; exit 1; }
+            test "$final_sha256" = "$backup_sha256" || { echo "Published backup SHA-256 changed"; exit 1; }
+            test "$(< "$backup_checksum")" = "$final_sha256" || { echo "Published backup checksum sidecar mismatch"; exit 1; }
+
+            require_headroom /
+            require_headroom "$deploy_root"
+            require_headroom /tmp
+            require_headroom "$docker_root"
+            require_headroom "$BACKUP_DIR"
+
+            printf 'backup_size_bytes=%s\n' "$final_size_bytes"
+            printf 'backup_sha256=%s\n' "$final_sha256"
+          REMOTE

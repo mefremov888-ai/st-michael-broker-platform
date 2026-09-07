@@ -1,0 +1,95 @@
+name: Apply display names backfill
+
+# 2026-09-07: бэкфилл Broker.display_name — «имя для работы» для КЦ.
+# Источники по приоритету: здоровое своё fullName → ФИО из старого
+# кабинета по телефону (data-ветка) → имя контакта amoCRM (280мс пауза).
+# Уже заполненный display_name скрипт НЕ перезаписывает (защита ручных
+# правок КЦ, идемпотентность повторных прогонов).
+#
+# Данные — в data-ветке (data/old-cabinet-names.json из выгрузки старого
+# кабинета brokers.xlsx, 2 325 строк), скрипт — в master
+# (scripts/backfill-display-names.js).
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (отчёт + сэмпл 50 amo-запросов).
+# Если в dry-run кандидатов amo-фазы >3000 — гонять APPLY порциями через
+# amo_offset/amo_limit (напр. 0/3000, затем 3000/3000, ...): скрипт
+# берёт только брокеров без display_name, порции не пересекаются.
+#
+# Запуск: Actions → "Apply display names backfill" → Run workflow
+# (сначала dry_run=true, проверить счётчики и примеры «было → станет»,
+# затем dry_run=false + confirm_apply=true).
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_branch:
+        description: Branch with data/old-cabinet-names.json
+        required: true
+        default: data/display-names-20260907
+        type: string
+      dry_run:
+        description: 'Dry-run (только отчёт, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+      amo_offset:
+        description: 'amo-фаза: пропустить первых N кандидатов (порционная обработка)'
+        required: false
+        default: '0'
+        type: string
+      amo_limit:
+        description: 'amo-фаза: максимум запросов за прогон (пусто = все; dry-run без лимита сэмплит 50)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Backfill display names on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: SSH and run backfill
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DATA_BRANCH: ${{ inputs.data_branch }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+          AMO_OFFSET: ${{ inputs.amo_offset }}
+          AMO_LIMIT: ${{ inputs.amo_limit }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 55m
+          envs: DATA_BRANCH,DRY_RUN_INPUT,CONFIRM_APPLY,AMO_OFFSET,AMO_LIMIT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin "$DATA_BRANCH"
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show "origin/$DATA_BRANCH:data/old-cabinet-names.json" > /tmp/old-cabinet-names.json
+            git show origin/master:scripts/backfill-display-names.js > /tmp/backfill-display-names.js
+            docker cp /tmp/old-cabinet-names.json st-michael-api:/app/old-cabinet-names.json
+            docker cp /tmp/backfill-display-names.js st-michael-api:/app/scripts/backfill-display-names.js
+            MODE=dry
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=apply; fi
+            EXTRA=""
+            if [ "$MODE" = "apply" ]; then EXTRA="--apply"; echo "=== APPLY (запись в БД) ==="; else echo "=== DRY-RUN (без записи) ==="; fi
+            if [ -n "$AMO_OFFSET" ] && [ "$AMO_OFFSET" != "0" ]; then EXTRA="$EXTRA --amo-offset $AMO_OFFSET"; fi
+            if [ -n "$AMO_LIMIT" ]; then EXTRA="$EXTRA --amo-limit $AMO_LIMIT"; fi
+            docker compose exec -T api node /app/scripts/backfill-display-names.js /app/old-cabinet-names.json $EXTRA
+            echo "=== Готово (режим: $MODE) ==="

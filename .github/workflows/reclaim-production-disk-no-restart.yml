@@ -1,0 +1,171 @@
+name: Reclaim production disk (no restart)
+
+# One-purpose production maintenance gate for the loyalty release. It may only
+# vacuum archived journald history down to 300 MB and prune dangling Docker
+# images. It never touches databases, volumes, build cache, tagged images,
+# containers, the deploy worktree, or running services.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_cleanup:
+        description: Confirm journal vacuum to 300 MB and dangling-image prune only
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reclaim:
+    name: Reclaim only approved production disk space
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Verify host and run no-restart cleanup
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          CONFIRM_CLEANUP: ${{ inputs.confirm_cleanup }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_CLEANUP" = "true" || { echo "Explicit cleanup confirmation is required"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Cleanup is restricted to the canonical repository"; exit 1; }
+          test "$EXPECTED_REF" = "refs/heads/master" || { echo "Cleanup is restricted to master"; exit 1; }
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH'" <<'REMOTE'
+          set -euo pipefail
+          export LC_ALL=C
+          MIN_AVAILABLE_BYTES=8589934592
+          deploy_path=$1
+
+          command -v df >/dev/null
+          command -v docker >/dev/null
+          command -v flock >/dev/null
+          command -v journalctl >/dev/null
+          command -v readlink >/dev/null
+          command -v sudo >/dev/null
+
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing absolute non-root directory"; exit 1; }
+
+          exec 9>/tmp/st-michael-production-deploy.lock
+          if ! flock -n 9; then
+            echo "Another production deploy/migration process holds the server lock"
+            exit 1
+          fi
+
+          available_bytes() {
+            df -P -B1 -- "$1" | awk 'NR == 2 { print $4 }'
+          }
+
+          require_uint() {
+            [[ "$1" =~ ^[0-9]+$ ]] || { echo "Disk metric is not an unsigned integer"; exit 1; }
+          }
+
+          docker_root_reported=$(docker info --format '{{.DockerRootDir}}')
+          [[ "$docker_root_reported" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "DockerRootDir is not a safe absolute path"; exit 1; }
+          case "$docker_root_reported/" in *"/../"*|*"/./"*|*"//"*) echo "DockerRootDir contains an unsafe segment"; exit 1;; esac
+          docker_root=$(readlink -f -- "$docker_root_reported")
+          test -n "$docker_root" -a "$docker_root" != "/" -a -d "$docker_root" || { echo "Resolved DockerRootDir must be an existing absolute non-root directory"; exit 1; }
+
+          root_before=$(available_bytes /)
+          deploy_before=$(available_bytes "$deploy_root")
+          release_context_before=$(available_bytes /tmp)
+          docker_before=$(available_bytes "$docker_root")
+          require_uint "$root_before"
+          require_uint "$deploy_before"
+          require_uint "$release_context_before"
+          require_uint "$docker_before"
+          dangling_before=$(docker image ls -q --filter dangling=true | sort -u | wc -l | tr -d '[:space:]')
+          require_uint "$dangling_before"
+
+          printf 'root_available_bytes_before=%s\n' "$root_before"
+          printf 'deploy_available_bytes_before=%s\n' "$deploy_before"
+          printf 'release_context_available_bytes_before=%s\n' "$release_context_before"
+          printf 'docker_root_available_bytes_before=%s\n' "$docker_before"
+          printf 'dangling_images_before=%s\n' "$dangling_before"
+
+          if [ "$root_before" -ge "$MIN_AVAILABLE_BYTES" ] \
+            && [ "$deploy_before" -ge "$MIN_AVAILABLE_BYTES" ] \
+            && [ "$release_context_before" -ge "$MIN_AVAILABLE_BYTES" ] \
+            && [ "$docker_before" -ge "$MIN_AVAILABLE_BYTES" ]; then
+            cleanup_performed=false
+            cleanup_reason=already_sufficient
+            root_after=$root_before
+            deploy_after=$deploy_before
+            release_context_after=$release_context_before
+            docker_after=$docker_before
+            dangling_after=$dangling_before
+          else
+            sudo -n journalctl --vacuum-size=300M >/dev/null 2>&1
+            docker image prune -f >/dev/null
+
+            cleanup_performed=true
+            cleanup_reason=below_threshold
+            root_after=$(available_bytes /)
+            deploy_after=$(available_bytes "$deploy_root")
+            release_context_after=$(available_bytes /tmp)
+            docker_after=$(available_bytes "$docker_root")
+            require_uint "$root_after"
+            require_uint "$deploy_after"
+            require_uint "$release_context_after"
+            require_uint "$docker_after"
+            dangling_after=$(docker image ls -q --filter dangling=true | sort -u | wc -l | tr -d '[:space:]')
+            require_uint "$dangling_after"
+          fi
+
+          printf 'cleanup_performed=%s\n' "$cleanup_performed"
+          printf 'cleanup_reason=%s\n' "$cleanup_reason"
+          printf 'root_available_bytes_after=%s\n' "$root_after"
+          printf 'deploy_available_bytes_after=%s\n' "$deploy_after"
+          printf 'release_context_available_bytes_after=%s\n' "$release_context_after"
+          printf 'docker_root_available_bytes_after=%s\n' "$docker_after"
+          printf 'dangling_images_after=%s\n' "$dangling_after"
+
+          if [ "$root_after" -lt "$MIN_AVAILABLE_BYTES" ] \
+            || [ "$deploy_after" -lt "$MIN_AVAILABLE_BYTES" ] \
+            || [ "$release_context_after" -lt "$MIN_AVAILABLE_BYTES" ] \
+            || [ "$docker_after" -lt "$MIN_AVAILABLE_BYTES" ]; then
+            echo "cleanup_threshold_satisfied=false"
+            echo "Approved cleanup completed, but production still has less than 8 GiB available" >&2
+            exit 1
+          fi
+          echo "cleanup_threshold_satisfied=true"
+          REMOTE

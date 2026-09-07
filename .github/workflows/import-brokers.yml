@@ -1,0 +1,103 @@
+name: Import brokers from Google Sheet
+
+# Ручной запуск из GitHub Actions UI:
+# Actions → "Import brokers from Google Sheet" → Run workflow → выбрать параметры.
+#
+# Скрипт читает таблицу через Google Service Account, поэтому ничего пересылать
+# не нужно — только нажать кнопку. Креденшелы Service Account живут на сервере
+# в .env (переменная GOOGLE_SERVICE_ACCOUNT_JSON).
+#
+# По умолчанию запускается в режиме --dry-run (ничего не пишет, только показывает
+# план). Чтобы реально записать в БД — поставить dry-run = false.
+
+on:
+  # 2026-07-06: авто-синк из Google Sheets — КЦ продолжает вести базу в
+  # таблице. Каждую ночь в 02:00 UTC = 05:00 МСК подтягиваем изменения:
+  # категории (COLD/WARM/HOT/…), флаг «не звонить», добавляем новых.
+  # Скрипт не затирает то, что брокер сам ввёл в кабинете.
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: 'BrokerCategory фильтр (ALL, COLD, WARM, HOT, CONVERTED, ON_BOT_REVIEW, BLACKLIST или через запятую)'
+        required: true
+        default: 'ALL'
+      call_flag:
+        description: 'Фильтр по столбцу ЗВОНОК (да, в работе, обработан — через запятую). Пусто = без фильтра.'
+        required: false
+        default: 'да'
+      dry_run:
+        description: 'Dry-run (ничего не пишет в БД, только показывает план)'
+        required: true
+        type: boolean
+        default: true
+      limit:
+        description: 'Ограничить N строк (для тестов). Пусто = без лимита.'
+        required: false
+        default: ''
+      include_coords:
+        description: 'Импортировать также лист координаторов'
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: import-brokers
+  cancel-in-progress: false
+
+jobs:
+  import:
+    name: Run import on production server
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Show parameters
+        run: |
+          echo "event:          ${{ github.event_name }}"
+          echo "filter:         ${{ inputs.filter || 'ALL (default)' }}"
+          echo "call_flag:      ${{ inputs.call_flag || 'да (default)' }}"
+          echo "dry_run:        ${{ inputs.dry_run || 'false (default)' }}"
+          echo "limit:          ${{ inputs.limit || '(no limit)' }}"
+          echo "include_coords: ${{ inputs.include_coords || 'false (default)' }}"
+
+      - name: SSH to server and run import
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: FILTER,CALL_FLAG,DRY_RUN,LIMIT,INCLUDE_COORDS
+          script: |
+            set -e
+            # 2026-07-06: при ночном cron-запуске inputs.* пустые → fallback:
+            #   filter=ALL, call_flag=да, dry_run=false, без лимита, без координаторов.
+            # Для ручного запуска через UI берём значения из формы.
+            FILTER="${{ inputs.filter || 'ALL' }}"
+            CALL_FLAG="${{ inputs.call_flag || 'да' }}"
+            DRY_RUN="${{ inputs.dry_run || 'false' }}"
+            LIMIT="${{ inputs.limit }}"
+            INCLUDE_COORDS="${{ inputs.include_coords || 'false' }}"
+
+            ARGS="--filter $FILTER"
+            if [ -n "$CALL_FLAG" ]; then
+              ARGS="$ARGS --call-flag \"$CALL_FLAG\""
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              ARGS="$ARGS --dry-run"
+            fi
+            if [ -n "$LIMIT" ]; then
+              ARGS="$ARGS --limit $LIMIT"
+            fi
+            if [ "$INCLUDE_COORDS" = "true" ]; then
+              ARGS="$ARGS --include-coords"
+            fi
+
+            echo "=== Args: $ARGS ==="
+            echo "=== Запуск import-brokers-from-gsheet.js в контейнере api ==="
+            cd ${{ secrets.DEPLOY_PATH }}
+            eval "docker compose exec -T api node /app/scripts/import-brokers-from-gsheet.js $ARGS"
+            echo "=== Готово ==="

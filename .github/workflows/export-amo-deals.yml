@@ -1,0 +1,40 @@
+name: Export amo deals (DDU analytics)
+
+# 2026-09-04: разовая read-only выгрузка сделок из amoCRM с полями договора
+# (№, дата, тип, стоимость в ДДУ) для сквозной аналитики: сшивка amo ↔
+# Google-реестр продаж ↔ старая база кабинета. Ничего не пишет ни в amo,
+# ни в БД. ФИО и телефоны не выгружаются. Результат — NDJSON в логе ран-а
+# между маркерами ===EXPORT-BEGIN=== / ===EXPORT-END===.
+#
+# Запуск: Actions → "Export amo deals (DDU analytics)" → Run workflow.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: export-amo-deals
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Run export on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: SSH and run export
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 55m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/export-amo-deals.js > /tmp/export-amo-deals.js
+            docker cp /tmp/export-amo-deals.js st-michael-api:/app/scripts/export-amo-deals.js
+            docker compose exec -T api node /app/scripts/export-amo-deals.js
+            echo "=== Готово ==="

@@ -1,0 +1,341 @@
+name: Apply production amo broker-contact provisioning (PII-safe one-shot)
+
+# One-off repair for the exact reviewed exhausted-fixation cohort. The action
+# streams two exact master files into the already deployed API container after
+# public SHA, canonical checkout, container SHA and SSH-host attestation. It
+# does not deploy code, retry fixation rows or mutate Client/lead records.
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type PROVISION_AMO_BROKER_CONTACTS exactly
+        required: true
+        type: string
+      confirm_exact_sha:
+        description: Type the exact 40-character master SHA being dispatched
+        required: true
+        type: string
+      reviewed_inspector_run_id:
+        description: Exact reviewed successful inspector run ID for this master SHA
+        required: true
+        type: string
+      expected_cohort_digest:
+        description: Exact 64-character HMAC digest from the reviewed inspector output
+        required: true
+        type: string
+      expected_count_manifest:
+        description: Exact canonical 22-count manifest from the reviewed inspector (colon-separated)
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  apply:
+    name: Provision exact reviewed broker contacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Checkout exact provisioner source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Attest exact production state and apply one-shot provisioning
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ github.sha }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+          HEALTH_URL: https://broker.stmichael.ru/api/health
+          GH_TOKEN: ${{ github.token }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          PROVISION_CONFIRMATION: ${{ inputs.confirmation }}
+          PROVISION_CONFIRM_EXACT_SHA: ${{ inputs.confirm_exact_sha }}
+          PROVISION_REVIEWED_PLAN_RUN_ID: ${{ inputs.reviewed_inspector_run_id }}
+          PROVISION_EXPECTED_COHORT_DIGEST: ${{ inputs.expected_cohort_digest }}
+          PROVISION_EXPECTED_COUNT_MANIFEST: ${{ inputs.expected_count_manifest }}
+          COHORT_ATTESTATION_KEY: ${{ secrets.BROKER_CONTACT_COHORT_ATTESTATION_KEY }}
+          BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Provisioner is restricted to the canonical repository"; exit 1; }
+          test "$EXPECTED_REF" = "refs/heads/master" || { echo "Provisioner is restricted to master"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid provisioner SHA"; exit 1; }
+          test "$PROVISION_CONFIRMATION" = "PROVISION_AMO_BROKER_CONTACTS" || { echo "Exact provisioning confirmation is required"; exit 1; }
+          test "$PROVISION_CONFIRM_EXACT_SHA" = "$EXPECTED_SHA" || { echo "Exact SHA confirmation does not match the dispatched source"; exit 1; }
+          [[ "$PROVISION_REVIEWED_PLAN_RUN_ID" =~ ^[1-9][0-9]{5,19}$ ]] || { echo "Reviewed inspector run ID is invalid"; exit 1; }
+          [[ "$PROVISION_EXPECTED_COHORT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected cohort attestation digest is invalid"; exit 1; }
+          test "$(printf '%s' "$COHORT_ATTESTATION_KEY" | wc -c)" -ge 32 || { echo "Cohort attestation secret is missing or invalid"; exit 1; }
+          test "$(printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" | wc -c)" -ge 32 || { echo "Broker contact gate secret is missing or invalid"; exit 1; }
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          count_manifest=$PROVISION_EXPECTED_COUNT_MANIFEST
+          [[ "$count_manifest" =~ ^(0|[1-9][0-9]{0,5})(:(0|[1-9][0-9]{0,5})){21}$ ]] || { echo "Invalid exact-count manifest"; exit 1; }
+
+          apply_path=scripts/apply-amo-broker-contact-provisioning.js
+          inspector_path=scripts/inspect-amo-broker-link-repair-plan.js
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || { echo "Checked-out source is not the dispatched exact SHA"; exit 1; }
+          for source_path in "$apply_path" "$inspector_path"; do
+            test -f "$source_path" -a ! -L "$source_path" || { echo "Provisioning source is missing or unsafe"; exit 1; }
+          done
+          apply_sha=$(sha256sum -- "$apply_path" | awk '{print $1}')
+          inspector_sha=$(sha256sum -- "$inspector_path" | awk '{print $1}')
+          [[ "$apply_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid provisioner source hash"; exit 1; }
+          [[ "$inspector_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
+
+          for required_tool in base64 curl date gh jq tar wc; do
+            command -v "$required_tool" >/dev/null || { echo "Required source-attestation tool is missing"; exit 1; }
+          done
+          health_body=$(curl --fail --silent --show-error --max-time 15 --proto '=https' --tlsv1.2 "$HEALTH_URL")
+          deployed_sha=$(printf '%s' "$health_body" | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')
+          unset health_body
+          test "$deployed_sha" = "$EXPECTED_SHA" || { echo "Mutation requires public production to run the exact dispatched master SHA"; exit 1; }
+          compare_status=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$EXPECTED_SHA" \
+            --jq '.status')
+          test "$compare_status" = "identical" || { echo "Public production and exact master source differ"; exit 1; }
+          reviewed_run=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$EXPECTED_REPOSITORY/actions/runs/$PROVISION_REVIEWED_PLAN_RUN_ID")
+          test "$(jq -er '.id | tostring' <<<"$reviewed_run")" = "$PROVISION_REVIEWED_PLAN_RUN_ID" || { echo "Reviewed inspector run identity mismatch"; exit 1; }
+          test "$(jq -er '.repository.full_name' <<<"$reviewed_run")" = "$CANONICAL_REPOSITORY" || { echo "Reviewed inspector run repository mismatch"; exit 1; }
+          test "$(jq -er '.head_repository.full_name' <<<"$reviewed_run")" = "$CANONICAL_REPOSITORY" || { echo "Reviewed inspector run head repository mismatch"; exit 1; }
+          test "$(jq -er '.path' <<<"$reviewed_run")" = ".github/workflows/inspect-production-amo-broker-contact-provisioning-plan.yml" || { echo "Reviewed inspector workflow path mismatch"; exit 1; }
+          test "$(jq -er '.event' <<<"$reviewed_run")" = "workflow_dispatch" || { echo "Reviewed inspector run event mismatch"; exit 1; }
+          test "$(jq -er '.status' <<<"$reviewed_run")" = "completed" || { echo "Reviewed inspector run is incomplete"; exit 1; }
+          test "$(jq -er '.conclusion' <<<"$reviewed_run")" = "success" || { echo "Reviewed inspector run did not succeed"; exit 1; }
+          test "$(jq -er '.head_branch' <<<"$reviewed_run")" = "master" || { echo "Reviewed inspector run branch mismatch"; exit 1; }
+          test "$(jq -er '.head_sha' <<<"$reviewed_run")" = "$EXPECTED_SHA" || { echo "Reviewed inspector run SHA mismatch"; exit 1; }
+          test "$(jq -er '.run_attempt' <<<"$reviewed_run")" = "1" || { echo "Reviewed inspector run must be its first attempt"; exit 1; }
+          reviewed_run_created_at=$(jq -er '.created_at | select(type == "string")' <<<"$reviewed_run")
+          reviewed_run_epoch=$(date -u -d "$reviewed_run_created_at" +%s) || { echo "Reviewed inspector run timestamp is invalid"; exit 1; }
+          current_epoch=$(date -u +%s)
+          reviewed_run_age_seconds=$((current_epoch - reviewed_run_epoch))
+          test "$reviewed_run_age_seconds" -ge 0 -a "$reviewed_run_age_seconds" -le 86400 || { echo "Reviewed inspector run must be less than 24 hours old"; exit 1; }
+          unset reviewed_run reviewed_run_created_at reviewed_run_epoch current_epoch reviewed_run_age_seconds compare_status GH_TOKEN
+
+          runner_temp=${RUNNER_TEMP:-/tmp}
+          test -d "$runner_temp" -a ! -L "$runner_temp" || { echo "Runner temp directory is missing or unsafe"; exit 1; }
+          ssh_root=$(mktemp -d "$runner_temp/st-michael-amo-broker-contact-apply.XXXXXX")
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          attestation_key="$ssh_root/cohort-attestation.key"
+          gate_key="$ssh_root/broker-contact-gate.key"
+          trap 'rm -f -- "$known_hosts" "$private_key" "$attestation_key" "$gate_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          printf '%s' "$COHORT_ATTESTATION_KEY" > "$attestation_key"
+          printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" > "$gate_key"
+          unset COHORT_ATTESTATION_KEY
+          unset BROKER_CONTACT_GATE_HMAC_KEY
+          chmod 600 "$private_key"
+          chmod 600 "$attestation_key"
+          chmod 600 "$gate_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          # The delimiter contains characters outside the base64 alphabet, so
+          # neither exact source file can terminate the streamed bundle early.
+          {
+            cat <<'REMOTE_PREFIX'
+          set -euo pipefail
+          export LC_ALL=C
+          deploy_path=$1
+          expected_apply_sha=$2
+          expected_inspector_sha=$3
+          expected_deployed_sha=$4
+          expected_source_sha=$5
+          confirmation=$6
+          confirm_sha=$7
+          reviewed_plan_run_id=$8
+          count_manifest=$9
+          expected_cohort_digest=${10}
+          canonical_origin=https://github.com/sereganikitin/st-michael-broker-platform.git
+
+          for required_tool in base64 docker flock git readlink; do
+            command -v "$required_tool" >/dev/null || { echo "Required production tool is missing"; exit 1; }
+          done
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$expected_apply_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid provisioner source hash"; exit 1; }
+          [[ "$expected_inspector_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid inspector source hash"; exit 1; }
+          [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid deployed SHA"; exit 1; }
+          test "$expected_source_sha" = "$expected_deployed_sha" || { echo "Source and deployed SHA differ"; exit 1; }
+          test "$confirmation" = "PROVISION_AMO_BROKER_CONTACTS" || { echo "Exact provisioning confirmation is missing"; exit 1; }
+          test "$confirm_sha" = "$expected_source_sha" || { echo "Exact SHA confirmation is missing"; exit 1; }
+          [[ "$reviewed_plan_run_id" =~ ^[1-9][0-9]{5,19}$ ]] || { echo "Reviewed inspector run ID is invalid"; exit 1; }
+          [[ "$count_manifest" =~ ^(0|[1-9][0-9]{0,5})(:(0|[1-9][0-9]{0,5})){21}$ ]] || { echo "Invalid exact-count manifest"; exit 1; }
+          [[ "$expected_cohort_digest" =~ ^[0-9a-f]{64}$ ]] || { echo "Expected cohort attestation digest is invalid"; exit 1; }
+
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != "/" -a -d "$deploy_root" || { echo "Resolved deploy path must be an existing absolute non-root directory"; exit 1; }
+          test -f /tmp/st-michael-production-deploy.lock -a ! -L /tmp/st-michael-production-deploy.lock || { echo "Production deploy lock is missing or unsafe"; exit 1; }
+          exec 9</tmp/st-michael-production-deploy.lock
+          flock -x -n 9 || { echo "Another production operation holds the exclusive lock"; exit 1; }
+
+          cd -- "$deploy_root"
+          test "$(git rev-parse --show-toplevel 2>/dev/null)" = "$deploy_root" || { echo "Deploy path is not the repository root"; exit 1; }
+          test "$(git remote get-url origin)" = "$canonical_origin" || { echo "Production origin is not canonical"; exit 1; }
+          test "$(git symbolic-ref --short HEAD 2>/dev/null)" = "master" || { echo "Production checkout is not on master"; exit 1; }
+          production_sha=$(git rev-parse HEAD)
+          test "$production_sha" = "$expected_deployed_sha" || { echo "Production checkout differs from public health attestation"; exit 1; }
+          test "$(git rev-parse refs/heads/master)" = "$production_sha" || { echo "Production master and checkout differ"; exit 1; }
+
+          test "$(docker inspect --format '{{.State.Running}}' st-michael-api 2>/dev/null)" = "true" || { echo "Production API container is not running"; exit 1; }
+          test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' st-michael-api 2>/dev/null)" = "api" || { echo "Unexpected production API container"; exit 1; }
+          container_sha=$(docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')
+          test "$container_sha" = "$production_sha" || { echo "Production API image and checkout differ"; exit 1; }
+
+          base64 -d <<'PII_SAFE_AMO_BROKER_CONTACT_APPLY_BUNDLE' | docker exec -i st-michael-api sh -c '
+            set -eu
+            expected_apply_sha=$1
+            expected_inspector_sha=$2
+            source_sha=$3
+            confirmation=$4
+            confirm_sha=$5
+            reviewed_plan_run_id=$6
+            count_manifest=$7
+            expected_cohort_digest=$8
+            for required_tool in cat mktemp node rm rmdir sha256sum tar wc; do
+              command -v "$required_tool" >/dev/null || exit 1
+            done
+            test -n "${DATABASE_URL:-}"
+            test -n "${AMO_ACCESS_TOKEN:-}"
+            case "$expected_apply_sha$expected_inspector_sha" in ""|*[!0-9a-f]*) exit 1;; esac
+            test "${#expected_apply_sha}" -eq 64
+            test "${#expected_inspector_sha}" -eq 64
+            case "$source_sha$confirm_sha" in ""|*[!0-9a-f]*) exit 1;; esac
+            test "${#source_sha}" -eq 40
+            test "$confirm_sha" = "$source_sha"
+            test "$confirmation" = "PROVISION_AMO_BROKER_CONTACTS"
+            case "$reviewed_plan_run_id" in ""|*[!0-9]*) exit 1;; esac
+            test "${#reviewed_plan_run_id}" -ge 6 -a "${#reviewed_plan_run_id}" -le 20
+            test "${reviewed_plan_run_id#0}" = "$reviewed_plan_run_id"
+            case "$count_manifest" in ""|*[!0-9:]*) exit 1;; esac
+            case "$expected_cohort_digest" in ""|*[!0-9a-f]*) exit 1;; esac
+            test "${#expected_cohort_digest}" -eq 64
+
+            old_ifs=$IFS
+            IFS=:
+            set -- $count_manifest
+            IFS=$old_ifs
+            test "$#" -eq 22
+            for expected_count in "$@"; do
+              case "$expected_count" in
+                0|[1-9]|[1-9][0-9]*) ;;
+                *) exit 1 ;;
+              esac
+              test "${#expected_count}" -le 6
+            done
+            unset expected_count
+            export EXPECTED_QUEUE_ROWS=$1
+            export EXPECTED_EFFECTIVE_BROKER_GROUPS=$2
+            export EXPECTED_LINK_EXISTING_BROKER_CONTACT_GROUPS=$3
+            export EXPECTED_LINK_EXISTING_BROKER_CONTACT_ROWS=$4
+            export EXPECTED_PROMOTE_EXISTING_CONTACT_CANDIDATE_GROUPS=$5
+            export EXPECTED_PROMOTE_EXISTING_CONTACT_CANDIDATE_ROWS=$6
+            export EXPECTED_CREATE_CONTACT_CANDIDATE_GROUPS=$7
+            export EXPECTED_CREATE_CONTACT_CANDIDATE_ROWS=$8
+            export EXPECTED_ALREADY_LINKED_GROUPS=$9
+            shift 9
+            export EXPECTED_ALREADY_LINKED_ROWS=$1
+            export EXPECTED_EFFECTIVE_BROKER_MISSING_GROUPS=$2
+            export EXPECTED_EFFECTIVE_BROKER_MISSING_ROWS=$3
+            export EXPECTED_BROKER_MERGED_GROUPS=$4
+            export EXPECTED_BROKER_MERGED_ROWS=$5
+            export EXPECTED_NO_VALID_PHONE_GROUPS=$6
+            export EXPECTED_NO_VALID_PHONE_ROWS=$7
+            export EXPECTED_DB_PHONE_AMBIGUOUS_GROUPS=$8
+            export EXPECTED_DB_PHONE_AMBIGUOUS_ROWS=$9
+            shift 9
+            export EXPECTED_AMBIGUOUS_EXACT_CONTACTS_GROUPS=$1
+            export EXPECTED_AMBIGUOUS_EXACT_CONTACTS_ROWS=$2
+            export EXPECTED_CANDIDATE_ALREADY_BOUND_GROUPS=$3
+            export EXPECTED_CANDIDATE_ALREADY_BOUND_ROWS=$4
+
+            umask 077
+            temp_root=$(mktemp -d /app/scripts/.apply-amo-broker-contact-provisioning.XXXXXX)
+            apply_script="$temp_root/apply-amo-broker-contact-provisioning.js"
+            inspector_script="$temp_root/inspect-amo-broker-link-repair-plan.js"
+            attestation_key_file="$temp_root/cohort-attestation.key"
+            gate_key_file="$temp_root/broker-contact-gate.key"
+            cleanup() {
+              rm -f -- "$apply_script" "$inspector_script" "$attestation_key_file" "$gate_key_file"
+              rmdir -- "$temp_root" 2>/dev/null || true
+            }
+            trap cleanup EXIT HUP INT TERM
+            tar -xf - -C "$temp_root"
+            set -- "$temp_root"/*
+            test "$#" -eq 4
+            test -f "$apply_script" -a ! -L "$apply_script"
+            test -f "$inspector_script" -a ! -L "$inspector_script"
+            test -f "$attestation_key_file" -a ! -L "$attestation_key_file"
+            test -f "$gate_key_file" -a ! -L "$gate_key_file"
+            test "$(wc -c < "$attestation_key_file")" -ge 32
+            test "$(wc -c < "$gate_key_file")" -ge 32
+            runtime_gate_hash=$(printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" | sha256sum)
+            runtime_gate_hash=${runtime_gate_hash%% *}
+            file_gate_hash=$(sha256sum "$gate_key_file")
+            file_gate_hash=${file_gate_hash%% *}
+            test "$runtime_gate_hash" = "$file_gate_hash"
+            unset BROKER_CONTACT_GATE_HMAC_KEY runtime_gate_hash file_gate_hash
+            actual_apply_sha=$(sha256sum "$apply_script")
+            actual_apply_sha=${actual_apply_sha%% *}
+            actual_inspector_sha=$(sha256sum "$inspector_script")
+            actual_inspector_sha=${actual_inspector_sha%% *}
+            test "$actual_apply_sha" = "$expected_apply_sha"
+            test "$actual_inspector_sha" = "$expected_inspector_sha"
+
+            BROKER_CONTACT_PLAN_MODULE="$inspector_script" \
+            BROKER_CONTACT_COHORT_ATTESTATION_KEY_FILE="$attestation_key_file" \
+            BROKER_CONTACT_GATE_HMAC_KEY_FILE="$gate_key_file" \
+            BROKER_CONTACT_INSPECTOR_SHA256="$expected_inspector_sha" \
+            BROKER_CONTACT_DEPLOYED_GIT_SHA="$source_sha" \
+            PROVISION_EXPECTED_COHORT_DIGEST="$expected_cohort_digest" \
+            PROVISION_CONFIRMATION="$confirmation" \
+            PROVISION_CONFIRM_EXACT_SHA="$confirm_sha" \
+            PROVISION_REVIEWED_PLAN_RUN_ID="$reviewed_plan_run_id" \
+            PROVISION_SOURCE_SHA="$source_sha" \
+            node "$apply_script"
+          ' provisioner "$expected_apply_sha" "$expected_inspector_sha" "$expected_source_sha" "$confirmation" "$confirm_sha" "$reviewed_plan_run_id" "$count_manifest" "$expected_cohort_digest"
+          REMOTE_PREFIX
+            tar -cf - -C scripts \
+              apply-amo-broker-contact-provisioning.js \
+              inspect-amo-broker-link-repair-plan.js \
+              -C "$ssh_root" cohort-attestation.key broker-contact-gate.key | base64 -w 0
+            printf '\nPII_SAFE_AMO_BROKER_CONTACT_APPLY_BUNDLE\n'
+          } | timeout --foreground 28m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$apply_sha' '$inspector_sha' '$deployed_sha' '$EXPECTED_SHA' '$PROVISION_CONFIRMATION' '$PROVISION_CONFIRM_EXACT_SHA' '$PROVISION_REVIEWED_PLAN_RUN_ID' '$count_manifest' '$PROVISION_EXPECTED_COHORT_DIGEST'"

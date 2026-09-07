@@ -1,0 +1,258 @@
+name: Проверка работы кабинета брокера
+
+# The public check runs on a GitHub runner, so it still alerts when the
+# production VM or SSH is unavailable. Host-level checks run separately over
+# SSH and keep a tiny state file to avoid repeating the same alert every run.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      send_test_alert:
+        description: Send a Telegram test message
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: monitor-server-health
+  cancel-in-progress: true
+
+jobs:
+  public-readiness:
+    name: Check public API readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      OPS_TELEGRAM_BOT_TOKEN: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+      OPS_ALERT_CHAT_ID: ${{ secrets.OPS_ALERT_CHAT_ID }}
+      CABINET_URL: https://broker.stmichael.ru/
+      HEALTH_URL: https://broker.stmichael.ru/api/health/ready
+    steps:
+      - name: Probe public endpoint
+        id: probe
+        shell: bash
+        run: |
+          set +e
+          CABINET_HTTP_CODE=$(curl -sS -o /tmp/cabinet-response.html -w '%{http_code}' \
+            --connect-timeout 5 --max-time 15 "$CABINET_URL")
+          CABINET_CURL_EXIT=$?
+          HEALTH_HTTP_CODE=$(curl -sS -o /tmp/health-response.json -w '%{http_code}' \
+            --connect-timeout 5 --max-time 15 "$HEALTH_URL")
+          HEALTH_CURL_EXIT=$?
+          if [ "$CABINET_CURL_EXIT" -eq 0 ] && [ "$CABINET_HTTP_CODE" = "200" ] \
+            && [ "$HEALTH_CURL_EXIT" -eq 0 ] && [ "$HEALTH_HTTP_CODE" = "200" ] \
+            && grep -q '"status"[[:space:]]*:[[:space:]]*"ok"' /tmp/health-response.json; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            echo "Public readiness: OK"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            echo "curl_exit=cabinet:${CABINET_CURL_EXIT}/http:${CABINET_HTTP_CODE:-none}, readiness:${HEALTH_CURL_EXIT}/http:${HEALTH_HTTP_CODE:-none}" >> "$GITHUB_OUTPUT"
+            echo "Public readiness: FAILED (cabinet curl=$CABINET_CURL_EXIT http=${CABINET_HTTP_CODE:-none}; readiness curl=$HEALTH_CURL_EXIT http=${HEALTH_HTTP_CODE:-none})"
+          fi
+
+      - name: Send requested test alert
+        if: github.event_name == 'workflow_dispatch' && inputs.send_test_alert
+        shell: bash
+        run: |
+          if [ -z "$OPS_TELEGRAM_BOT_TOKEN" ] || [ -z "$OPS_ALERT_CHAT_ID" ]; then
+            echo "OPS Telegram secrets are not configured"
+            exit 1
+          fi
+          TEXT="🧪 Проверка Telegram-поддержки прошла успешно. Бот может отправлять сообщения в этот чат."
+          curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
+            -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$OPS_ALERT_CHAT_ID" \
+            --data-urlencode text="$TEXT" > /dev/null
+
+      - name: Alert public outage from runner
+        if: steps.probe.outputs.healthy != 'true'
+        shell: bash
+        run: |
+          if [ -z "$OPS_TELEGRAM_BOT_TOKEN" ] || [ -z "$OPS_ALERT_CHAT_ID" ]; then
+            echo "OPS Telegram secrets are not configured"
+            exit 1
+          fi
+          TEXT="🔴 Рабочий сайт: кабинет брокера недоступен. Публичная проверка сайта не прошла. Нужно проверить сервер кабинета и базу данных."
+          curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
+            -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$OPS_ALERT_CHAT_ID" \
+            --data-urlencode text="$TEXT" > /dev/null
+
+      - name: Mark public probe failed
+        if: steps.probe.outputs.healthy != 'true'
+        run: exit 1
+
+  host-and-fixations:
+    name: Check host and failed fixation queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OPS_TELEGRAM_BOT_TOKEN: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}
+      OPS_ALERT_CHAT_ID: ${{ secrets.OPS_ALERT_CHAT_ID }}
+    steps:
+      - name: SSH and check host
+        id: ssh-check
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          OPS_TELEGRAM_BOT_TOKEN: ${{ env.OPS_TELEGRAM_BOT_TOKEN }}
+          OPS_ALERT_CHAT_ID: ${{ env.OPS_ALERT_CHAT_ID }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 5m
+          envs: OPS_TELEGRAM_BOT_TOKEN,OPS_ALERT_CHAT_ID
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }} || exit 2
+
+            alert() {
+              if [ -z "$OPS_TELEGRAM_BOT_TOKEN" ] || [ -z "$OPS_ALERT_CHAT_ID" ]; then
+                echo "OPS Telegram secrets are not configured"
+                return 1
+              fi
+              curl --fail -sS --connect-timeout 5 --max-time 15 \
+                -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="$OPS_ALERT_CHAT_ID" \
+                --data-urlencode text="$1" > /dev/null
+            }
+
+            INCIDENT_KEYS=""
+            INCIDENT_TEXT=""
+            add_incident() {
+              if [ -n "$INCIDENT_KEYS" ]; then INCIDENT_KEYS="${INCIDENT_KEYS},"; fi
+              INCIDENT_KEYS="${INCIDENT_KEYS}$1"
+              INCIDENT_TEXT="${INCIDENT_TEXT}
+            • $2"
+            }
+
+            DISK_PCT=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/, "", $5); print $5}')
+            if [ -z "$DISK_PCT" ]; then
+              add_incident "disk-check" "не удалось проверить диск"
+            elif [ "$DISK_PCT" -ge 85 ]; then
+              add_incident "disk" "диск заполнен на ${DISK_PCT}%"
+            fi
+
+            RUNNING_SERVICES=$(docker compose ps --status running --services 2>/dev/null || true)
+            for SERVICE in postgres redis api web nginx; do
+              if ! printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$SERVICE"; then
+                case "$SERVICE" in
+                  postgres) SERVICE_LABEL="база данных" ;;
+                  redis) SERVICE_LABEL="служба очередей" ;;
+                  api) SERVICE_LABEL="сервер кабинета" ;;
+                  web) SERVICE_LABEL="интерфейс кабинета" ;;
+                  nginx) SERVICE_LABEL="веб-сервер" ;;
+                esac
+                add_incident "container-${SERVICE}" "не работает: ${SERVICE_LABEL}"
+              fi
+            done
+
+            if ! docker compose exec -T api wget -qO- --timeout=10 \
+              http://localhost:4000/api/health/ready 2>/dev/null \
+              | grep -q '"status":"ok"'; then
+              add_incident "api-ready" "внутренняя проверка кабинета, базы данных или очереди не прошла"
+            fi
+
+            QUEUE_RESULT=$(docker compose exec -T api node -e "
+              const { PrismaClient } = require('@st-michael/database');
+              const p = new PrismaClient();
+              const where = { amoSyncStatus: { in: ['FAILED', 'PENDING'] } };
+              Promise.all([
+                p.client.count({ where }),
+                p.client.findFirst({ where, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
+                p.client.count({ where: { ...where, amoSyncAttempts: { gte: 10 } } }),
+                p.client.count({ where: { ...where, amoSyncError: 'BROKER_AMO_CONTACT_MISSING' } }),
+              ]).then(([count, oldest, exhausted, missingContact]) => {
+                console.log([count, oldest ? Math.floor(oldest.createdAt.getTime() / 1000) : 0, exhausted, missingContact].join('|'));
+              }).catch(() => process.exitCode = 1).finally(() => p.\$disconnect());
+            " 2>/dev/null | tail -1)
+
+            if ! printf '%s' "$QUEUE_RESULT" | grep -Eq '^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$'; then
+              add_incident "fixation-queue-check" "не удалось проверить очередь заявок для amoCRM"
+            else
+              IFS='|' read -r FAILED_COUNT OLDEST_EPOCH EXHAUSTED_COUNT MISSING_CONTACT_COUNT <<EOF
+            $QUEUE_RESULT
+            EOF
+              NOW_EPOCH=$(date +%s)
+              OLDEST_MINUTES=0
+              if [ "$OLDEST_EPOCH" -gt 0 ]; then
+                OLDEST_MINUTES=$(( (NOW_EPOCH - OLDEST_EPOCH) / 60 ))
+              fi
+              # 2026-09-05 (антиспам): ключ инцидента = «отпечаток» состояния.
+              # Количества входят в ключ (изменилось число заявок — новый алерт),
+              # а минуты ожидания НЕ входят — они растут сами по себе и не
+              # должны считаться изменением состояния.
+              if [ "$MISSING_CONTACT_COUNT" -ge 1 ]; then
+                add_incident "fixation-broker-contact:${MISSING_CONTACT_COUNT}" "у брокеров нет контактов в amoCRM: ${MISSING_CONTACT_COUNT} заявок. Откройте «Админка → Все заявки от брокеров» и выберите фильтр «Передача в amoCRM»"
+              fi
+              if [ "$FAILED_COUNT" -ge 10 ] || [ "$EXHAUSTED_COUNT" -ge 1 ] \
+                || { [ "$FAILED_COUNT" -ge 1 ] && [ "$OLDEST_MINUTES" -ge 10 ]; }; then
+                add_incident "fixation-queue:${FAILED_COUNT}:${EXHAUSTED_COUNT}" "не передано в amoCRM: ${FAILED_COUNT}; самая старая заявка ждёт ${OLDEST_MINUTES} мин.; автоматические повторы закончились у ${EXHAUSTED_COUNT} заявок"
+              fi
+            fi
+
+            # 2026-09-05 (антиспам): маркер переехал из рабочей папки в
+            # /var/tmp — он не должен зависеть от git-состояния репозитория.
+            # Формат прежний: «отпечаток|epoch последней отправки».
+            # Повтор того же отпечатка — не чаще раза в 24 часа (было раз в
+            # час, владельца заваливало одинаковыми сообщениями). Любое
+            # ИЗМЕНЕНИЕ отпечатка по-прежнему шлётся сразу.
+            STATE_FILE="/var/tmp/stmichael-health-alert.state"
+            PREVIOUS_KEYS=""
+            PREVIOUS_ALERT_AT=0
+            if [ -f "$STATE_FILE" ]; then
+              IFS='|' read -r PREVIOUS_KEYS PREVIOUS_ALERT_AT < "$STATE_FILE" || true
+            fi
+            if ! printf '%s' "$PREVIOUS_ALERT_AT" | grep -Eq '^[0-9]+$'; then
+              PREVIOUS_ALERT_AT=0
+            fi
+            NOW_EPOCH=$(date +%s)
+            SHOULD_ALERT=0
+            ALERT_DELIVERY_FAILED=0
+            if [ "$INCIDENT_KEYS" != "$PREVIOUS_KEYS" ]; then
+              SHOULD_ALERT=1
+            elif [ -n "$INCIDENT_KEYS" ] && [ $((NOW_EPOCH - PREVIOUS_ALERT_AT)) -ge 86400 ]; then
+              SHOULD_ALERT=1
+            fi
+
+            KEYS_TO_STORE="$PREVIOUS_KEYS"
+            ALERT_AT_TO_STORE="$PREVIOUS_ALERT_AT"
+            if [ -n "$INCIDENT_KEYS" ] && [ "$SHOULD_ALERT" -eq 1 ]; then
+              if alert "🔴 Рабочий сайт: обнаружены проблемы кабинета брокера:${INCIDENT_TEXT}
+            Что сделать: открыть «Админка → Все заявки от брокеров» и проверить состояние сервера."; then
+                KEYS_TO_STORE="$INCIDENT_KEYS"
+                ALERT_AT_TO_STORE=$NOW_EPOCH
+              else
+                ALERT_DELIVERY_FAILED=1
+              fi
+            elif [ -n "$INCIDENT_KEYS" ]; then
+              KEYS_TO_STORE="$INCIDENT_KEYS"
+            elif [ -z "$INCIDENT_KEYS" ] && [ -n "$PREVIOUS_KEYS" ]; then
+              if alert "🟢 Рабочий сайт: кабинет брокера восстановлен. Сайт, база данных и очередь заявок работают нормально."; then
+                KEYS_TO_STORE=""
+                ALERT_AT_TO_STORE=$NOW_EPOCH
+              else
+                ALERT_DELIVERY_FAILED=1
+              fi
+            else
+              KEYS_TO_STORE=""
+            fi
+
+            printf '%s|%s\n' "$KEYS_TO_STORE" "$ALERT_AT_TO_STORE" > "$STATE_FILE"
+            echo "incidents=${INCIDENT_KEYS:-none}; disk=${DISK_PCT:-unknown}; queue=${QUEUE_RESULT:-unknown}"
+            if [ "$ALERT_DELIVERY_FAILED" -eq 1 ]; then exit 3; fi
+
+      - name: Alert when host monitor fails
+        if: failure()
+        shell: bash
+        run: |
+          if [ -z "$OPS_TELEGRAM_BOT_TOKEN" ] || [ -z "$OPS_ALERT_CHAT_ID" ]; then
+            echo "OPS Telegram secrets are not configured"
+            exit 1
+          fi
+          TEXT="🔴 Рабочий сайт: автоматическая проверка сервера завершилась ошибкой. Сервер может быть недоступен либо сама проверка дала сбой. Нужно открыть в GitHub раздел автоматических проверок и журнал «Проверка работы кабинета брокера»."
+          curl --fail-with-body -sS --connect-timeout 5 --max-time 15 \
+            -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="$OPS_ALERT_CHAT_ID" \
+            --data-urlencode text="$TEXT" > /dev/null

@@ -1,0 +1,42 @@
+name: Report amo fixations (read-only)
+
+# 2026-07-22: отчёт «кто фиксирует уникальность в самой amoCRM» —
+# воронка брокеров по стадиям + клиентские лиды с прикреплённым
+# брокером по всем воронкам, скрещено с турами и фиксациями кабинета.
+# Read-only: ничего не пишет ни в amo, ни в БД.
+#
+# Запуск: gh workflow run report-amo-fixations.yml
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: report-amo-fixations
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Run amo fixations report on production
+    runs-on: ubuntu-latest
+    # 2026-07-22: первый прогон убило по command_timeout=35m (exit 137) —
+    # 125k контактов + ~100k лидов не влезли. Подняли до 55m.
+    timeout-minutes: 60
+    steps:
+      - name: SSH and run report
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 55m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/report-amo-fixations.js > /tmp/report-amo-fixations.js
+            docker cp /tmp/report-amo-fixations.js st-michael-api:/app/scripts/report-amo-fixations.js
+            docker compose exec -T api node /app/scripts/report-amo-fixations.js
+            echo "=== Отчёт завершён ==="

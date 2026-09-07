@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1.6
+FROM mirror.gcr.io/library/node:20.20.2-alpine AS builder
+WORKDIR /app
+
+# python3/make/g++ нужны для компиляции нативных модулей (bcrypt), когда
+# prebuilt-бинарник не качается с GitHub releases. Живут только в builder-stage.
+RUN apk add --no-cache openssl python3 make g++
+
+# 1) КОПИРУЕМ ТОЛЬКО ФАЙЛЫ ЗАВИСИМОСТЕЙ (всех workspace'ов).
+# Это стартует слой `npm install`, который инвалидируется ТОЛЬКО при изменении
+# package.json/package-lock.json. Любая правка кода (page.tsx, *.ts) больше
+# НЕ запускает npm install с нуля → сборка с 40 мин падает до 3-5 мин на хитах.
+COPY package.json package-lock.json* ./
+COPY apps/api/package.json apps/api/
+COPY apps/telegram/package.json apps/telegram/
+COPY apps/web/package.json apps/web/
+COPY packages/database/package.json packages/database/
+COPY packages/integrations/package.json packages/integrations/
+COPY packages/shared/package.json packages/shared/
+
+# 2) NPM INSTALL с BuildKit cache mount.
+# /root/.npm выживает между сборками внутри билдера → на втором прогоне
+# install читает почти всё из локального кеша вместо registry.
+# 2026-06-25: добавлена проверка `test -x node_modules/.bin/prisma`. Без неё
+# битый кеш-слой от ранее упавшего build'а (run 28107132638) скрывал тот
+# факт, что в установке не появлялся локальный prisma-бинарник. Следствие:
+# `npx prisma generate` ниже не находил локальную prisma и тянул latest 7.x,
+# которая ломает наш schema.prisma (см. P1012 в run 28171122819). Проверка
+# меняет cache-key слоя → BuildKit пересоберёт слой; если prisma всё-таки
+# не появится — build упадёт здесь с понятной ошибкой.
+RUN --mount=type=cache,target=/root/.npm npm install && test -x node_modules/.bin/prisma
+
+# 3) PRISMA GENERATE — поставлен ВЫШЕ COPY . .
+# 2026-06-26: prisma generate скачивает query-engine бинарник с
+# binaries.prisma.sh при каждом запуске. С нашего сервера этот CDN
+# отвечает нестабильно (run 28249010685, 28249646914, 28249978791 —
+# все упали тут). Раньше слой `prisma generate` стоял после COPY . . →
+# любая правка кода приложения инвалидировала его кеш → каждый деплой
+# заново лез на CDN.
+# Теперь слой зависит ТОЛЬКО от package*.json (выше) и schema.prisma
+# (копируется здесь). Schema.prisma меняется редко → слой почти всегда
+# CACHED → CDN не дёргается на каждый деплой. Один раз скачаем engine
+# при удачном моменте — дальше всё пройдёт без обращения к CDN.
+COPY packages/database/prisma packages/database/prisma
+# 2026-06-25: явный путь вместо `npx prisma`. npx молча ставит latest
+# prisma из реестра, если не находит локальный бинарник — это сегодня
+# подтянуло Prisma 7.8.0 поверх нашей фиксированной ^5.0.0 и обвалило
+# валидацию schema. Локальный путь либо запускает 5.x из node_modules,
+# либо падает с понятным "no such file".
+RUN ./node_modules/.bin/prisma generate --schema=packages/database/prisma/schema.prisma
+
+# 4) КОПИРУЕМ ОСТАЛЬНОЙ КОД (теперь, когда engine уже в node_modules/.prisma/).
+COPY . .
+
+# 5) BUILD STEPS.
+# 2026-06-08: убрали `2>/dev/null` — он глушил реальные ошибки tsc и
+# fallback ветка после || молча отрабатывала с дефектным dist (PR #86
+# проявил: setMangoConfig экспортируется в исходниках, но dist оставался
+# старым и apps/api падал с TS2304 "Cannot find name 'setMangoConfig'").
+# Плюс предварительный rm -rf dist + tsbuildinfo чтобы incremental не
+# тянул кэш предыдущей сборки.
+RUN rm -rf packages/shared/dist packages/shared/tsconfig.tsbuildinfo \
+ && npm run build --workspace=packages/shared
+RUN rm -rf packages/integrations/dist packages/integrations/tsconfig.tsbuildinfo \
+ && npm run build --workspace=packages/integrations
+RUN rm -rf apps/api/dist apps/api/tsconfig.tsbuildinfo \
+ && NODE_OPTIONS=--max-old-space-size=1024 npm run build --workspace=apps/api
+
+# ─── runtime ───
+FROM mirror.gcr.io/library/node:20.20.2-alpine
+WORKDIR /app
+RUN apk add --no-cache openssl
+RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
+
+# COPY с уже выставленным владельцем → больше не нужен медленный `chown -R`
+# (в прошлой версии `mkdir + chown -R nestjs:nodejs /app` занимал 9.5 минут).
+COPY --from=builder --chown=nestjs:nodejs /app /app
+COPY --chown=nestjs:nodejs docker/entrypoint-api.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+RUN mkdir -p /app/uploads && chown nestjs:nodejs /app/uploads
+
+USER nestjs
+EXPOSE 4000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -qO- http://localhost:4000/api/health/ready | grep -q '"status":"ok"' || exit 1
+ENTRYPOINT ["/entrypoint.sh"]

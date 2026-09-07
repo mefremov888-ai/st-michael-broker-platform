@@ -1,0 +1,467 @@
+name: Публикация кабинета на рабочем сайте
+
+# Триггеры:
+# Push в master запускает обязательную сборку/тесты, но production deployment
+# выполняется только вручную с явным подтверждением. Это особенно важно для
+# первого migration-aware релиза и legacy Prisma baseline.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: I completed backup, clone rehearsal and production DB identity checks
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  # Гарантирует, что одновременно идёт не более одного деплоя.
+  # Если приходит новый push пока идёт предыдущий — старый отменяется.
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    name: Build and test release commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Prisma generate only needs a syntactically valid URL in CI; this address
+      # is deliberately non-routable and is never used for a database connection.
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/ci?connect_timeout=1
+    steps:
+      - name: Checkout exact workflow commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Run test suites
+        run: npm test --workspace=@st-michael/api -- --runInBand
+
+      - name: Run web contract tests
+        run: npm test --workspace=@st-michael/web
+
+  deploy:
+    name: SSH deploy to production
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm_production
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Configure required reviewers and prevent self-approval for this
+    # environment in GitHub Settings before the first migration-aware release.
+    environment: production
+    steps:
+      - name: Validate production SSH host fingerprint
+        shell: bash
+        env:
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || {
+            echo "Production SSH ED25519 fingerprint variable is missing or invalid"
+            exit 1
+          }
+
+      - name: Verify exact successful backup attestation
+        id: backup_attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DEPLOY_SHA: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+        run: |
+          set -euo pipefail
+          command -v gh >/dev/null
+          command -v jq >/dev/null
+          command -v date >/dev/null
+          [[ "$EXPECTED_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid deploy SHA for backup attestation"; exit 1; }
+          [[ "$EXPECTED_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Invalid repository identity"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Workflow repository is not canonical"; exit 1; }
+
+          runs_json=$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${EXPECTED_REPOSITORY}/actions/workflows/backup-production-loyalty-predeploy.yml/runs" \
+            -f event=workflow_dispatch \
+            -f status=completed \
+            -f branch=master \
+            -f head_sha="$EXPECTED_DEPLOY_SHA" \
+            -f per_page=100)
+
+          if ! attestation=$(jq -cer \
+            --arg sha "$EXPECTED_DEPLOY_SHA" \
+            --arg repo "$EXPECTED_REPOSITORY" '
+              [
+                .workflow_runs[]
+                | select(
+                    .event == "workflow_dispatch"
+                    and .status == "completed"
+                    and .conclusion == "success"
+                    and .head_sha == $sha
+                    and .head_branch == "master"
+                    and .repository.full_name == $repo
+                    and .head_repository.full_name == $repo
+                    and (.updated_at | type == "string")
+                  )
+              ]
+              | sort_by(.updated_at)
+              | last // empty
+            ' <<< "$runs_json"); then
+            echo "No successful workflow_dispatch backup exists for this exact canonical master SHA"
+            exit 1
+          fi
+
+          attested_at=$(jq -er '.updated_at' <<< "$attestation")
+          [[ "$attested_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "Invalid backup completion timestamp"; exit 1; }
+          attested_epoch=$(date -u -d "$attested_at" +%s)
+          now_epoch=$(date -u +%s)
+          backup_age_seconds=$((now_epoch - attested_epoch))
+          if [ "$backup_age_seconds" -lt 0 ] || [ "$backup_age_seconds" -gt 21600 ]; then
+            echo "Exact-SHA backup is older than 6 hours or has an invalid future timestamp"
+            exit 1
+          fi
+          attested_backup_run_id=$(jq -er '.id | tostring' <<< "$attestation")
+          attested_backup_run_attempt=$(jq -er '.run_attempt | tostring' <<< "$attestation")
+          [[ "$attested_backup_run_id" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid attested backup run id"; exit 1; }
+          [[ "$attested_backup_run_attempt" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid attested backup run attempt"; exit 1; }
+          {
+            printf 'run_id=%s\n' "$attested_backup_run_id"
+            printf 'run_attempt=%s\n' "$attested_backup_run_attempt"
+          } >> "$GITHUB_OUTPUT"
+          echo "Exact-SHA successful backup attestation is current (${backup_age_seconds}s old)."
+
+      - name: Verify exact successful rehearsal attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_DEPLOY_SHA: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          CANONICAL_REPOSITORY: sereganikitin/st-michael-broker-platform
+        run: |
+          set -euo pipefail
+          command -v gh >/dev/null
+          command -v jq >/dev/null
+          command -v date >/dev/null
+          [[ "$EXPECTED_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid deploy SHA for rehearsal attestation"; exit 1; }
+          [[ "$EXPECTED_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Invalid repository identity"; exit 1; }
+          test "$EXPECTED_REPOSITORY" = "$CANONICAL_REPOSITORY" || { echo "Workflow repository is not canonical"; exit 1; }
+
+          runs_json=$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${EXPECTED_REPOSITORY}/actions/workflows/rehearse-loyalty-migration.yml/runs" \
+            -f event=workflow_dispatch \
+            -f status=completed \
+            -f branch=master \
+            -f head_sha="$EXPECTED_DEPLOY_SHA" \
+            -f per_page=100)
+
+          if ! attestation=$(jq -cer \
+            --arg sha "$EXPECTED_DEPLOY_SHA" \
+            --arg repo "$EXPECTED_REPOSITORY" '
+              [
+                .workflow_runs[]
+                | select(
+                    .event == "workflow_dispatch"
+                    and .status == "completed"
+                    and .conclusion == "success"
+                    and .head_sha == $sha
+                    and .head_branch == "master"
+                    and .repository.full_name == $repo
+                    and .head_repository.full_name == $repo
+                    and (.updated_at | type == "string")
+                  )
+              ]
+              | sort_by(.updated_at)
+              | last // empty
+            ' <<< "$runs_json"); then
+            echo "No successful workflow_dispatch rehearsal exists for this exact canonical master SHA"
+            exit 1
+          fi
+
+          attested_at=$(jq -er '.updated_at' <<< "$attestation")
+          [[ "$attested_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || { echo "Invalid rehearsal completion timestamp"; exit 1; }
+          attested_epoch=$(date -u -d "$attested_at" +%s)
+          now_epoch=$(date -u +%s)
+          rehearsal_age_seconds=$((now_epoch - attested_epoch))
+          if [ "$rehearsal_age_seconds" -lt 0 ] || [ "$rehearsal_age_seconds" -gt 21600 ]; then
+            echo "Exact-SHA rehearsal is older than 6 hours or has an invalid future timestamp"
+            exit 1
+          fi
+          echo "Exact-SHA successful rehearsal attestation is current (${rehearsal_age_seconds}s old)."
+
+      - name: Deploy via SSH
+        shell: bash
+        # 2026-06-05: добавлены AMO_CLIENT_ID / AMO_CLIENT_SECRET / AMO_REFRESH_TOKEN —
+        # нужны для авто-refresh access_token (см. PR #82).
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          AMO_ACCESS_TOKEN: ${{ secrets.AMO_ACCESS_TOKEN }}
+          AMO_CLIENT_ID: ${{ secrets.AMO_CLIENT_ID }}
+          AMO_CLIENT_SECRET: ${{ secrets.AMO_CLIENT_SECRET }}
+          AMO_REFRESH_TOKEN: ${{ secrets.AMO_REFRESH_TOKEN }}
+          BROKER_CONTACT_GATE_HMAC_KEY: ${{ secrets.BROKER_CONTACT_GATE_HMAC_KEY }}
+          MANGO_API_KEY: ${{ secrets.MANGO_API_KEY }}
+          MANGO_API_SALT: ${{ secrets.MANGO_API_SALT }}
+          MANGO_API_URL: ${{ secrets.MANGO_API_URL }}
+          MANGO_CALLBACK_URL: ${{ secrets.MANGO_CALLBACK_URL }}
+          MANGO_OUTBOUND_LINE: ${{ secrets.MANGO_OUTBOUND_LINE }}
+          # 2026-06-09: SMTP для welcome-email при регистрации брокера +
+          # forgotPassword. mail.stmichael.ru:587 (STARTTLS).
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+          # 2026-06-26: Dadata Suggestions API — автодополнение ИНН на форме регистрации.
+          DADATA_API_KEY: ${{ secrets.DADATA_API_KEY }}
+          # 2026-07-07: Anthropic API — классификация специализации брокеров
+          # через Claude (batch-скрипт classify-brokers-specialization.js).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # 2026-07-09: Google Service Account JSON — ключ авторизации для
+          # ночного синка брокеров из Google Sheets (см.
+          # scripts/import-brokers-from-gsheet.js). До этого секрет
+          # руками клался на сервер и терялся при перезапусках.
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # 2026-08-18: бот для технических алертов (amoCRM/SMTP/диск и т.д.),
+          # см. scheduler.service.ts alertAmoDown/alertAmoTokenDead/alertSmtpDown.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPS_TELEGRAM_BOT_TOKEN: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          OPS_ALERT_CHAT_ID: ${{ secrets.OPS_ALERT_CHAT_ID }}
+          OPS_ALERT_CHAT_IDS: ${{ secrets.OPS_ALERT_CHAT_IDS }}
+          EXPECTED_DEPLOY_SHA: ${{ github.sha }}
+          ATTESTED_BACKUP_RUN_ID: ${{ steps.backup_attestation.outputs.run_id }}
+          ATTESTED_BACKUP_RUN_ATTEMPT: ${{ steps.backup_attestation.outputs.run_attempt }}
+          PRODUCTION_PG_SYSTEM_IDENTIFIER: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+          PRODUCTION_COMPOSE_OVERRIDE_SHA256: ${{ vars.PRODUCTION_COMPOSE_OVERRIDE_SHA256 }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          if [ "${#BROKER_CONTACT_GATE_HMAC_KEY}" -lt 32 ] \
+            || ! printf '%s' "$BROKER_CONTACT_GATE_HMAC_KEY" | grep -Eq '^[A-Za-z0-9._~+/=-]{32,}$' \
+            || [ "$BROKER_CONTACT_GATE_HMAC_KEY" = "replace-with-a-stable-random-secret-at-least-32-bytes" ]; then
+            echo "BROKER_CONTACT_GATE_HMAC_KEY must be a non-placeholder secret of at least 32 ASCII bytes"
+            exit 1
+          fi
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH" || { echo "Production SSH configuration is incomplete"; exit 1; }
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) echo "Invalid SSH host"; exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || { echo "Invalid SSH user"; exit 1; }
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || { echo "Invalid SSH port"; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "Invalid deploy path"; exit 1; }
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) echo "Unsafe deploy path"; exit 1;; esac
+          [[ "$EXPECTED_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid EXPECTED_DEPLOY_SHA"; exit 1; }
+          [[ "$ATTESTED_BACKUP_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid attested backup run id"; exit 1; }
+          [[ "$ATTESTED_BACKUP_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid attested backup run attempt"; exit 1; }
+          [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]] || { echo "Production database identity variable is missing or invalid"; exit 1; }
+          [[ "$PRODUCTION_MIN_BROKER_ROWS" =~ ^[1-9][0-9]*$ ]] || { echo "Production broker-row floor is missing or invalid"; exit 1; }
+          [[ "$PRODUCTION_COMPOSE_OVERRIDE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Production compose override SHA-256 variable is missing or invalid"; exit 1; }
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || { echo "Production SSH fingerprint variable is missing or invalid"; exit 1; }
+
+          ssh_root=$(mktemp -d)
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1 || { echo "Expected exactly one production ED25519 fingerprint"; exit 1; }
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT" || { echo "Production SSH host fingerprint mismatch"; exit 1; }
+
+          # AMO_* из GH secrets автоматически в .env на сервере.
+          # Чтобы обновить токен: gh secret set AMO_* ... + push.
+          # ВАЖНО: refresh_token ротируется на каждом использовании.
+          # На сервере приоритет у БД (SystemSetting) — деплой пишет в .env
+          # как fallback. См. apps/api/src/common/amo-token-bootstrap.service.ts.
+          # Значения (включая многострочный Google JSON) сериализуются Bash %q
+          # только в зашифрованный stdin SSH и не попадают в argv процесса.
+          forwarded_names=(
+            AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN
+            BROKER_CONTACT_GATE_HMAC_KEY
+            MANGO_API_KEY MANGO_API_SALT MANGO_API_URL MANGO_CALLBACK_URL MANGO_OUTBOUND_LINE
+            SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE
+            DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON
+            TELEGRAM_BOT_TOKEN OPS_TELEGRAM_BOT_TOKEN OPS_ALERT_CHAT_ID OPS_ALERT_CHAT_IDS
+            EXPECTED_DEPLOY_SHA ATTESTED_BACKUP_RUN_ID ATTESTED_BACKUP_RUN_ATTEMPT
+            PRODUCTION_PG_SYSTEM_IDENTIFIER PRODUCTION_MIN_BROKER_ROWS
+            PRODUCTION_COMPOSE_OVERRIDE_SHA256 DEPLOY_PATH
+          )
+          {
+            for forwarded_name in "${forwarded_names[@]}"; do
+              printf 'export %s=%q\n' "$forwarded_name" "${!forwarded_name}"
+            done
+            cat <<'REMOTE'
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            command -v git >/dev/null
+            command -v flock >/dev/null
+            command -v mktemp >/dev/null
+            command -v grep >/dev/null
+            command -v docker >/dev/null
+            command -v readlink >/dev/null
+            command -v sha256sum >/dev/null
+            command -v stat >/dev/null
+            command -v awk >/dev/null
+            command -v id >/dev/null
+            printf '%s' "$EXPECTED_DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "Invalid EXPECTED_DEPLOY_SHA"; exit 1; }
+            printf '%s' "$ATTESTED_BACKUP_RUN_ID" | grep -Eq '^[1-9][0-9]*$' || { echo "Invalid attested backup run id"; exit 1; }
+            printf '%s' "$ATTESTED_BACKUP_RUN_ATTEMPT" | grep -Eq '^[1-9][0-9]*$' || { echo "Invalid attested backup run attempt"; exit 1; }
+            exec 8>/tmp/st-michael-production-deploy.lock
+            flock -n 8 || { echo "Another production deploy holds the server lock"; exit 1; }
+            TRUSTED_REPOSITORY="https://github.com/sereganikitin/st-michael-broker-platform.git"
+            git fetch "$TRUSTED_REPOSITORY" master
+            TRUSTED_SHA=$(git rev-parse FETCH_HEAD)
+            if [ "$TRUSTED_SHA" != "$EXPECTED_DEPLOY_SHA" ]; then
+              echo "Production master changed after this workflow started; rerun for the current SHA."
+              exit 1
+            fi
+            BACKUP_DIR="/var/backups/stmichael/loyalty-predeploy"
+            RESOLVED_BACKUP_DIR=$(readlink -f -- "$BACKUP_DIR")
+            test "$RESOLVED_BACKUP_DIR" = "$BACKUP_DIR" \
+              && test -d "$BACKUP_DIR" \
+              && test ! -L "$BACKUP_DIR" || {
+              echo "Attested backup directory is missing or unsafe"
+              exit 1
+            }
+            BACKUP_FILE="$BACKUP_DIR/loyalty-predeploy-${EXPECTED_DEPLOY_SHA}-run${ATTESTED_BACKUP_RUN_ID}-attempt${ATTESTED_BACKUP_RUN_ATTEMPT}.dump"
+            BACKUP_CHECKSUM="$BACKUP_FILE.sha256"
+            RESOLVED_BACKUP_FILE=$(readlink -f -- "$BACKUP_FILE")
+            RESOLVED_BACKUP_CHECKSUM=$(readlink -f -- "$BACKUP_CHECKSUM")
+            test "$RESOLVED_BACKUP_FILE" = "$BACKUP_FILE" \
+              && test -f "$BACKUP_FILE" \
+              && test ! -L "$BACKUP_FILE" || {
+              echo "Attested backup file is missing or unsafe"
+              exit 1
+            }
+            test "$RESOLVED_BACKUP_CHECKSUM" = "$BACKUP_CHECKSUM" \
+              && test -f "$BACKUP_CHECKSUM" \
+              && test ! -L "$BACKUP_CHECKSUM" || {
+              echo "Attested backup checksum is missing or unsafe"
+              exit 1
+            }
+            test "$(stat -c %a -- "$BACKUP_FILE")" = "600" \
+              && test "$(stat -c %a -- "$BACKUP_CHECKSUM")" = "600" \
+              && test "$(stat -c %u -- "$BACKUP_FILE")" = "$(id -u)" \
+              && test "$(stat -c %u -- "$BACKUP_CHECKSUM")" = "$(id -u)" || {
+                echo "Attested backup ownership or mode is unsafe"
+                exit 1
+              }
+            EXPECTED_BACKUP_SHA256=$(< "$BACKUP_CHECKSUM")
+            printf '%s' "$EXPECTED_BACKUP_SHA256" | grep -Eq '^[0-9a-f]{64}$' || { echo "Attested backup checksum is invalid"; exit 1; }
+            ACTUAL_BACKUP_SHA256=$(sha256sum -- "$BACKUP_FILE" | awk '{print $1}')
+            test "$ACTUAL_BACKUP_SHA256" = "$EXPECTED_BACKUP_SHA256" || {
+              echo "Attested backup checksum mismatch"
+              exit 1
+            }
+            BACKUP_SIZE_BYTES=$(stat -c %s -- "$BACKUP_FILE")
+            printf '%s' "$BACKUP_SIZE_BYTES" | grep -Eq '^[1-9][0-9]*$' || { echo "Attested backup is empty or invalid"; exit 1; }
+            test "$(docker inspect --format '{{.State.Running}}' st-michael-postgres 2>/dev/null)" = "true" || {
+              echo "Production PostgreSQL container is not running for backup verification"
+              exit 1
+            }
+            docker exec -i st-michael-postgres pg_restore --list < "$BACKUP_FILE" >/dev/null
+            docker exec -i st-michael-postgres pg_restore \
+              --exit-on-error --no-owner --file=/dev/null < "$BACKUP_FILE"
+            echo "Exact attested production backup still exists and fully decodes."
+            TRUSTED_DEPLOY_SCRIPT=$(mktemp /tmp/st-michael-deploy-script.XXXXXX)
+            cleanup_bootstrap() { rm -f -- "$TRUSTED_DEPLOY_SCRIPT"; }
+            trap cleanup_bootstrap EXIT
+            git show "$EXPECTED_DEPLOY_SHA:deploy-update.sh" > "$TRUSTED_DEPLOY_SCRIPT"
+            chmod 700 "$TRUSTED_DEPLOY_SCRIPT"
+            echo "=== Запуск reviewed deploy-update.sh exact SHA ==="
+            DEPLOY_REPO_DIR="$PWD" DEPLOY_LOCK_HELD=1 bash "$TRUSTED_DEPLOY_SCRIPT"
+            echo "=== Деплой завершён успешно ==="
+          REMOTE
+          } | timeout --foreground 75m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s'
+
+  # 2026-08-20: `deploy` тихо пропускается на каждом обычном push (by design —
+  # confirm_production не выставлен). Раньше это никак не было видно: весь
+  # workflow всё равно завершался зелёным "success", и код, собранный и
+  # протестированный, реально не попадал на сервер несколько раз подряд
+  # незамеченным. Эта job делает пропуск громким вместо тихого.
+  notify-skipped:
+    name: Warn when push was NOT deployed
+    needs: [verify, deploy]
+    if: always() && github.event_name == 'push' && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write job summary
+        run: |
+          {
+            echo "## ⚠️ Код собран и протестирован, но НЕ выложен на сервер"
+            echo ""
+            echo "Коммит \`${{ github.sha }}\` прошёл сборку и тесты, но SSH-деплой на"
+            echo "продакшн намеренно пропущен — он запускается только вручную,"
+            echo "с флагом \`confirm_production=true\`."
+            echo ""
+            echo "Чтобы выложить изменения: откройте в GitHub раздел автоматических действий"
+            echo "→ **Публикация кабинета на рабочем сайте** → запустите проверку → поставьте галочку подтверждения."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Telegram alert (best-effort, ok if secrets are missing)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}${{ secrets.TELEGRAM_BOT_TOKEN }}" ] || [ -z "${{ secrets.OPS_ALERT_CHAT_ID }}" ]; then
+            echo "OPS Telegram secrets are not configured — skipping alert (see job summary above)."
+            exit 0
+          fi
+          # 2026-09-04: антиспам. При активной работе каждый merge в master
+          # рождал отдельное «не опубликовано» — за день приходило 5-6 штук.
+          # 1) Если сайт уже работает ровно на этом коммите — молчим.
+          DEPLOYED_SHA=$(curl -s --max-time 10 https://broker.stmichael.ru/api/health | grep -o '"deployedSha":"[0-9a-f]*"' | cut -d'"' -f4 || true)
+          if [ "$DEPLOYED_SHA" = "${{ github.sha }}" ]; then
+            echo "Сайт уже на этом коммите — алерт не нужен."
+            exit 0
+          fi
+          # 2) Дебаунс: если такой же алерт уже уходил за последние 6 часов —
+          #    молчим (там уже написано, что делать; summary всё равно пишется).
+          SINCE=$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          RECENT=$(gh api "/repos/${{ github.repository }}/actions/workflows/deploy.yml/runs?event=push&status=success&created=>${SINCE}&per_page=20" \
+            --jq "[.workflow_runs[] | select(.id != ${{ github.run_id }})] | length" 2>/dev/null || echo 0)
+          if [ "${RECENT:-0}" -gt 0 ]; then
+            echo "Похожий алерт уже был за последние 6 часов ($RECENT ранов) — пропускаем."
+            exit 0
+          fi
+          TOKEN="${{ secrets.OPS_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN }}"
+          curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d chat_id="${{ secrets.OPS_ALERT_CHAT_ID }}" \
+            -d parse_mode=HTML \
+            --data-urlencode text="⚠️ Обновление кабинета проверено, но ещё не опубликовано на рабочем сайте. Для публикации откройте в GitHub раздел автоматических действий, выберите «Публикация кабинета на рабочем сайте», запустите её вручную и подтвердите выкладку. (Повторные обновления в ближайшие 6 часов не будут дублировать это сообщение.)" \
+            > /dev/null || echo "Telegram alert failed to send (non-fatal)."

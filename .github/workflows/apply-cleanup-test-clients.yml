@@ -1,0 +1,64 @@
+name: Apply cleanup test clients
+
+# 2026-09-07: чистка тестовых клиентов из прод-БД (шум SMS-уведомлений в
+# логах). Правила — в scripts/cleanup-test-clients.js: слово «тест»/«test»
+# в имени, тестовые серии телефонов +7999(9999|1234|1235|1236), точные
+# имена-мусор (DDD, НДЗ, те, 2 1, Тест звонок). Клиенты с amo_lead_id и
+# реальными сделками не трогаются (отчёт «подозрительные»); любой кандидат
+# со сделками пропускается. Удаляются клиент + его meetings/calls, порциями.
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (только отчёт, без записи).
+#
+# Порядок: сначала dry_run=true (проверить полный список кандидатов в логе,
+# убедиться что реальных клиентов нет), затем dry_run=false + confirm_apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только отчёт, ничего не удаляется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю удаление тестовых клиентов из прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: cleanup-test-clients
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Run cleanup on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: SSH and run cleanup
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 15m
+          envs: DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/cleanup-test-clients.js > /tmp/cleanup-test-clients.js
+            docker cp /tmp/cleanup-test-clients.js st-michael-api:/app/scripts/cleanup-test-clients.js
+            MODE=1
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без удаления) ==="; else echo "=== APPLY (удаление тестовых клиентов) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/cleanup-test-clients.js
+            echo "=== Готово (DRY_RUN=$MODE) ==="

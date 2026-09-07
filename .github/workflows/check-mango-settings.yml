@@ -1,0 +1,37 @@
+name: Check Mango settings compatibility
+
+# 2026-08-19: read-only проверка перед PR #288 — пройдут ли текущие
+# сохранённые в БД MANGO_API_URL/MANGO_CALLBACK_URL новую строгую валидацию.
+#
+# Запуск: Actions → "Check Mango settings compatibility" → Run workflow.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: check-mango-settings
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Run check on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 5m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/check-mango-settings.js > /tmp/check-mango-settings.js
+            docker cp /tmp/check-mango-settings.js st-michael-api:/app/scripts/check-mango-settings.js
+            docker compose exec -T api node /app/scripts/check-mango-settings.js
+            echo "=== Готово ==="

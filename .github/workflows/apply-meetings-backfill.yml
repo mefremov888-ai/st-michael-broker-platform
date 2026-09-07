@@ -1,0 +1,91 @@
+name: Apply meetings backfill (amoCRM)
+
+# 2026-09-07: backfill встреч кабинета из amoCRM слоями
+# (scripts/backfill-meetings.js):
+#   status  — дотянуть статусы существующих PENDING-встреч по лидам amo
+#             (КЦ 7600542 + 142 = встреча состоялась; 143 = отменена);
+#   history — импорт исторических встреч из закрытых успешных лидов КЦ
+#             (мэтч контакта по телефону на clients.phone, дедуп по дню);
+#   history_brokers — 2026-09-07: те же лиды КЦ 142, но контакт = БРОКЕР:
+#             Meeting c client_id=NULL (нужна миграция
+#             20260907120000_meeting_client_optional на проде!), мэтч по
+#             кандидатным 10-значным ключам на brokers.phone+broker_phones,
+#             merged-брокеры резолвятся в каноничного; дедуп по
+#             (broker_id, день, type);
+#   tours   — брокер-туры из Broker.brokerTourDate → Meeting BROKER_TOUR
+#             c client_id=NULL (та же миграция), дедуп тот же;
+#   mark    — идемпотентная метка «[amo:статус не подтверждён]» для
+#             вечных PENDING без amo-лида (для оранжевого бейджа в UI).
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (только отчёт, без записи).
+#
+# Запуск: Actions → "Apply meetings backfill (amoCRM)" → Run workflow
+# (каждый слой сначала dry_run=true, проверить счётчики и примеры в логе,
+# затем dry_run=false + confirm_apply=true). Рекомендуемый порядок слоёв:
+# status → history → history_brokers → tours → mark.
+# ВАЖНО: history_brokers и tours пишут client_id=NULL — запускать только
+# после того, как деплой-поезд прогнал prisma migrate deploy с миграцией
+# 20260907120000_meeting_client_optional (иначе NOT NULL constraint).
+
+on:
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: 'Слой (status | history | history_brokers | tours | mark)'
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - history
+          - history_brokers
+          - tours
+          - mark
+      dry_run:
+        description: 'Dry-run (только отчёт, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    name: Backfill meetings on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: SSH and run backfill
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          LAYER_INPUT: ${{ inputs.layer }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 40m
+          envs: LAYER_INPUT,DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/backfill-meetings.js > /tmp/backfill-meetings.js
+            docker cp /tmp/backfill-meetings.js st-michael-api:/app/scripts/backfill-meetings.js
+            MODE=1
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) слой=$LAYER_INPUT ==="; else echo "=== APPLY (запись в БД) слой=$LAYER_INPUT ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE -e LAYER=$LAYER_INPUT api node /app/scripts/backfill-meetings.js
+            echo "=== Готово (LAYER=$LAYER_INPUT DRY_RUN=$MODE) ==="

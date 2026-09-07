@@ -1,0 +1,149 @@
+name: Archive stale deploy-path backup files (one-off)
+
+# deploy-update.sh отказывается ехать дальше, пока в рабочей папке на
+# сервере есть untracked-файлы — это специальная защита от случайной
+# потери непросмотренных ручных правок. Разобрали руками (см. workflow
+# "Inspect untracked deploy-path files"), что там реально лежит:
+#
+#   - docker-compose.override.yml — ЖИВАЯ конфигурация: через тот же nginx
+#     раздаются ещё два внешних сайта (partners.zorge9.com,
+#     feeds.infoseledka.ru). НЕ ТРОГАЕМ.
+#   - docker/ssl/nginx.crt и .key — уже в белом списке самого deploy-update.sh,
+#     не блокируют деплой. НЕ ТРОГАЕМ.
+#   - все остальные файлы ниже — устаревшие бэкапы (*.bak, *.bak.<дата>)
+#     трёхмесячной давности, до кучи важных правок, и мусор от вчерашних
+#     неудачных попыток ротации пароля (.env.tmp.*, файл с CR в имени).
+#
+# Переносим их в архивную папку на сервере (не удаляем), чтобы не потерять
+# ничего безвозвратно, но убрать их с дороги обычного деплоя.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Я проверил(а) список файлов в описании workflow и согласен(на) их архивировать
+        required: true
+        default: false
+        type: boolean
+      override_sha256:
+        description: SHA-256 живого docker-compose.override.yml из read-only инспектора
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    name: SSH and move stale files into an archive folder
+    if: inputs.confirm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    steps:
+      - name: SSH and archive
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          EXPECTED_OVERRIDE_SHA256: ${{ inputs.override_sha256 }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          # script_stop rewrites every line and breaks multiline if/awk blocks.
+          # The remote script is fail-closed through set -eu instead.
+          script_stop: false
+          command_timeout: 3m
+          envs: EXPECTED_OVERRIDE_SHA256
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+
+            command -v flock >/dev/null
+            command -v sha256sum >/dev/null
+            printf '%s' "$EXPECTED_OVERRIDE_SHA256" | grep -Eq '^[0-9a-f]{64}$' || {
+              echo "Некорректный ожидаемый SHA-256 override-файла."
+              exit 1
+            }
+            exec 8>/tmp/st-michael-production-deploy.lock
+            flock -n 8 || {
+              echo "Другой production deploy уже держит серверный lock."
+              exit 1
+            }
+
+            OVERRIDE_FILE="docker-compose.override.yml"
+            if [ ! -f "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
+              echo "Живой docker-compose.override.yml отсутствует, не является обычным файлом или является symlink."
+              exit 1
+            fi
+            ACTUAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+            if [ "$ACTUAL_OVERRIDE_SHA256" != "$EXPECTED_OVERRIDE_SHA256" ]; then
+              echo "SHA-256 живого docker-compose.override.yml изменился после ручной проверки."
+              echo "Ожидался: $EXPECTED_OVERRIDE_SHA256"
+              echo "Получен:   $ACTUAL_OVERRIDE_SHA256"
+              exit 1
+            fi
+            echo "Живой docker-compose.override.yml проверен по SHA-256 и останется на месте."
+
+            ARCHIVE_DIR="/var/backups/stmichael/pre-deploy-cleanup-$(date -u +%Y%m%dT%H%M%SZ)"
+            sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ARCHIVE_DIR"
+            echo "=== Архив: $ARCHIVE_DIR ==="
+
+            move_if_exists() {
+              if [ -e "$1" ]; then
+                mv -v -- "$1" "$ARCHIVE_DIR/"
+              else
+                echo "(нет) $1"
+              fi
+            }
+
+            move_if_exists ".env.bak.1781507983"
+            move_if_exists ".env.bak.1781508185"
+            move_if_exists ".env.bak.1781522903"
+            move_if_exists ".env.bak.1781522935"
+            move_if_exists ".env.bak.1781522956"
+            move_if_exists ".env.bak.1781523085"
+            move_if_exists ".env.bak.1781523182"
+            move_if_exists ".env.bak.1781779686"
+            # 2026-09-04: бэкап от update-smtp-creds (seed-data.yml) в день
+            # починки почты; сама задача теперь пишет бэкапы в /var/backups.
+            move_if_exists ".env.bak.1788503041"
+            move_if_exists ".env.tmp.4gJGKo"
+            move_if_exists ".env.tmp.OmEGXO"
+            move_if_exists "docker-compose.override.yml.bak.2026-05-30-012943"
+            move_if_exists "docker-compose.yml.bak"
+            move_if_exists "docker-compose.yml.bak.2026-05-21"
+            move_if_exists "docker/nginx.conf.bak"
+            move_if_exists "docker/nginx.conf.bak.2026-05-21"
+            # Файл с литеральным CR в конце имени (".env" + \r) — из
+            # сломанной вчерашней awk-версии скрипта ротации пароля.
+            move_if_exists "$(printf '.env\r')"
+
+            echo ""
+            echo "=== Осталось untracked после архивации ==="
+            UNTRACKED_FILES=$(git ls-files --others --exclude-standard)
+            UNEXPECTED_UNTRACKED=$(printf '%s\n' "$UNTRACKED_FILES" | awk '
+              NF == 0 { next }
+              /^uploads\// { next }
+              /^docker\/ssl\// { next }
+              /^\.env\.staging\.[A-Za-z0-9]+$/ { next }
+              /^docker-compose\.override\.yml$/ { next }
+              { print }
+            ')
+            if [ -n "$UNEXPECTED_UNTRACKED" ]; then
+              UNEXPECTED_COUNT=$(printf '%s\n' "$UNEXPECTED_UNTRACKED" | grep -c . || true)
+              echo "После архивации остались неизвестные untracked-файлы: $UNEXPECTED_COUNT"
+              exit 1
+            fi
+            REMAINING_COUNT=$(printf '%s\n' "$UNTRACKED_FILES" | grep -c . || true)
+            echo "Разрешённых untracked-путей осталось: $REMAINING_COUNT"
+
+            FINAL_OVERRIDE_SHA256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+            if [ "$FINAL_OVERRIDE_SHA256" != "$EXPECTED_OVERRIDE_SHA256" ]; then
+              echo "Живой docker-compose.override.yml изменился во время архивирования."
+              exit 1
+            fi
+
+            echo ""
+            echo "=== Готово ==="

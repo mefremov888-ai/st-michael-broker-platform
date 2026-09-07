@@ -1,0 +1,939 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────
+
+enum UserRole {
+  BROKER
+  MANAGER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  BLOCKED
+  PENDING
+}
+
+enum CommissionLevel {
+  START
+  BASIC
+  STRONG
+  PREMIUM
+  ELITE
+  CHAMPION
+  LEGEND
+}
+
+// Режим расчёта комиссии (политика для проекта в заданный период).
+// PROGRESSIVE — традиционная шкала по м² (накопительно).
+// FLAT — фиксированный процент для всех сделок (например 4% по Зорге 9 с 07.05.2026).
+enum CommissionMode {
+  PROGRESSIVE
+  FLAT
+}
+
+enum Project {
+  ZORGE9
+  SILVER_BOR
+}
+
+enum UniquenessStatus {
+  CONDITIONALLY_UNIQUE
+  REJECTED
+  UNDER_REVIEW // Спорная ситуация — ручное решение менеджера
+  EXPIRED
+}
+
+// Этапы воронки брокеров в amoCRM
+enum BrokerFunnelStage {
+  NEW_BROKER
+  BROKER_TOUR
+  FIXATION
+  MEETING
+  DEAL
+}
+
+// Источник появления брокера
+enum BrokerSource {
+  CRM_MANUAL // Внесён менеджером вручную
+  BROKER_CABINET // Зарегистрировался через кабинет
+  PHONE_CALL // Позвонил на линию
+  CLOSED_AS_BROKER // Закрыт как брокер (с причиной)
+  // 2026-05-26: заявки с лендинга → попадают в очередь КЦ
+  LANDING_BROKER_TOUR // Записался на брокер-тур
+  LANDING_FORM // Оставил контакт через форму на лендинге
+}
+
+enum FixationStatus {
+  NOT_FIXED
+  FIXED
+  EXPIRED
+  ANNULLED
+}
+
+enum ClientStatus {
+  NEW
+  BOOKED
+  DEAL
+  CANCELLED
+}
+
+enum ContractType {
+  DDU
+  DKP
+  PDKP
+}
+
+enum DealStatus {
+  PENDING
+  SIGNED
+  PAID
+  COMMISSION_PAID
+  CANCELLED
+}
+
+enum LotStatus {
+  AVAILABLE
+  BOOKED
+  SOLD
+}
+
+enum CallDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum CallStatus {
+  // 2026-06-02: статус «звонок инициирован, ещё не завершён» —
+  // используется брокерским callback'ом до прихода webhook от Mango.
+  INITIATED
+  COMPLETED
+  NO_ANSWER
+  BUSY
+  UNAVAILABLE
+  FAILED
+}
+
+enum CallResult {
+  INTERESTED
+  NOT_INTERESTED
+  CALLBACK
+  MEETING_SCHEDULED
+}
+
+enum Sentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+enum MeetingType {
+  OFFICE_VISIT
+  ONLINE
+  BROKER_TOUR
+}
+
+// 2026-07-22: разделение менеджеров КЦ на штатных (Empire Estate) и
+// аутсорс-операторов. Только для role=MANAGER; у остальных null.
+enum KcTeam {
+  STAFF
+  OUTSOURCE
+}
+
+enum MeetingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum NotificationChannel {
+  SMS
+  WHATSAPP
+  TELEGRAM
+  EMAIL
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+}
+
+// База брокеров для КЦ (TZ v3 §2.2). Рабочие статусы холодного обзвона.
+enum BrokerCategory {
+  COLD // НДЗ (без 2x), новые из импорта — звонить регулярно
+  WARM // Проинформирован, Только отправить инфо, Уже был
+  HOT // Запись на БТ, В работе
+  CONVERTED // Есть встреча/сделка — вне обзвонной воронки
+  ON_BOT_REVIEW // 2 НДЗ, Отказ от коммуникации — «на проверке у бота»
+  BLACKLIST // НЕ брокер, Некорректный номер — удалять через 6 мес
+}
+
+enum BrokerSpecialization {
+  COMM
+  RESIDENTIAL
+  BOTH
+}
+
+// Результат холодного звонка оператора КЦ (TZ v3). Отличается от CallResult — тот про факт телефонии (Mango).
+enum BrokerCallResult {
+  NDZ
+  DOUBLE_NDZ
+  INFORMED
+  ALREADY_KNOWS
+  WRONG_NUMBER
+  REFUSED_COMMUNICATION
+  NOT_A_BROKER
+  SCHEDULED_TOUR
+  ONLY_SEND_INFO
+  IN_PROGRESS
+  REFUSED_TOUR
+  HUNG_UP
+  NOT_RELEVANT
+  NOT_BROKER_ANYMORE
+  ASKED_NOT_TO_CALL
+  NEGATIVE
+}
+
+// ─── MODELS ──────────────────────────────────────────
+
+model Agency {
+  id                   String          @id @default(uuid())
+  name                 String
+  legalName            String?         @map("legal_name")
+  inn                  String          @unique // ОБЯЗАТЕЛЬНОЕ — ключ дедупликации и связи с кабинетом
+  phone                String?
+  email                String?
+  address              String?
+  legalAddress         String?         @map("legal_address")
+  bankName             String?         @map("bank_name")
+  bankBik              String?         @map("bank_bik")
+  bankAccount          String?         @map("bank_account")
+  correspondentAccount String?         @map("correspondent_account")
+  totalSqmSold         Decimal         @default(0) @map("total_sqm_sold") @db.Decimal(10, 2)
+  commissionLevel      CommissionLevel @default(START) @map("commission_level")
+  quarterlyBonusStreak Int             @default(0) @map("quarterly_bonus_streak")
+  brokerAgencies       BrokerAgency[]
+  deals                Deal[]
+  createdAt            DateTime        @default(now()) @map("created_at")
+  updatedAt            DateTime        @updatedAt @map("updated_at")
+
+  @@map("agencies")
+}
+
+// M2M: Брокер ↔ Компании (неограниченное кол-во, не удаляются)
+model BrokerAgency {
+  id        String   @id @default(uuid())
+  brokerId  String   @map("broker_id")
+  broker    Broker   @relation(fields: [brokerId], references: [id])
+  agencyId  String   @map("agency_id")
+  agency    Agency   @relation(fields: [agencyId], references: [id])
+  isPrimary Boolean  @default(false) @map("is_primary") // Основная компания
+  joinedAt  DateTime @default(now()) @map("joined_at")
+
+  @@unique([brokerId, agencyId]) // Без повторов
+  @@map("broker_agencies")
+}
+
+model Broker {
+  id                     String                   @id @default(uuid())
+  amoContactId           BigInt?                  @unique @map("amo_contact_id")
+  fullName               String                   @map("full_name")
+  phone                  String                   @unique
+  email                  String?
+  avatarUrl              String?                  @map("avatar_url")
+  birthDate              DateTime?                @map("birth_date") @db.Date
+  passwordHash           String?                  @map("password_hash")
+  passwordResetToken     String?                  @unique @map("password_reset_token")
+  passwordResetExpiresAt DateTime?                @map("password_reset_expires_at")
+  role                   UserRole                 @default(BROKER)
+  status                 UserStatus               @default(PENDING)
+  funnelStage            BrokerFunnelStage        @default(NEW_BROKER) @map("funnel_stage")
+  source                 BrokerSource? // Откуда пришёл брокер
+  closureReason          String?                  @map("closure_reason") // Причина закрытия (если закрыт)
+  brokerAgencies         BrokerAgency[] // M2M — список компаний (не удаляются)
+  telegramChatId         BigInt?                  @unique @map("telegram_chat_id")
+  brokerTourVisited      Boolean                  @default(false) @map("broker_tour_visited")
+  brokerTourDate         DateTime?                @map("broker_tour_date")
+  doNotCall              Boolean                  @default(false) @map("do_not_call")
+  bestCallTime           String?                  @map("best_call_time")
+  // 2026-06-09: внутренний номер сотрудника в Mango (для click-to-call:
+  // Mango сначала набирает этот номер, оператор берёт трубку → соединение).
+  mangoEmployeeNum       String?                  @map("mango_employee_num")
+  // 2026-07-22: Штат (Empire Estate) / Аутсорс — только для role=MANAGER.
+  // Backfill: scripts/backfill-kc-team.js (6 штатных по ФИО из
+  // docs/call-center-team.md, остальные MANAGER → OUTSOURCE).
+  kcTeam                 KcTeam?                  @map("kc_team")
+  // ─── Поля для амо-карточки контакта (sync через brokerToAmoContactFields) ───
+  position               String? // Должность
+  telegramUsername       String?                  @map("telegram_username")
+  telegramId             String?                  @map("telegram_id") // Хранится как строка (могут быть длинные ID)
+  whatsappUsername       String?                  @map("whatsapp_username")
+  presentationSent       Boolean                  @default(false) @map("presentation_sent")
+  // ─── База брокеров КЦ (TZ v3 §5) ───
+  category               BrokerCategory           @default(COLD)
+  specialization         BrokerSpecialization?
+  region                 String? // MSK / SPB / OTHER
+  // 2026-07-09: пометка «региональный» — КЦ в комментариях пишет что
+  // брокер из региона (регекс парсит «регион», «региональ»). Хранится
+  // как отдельный признак, не как значение specialization: региональный
+  // брокер может параллельно быть коммерческим или жилым.
+  isRegional             Boolean                  @default(false) @map("is_regional")
+  isCoordinator          Boolean                  @default(false) @map("is_coordinator")
+  coordinatorAgency      String?                  @map("coordinator_agency")
+  lastCallAt             DateTime?                @map("last_call_at")
+  nextCallAt             DateTime?                @map("next_call_at")
+  isInBase               Boolean                  @default(false) @map("is_in_base")
+  baseSource             String?                  @map("base_source") // 'google_sheet' | 'amocrm' | 'manual'
+  // 2026-06-03: распределение брокера на менеджера КЦ. Self-FK на Broker.id
+  // где role=MANAGER. Руководитель КЦ батч-назначает, менеджер видит
+  // дефолтным фильтром «только мои» в /admin/call-center.
+  assignedManagerId      String?                  @map("assigned_manager_id")
+  assignedManager        Broker?                  @relation("BrokerAssignedManager", fields: [assignedManagerId], references: [id])
+  assignedBrokers        Broker[]                 @relation("BrokerAssignedManager")
+  assignedAt             DateTime?                @map("assigned_at")
+  phones                 BrokerPhone[]
+  callLogs               CallLog[]
+  clients                Client[]
+  responsibleForClients  Client[]                 @relation("ClientResponsibleBroker")
+  deals                  Deal[]
+  calls                  Call[]
+  meetings               Meeting[]
+  notifications          Notification[]
+  pushSubscriptions      PushSubscription[]
+  notificationPrefs      NotificationPreference[]
+  offerAcceptances       OfferAcceptance[]
+  privacyAcceptances     PrivacyAcceptance[]
+  favoriteLots           FavoriteLot[]
+  createdAt              DateTime                 @default(now()) @map("created_at")
+  updatedAt              DateTime                 @updatedAt @map("updated_at")
+  // 2026-07-10: момент повторной активации аккаунта — ставится когда админ
+  // переводит status из BLOCKED/CLOSED обратно в ACTIVE. Используется на
+  // /admin/broker-applications, вкладка «Заходы».
+  reactivatedAt          DateTime?                @map("reactivated_at")
+  // 2026-07-17: ручное слияние дублей (/admin/broker-dedup). Карточка с
+  // mergedIntoId — дубль, слитый в другую; из очередей и списков скрывается,
+  // но НЕ удаляется (решение пользователя: ничего не удалять). Телефон
+  // дубля при слиянии копируется в BrokerPhone основной карточки.
+  mergedIntoId           String?                  @map("merged_into_id")
+  mergedInto             Broker?                  @relation("BrokerMergedInto", fields: [mergedIntoId], references: [id])
+  mergedBrokers          Broker[]                 @relation("BrokerMergedInto")
+  mergedAt               DateTime?                @map("merged_at")
+
+  @@index([category])
+  @@index([nextCallAt])
+  @@index([assignedManagerId])
+  @@map("brokers")
+}
+
+model Client {
+  id                  String           @id @default(uuid())
+  brokerId            String           @map("broker_id") // владелец кабинета (для координатора — координатор)
+  broker              Broker           @relation(fields: [brokerId], references: [id])
+  // 2026-06-19: для координаторов — реальный брокер, который ведёт клиента.
+  // Nullable для обратной совместимости: если поле пустое, ответственный = brokerId
+  // (как было раньше). У координаторов на новых фиксациях ОБЯЗАТЕЛЬНО.
+  responsibleBrokerId String?          @map("responsible_broker_id")
+  responsibleBroker   Broker?          @relation("ClientResponsibleBroker", fields: [responsibleBrokerId], references: [id])
+  amoLeadId           BigInt?          @map("amo_lead_id")
+  fullName            String           @map("full_name")
+  phone               String
+  email               String?
+  comment             String?
+  project             Project          @default(ZORGE9)
+  fixationAgencyId    String?          @map("fixation_agency_id") // Компания, от которой подана заявка
+  uniquenessStatus    UniquenessStatus @default(CONDITIONALLY_UNIQUE) @map("uniqueness_status")
+  uniquenessReason    String?          @map("uniqueness_reason") // Пояснение (напр. «переоткрыта сделка»)
+  uniquenessExpiresAt DateTime?        @map("uniqueness_expires_at")
+  fixationStatus      FixationStatus   @default(NOT_FIXED) @map("fixation_status")
+  fixationExpiresAt   DateTime?        @map("fixation_expires_at")
+  inspectionActSigned Boolean          @default(false) @map("inspection_act_signed")
+  status              ClientStatus     @default(NEW)
+  deals               Deal[]
+  meetings            Meeting[]
+  calls               Call[]
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+  // amoCRM dates — для показа в кабинете вместо нашей sync-даты.
+  amoCreatedAt        DateTime?        @map("amo_created_at")
+  amoUpdatedAt        DateTime?        @map("amo_updated_at")
+  // 2026-05-25: статус синка с amoCRM. Если amo упал во время фиксации,
+  // клиент НЕ теряется (остаётся в БД), а сюда пишем FAILED и amoSyncError.
+  // Менеджеры/координаторы видят список FAILED, scheduler ретраит.
+  amoSyncStatus       AmoSyncStatus    @default(SYNCED) @map("amo_sync_status")
+  amoSyncError        String?          @map("amo_sync_error")
+  amoSyncAttempts     Int              @default(0) @map("amo_sync_attempts")
+  amoSyncLastAttemptAt DateTime?       @map("amo_sync_last_attempt_at")
+
+  // 2026-06-09: поля формы фиксации — раньше склеивались в comment строкой,
+  // что мешало брокеру видеть структурированно. Теперь храним каждое поле
+  // отдельно и показываем в карточке клиента.
+  propertyType        String?          @map("property_type")        // «Квартира» / «Апартаменты» / «Коммерция» и т.п.
+  roomsCount          String?          @map("rooms_count")          // «Студия» / «1» / «2» / ... / «Коммерческое помещение»
+  amount              Decimal?         @db.Decimal(14, 2)            // бюджет покупки, руб.
+  sqm                 Decimal?         @db.Decimal(10, 2)            // метраж, м²
+  clientRegion        String?          @map("client_region")         // «Москва / СПб / другой»
+  purchaseTiming      String?          @map("purchase_timing")       // «1-3 месяца» / «3-6» / «от 5» / «Не выяснил»
+  readinessLevel      String?          @map("readiness_level")       // «Горячий» / «Тёплый» / «Холодный»
+
+  @@index([phone])
+  @@index([brokerId])
+  @@index([amoSyncStatus])
+  @@map("clients")
+}
+
+enum AmoSyncStatus {
+  SYNCED
+  PENDING
+  FAILED
+}
+
+model Lot {
+  id               String    @id @default(uuid())
+  externalId       String?   @unique @map("external_id")
+  number           String
+  project          Project   @default(ZORGE9)
+  building         String
+  floor            Int
+  rooms            String
+  sqm              Decimal   @db.Decimal(10, 2)
+  price            Decimal   @db.Decimal(14, 2)
+  pricePerSqm      Decimal?  @map("price_per_sqm") @db.Decimal(10, 2)
+  status           LotStatus @default(AVAILABLE)
+  propertyType     String?   @map("property_type")
+  layoutUrl        String?   @map("layout_url")
+  planImageUrl     String?   @map("plan_image_url")
+  description      String?
+  floorsTotal      Int?      @map("floors_total")
+  buildingSection  String?   @map("building_section")
+  windowView       String?   @map("window_view")
+  builtYear        Int?      @map("built_year")
+  readyQuarter     Int?      @map("ready_quarter")
+  buildingState    String?   @map("building_state")
+  hasBalcony       Boolean   @default(false) @map("has_balcony")
+  hasTerrace       Boolean   @default(false) @map("has_terrace")
+  isPenthouse      Boolean   @default(false) @map("is_penthouse")
+  isCornerLayout   Boolean   @default(false) @map("is_corner_layout")
+  hasStorage       Boolean   @default(false) @map("has_storage")
+  twoBathrooms     Boolean   @default(false) @map("two_bathrooms")
+  hasMasterBedroom Boolean   @default(false) @map("has_master_bedroom")
+  isUrbanVilla     Boolean   @default(false) @map("is_urban_villa")
+  isViewLot        Boolean   @default(false) @map("is_view_lot")
+  isHighFlat       Boolean   @default(false) @map("is_high_flat") // ceilings 4.2+ м
+  discountPrice    Decimal?  @map("discount_price") @db.Decimal(14, 2)
+  discountPercent  Decimal?  @map("discount_percent") @db.Decimal(5, 2)
+  discountName     String?   @map("discount_name")
+  deals            Deal[]
+  favoritedBy      FavoriteLot[]
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([project, status])
+  @@map("lots")
+}
+
+model Deal {
+  id               String        @id @default(uuid())
+  clientId         String        @map("client_id")
+  client           Client        @relation(fields: [clientId], references: [id])
+  brokerId         String        @map("broker_id")
+  broker           Broker        @relation(fields: [brokerId], references: [id])
+  agencyId         String?       @map("agency_id") // Компания, от которой сделка (привязка на ДВОУ)
+  agency           Agency?       @relation(fields: [agencyId], references: [id])
+  lotId            String?       @map("lot_id")
+  lot              Lot?          @relation(fields: [lotId], references: [id])
+  amoDealId        BigInt?       @map("amo_deal_id")
+  // ID родительской карточки в amoCRM (custom field "cc_id_parent" 839249).
+  // На одну реальную продажу в amoCRM может быть 2-3 карточки в разных воронках,
+  // связанные через это поле. Используется для дедупа: child→parent ссылка.
+  amoParentDealId  BigInt?       @map("amo_parent_deal_id")
+  project          Project       @default(ZORGE9)
+  contractType     ContractType? @map("contract_type")
+  amount           Decimal       @db.Decimal(14, 2)
+  sqm              Decimal       @db.Decimal(10, 2)
+  commissionRate   Decimal       @map("commission_rate") @db.Decimal(5, 2)
+  commissionAmount Decimal       @map("commission_amount") @db.Decimal(14, 2)
+  paymentReceived  Boolean       @default(false) @map("payment_received")
+  paymentPercent   Decimal       @default(0) @map("payment_percent") @db.Decimal(5, 2)
+  isInstallment    Boolean       @default(false) @map("is_installment")
+  status           DealStatus    @default(PENDING)
+  signedAt         DateTime?     @map("signed_at")
+  paidAt           DateTime?     @map("paid_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  @@index([brokerId])
+  @@index([clientId])
+  @@index([agencyId])
+  @@map("deals")
+}
+
+model Call {
+  id            String        @id @default(uuid())
+  brokerId      String        @map("broker_id")
+  broker        Broker        @relation(fields: [brokerId], references: [id])
+  // 2026-06-02: брокер→клиент звонки из кабинета через Mango. clientId
+  // nullable, потому что есть исторические звонки КЦ→брокер без клиента.
+  clientId      String?       @map("client_id")
+  client        Client?       @relation(fields: [clientId], references: [id])
+  mangoCallId   String?       @map("mango_call_id")
+  direction     CallDirection @default(OUTBOUND)
+  status        CallStatus    @default(COMPLETED)
+  result        CallResult?
+  durationSec   Int?          @map("duration_sec")
+  transcript    String?
+  sentiment     Sentiment?
+  recordingUrl  String?       @map("recording_url")
+  attemptNumber Int           @default(1) @map("attempt_number")
+  cycleDay      Int           @default(1) @map("cycle_day")
+  materialsSent Json?         @map("materials_sent")
+  // 2026-06-02: время инициации звонка (брокер нажал «Позвонить»).
+  // Отделяем от createdAt, который может смещаться при webhook-апдейте.
+  initiatedAt   DateTime      @default(now()) @map("initiated_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  @@index([brokerId, createdAt])
+  @@index([clientId, createdAt])
+  @@index([mangoCallId])
+  @@map("calls")
+}
+
+// Дополнительные телефоны брокера (TZ v3 §2.3). Broker.phone остаётся primary.
+// 2026-07-17: группа дублей ФИО, помеченная админом как «это разные люди»
+// на /admin/broker-dedup — такая группа больше не показывается в списке.
+model BrokerDedupDismissal {
+  id          String   @id @default(uuid())
+  nameKey     String   @unique @map("name_key") // lower(btrim(full_name))
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("broker_dedup_dismissals")
+}
+
+model BrokerPhone {
+  id        String   @id @default(uuid())
+  brokerId  String   @map("broker_id")
+  broker    Broker   @relation(fields: [brokerId], references: [id])
+  phone     String   @unique
+  isPrimary Boolean  @default(false) @map("is_primary")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([brokerId])
+  @@map("broker_phones")
+}
+
+// Лог результата холодного звонка оператора КЦ (TZ v3 §5). Не путать с Call (телефония Mango).
+model CallLog {
+  id         String           @id @default(uuid())
+  brokerId   String           @map("broker_id")
+  broker     Broker           @relation(fields: [brokerId], references: [id])
+  operatorId String?          @map("operator_id")
+  campaign   String? // имя кампании-строкой; ссылка на Campaign на будущее
+  result     BrokerCallResult
+  comment    String?
+  nextCallAt DateTime?        @map("next_call_at")
+  duration   Int? // секунды, если оператор зафиксировал
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@index([brokerId, createdAt])
+  @@index([operatorId, createdAt])
+  @@map("call_logs")
+}
+
+// Кампания обзвона (TZ v3 §2.5): «Зорге 9», «Серебряный Бор», «Новые условия» и т.д.
+model Campaign {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  createdById String    @map("created_by_id")
+  startAt     DateTime? @map("start_at")
+  endAt       DateTime? @map("end_at")
+  isActive    Boolean   @default(true) @map("is_active")
+  filters     Json // фильтры таргетинга (category/specialization/region/...)
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([isActive])
+  @@map("campaigns")
+}
+
+model Meeting {
+  id          String        @id @default(uuid())
+  clientId    String        @map("client_id")
+  client      Client        @relation(fields: [clientId], references: [id])
+  brokerId    String        @map("broker_id")
+  broker      Broker        @relation(fields: [brokerId], references: [id])
+  managerId   String?       @map("manager_id")
+  slotId      String?       @map("slot_id")
+  slot        MeetingSlot?  @relation(fields: [slotId], references: [id])
+  type        MeetingType
+  date        DateTime
+  comment     String?
+  status      MeetingStatus @default(PENDING)
+  actSigned   Boolean       @default(false) @map("act_signed")
+  reminded24h Boolean       @default(false) @map("reminded_24h")
+  reminded1h  Boolean       @default(false) @map("reminded_1h")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  @@index([brokerId, date])
+  @@index([date, status])
+  @@map("meetings")
+}
+
+// Доступные слоты времени, настраиваемые менеджером.
+// Брокер выбирает слот при создании встречи; capacity = сколько встреч можно забронировать.
+model MeetingSlot {
+  id          String       @id @default(uuid())
+  startsAt    DateTime     @map("starts_at")
+  durationMin Int          @default(60) @map("duration_min")
+  capacity    Int          @default(1)
+  type        MeetingType? // null = любой тип
+  isActive    Boolean      @default(true) @map("is_active")
+  meetings    Meeting[]
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  @@index([startsAt, isActive])
+  @@map("meeting_slots")
+}
+
+model Document {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  type        String // mime type or extension label (PDF, DOCX, MP4, URL...)
+  category    String // cooperation | analytics | marketing | materials
+  subcategory String? // optional sub-grouping label
+  project     Project?
+  fileUrl     String   @map("file_url") // local: /files/<cat>/<uuid>.ext  |  external URL
+  fileSize    Int?     @map("file_size")
+  isPublic    Boolean  @default(true) @map("is_public")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([category, isPublic, sortOrder])
+  @@map("documents")
+}
+
+model Notification {
+  id        String              @id @default(uuid())
+  brokerId  String              @map("broker_id")
+  broker    Broker              @relation(fields: [brokerId], references: [id])
+  channel   NotificationChannel
+  subject   String?
+  body      String
+  status    NotificationStatus  @default(PENDING)
+  sentAt    DateTime?           @map("sent_at")
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  @@index([brokerId, createdAt])
+  @@map("notifications")
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  brokerId  String   @map("broker_id")
+  broker    Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String // public key (base64url)
+  auth      String // auth secret (base64url)
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([brokerId])
+  @@map("push_subscriptions")
+}
+
+// Per-broker per-event-type per-channel toggle.
+// Missing row = enabled by default (opt-out model).
+model NotificationPreference {
+  id        String              @id @default(uuid())
+  brokerId  String              @map("broker_id")
+  broker    Broker              @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  eventType String              @map("event_type") // NEW_LOTS, PROMOTIONS, COMMISSION_ACCRUED, COMMISSION_PAID, FIXATION_EXPIRY, MEETING_REMINDER, BOOKING_CONFIRMED, DEAL_STATUS, ANNOUNCEMENTS
+  channel   NotificationChannel
+  enabled   Boolean             @default(true)
+  updatedAt DateTime            @updatedAt @map("updated_at")
+
+  @@unique([brokerId, eventType, channel])
+  @@index([brokerId])
+  @@map("notification_preferences")
+}
+
+// Manual broadcast campaigns sent by admins.
+model Mailing {
+  id              String   @id @default(uuid())
+  createdById     String   @map("created_by_id")
+  subject         String?
+  body            String
+  channels        Json // ["EMAIL","PUSH","TELEGRAM","SMS"]
+  filters         Json // segmentation criteria — see service
+  recipientsCount Int      @default(0) @map("recipients_count")
+  sentAt          DateTime @default(now()) @map("sent_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([sentAt])
+  @@map("mailings")
+}
+
+// Acceptance record of the public offer (договор оферты) by a broker.
+// Stored per offer version so admin can publish a new version without invalidating prior acceptances.
+// 2026-06-15 (правки Ксении KB5 #3): «избранное» лотов для брокера.
+// Раньше хранили в localStorage — терялось при очистке кэша и не
+// синхронизировалось между устройствами. Теперь в БД, одна запись на
+// (broker, lot). Каскад: удалили лот → ушёл из избранного автоматом.
+model FavoriteLot {
+  id        String   @id @default(uuid())
+  brokerId  String   @map("broker_id")
+  broker    Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  lotId     String   @map("lot_id")
+  lot       Lot      @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([brokerId, lotId])
+  @@index([brokerId])
+  @@map("favorite_lots")
+}
+
+model OfferAcceptance {
+  id           String   @id @default(uuid())
+  brokerId     String   @map("broker_id")
+  broker       Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  offerVersion String   @map("offer_version")
+  acceptedAt   DateTime @default(now()) @map("accepted_at")
+  ip           String?
+  userAgent    String?  @map("user_agent")
+  signedPdfUrl String?  @map("signed_pdf_url")
+
+  @@unique([brokerId, offerVersion])
+  @@index([brokerId])
+  @@map("offer_acceptances")
+}
+
+// 2026-06-15 (правки Ксении KB5 #5): согласие на обработку персональных
+// данных по 152-ФЗ. Отдельный документ от оферты — закон требует явное
+// согласие на обработку ПД, оно не покрывается акцептом оферты.
+// Версионируем чтобы при изменении текста требовать переподтверждения.
+model PrivacyAcceptance {
+  id             String   @id @default(uuid())
+  brokerId       String   @map("broker_id")
+  broker         Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  privacyVersion String   @map("privacy_version")
+  acceptedAt     DateTime @default(now()) @map("accepted_at")
+  ip             String?
+  userAgent      String?  @map("user_agent")
+
+  @@unique([brokerId, privacyVersion])
+  @@index([brokerId])
+  @@map("privacy_acceptances")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?  @map("user_id")
+  action    String
+  entity    String
+  entityId  String?  @map("entity_id")
+  payload   Json?
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([entity, entityId])
+  @@index([userId, createdAt])
+  @@map("audit_logs")
+}
+
+// ─── CMS / LANDING CONTENT ───────────────────────────
+
+// Generic key-value content for landing blocks (hero, advantages, commission, contact, etc.)
+model SiteContent {
+  key       String   @id // e.g. "hero", "advantages", "commission", "contact"
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  @@map("site_content")
+}
+
+// 2026-06-04: KV-таблица для админ-настроек, которые администратор хочет
+// менять из UI без релиза/SSH. Например MOREKIT_WEBHOOK_URL — Анна из
+// Morekit'а периодически даёт новый URL («копия предыдущего процесса»).
+// Читается с env-fallback: если в БД нет ключа — берём process.env[KEY].
+model SystemSetting {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  @@map("system_settings")
+}
+
+// КБ6 #45 (2026-05-25): история правок CMS-блоков. На каждое изменение
+// SiteContent сохраняем снимок предыдущего значения, кто и когда правил.
+// Позволяет откатиться / посмотреть изменения «как в Google Docs».
+model SiteContentRevision {
+  id         String   @id @default(uuid())
+  key        String   // тот же что в SiteContent
+  value      Json     // снимок значения после правки
+  editorId   String?  @map("editor_id")     // brokerId редактора (если есть)
+  editorName String?  @map("editor_name")   // ФИО на момент правки (для истории)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([key, createdAt])
+  @@map("site_content_revisions")
+}
+
+
+model LandingEvent {
+  id          String   @id @default(uuid())
+  date        DateTime
+  title       String
+  location    String?
+  isOnline    Boolean  @default(false) @map("is_online")
+  description String?
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([date, isActive])
+  @@map("landing_events")
+}
+
+model LandingProject {
+  id              String   @id @default(uuid())
+  slug            String   @unique
+  tag             String? // e.g. "Приоритетный проект"
+  name            String // bold part, e.g. "Зорге"
+  subtitle        String? // suffix, e.g. "9" or "Серебряный Бор"
+  description     String
+  ctaText         String?  @map("cta_text") // e.g. "Смотреть каталог"
+  ctaHref         String?  @map("cta_href") // optional URL; null = open cabinet
+  imageUrl        String?  @map("image_url")
+  gallery         Json? // ["url1","url2",...]
+  classType       String?  @map("class_type") // e.g. "бизнес", "премиум"
+  address         String?
+  district        String?
+  totalUnits      Int?     @map("total_units")
+  floorsTotal     Int?     @map("floors_total")
+  buildingsCount  Int?     @map("buildings_count")
+  pricePerSqmFrom Decimal? @map("price_per_sqm_from") @db.Decimal(14, 2)
+  readyQuarter    Int?     @map("ready_quarter")
+  readyYear       Int?     @map("ready_year")
+  commissionFrom  Decimal? @map("commission_from") @db.Decimal(5, 2)
+  commissionTo    Decimal? @map("commission_to") @db.Decimal(5, 2)
+  characteristics Json? // free-form key/value pairs
+  sortOrder       Int      @default(0) @map("sort_order")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("landing_projects")
+}
+
+// News card block at the bottom of landing — refs to media coverage / announcements.
+model LandingNews {
+  id          String   @id @default(uuid())
+  title       String
+  source      String? // e.g. "РБК", "Коммерсантъ", "Forbes"
+  publishedAt DateTime @map("published_at")
+  excerpt     String? // 1-2 sentence preview
+  imageUrl    String?  @map("image_url")
+  url         String // link to original article
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([publishedAt, isActive])
+  @@map("landing_news")
+}
+
+// Promotion slider on landing — block 3 of TZ.
+model LandingPromo {
+  id          String    @id @default(uuid())
+  title       String
+  subtitle    String?
+  description String?
+  tag         String? // e.g. "Старт продаж"
+  imageUrl      String?   @map("image_url")
+  imagePosition String?   @default("center") @map("image_position")
+  ctaText       String?   @map("cta_text")
+  ctaHref     String?   @map("cta_href")
+  project     Project?
+  sortOrder   Int       @default(0) @map("sort_order")
+  isActive    Boolean   @default(true) @map("is_active")
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([sortOrder, isActive])
+  @@map("landing_promos")
+}
+
+// Contact / lead form submissions from landing.
+model ContactRequest {
+  id          String    @id @default(uuid())
+  name        String
+  phone       String
+  email       String?
+  message     String?
+  source      String? // landing-contact / event-signup / etc
+  eventId     String?   @map("event_id") // optional — if linked to a brokerTour signup
+  ip          String?
+  userAgent   String?   @map("user_agent")
+  processedAt DateTime? @map("processed_at")
+  processedBy String?   @map("processed_by")
+  amoLeadId   BigInt?   @map("amo_lead_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("contact_requests")
+}
+
+// Политика начисления комиссии для проекта в определённый период.
+// Админ может создавать несколько политик; для каждой сделки активной считается
+// та, у которой startDate ≤ deal.signedAt (или deal.createdAt) ≤ endDate.
+// Перекрытие диапазонов для одного project запрещено на уровне API-валидации.
+//
+// Пример (правка 2026-05-13):
+//   Зорге 9: PROGRESSIVE 01.01.2026—06.05.2026 (старая шкала)
+//   Зорге 9: FLAT 4% 07.05.2026—31.12.2099 (новая, действует сейчас)
+model CommissionPolicy {
+  id        String         @id @default(uuid())
+  project   Project
+  mode      CommissionMode
+  // Условия оплаты являются частью той же политики, что и базовая ставка.
+  // Nullable оставлены только для бесшовной миграции старых записей: пока
+  // политика не пересохранена, API подхватит legacy-значения из CMS.
+  installmentEnabled        Boolean? @map("installment_enabled")
+  installmentDiscount       Decimal? @map("installment_discount") @db.Decimal(5, 2)
+  subsidizedMortgageEnabled Boolean? @map("subsidized_mortgage_enabled")
+  subsidizedMortgageRate    Decimal? @map("subsidized_mortgage_rate") @db.Decimal(5, 2)
+  // Публичное пояснение рядом со ставкой на лендинге/в кабинете.
+  displayNote String? @map("display_note")
+  // Для FLAT — единая ставка (например 4.00).
+  flatRate  Decimal?       @map("flat_rate") @db.Decimal(5, 2)
+  // Для PROGRESSIVE — JSON со шкалой: [{level: 'START', minSqm: 0, rate: 5.0}, ...]
+  levels    Json?
+  startDate DateTime       @map("start_date")
+  endDate   DateTime       @map("end_date")
+  isActive  Boolean        @default(true) @map("is_active")
+  notes     String?
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  @@index([project, startDate, endDate])
+  @@map("commission_policies")
+}

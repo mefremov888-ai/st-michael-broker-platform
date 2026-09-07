@@ -1,0 +1,77 @@
+name: Apply merge Tatyana broker duplicate
+
+# 2026-09-07: склейка дублей «Татьяна брокер» — лечение ежечасной ошибки
+# «amoCRM sync failed … Unique constraint failed on (amo_contact_id)».
+# Скрипт scripts/merge-tatyana-broker.js: выживает карточка с реальными
+# данными, второй помечается mergedIntoId (НЕ удаляется), клиенты/сделки/
+# встречи/звонки переносятся, amo_contact_id остаётся у выжившего.
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (только план, без записи).
+#
+# Порядок: сначала inspect-tatyana-dup.yml (диагностика), затем этот
+# workflow с dry_run=true (проверить план), затем dry_run=false +
+# confirm_apply=true. survivor_id/loser_id можно не задавать —
+# скрипт найдёт пару сам; при явном указании берутся id из диагностики.
+
+on:
+  workflow_dispatch:
+    inputs:
+      survivor_id:
+        description: 'id выжившего брокера (пусто = авто-выбор)'
+        required: false
+        default: ''
+        type: string
+      loser_id:
+        description: 'id сливаемого брокера (пусто = авто-выбор)'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Dry-run (только план, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge duplicate on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run merge
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SURVIVOR_ID_INPUT: ${{ inputs.survivor_id }}
+          LOSER_ID_INPUT: ${{ inputs.loser_id }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 10m
+          envs: SURVIVOR_ID_INPUT,LOSER_ID_INPUT,DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/merge-tatyana-broker.js > /tmp/merge-tatyana-broker.js
+            docker cp /tmp/merge-tatyana-broker.js st-michael-api:/app/scripts/merge-tatyana-broker.js
+            MODE=1
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE -e SURVIVOR_ID="$SURVIVOR_ID_INPUT" -e LOSER_ID="$LOSER_ID_INPUT" api node /app/scripts/merge-tatyana-broker.js
+            echo "=== Готово (DRY_RUN=$MODE) ==="

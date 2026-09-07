@@ -1,0 +1,1005 @@
+#!/bin/bash
+# Скрипт обновления продакшна запускается только защищённым GitHub workflow,
+# который передаёт точный EXPECTED_DEPLOY_SHA. Прямой deploy latest-master
+# запрещён: без SHA скрипт завершается до сборки/миграций.
+#
+# Что делает:
+#   1) Подтягивает свежий master из git origin
+#   2) Пересобирает Docker-образы и перезапускает контейнеры
+#   3) До замены API проверяет baseline и применяет миграции одноразовым контейнером
+#   4) Проверяет readiness нового API и состояние миграций
+#
+# Идемпотентен — можно запускать сколько угодно раз подряд.
+
+set -euo pipefail
+if [ -n "${DEPLOY_REPO_DIR:-}" ]; then
+    cd "$DEPLOY_REPO_DIR"
+else
+    cd "$(dirname "$0")"
+fi
+DEPLOY_ROOT=$(pwd -P)
+
+for REQUIRED_TOOL in git docker curl df flock sha256sum awk grep sed tar mktemp rm mv cp readlink sudo; do
+    if ! command -v "$REQUIRED_TOOL" >/dev/null 2>&1; then
+        echo "Required deployment tool is missing: $REQUIRED_TOOL"
+        exit 1
+    fi
+done
+if ! docker compose version >/dev/null 2>&1; then
+    echo "Docker Compose v2 is required; the legacy docker-compose client is not supported."
+    exit 1
+fi
+
+if [ "${DEPLOY_LOCK_HELD:-0}" = "1" ]; then
+    if [ "$(readlink /proc/$$/fd/8 2>/dev/null || true)" != "/tmp/st-michael-production-deploy.lock" ] \
+        || ! flock -n 8; then
+        echo "DEPLOY_LOCK_HELD was set without the inherited production lock."
+        exit 1
+    fi
+else
+    exec 9>/tmp/st-michael-production-deploy.lock
+    if ! flock -n 9; then
+        echo "Another production deploy/migration process holds the server lock."
+        exit 1
+    fi
+fi
+
+ENV_STAGING_FILE=""
+RELEASE_CONTEXT=""
+ROLLBACK_RECOVERY_CONTEXT=""
+ROLLBACK_DIR=/var/backups/stmichael/releases
+ROLLBACK_CAPTURE_COMMITTED=0
+ROLLBACK_RECORD=""
+ROLLBACK_OVERRIDE=""
+ROLLBACK_RECORD_STAGING=""
+ROLLBACK_OVERRIDE_STAGING=""
+ROLLBACK_API_TAG=""
+ROLLBACK_WEB_TAG=""
+ROLLBACK_RECORD_CREATED=0
+ROLLBACK_OVERRIDE_CREATED=0
+ROLLBACK_API_TAG_CREATED=0
+ROLLBACK_WEB_TAG_CREATED=0
+cleanup_temporary_files() {
+    case "${ENV_STAGING_FILE:-}" in
+        "$(pwd)"/.env.staging.*) rm -f -- "$ENV_STAGING_FILE" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected env staging path: $ENV_STAGING_FILE" >&2 ;;
+    esac
+    case "${RELEASE_CONTEXT:-}" in
+        /tmp/st-michael-release.*) rm -rf -- "$RELEASE_CONTEXT" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected release context: $RELEASE_CONTEXT" >&2 ;;
+    esac
+    case "${ROLLBACK_RECOVERY_CONTEXT:-}" in
+        /tmp/st-michael-rollback-recovery.*) rm -rf -- "$ROLLBACK_RECOVERY_CONTEXT" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected rollback recovery context: $ROLLBACK_RECOVERY_CONTEXT" >&2 ;;
+    esac
+    case "${ROLLBACK_RECORD_STAGING:-}" in
+        "$ROLLBACK_DIR"/.release-*.tmp.*) rm -f -- "$ROLLBACK_RECORD_STAGING" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected rollback record staging path: $ROLLBACK_RECORD_STAGING" >&2 ;;
+    esac
+    case "${ROLLBACK_OVERRIDE_STAGING:-}" in
+        "$ROLLBACK_DIR"/.rollback-*.tmp.*) rm -f -- "$ROLLBACK_OVERRIDE_STAGING" ;;
+        "") ;;
+        *) echo "Refusing to remove unexpected rollback override staging path: $ROLLBACK_OVERRIDE_STAGING" >&2 ;;
+    esac
+    if [ "${ROLLBACK_CAPTURE_COMMITTED:-0}" != "1" ]; then
+        if [ "${ROLLBACK_RECORD_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_RECORD:-}" in
+                "$ROLLBACK_DIR"/release-*.txt) rm -f -- "$ROLLBACK_RECORD" ;;
+                *) echo "Refusing to remove unexpected rollback record path: $ROLLBACK_RECORD" >&2 ;;
+            esac
+        fi
+        if [ "${ROLLBACK_OVERRIDE_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_OVERRIDE:-}" in
+                "$ROLLBACK_DIR"/rollback-*.yml) rm -f -- "$ROLLBACK_OVERRIDE" ;;
+                *) echo "Refusing to remove unexpected rollback override path: $ROLLBACK_OVERRIDE" >&2 ;;
+            esac
+        fi
+        if [ "${ROLLBACK_API_TAG_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_API_TAG:-}" in
+                st-michael-rollback-api:[0-9]*-[0-9]*) docker image rm "$ROLLBACK_API_TAG" >/dev/null 2>&1 || true ;;
+                *) echo "Refusing to remove unexpected rollback API tag: $ROLLBACK_API_TAG" >&2 ;;
+            esac
+        fi
+        if [ "${ROLLBACK_WEB_TAG_CREATED:-0}" = "1" ]; then
+            case "${ROLLBACK_WEB_TAG:-}" in
+                st-michael-rollback-web:[0-9]*-[0-9]*) docker image rm "$ROLLBACK_WEB_TAG" >/dev/null 2>&1 || true ;;
+                *) echo "Refusing to remove unexpected rollback web tag: $ROLLBACK_WEB_TAG" >&2 ;;
+            esac
+        fi
+    fi
+}
+trap cleanup_temporary_files EXIT
+
+# Включаем BuildKit — нужен для:
+#   - cache mounts в Dockerfile (RUN --mount=type=cache,target=/root/.npm)
+#   - syntax=docker/dockerfile:1.6 директивы
+# Без BuildKit npm install прогоняется с нуля каждый раз → сборка ~40 минут
+# вместо ~5. См. docker/Dockerfile.api и docker/Dockerfile.web.
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
+echo "==> Рабочая директория: $(pwd)"
+
+PREVIOUS_DEPLOY_SHA=""
+echo "==> Используем Docker Compose v2 with explicit live/target environments"
+
+# Bind every Compose command (including the clean-context build below) to the
+# existing production project. This prevents a different working-directory
+# name from creating a second set of volumes/containers.
+COMPOSE_PROJECT_NAME=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' st-michael-postgres 2>/dev/null || true)
+if [ -z "$COMPOSE_PROJECT_NAME" ]; then
+    echo "Cannot determine the existing production Compose project from st-michael-postgres."
+    exit 1
+fi
+export COMPOSE_PROJECT_NAME
+
+# 1) Pull latest master
+echo ""
+echo "==> [1/5] Pulling latest master..."
+if ! git diff --quiet --exit-code || ! git diff --cached --quiet --exit-code; then
+    echo "    ✗ Production checkout has tracked local changes."
+    echo "      Deployment will not erase an unreviewed hotfix/configuration; reconcile it through a reviewed commit first."
+    exit 1
+fi
+EXPECTED_ORIGIN_URL="https://github.com/sereganikitin/st-michael-broker-platform.git"
+CURRENT_ORIGIN_URL=$(git remote get-url origin)
+if [ "$CURRENT_ORIGIN_URL" != "$EXPECTED_ORIGIN_URL" ]; then
+    echo "    origin differs from the canonical production repository; correcting it without printing the old URL."
+    git remote set-url origin "$EXPECTED_ORIGIN_URL"
+fi
+git fetch origin
+ACTUAL_MASTER_SHA=$(git rev-parse origin/master)
+if ! printf '%s' "${EXPECTED_DEPLOY_SHA:-}" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "    ✗ EXPECTED_DEPLOY_SHA (40 lowercase hex characters) is required."
+    echo "      Run deployment through the reviewed GitHub workflow; direct latest-master deploys are forbidden."
+    exit 1
+fi
+if [ "$ACTUAL_MASTER_SHA" != "$EXPECTED_DEPLOY_SHA" ]; then
+    echo "    ✗ origin/master changed after the workflow started."
+    echo "      expected: $EXPECTED_DEPLOY_SHA"
+    echo "      actual:   $ACTUAL_MASTER_SHA"
+    echo "      Refusing to deploy an unverified commit."
+    exit 1
+fi
+git reset --hard origin/master
+echo "    HEAD: $(git log --oneline -1)"
+
+# Production intentionally has one reviewed untracked Compose override for two
+# additional sites. It is permitted only as a regular file with an operator-
+# reviewed SHA-256 supplied by the protected GitHub production environment.
+OVERRIDE_FILE="docker-compose.override.yml"
+verify_production_compose_override() {
+    local actual_override_sha256
+    if ! printf '%s' "${PRODUCTION_COMPOSE_OVERRIDE_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$'; then
+        echo "    ✗ PRODUCTION_COMPOSE_OVERRIDE_SHA256 (64 lowercase hex characters) is required."
+        return 1
+    fi
+    if [ ! -f "$OVERRIDE_FILE" ] || [ -L "$OVERRIDE_FILE" ]; then
+        echo "    ✗ Reviewed production docker-compose.override.yml is missing, not a regular file, or is a symlink."
+        return 1
+    fi
+    actual_override_sha256=$(sha256sum -- "$OVERRIDE_FILE" | awk '{print $1}')
+    if [ "$actual_override_sha256" != "$PRODUCTION_COMPOSE_OVERRIDE_SHA256" ]; then
+        echo "    ✗ Production docker-compose.override.yml SHA-256 mismatch."
+        echo "      The two external-site routes must be reviewed again before deployment."
+        return 1
+    fi
+}
+verify_production_compose_override
+echo "    ✓ Production docker-compose.override.yml matches the reviewed SHA-256."
+
+# Update optional integration credentials while holding the same server-side
+# lock as migrations/rollout. Values are read from the workflow environment,
+# never interpolated into shell source, and are persisted as literal quoted
+# dotenv values so spaces, `$` and JSON punctuation are preserved.
+SERVER_ENV_FILE="$(pwd)/.env"
+if [ ! -f "$SERVER_ENV_FILE" ]; then
+    echo "    ✗ Server .env is missing; refusing to create an insecure default config."
+    exit 1
+fi
+umask 077
+chmod 600 "$SERVER_ENV_FILE"
+
+live_compose() {
+    docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+        --env-file "$SERVER_ENV_FILE" "$@"
+}
+
+target_compose() {
+    if [ -z "${ENV_STAGING_FILE:-}" ] || [ ! -f "$ENV_STAGING_FILE" ]; then
+        echo "    ✗ Verified target environment is unavailable." >&2
+        return 1
+    fi
+    docker compose --project-name "$COMPOSE_PROJECT_NAME" \
+        --env-file "$ENV_STAGING_FILE" "$@"
+}
+
+rollback_compose() {
+    if ! printf '%s' "$PREVIOUS_DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+        echo "    ✗ Previous running API SHA is unavailable for rollback." >&2
+        return 1
+    fi
+    GIT_SHA="$PREVIOUS_DEPLOY_SHA" docker compose \
+        --project-name "$COMPOSE_PROJECT_NAME" \
+        --env-file "$SERVER_ENV_FILE" "$@"
+}
+
+for REQUIRED_VAR in POSTGRES_PASSWORD JWT_SECRET; do
+    REQUIRED_VALUE=$(awk -F= -v key="$REQUIRED_VAR" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$SERVER_ENV_FILE")
+    case "$REQUIRED_VALUE" in
+        \'*\') REQUIRED_VALUE=${REQUIRED_VALUE:1:${#REQUIRED_VALUE}-2} ;;
+        \"*\") REQUIRED_VALUE=${REQUIRED_VALUE:1:${#REQUIRED_VALUE}-2} ;;
+    esac
+    if [ -z "$REQUIRED_VALUE" ]; then
+        echo "    ✗ $REQUIRED_VAR is missing in server .env."
+        exit 1
+    fi
+    if [ "$REQUIRED_VAR" = "POSTGRES_PASSWORD" ] \
+        && { [ "$REQUIRED_VALUE" = "postgres" ] || [ ${#REQUIRED_VALUE} -lt 16 ]; }; then
+        echo "    ✗ POSTGRES_PASSWORD is default/too short."
+        exit 1
+    fi
+    if [ "$REQUIRED_VAR" = "JWT_SECRET" ] \
+        && { [ "$REQUIRED_VALUE" = "change-me-in-production" ] || [ ${#REQUIRED_VALUE} -lt 32 ]; }; then
+        echo "    ✗ JWT_SECRET is default/too short."
+        exit 1
+    fi
+done
+
+ENV_STAGING_FILE=$(mktemp "$(pwd)/.env.staging.XXXXXX")
+cp "$SERVER_ENV_FILE" "$ENV_STAGING_FILE"
+chmod 600 "$ENV_STAGING_FILE"
+
+update_env_value() {
+    local var_name="$1"
+    local var_value="$2"
+    local escaped_value
+    local env_tmp
+    case "$var_value" in
+        *$'\r'*|*$'\n'*)
+            echo "    ✗ $var_name must be one line; minify JSON and keep \\n as escaped characters."
+            return 1
+            ;;
+    esac
+    env_tmp=$(mktemp "${ENV_STAGING_FILE}.tmp.XXXXXX")
+    if ! awk -v var="$var_name" '
+        BEGIN { skip=0 }
+        $0 ~ "^" var "=" { skip=1; next }
+        skip && /^[A-Z_][A-Z0-9_]*=/ { skip=0 }
+        !skip { print }
+    ' "$ENV_STAGING_FILE" > "$env_tmp"; then
+        rm -f -- "$env_tmp"
+        return 1
+    fi
+    mv "$env_tmp" "$ENV_STAGING_FILE"
+    escaped_value=$(printf '%s' "$var_value" | sed "s/'/\\\\'/g")
+    printf "%s='%s'\n" "$var_name" "$escaped_value" >> "$ENV_STAGING_FILE"
+    echo "    $var_name accepted (${#var_value} characters)."
+}
+
+validate_broker_contact_gate_hmac_key() {
+    local gate_key_value="${1-}"
+    [ "${#gate_key_value}" -ge 32 ] \
+        && printf '%s' "$gate_key_value" | LC_ALL=C grep -Eq '^[A-Za-z0-9._~+/=-]{32,}$' \
+        && [ "$gate_key_value" != "replace-with-a-stable-random-secret-at-least-32-bytes" ]
+}
+
+for VAR_NAME in \
+    AMO_ACCESS_TOKEN AMO_CLIENT_ID AMO_CLIENT_SECRET AMO_REFRESH_TOKEN \
+    BROKER_CONTACT_GATE_HMAC_KEY \
+    MANGO_API_KEY MANGO_API_SALT MANGO_API_URL MANGO_CALLBACK_URL MANGO_OUTBOUND_LINE \
+    SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE \
+    DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON \
+    TELEGRAM_BOT_TOKEN OPS_TELEGRAM_BOT_TOKEN OPS_ALERT_CHAT_ID OPS_ALERT_CHAT_IDS; do
+    VAR_VALUE=$(printenv "$VAR_NAME" || true)
+    if [ -n "$VAR_VALUE" ]; then
+        update_env_value "$VAR_NAME" "$VAR_VALUE"
+    fi
+    # The workflow exports these values for the trusted script. Compose gives
+    # process variables precedence over --env-file, so remove each one after
+    # it has been copied into the verified staging file. This is what keeps a
+    # later rollback bound to the still-live server environment.
+    unset "$VAR_NAME"
+done
+unset VAR_NAME VAR_VALUE
+
+# Read back the exact target value written by the allowlist loop. Do not source
+# the server env: it is data, not trusted shell. The workflow accepts only this
+# dotenv-safe ASCII alphabet, so the single-quoted value can be decoded without
+# eval and checked before compose parsing, release-context creation, builds or
+# migrations. The value is never printed.
+BROKER_CONTACT_GATE_HMAC_LINE_COUNT=$(awk '
+    /^BROKER_CONTACT_GATE_HMAC_KEY=/ { count += 1 }
+    END { print count + 0 }
+' "$ENV_STAGING_FILE")
+if [ "$BROKER_CONTACT_GATE_HMAC_LINE_COUNT" -ne 1 ]; then
+    echo "    ✗ BROKER_CONTACT_GATE_HMAC_KEY is missing or duplicated in target env."
+    exit 1
+fi
+BROKER_CONTACT_GATE_HMAC_ENV_VALUE=$(awk '
+    /^BROKER_CONTACT_GATE_HMAC_KEY=/ {
+        print substr($0, length("BROKER_CONTACT_GATE_HMAC_KEY=") + 1)
+    }
+' "$ENV_STAGING_FILE")
+case "$BROKER_CONTACT_GATE_HMAC_ENV_VALUE" in
+    \'*\')
+        BROKER_CONTACT_GATE_HMAC_VALUE=${BROKER_CONTACT_GATE_HMAC_ENV_VALUE#\'}
+        BROKER_CONTACT_GATE_HMAC_VALUE=${BROKER_CONTACT_GATE_HMAC_VALUE%\'}
+        ;;
+    *)
+        echo "    ✗ BROKER_CONTACT_GATE_HMAC_KEY has an invalid target env encoding."
+        exit 1
+        ;;
+esac
+if ! validate_broker_contact_gate_hmac_key "$BROKER_CONTACT_GATE_HMAC_VALUE"; then
+    echo "    ✗ BROKER_CONTACT_GATE_HMAC_KEY must be a non-placeholder secret of at least 32 ASCII bytes."
+    exit 1
+fi
+unset BROKER_CONTACT_GATE_HMAC_LINE_COUNT BROKER_CONTACT_GATE_HMAC_ENV_VALUE BROKER_CONTACT_GATE_HMAC_VALUE
+
+# 2026-08-20: пишем реально задеплоенный SHA в .env, читается через
+# GET /api/health (см. health.controller.ts) — способ проверить, что сервер
+# на самом деле обновился, а не просто "workflow прошёл зелёным".
+update_env_value "GIT_SHA" "$EXPECTED_DEPLOY_SHA"
+chmod 600 "$ENV_STAGING_FILE"
+verify_production_compose_override
+docker compose --env-file "$ENV_STAGING_FILE" config --quiet >/dev/null
+
+# `git reset --hard` does not remove untracked or ignored files. We still flag
+# unexpected untracked paths for operators, but image builds below use a clean
+# `git archive` of the exact reviewed SHA so ignored PII/artifacts cannot enter
+# Docker through `COPY . .`.
+git cat-file -e "$EXPECTED_DEPLOY_SHA:.dockerignore" || {
+    echo "    ✗ Reviewed commit does not contain .dockerignore."
+    exit 1
+}
+git diff --quiet --exit-code || {
+    echo "    ✗ Tracked server checkout differs from the reviewed commit."
+    exit 1
+}
+UNTRACKED_FILES=$(git ls-files --others --exclude-standard)
+UNEXPECTED_UNTRACKED=$(printf '%s\n' "$UNTRACKED_FILES" | awk '
+    NF == 0 { next }
+    /^uploads\// { next }
+    /^docker\/ssl\// { next }
+    /^\.env\.staging\.[A-Za-z0-9]+$/ { next }
+    /^docker-compose\.override\.yml$/ { next }
+    { print }
+')
+if [ -n "$UNEXPECTED_UNTRACKED" ]; then
+    echo "    ✗ Unexpected untracked files in production checkout:"
+    printf '%s\n' "$UNEXPECTED_UNTRACKED"
+    echo "      Move/review them manually; deployment will not delete files automatically."
+    exit 1
+fi
+
+RELEASE_CONTEXT=$(mktemp -d /tmp/st-michael-release.XXXXXX)
+git archive "$EXPECTED_DEPLOY_SHA" | tar -x -C "$RELEASE_CONTEXT"
+if [ "$(git -C "$RELEASE_CONTEXT" rev-parse --is-inside-work-tree 2>/dev/null || true)" = "true" ]; then
+    echo "Clean release context unexpectedly contains Git metadata."
+    exit 1
+fi
+
+verify_prisma_baseline() {
+    if [ -z "${PRODUCTION_PG_SYSTEM_IDENTIFIER:-}" ]; then
+        echo "    ✗ PRODUCTION_PG_SYSTEM_IDENTIFIER is required; refusing an unbound production database."
+        exit 1
+    fi
+    if ! printf '%s' "${PRODUCTION_MIN_BROKER_ROWS:-}" | grep -Eq '^[1-9][0-9]*$'; then
+        echo "    ✗ PRODUCTION_MIN_BROKER_ROWS must be a reviewed positive integer."
+        exit 1
+    fi
+
+    ACTUAL_DATABASE=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT current_database()")
+    ACTUAL_SYSTEM_IDENTIFIER=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT system_identifier FROM pg_control_system()")
+    if [ "$ACTUAL_DATABASE" != "broker_platform" ] \
+        || [ "$ACTUAL_SYSTEM_IDENTIFIER" != "$PRODUCTION_PG_SYSTEM_IDENTIFIER" ]; then
+        echo "    ✗ Production database identity mismatch."
+        echo "      expected database=broker_platform system_identifier=$PRODUCTION_PG_SYSTEM_IDENTIFIER"
+        echo "      actual   database=$ACTUAL_DATABASE system_identifier=$ACTUAL_SYSTEM_IDENTIFIER"
+        exit 1
+    fi
+
+    LEGACY_SCHEMA_EXISTS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT to_regclass('public.brokers') IS NOT NULL")
+    MIGRATION_HISTORY_EXISTS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT to_regclass('public._prisma_migrations') IS NOT NULL")
+
+    # This workflow is production-update only. A missing brokers table means a
+    # wrong/empty volume or Compose project, never a fresh-install signal.
+    if [ "$LEGACY_SCHEMA_EXISTS" != "t" ]; then
+        echo "    ✗ Production brokers table is missing; refusing to initialize an empty database."
+        exit 1
+    fi
+
+    BROKER_ROWS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT COUNT(*) FROM public.brokers")
+    if ! printf '%s' "$BROKER_ROWS" | grep -Eq '^[0-9]+$' \
+        || [ "$BROKER_ROWS" -lt "$PRODUCTION_MIN_BROKER_ROWS" ]; then
+        echo "    ✗ Broker row-count invariant failed: actual=$BROKER_ROWS minimum=$PRODUCTION_MIN_BROKER_ROWS."
+        exit 1
+    fi
+
+    if [ "$MIGRATION_HISTORY_EXISTS" != "t" ]; then
+        echo "    ✗ Deployment blocked before container replacement: legacy database has no Prisma baseline."
+        echo "      Follow packages/database/prisma/migrations/README.md on an isolated clone first."
+        exit 1
+    fi
+
+    UNFINISHED_MIGRATIONS=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT COUNT(*) FROM public.\"_prisma_migrations\" WHERE finished_at IS NULL AND rolled_back_at IS NULL")
+    if [ "$UNFINISHED_MIGRATIONS" -ne 0 ]; then
+        echo "    ✗ Deployment blocked before container replacement: unfinished Prisma migration rows: $UNFINISHED_MIGRATIONS."
+        exit 1
+    fi
+
+    BASELINE_APPLIED=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT EXISTS (SELECT 1 FROM public.\"_prisma_migrations\" WHERE migration_name = '0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL)")
+    if [ "$BASELINE_APPLIED" != "t" ]; then
+        echo "    ✗ Deployment blocked before container replacement: 0_legacy_baseline is not recorded as applied."
+        echo "      Follow packages/database/prisma/migrations/README.md; never mark it applied without the clone fingerprint check."
+        exit 1
+    fi
+
+    EXPECTED_BASELINE_CHECKSUM=$(sha256sum packages/database/prisma/migrations/0_legacy_baseline/migration.sql | awk '{print $1}')
+    STORED_BASELINE_CHECKSUM=$(live_compose exec -T postgres psql -U postgres -d broker_platform -Atqc \
+        "SELECT checksum FROM public.\"_prisma_migrations\" WHERE migration_name = '0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY finished_at DESC LIMIT 1")
+    if [ "$STORED_BASELINE_CHECKSUM" != "$EXPECTED_BASELINE_CHECKSUM" ]; then
+        echo "    ✗ Deployment blocked before container replacement: baseline checksum does not match the reviewed SQL."
+        exit 1
+    fi
+}
+
+echo ""
+echo "==> Preflight existing PostgreSQL/Redis before any build or replacement..."
+for REQUIRED_CONTAINER in \
+    st-michael-postgres st-michael-redis st-michael-api st-michael-web st-michael-nginx; do
+    if [ "$(docker inspect --format '{{.State.Running}}' "$REQUIRED_CONTAINER" 2>/dev/null || true)" != "true" ]; then
+        echo "    ✗ Existing production container is not running: $REQUIRED_CONTAINER"
+        echo "      This update-only workflow will not create/restart infrastructure implicitly."
+        exit 1
+    fi
+done
+if ! docker exec st-michael-postgres pg_isready -U postgres -d broker_platform >/dev/null 2>&1; then
+    echo "    ✗ Existing production PostgreSQL is not ready; nothing has been replaced."
+    exit 1
+fi
+if [ "$(docker exec st-michael-redis redis-cli ping 2>/dev/null || true)" != "PONG" ]; then
+    echo "    ✗ Existing production Redis is not ready; nothing has been replaced."
+    exit 1
+fi
+if ! docker exec st-michael-api wget -qO- http://localhost:4000/api/health 2>/dev/null \
+    | grep -q '"status":"ok"'; then
+    echo "    ✗ Existing production API is not healthy enough to serve as a rollback target."
+    exit 1
+fi
+PREVIOUS_DEPLOY_SHA=$(docker inspect \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' st-michael-api 2>/dev/null \
+    | awk -F= '$1 == "GIT_SHA" { sub(/^[^=]*=/, ""); print; exit }')
+if ! printf '%s' "$PREVIOUS_DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "    ✗ Running production API has no valid deployed SHA; refusing an unauditable rollback target."
+    exit 1
+fi
+if ! curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+    https://broker.stmichael.ru/ > /dev/null; then
+    echo "    ✗ Existing external site is unavailable; use the incident runbook, not normal deployment."
+    exit 1
+fi
+verify_production_compose_override
+verify_prisma_baseline
+echo "    ✓ Existing database identity, baseline and Redis preflight passed"
+
+# Image builds need predictable headroom and must never attempt implicit cleanup.
+# Reclaiming production disk is a separate, explicitly reviewed operation.
+MIN_DEPLOY_AVAILABLE_KIB=8388608
+require_deploy_disk_headroom() {
+    local disk_label="$1"
+    local disk_path="$2"
+    local available_kib
+
+    if [ -z "$disk_path" ] || [ "${disk_path#/}" = "$disk_path" ] \
+        || [ "$disk_path" = "/" ] || [ ! -d "$disk_path" ]; then
+        echo "    ✗ $disk_label path must be an existing absolute non-root directory."
+        exit 1
+    fi
+    if ! available_kib=$(df -Pk -- "$disk_path" | awk 'NR == 2 { print $4 }'); then
+        echo "    ✗ Cannot determine available disk space for $disk_label."
+        exit 1
+    fi
+    if ! printf '%s' "$available_kib" | grep -Eq '^[0-9]+$'; then
+        echo "    ✗ Invalid available disk-space result for $disk_label."
+        exit 1
+    fi
+    if [ "$available_kib" -lt "$MIN_DEPLOY_AVAILABLE_KIB" ]; then
+        echo "    ✗ Insufficient $disk_label disk: available=${available_kib} KiB; required=${MIN_DEPLOY_AVAILABLE_KIB} KiB (8 GiB)."
+        echo "      Deployment stops before image builds; run only a separately reviewed cleanup workflow."
+        exit 1
+    fi
+    echo "    ✓ $disk_label disk preflight passed: available=${available_kib} KiB; required=${MIN_DEPLOY_AVAILABLE_KIB} KiB (8 GiB)."
+}
+
+if ! DOCKER_ROOT_REPORTED=$(docker info --format '{{.DockerRootDir}}'); then
+    echo "    ✗ Cannot determine DockerRootDir; refusing to build images."
+    exit 1
+fi
+if [[ ! "$DOCKER_ROOT_REPORTED" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "    ✗ DockerRootDir is not a strictly valid absolute path."
+    exit 1
+fi
+case "$DOCKER_ROOT_REPORTED/" in
+    *"/../"*|*"/./"*|*"//"*)
+        echo "    ✗ DockerRootDir contains an unsafe path component."
+        exit 1
+        ;;
+esac
+if ! DOCKER_ROOT=$(readlink -f -- "$DOCKER_ROOT_REPORTED"); then
+    echo "    ✗ DockerRootDir cannot be resolved."
+    exit 1
+fi
+if [ -z "$DOCKER_ROOT" ] || [ "${DOCKER_ROOT#/}" = "$DOCKER_ROOT" ] \
+    || [ "$DOCKER_ROOT" = "/" ] || [ ! -d "$DOCKER_ROOT" ]; then
+    echo "    ✗ Resolved DockerRootDir must be an existing absolute non-root directory."
+    exit 1
+fi
+
+require_deploy_disk_headroom "deploy repository" "$DEPLOY_ROOT"
+require_deploy_disk_headroom "release context" "$RELEASE_CONTEXT"
+require_deploy_disk_headroom "Docker root" "$DOCKER_ROOT"
+
+# 2) Rebuild images while the current containers continue serving traffic.
+echo ""
+echo "==> [2/5] Rebuild образов..."
+compose_for_scope() {
+    local scope="$1"
+    shift
+    case "$scope" in
+        target) target_compose "$@" ;;
+        rollback) rollback_compose "$@" ;;
+        *)
+            echo "    ✗ Unknown Compose environment scope: $scope" >&2
+            return 1
+            ;;
+    esac
+}
+
+reload_nginx_upstreams() {
+    local scope="$1"
+    # nginx resolves static upstream hostnames when it loads the configuration.
+    # Recreated api/web containers can receive new Docker IPs, so a graceful
+    # reload is required after both rollout and rollback. Existing workers keep
+    # serving traffic if validation or reload fails.
+    if ! compose_for_scope "$scope" exec -T nginx nginx -t; then
+        echo "    ✗ nginx configuration validation failed."
+        return 1
+    fi
+    if ! compose_for_scope "$scope" exec -T nginx nginx -s reload; then
+        echo "    ✗ nginx graceful reload failed."
+        return 1
+    fi
+}
+
+previous_api_schema_is_compatible() {
+    local rollback_schema_status
+    local loyalty_schema_state
+    local incompatible_decision_rows
+    local current_api_running
+
+    # The tagged image is the rollback authority. The production checkout may
+    # belong to a failed prior attempt, so PREVIOUS_DEPLOY_SHA is not enough.
+    # Inspect the image without network access, application environment, or a
+    # writable root filesystem, and never print schema contents.
+    if docker run --rm --network none --read-only --entrypoint /bin/sh \
+        "$ROLLBACK_API_TAG" -c '
+          schema=/app/packages/database/prisma/schema.prisma
+          test -r "$schema" || exit 20
+          awk '\''
+            $1 == "enum" && $2 == "LoyaltyReconciliationDecision" { in_enum = 1; next }
+            in_enum && $1 == "}" { in_enum = 0 }
+            in_enum && $1 == "SUPPLEMENT" { supplement = 1 }
+            in_enum && $1 == "ARCHIVE" { archive = 1 }
+            END { exit (supplement && archive ? 0 : 10) }
+          '\'' "$schema"
+        '; then
+        return 0
+    else
+        rollback_schema_status=$?
+    fi
+
+    if [ "$rollback_schema_status" -ne 10 ]; then
+        echo "    ✗ Could not inspect the tagged previous API schema; refusing old-image rollback."
+        return 1
+    fi
+    echo "    Previous API image lacks SUPPLEMENT/ARCHIVE; verifying that neither value has been written."
+
+    if ! loyalty_schema_state=$(rollback_compose exec -T postgres \
+        psql -U postgres -d broker_platform -Atqc \
+        "SELECT CASE
+           WHEN to_regclass('public.loyalty_reconciliation_cases') IS NULL THEN 'absent'
+           WHEN NOT EXISTS (
+             SELECT 1
+             FROM pg_type t
+             JOIN pg_namespace n ON n.oid = t.typnamespace
+             WHERE n.nspname = 'public'
+               AND t.typname = 'LoyaltyReconciliationDecision'
+           ) THEN 'absent'
+           ELSE 'present'
+         END"); then
+        echo "    ✗ Could not verify whether the previous API understands the migrated loyalty schema."
+        return 1
+    fi
+
+    if [ "$loyalty_schema_state" = "absent" ]; then
+        return 0
+    fi
+    if [ "$loyalty_schema_state" != "present" ]; then
+        echo "    ✗ Unexpected loyalty schema compatibility result; refusing old-image rollback."
+        return 1
+    fi
+
+    # The currently running API understands the expanded enum and can still
+    # commit SUPPLEMENT/ARCHIVE while a compatibility query is in flight. Stop
+    # it first and verify the fixed production container is actually quiesced;
+    # only then can the following COUNT authoritatively fence old-image
+    # rollback. A failed stop/verification must never fall through to old up.
+    if ! rollback_compose stop -t 30 api; then
+        echo "    ✗ Could not quiesce the current API before the rollback compatibility check."
+        return 1
+    fi
+    if ! current_api_running=$(docker inspect --format '{{.State.Running}}' st-michael-api 2>/dev/null); then
+        echo "    ✗ Could not verify that the current API is stopped; refusing old-image rollback."
+        return 1
+    fi
+    if [ "$current_api_running" != "false" ]; then
+        echo "    ✗ Current API is still running; refusing the old-image compatibility check."
+        return 1
+    fi
+
+    if ! incompatible_decision_rows=$(rollback_compose exec -T postgres \
+        psql -U postgres -d broker_platform -Atqc \
+        "SELECT COUNT(*)
+         FROM public.loyalty_reconciliation_cases
+         WHERE decision::text IN ('SUPPLEMENT', 'ARCHIVE')"); then
+        echo "    ✗ Could not verify loyalty decisions before old-image rollback."
+        return 1
+    fi
+    if ! printf '%s' "$incompatible_decision_rows" | grep -Eq '^[0-9]+$'; then
+        echo "    ✗ Invalid loyalty decision compatibility result; refusing old-image rollback."
+        return 1
+    fi
+    if [ "$incompatible_decision_rows" -ne 0 ]; then
+        echo "    ✗ Fast rollback is unsafe: SUPPLEMENT/ARCHIVE decisions already exist."
+        echo "      The previous API image may not understand the expanded enum and will not be started."
+        echo "      Apply a compatible forward fix or restore the confirmed predeploy database backup."
+        return 1
+    fi
+}
+
+rollback_application() {
+    echo "    Attempting fast application rollback; additive DB migrations stay applied."
+    if ! previous_api_schema_is_compatible; then
+        echo "    ✗ Incompatible previous API rollback blocked before container replacement."
+        return 1
+    fi
+    if ! rollback_compose -f docker-compose.yml -f "$ROLLBACK_OVERRIDE" up -d \
+        --no-deps --no-build --pull never --force-recreate api web; then
+        echo "    ✗ Fast rollback command failed; page the production operator immediately."
+        return 1
+    fi
+    if ! reload_nginx_upstreams rollback; then
+        echo "    ✗ Previous images started, but nginx could not refresh their Docker addresses."
+        return 1
+    fi
+    for i in {1..30}; do
+        if rollback_compose exec -T api wget -qO- http://localhost:4000/api/health 2>/dev/null \
+            | grep -q '"status":"ok"'; then
+            if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+                https://broker.stmichael.ru/ > /dev/null; then
+                echo "    ✓ Previous API/web images restored. Investigate before retrying deploy."
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+    echo "    ✗ Previous images were started but rollback smoke-test failed; page the production operator."
+    return 1
+}
+
+fail_after_rollout() {
+    local reason="$1"
+    echo "    ✗ $reason"
+    target_compose logs --tail=120 api web 2>/dev/null || true
+    rollback_application || true
+    exit 1
+}
+# Pin the images used by the still-running containers before either mutable
+# Compose image tag is rebuilt. BuildKit may collect the now-untagged previous
+# image as soon as a successful build replaces `latest`; capturing it after both
+# builds therefore cannot provide a reliable rollback target (production run
+# 32950095327 failed this way before migrations or rollout). The EXIT trap removes
+# these provisional tags if a build fails before the record is committed.
+sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ROLLBACK_DIR"
+RELEASE_TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+if ! printf '%s' "$RELEASE_TIMESTAMP" | grep -Eq '^[0-9]{8}-[0-9]{6}$'; then
+    echo "    ✗ Cannot create a safe rollback release timestamp."
+    exit 1
+fi
+ROLLBACK_RECORD="$ROLLBACK_DIR/release-$RELEASE_TIMESTAMP.txt"
+ROLLBACK_OVERRIDE="$ROLLBACK_DIR/rollback-$RELEASE_TIMESTAMP.yml"
+ROLLBACK_API_TAG="st-michael-rollback-api:$RELEASE_TIMESTAMP"
+ROLLBACK_WEB_TAG="st-michael-rollback-web:$RELEASE_TIMESTAMP"
+for ROLLBACK_PATH in "$ROLLBACK_RECORD" "$ROLLBACK_OVERRIDE"; do
+    if [ -e "$ROLLBACK_PATH" ] || [ -L "$ROLLBACK_PATH" ]; then
+        echo "    ✗ Refusing to overwrite an existing rollback record."
+        exit 1
+    fi
+done
+for ROLLBACK_TAG in "$ROLLBACK_API_TAG" "$ROLLBACK_WEB_TAG"; do
+    if docker image inspect "$ROLLBACK_TAG" >/dev/null 2>&1; then
+        echo "    ✗ Refusing to overwrite an existing rollback image tag."
+        exit 1
+    fi
+done
+PREVIOUS_API_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-api 2>/dev/null || true)
+PREVIOUS_WEB_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-web 2>/dev/null || true)
+PREVIOUS_NGINX_IMAGE=$(docker inspect --format '{{.Image}}' st-michael-nginx 2>/dev/null || true)
+for PREVIOUS_IMAGE in "$PREVIOUS_API_IMAGE" "$PREVIOUS_WEB_IMAGE" "$PREVIOUS_NGINX_IMAGE"; do
+    if ! printf '%s' "$PREVIOUS_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        echo "    ✗ Cannot capture a valid previous application image for fast rollback."
+        exit 1
+    fi
+done
+
+prepare_rollback_recovery_context() {
+    if [ -n "$ROLLBACK_RECOVERY_CONTEXT" ]; then
+        return 0
+    fi
+    if ! git cat-file -e "$PREVIOUS_DEPLOY_SHA^{commit}" \
+        || ! git merge-base --is-ancestor "$PREVIOUS_DEPLOY_SHA" "$EXPECTED_DEPLOY_SHA"; then
+        echo "    ✗ Previous deployed SHA is not a trusted ancestor of the target release."
+        return 1
+    fi
+    ROLLBACK_RECOVERY_CONTEXT=$(mktemp -d /tmp/st-michael-rollback-recovery.XXXXXX)
+    # Export only the trusted previous Git tree. Never copy the live container
+    # configuration: it contains runtime environment variables and secrets.
+    git archive --format=tar "$PREVIOUS_DEPLOY_SHA" \
+        | tar -x -C "$ROLLBACK_RECOVERY_CONTEXT"
+    test -f "$ROLLBACK_RECOVERY_CONTEXT/docker/Dockerfile.api" \
+        -a -f "$ROLLBACK_RECOVERY_CONTEXT/docker/Dockerfile.web" \
+        -a -f "$ROLLBACK_RECOVERY_CONTEXT/package-lock.json" || {
+        echo "    ✗ Trusted previous release tree is incomplete; refusing rollback recovery."
+        return 1
+    }
+}
+
+pin_or_recover_rollback_image() {
+    local service="$1"
+    local running_image="$2"
+    local rollback_tag="$3"
+    local dockerfile
+    case "$service" in
+        api|web) dockerfile="docker/Dockerfile.$service" ;;
+        *)
+            echo "    ✗ Unsupported rollback recovery service."
+            return 1
+            ;;
+    esac
+
+    if docker image inspect "$running_image" >/dev/null 2>&1; then
+        docker tag "$running_image" "$rollback_tag"
+        return 0
+    fi
+
+    echo "    Running $service image metadata is absent; rebuilding rollback from the exact previous Git SHA."
+    prepare_rollback_recovery_context
+    docker build --pull=false \
+        --file "$ROLLBACK_RECOVERY_CONTEXT/$dockerfile" \
+        --label "org.opencontainers.image.revision=$PREVIOUS_DEPLOY_SHA" \
+        --label "com.stmichael.rollback.recovered=true" \
+        --tag "$rollback_tag" \
+        "$ROLLBACK_RECOVERY_CONTEXT"
+    test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$rollback_tag")" \
+        = "$PREVIOUS_DEPLOY_SHA" \
+        && test "$(docker image inspect --format '{{index .Config.Labels "com.stmichael.rollback.recovered"}}' "$rollback_tag")" \
+        = "true" || {
+        echo "    ✗ Recovered rollback image lacks exact-source attestation."
+        return 1
+    }
+}
+
+ROLLBACK_API_TAG_CREATED=1
+pin_or_recover_rollback_image api "$PREVIOUS_API_IMAGE" "$ROLLBACK_API_TAG"
+ROLLBACK_WEB_TAG_CREATED=1
+pin_or_recover_rollback_image web "$PREVIOUS_WEB_IMAGE" "$ROLLBACK_WEB_TAG"
+ROLLBACK_API_IMAGE=$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")
+ROLLBACK_WEB_IMAGE=$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")
+for ROLLBACK_IMAGE in "$ROLLBACK_API_IMAGE" "$ROLLBACK_WEB_IMAGE"; do
+    if ! printf '%s' "$ROLLBACK_IMAGE" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        echo "    ✗ Rollback image tag does not resolve to a valid image."
+        exit 1
+    fi
+done
+if docker image inspect "$PREVIOUS_API_IMAGE" >/dev/null 2>&1 \
+    && [ "$ROLLBACK_API_IMAGE" != "$PREVIOUS_API_IMAGE" ]; then
+    echo "    ✗ Rollback API tag does not resolve to the running image."
+    exit 1
+fi
+if docker image inspect "$PREVIOUS_WEB_IMAGE" >/dev/null 2>&1 \
+    && [ "$ROLLBACK_WEB_IMAGE" != "$PREVIOUS_WEB_IMAGE" ]; then
+    echo "    ✗ Rollback web tag does not resolve to the running image."
+    exit 1
+fi
+echo "    ✓ Previous API/web images are pinned before rebuild."
+
+# 2026-06-25: строим api и web ПО ОЧЕРЕДИ, не параллельно. При пустом
+# buildkit кеше параллельный `npm install` для api + web суммарно жрёт
+# >2 ГБ RAM → OOM-killer убивает процесс → SSH сессия рвётся без exit
+# кода (run 28107132638, 28179889464). После того как кеш слоя npm install
+# прогрелся — оба билда становятся CACHED и параллелизм безопасен,
+# но последовательная сборка работает в любом случае.
+target_compose --project-directory "$RELEASE_CONTEXT" \
+    -f "$RELEASE_CONTEXT/docker-compose.yml" build api
+target_compose --project-directory "$RELEASE_CONTEXT" \
+    -f "$RELEASE_CONTEXT/docker-compose.yml" build web
+
+# A successful pair of builds commits the already-pinned images to an atomic
+# rollback record. Until both files are in place, the EXIT trap removes the
+# provisional tags and any partial metadata.
+if [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_TAG")" != "$ROLLBACK_API_IMAGE" ] \
+    || [ "$(docker image inspect --format '{{.Id}}' "$ROLLBACK_WEB_TAG")" != "$ROLLBACK_WEB_IMAGE" ]; then
+    echo "    ✗ A pinned rollback image disappeared during the rebuild."
+    exit 1
+fi
+ROLLBACK_RECORD_STAGING=$(mktemp "$ROLLBACK_DIR/.release-$RELEASE_TIMESTAMP.tmp.XXXXXX")
+{
+    echo "previous_commit=$PREVIOUS_DEPLOY_SHA"
+    echo "target_commit=$EXPECTED_DEPLOY_SHA"
+    echo "previous_api_image=$ROLLBACK_API_IMAGE"
+    echo "previous_web_image=$ROLLBACK_WEB_IMAGE"
+    echo "previous_nginx_image=$PREVIOUS_NGINX_IMAGE"
+} > "$ROLLBACK_RECORD_STAGING"
+chmod 600 "$ROLLBACK_RECORD_STAGING"
+ROLLBACK_OVERRIDE_STAGING=$(mktemp "$ROLLBACK_DIR/.rollback-$RELEASE_TIMESTAMP.tmp.XXXXXX")
+{
+    echo "services:"
+    echo "  api:"
+    echo "    image: \"$ROLLBACK_API_TAG\""
+    echo '    entrypoint: ["/bin/sh", "-c", "exec node apps/api/dist/main.js"]'
+    echo "  web:"
+    echo "    image: \"$ROLLBACK_WEB_TAG\""
+} > "$ROLLBACK_OVERRIDE_STAGING"
+chmod 600 "$ROLLBACK_OVERRIDE_STAGING"
+mv -- "$ROLLBACK_RECORD_STAGING" "$ROLLBACK_RECORD"
+ROLLBACK_RECORD_CREATED=1
+ROLLBACK_RECORD_STAGING=""
+mv -- "$ROLLBACK_OVERRIDE_STAGING" "$ROLLBACK_OVERRIDE"
+ROLLBACK_OVERRIDE_CREATED=1
+ROLLBACK_OVERRIDE_STAGING=""
+ROLLBACK_CAPTURE_COMMITTED=1
+echo "    rollback metadata: $ROLLBACK_RECORD"
+echo "    rollback override: $ROLLBACK_OVERRIDE"
+
+# 3) Apply migrations with the NEW image before replacing the healthy API.
+# Prisma Migrate was introduced after the legacy production database already
+# existed, so the one-time baseline must have been rehearsed and recorded.
+# This is an update-only workflow; fresh/empty databases are always rejected.
+echo ""
+echo "==> [3/5] Preflight baseline и Prisma migrations..."
+verify_production_compose_override
+target_compose run --rm --no-deps --entrypoint npx api prisma migrate deploy \
+    --schema=/app/packages/database/prisma/schema.prisma
+echo "    ✓ Миграции применены до замены API"
+
+# Replace application containers only after migration success. PostgreSQL,
+# Redis and nginx are deliberately not recreated here: infrastructure/config
+# restarts need a separate maintenance window and must not cause surprise
+# downtime during an application release.
+verify_production_compose_override
+if ! target_compose up -d --no-deps api web; then
+    fail_after_rollout "Application container replacement failed."
+fi
+
+# 4) Wait for API to be ready before exposing its new Docker address in nginx.
+echo ""
+echo "==> [4/5] Ждём готовности API..."
+API_READY=0
+for i in {1..30}; do
+    if target_compose exec -T api wget -qO- http://localhost:4000/api/health/ready 2>/dev/null \
+        | grep -q '"status":"ok"'; then
+        echo "    API, PostgreSQL и Redis готовы"
+        API_READY=1
+        break
+    fi
+    sleep 2
+done
+if [ "$API_READY" -ne 1 ]; then
+    fail_after_rollout "Readiness не пройден: проверить API, PostgreSQL, Redis и обязательные миграции."
+fi
+if ! reload_nginx_upstreams target; then
+    fail_after_rollout "nginx could not expose the ready API/web upstream addresses."
+fi
+
+echo "    Проверяю обязательные контейнеры..."
+RUNNING_SERVICES=$(target_compose ps --status running --services)
+for SERVICE in postgres redis api web nginx; do
+    if ! printf '%s\n' "$RUNNING_SERVICES" | grep -qx "$SERVICE"; then
+        target_compose ps || true
+        fail_after_rollout "Контейнер $SERVICE не работает после rollout."
+    fi
+done
+
+echo "    Проверяю nginx и внешний HTTPS route..."
+if ! curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+    http://127.0.0.1/ > /dev/null; then
+    fail_after_rollout "Local nginx smoke-test failed after rollout."
+fi
+EXTERNAL_READY=0
+for i in {1..12}; do
+    if curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+        https://broker.stmichael.ru/api/health/ready \
+        | grep -q '"status":"ok"'; then
+        EXTERNAL_READY=1
+        break
+    fi
+    sleep 5
+done
+if [ "$EXTERNAL_READY" -ne 1 ]; then
+    fail_after_rollout "External HTTPS readiness failed after rollout."
+fi
+if ! curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+    https://broker.stmichael.ru/ > /dev/null; then
+    fail_after_rollout "External web smoke-test failed after rollout."
+fi
+echo "    ✓ web, nginx and external HTTPS are available"
+
+# 5) Verify migration state. Production never uses db push/accept-data-loss:
+# custom CHECK constraints, partial indexes and deferred triggers live in SQL migrations.
+echo ""
+echo "==> [5/5] Проверка миграций и обновление CMS-контента..."
+if ! target_compose exec -T api npx prisma migrate status \
+    --schema=/app/packages/database/prisma/schema.prisma; then
+    fail_after_rollout "New API reports an invalid Prisma migration state."
+fi
+echo "    ✓ Все Prisma migrations применены"
+
+# 2026-05-26 КРИТИЧНЫЙ ФИКС: раньше скрипт делал UPSERT и стирал правки
+# админа из /admin/content при каждом деплое. Теперь — только CREATE
+# (sites без записи), а в этом случае мы и так полагаемся на
+# cms.seedDefaults() при старте API. Запуск отдельным скриптом убран.
+# Для ручной перезаписи запустить вручную:
+#   docker compose exec api node /app/scripts/refresh-cms-content.js          # safe: skip existing
+#   docker compose exec api node -e 'process.env.FORCE=1' /app/scripts/refresh-cms-content.js  # force
+# или: docker compose exec -e FORCE=1 api node /app/scripts/refresh-cms-content.js
+echo "    (refresh-cms-content пропущен — правки админа сохраняются между деплоями)"
+
+# Data seeds and amoCRM inspection are intentionally not part of application
+# deployment. Run their dedicated reviewed workflows after rollout if needed;
+# a code/migration release must not mutate unrelated business content.
+echo "    (business seeds and amoCRM inspection skipped by design)"
+
+# Status check
+echo ""
+echo "==> Состояние контейнеров:"
+if ! target_compose ps; then
+    fail_after_rollout "Could not verify the final target Compose state."
+fi
+
+# The exact environment is activated only after both builds, migrations,
+# internal/external readiness and the final Compose state have succeeded. The
+# staging file is on the same filesystem, so mv is atomic. No fallible command
+# follows activation: a red workflow can no longer leave an unverified .env
+# claiming a release that never became healthy.
+if ! mv -- "$ENV_STAGING_FILE" "$SERVER_ENV_FILE"; then
+    fail_after_rollout "Could not atomically activate the verified release environment."
+fi
+ENV_STAGING_FILE=""
+
+echo ""
+echo "✓ Деплой завершён успешно"
+echo "  Сайт: https://72.56.241.199/"
+echo "  Развёрнутый SHA: $EXPECTED_DEPLOY_SHA"

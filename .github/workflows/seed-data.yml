@@ -1,0 +1,454 @@
+name: Заполнить данные на сервере
+
+# Вручную через GitHub UI: Actions → Заполнить данные на сервере → Run workflow.
+# Запускает на проде сидеры/синки данных без SSH-доступа пользователя.
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Что запустить'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - seed-stmichael
+          - sync-yandex-disk
+          - seed-cooperation-doc
+          - cleanup-cooperation-docs
+          - refresh-cms-content
+          - create-admin
+          - sync-amocrm-all
+          - seed-commission-policies
+          - dry-run-dedup
+          - inspect-lead
+          - list-broker-leads
+          - find-contact-by-phone
+          - list-amo-users
+          - inspect-contact
+          - inspect-broker-company-links
+          - list-contact-fields
+          - inspect-recent-fixations
+          - inspect-broker-attachment
+          - audit-missing-responsible-broker-links
+          - inspect-amo-webhooks
+          - setup-amo-webhook
+          - test-smtp-send
+          - update-smtp-creds
+          - update-amo-meetings-manager
+          - backfill-client-amo-lead-id
+          - force-sync-lead
+          - api-logs
+          - find-test-leads
+          - production-db-preflight
+          - full-backup
+      admin_phone:
+        description: 'Телефон админа (для task=create-admin), формат +7XXXXXXXXXX'
+        required: false
+      admin_password:
+        description: 'Пароль админа (для task=create-admin), будет скрыт в логах'
+        required: false
+      admin_name:
+        description: 'Имя админа (для task=create-admin)'
+        required: false
+        default: 'Администратор'
+      lead_id:
+        description: 'ID лида amoCRM (для task=inspect-lead)'
+        required: false
+      phone:
+        description: 'Телефон контакта (для task=find-contact-by-phone), любой формат'
+        required: false
+      contact_id:
+        description: 'ID контакта amoCRM (для task=inspect-contact)'
+        required: false
+      broker_id:
+        description: 'ID брокера в кабинете (для read-only task=inspect-broker-company-links)'
+        required: false
+      email:
+        description: 'Email брокера (для task=inspect-broker-attachment, проверка forgot-password)'
+        required: false
+      audit_days:
+        description: 'Окно аудита связей брокеров, дней (default 30, max 3650)'
+        required: false
+        default: '30'
+      audit_limit:
+        description: 'Максимум фиксаций для аудита (default 200, max 1000)'
+        required: false
+        default: '200'
+      smtp_user:
+        description: 'SMTP логин (для update-smtp-creds). Для Exchange формат stmichael\broker_st'
+        required: false
+      smtp_pass:
+        description: 'SMTP пароль (для update-smtp-creds). Скрыт в логах.'
+        required: false
+      amo_user_id:
+        description: 'amoCRM user_id (для update-amo-meetings-manager). Узнать через task=list-amo-users.'
+        required: false
+      amo_meeting_task_type_id:
+        description: 'amoCRM task_type_id «Встреча» (опционально, default=2)'
+        required: false
+      apply:
+        description: 'true = реально применить backfill. По умолчанию dry-run.'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  run:
+    name: Run seed task on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: SSH and run requested task
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 35m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+
+            COMPOSE_CMD="docker compose"
+            if ! docker compose version &>/dev/null; then COMPOSE_CMD="docker-compose"; fi
+
+            TASK="${{ inputs.task }}"
+
+            if [ "$TASK" = "production-db-preflight" ]; then
+              echo "=== production-db-preflight (read-only, no secret values) ==="
+              test -f .env || { echo "env_file=missing"; exit 1; }
+              ENV_MODE=$(stat -c '%a' .env)
+              POSTGRES_VALUE=$(awk -F= '$1=="POSTGRES_PASSWORD" {sub(/^[^=]*=/, ""); print; exit}' .env)
+              JWT_VALUE=$(awk -F= '$1=="JWT_SECRET" {sub(/^[^=]*=/, ""); print; exit}' .env)
+              echo "env_mode=$ENV_MODE"
+              if [ -n "$POSTGRES_VALUE" ] && [ "$POSTGRES_VALUE" != "postgres" ] && [ ${#POSTGRES_VALUE} -ge 16 ]; then echo "postgres_password=strong_enough"; else echo "postgres_password=missing_default_or_short"; fi
+              if [ -n "$JWT_VALUE" ] && [ "$JWT_VALUE" != "change-me-in-production" ] && [ ${#JWT_VALUE} -ge 32 ]; then echo "jwt_secret=strong_enough"; else echo "jwt_secret=missing_default_or_short"; fi
+              unset POSTGRES_VALUE JWT_VALUE
+
+              DB_NAME=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT current_database()')
+              SYSTEM_ID=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT system_identifier FROM pg_control_system()')
+              BROKERS_EXISTS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT to_regclass('public.brokers') IS NOT NULL")
+              MIGRATIONS_EXISTS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT to_regclass('public._prisma_migrations') IS NOT NULL")
+              echo "database=$DB_NAME"
+              echo "system_identifier=$SYSTEM_ID"
+              echo "brokers_table=$BROKERS_EXISTS"
+              echo "migration_history=$MIGRATIONS_EXISTS"
+              if [ "$BROKERS_EXISTS" = "t" ]; then
+                BROKER_ROWS=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT COUNT(*) FROM public.brokers')
+                echo "broker_rows=$BROKER_ROWS"
+              fi
+              if [ "$MIGRATIONS_EXISTS" = "t" ]; then
+                UNFINISHED=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc 'SELECT COUNT(*) FROM public."_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL')
+                BASELINE=$($COMPOSE_CMD exec -T postgres psql -U postgres -d broker_platform -Atqc "SELECT EXISTS (SELECT 1 FROM public.\"_prisma_migrations\" WHERE migration_name='0_legacy_baseline' AND finished_at IS NOT NULL AND rolled_back_at IS NULL)")
+                echo "unfinished_migrations=$UNFINISHED"
+                echo "baseline_applied=$BASELINE"
+              fi
+            fi
+
+            if [ "$TASK" = "all" ] || [ "$TASK" = "seed-stmichael" ]; then
+              echo "=== seed-from-stmichael (проекты + акции с stmichael.ru) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/seed-from-stmichael.js
+            fi
+
+            if [ "$TASK" = "all" ] || [ "$TASK" = "sync-yandex-disk" ]; then
+              echo ""
+              echo "=== sync-yandex-disk (материалы с Яндекс.Диска, структура папок) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/sync-yandex-files.js
+            fi
+
+            if [ "$TASK" = "all" ] || [ "$TASK" = "seed-cooperation-doc" ]; then
+              echo ""
+              echo "=== seed-cooperation-doc (документ 'Как начать сотрудничать') ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/seed-cooperation-doc.js
+            fi
+
+            if [ "$TASK" = "cleanup-cooperation-docs" ]; then
+              echo ""
+              echo "=== cleanup-cooperation-docs (удалить неверные документы) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/cleanup-cooperation-docs.js
+            fi
+
+            if [ "$TASK" = "refresh-cms-content" ]; then
+              echo "=== refresh-cms-content (перезаписать дефолты CMS — ОПАСНО, перетирает админские правки) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/refresh-cms-content.js
+            fi
+
+            if [ "$TASK" = "seed-commission-policies" ]; then
+              echo "=== seed-commission-policies (начальные политики комиссии Зорге 9) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/seed-commission-policies.js
+            fi
+
+            if [ "$TASK" = "dry-run-dedup" ]; then
+              echo "=== dry-run-dedup (вывод какие дубликаты будут удалены — БД НЕ МЕНЯЕТСЯ) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/dry-run-dedup.js
+            fi
+
+            if [ "$TASK" = "sync-amocrm-all" ]; then
+              echo "=== sync-amocrm-all (пересинк всех брокеров с amoCRM) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/sync-amocrm-all.js
+            fi
+
+            if [ "$TASK" = "inspect-lead" ]; then
+              echo "=== inspect-lead (диагностика custom_fields лида в amoCRM) ==="
+              if [ -z "${{ inputs.lead_id }}" ]; then
+                echo "ERROR: lead_id обязателен (заполни поле lead_id в workflow form)"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e LEAD_ID="${{ inputs.lead_id }}" api node /app/scripts/inspect-lead.js
+            fi
+
+            if [ "$TASK" = "inspect-recent-fixations" ]; then
+              echo "=== inspect-recent-fixations (последние 5 Client из БД с amoSyncError) ==="
+              $COMPOSE_CMD exec -T -e LIMIT=5 api node /app/scripts/inspect-recent-fixations.js
+            fi
+
+            if [ "$TASK" = "inspect-broker-attachment" ]; then
+              echo "=== inspect-broker-attachment (диагностика прикрепления брокера или forgot-password) ==="
+              if [ -z "${{ inputs.phone }}" ] && [ -z "${{ inputs.email }}" ]; then
+                echo "ERROR: укажи phone (для проверки фиксации) ИЛИ email (для проверки forgot-password)"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T \
+                -e PHONE="${{ inputs.phone }}" \
+                -e EMAIL="${{ inputs.email }}" \
+                api node /app/scripts/inspect-broker-attachment.js
+            fi
+
+            if [ "$TASK" = "audit-missing-responsible-broker-links" ]; then
+              echo "=== READ-ONLY audit missing responsible broker links ==="
+              $COMPOSE_CMD exec -T \
+                -e AUDIT_DAYS="${{ inputs.audit_days }}" \
+                -e AUDIT_LIMIT="${{ inputs.audit_limit }}" \
+                api node /app/scripts/audit-missing-responsible-broker-links.js
+            fi
+
+            if [ "$TASK" = "inspect-amo-webhooks" ]; then
+              echo "=== inspect-amo-webhooks (список настроенных webhook'ов в amoCRM) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/inspect-amo-webhooks.js
+            fi
+
+            if [ "$TASK" = "setup-amo-webhook" ]; then
+              echo "=== setup-amo-webhook (регистрация webhook'а amoCRM → /api/webhooks/amo/lead-update) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/setup-amo-webhook.js
+            fi
+
+            if [ "$TASK" = "test-smtp-send" ]; then
+              echo "=== test-smtp-send (реальная отправка тестового SMTP-письма) ==="
+              if [ -z "${{ inputs.email }}" ]; then
+                echo "ERROR: email обязателен — на этот адрес попробуем отправить тестовое письмо"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e TEST_EMAIL="${{ inputs.email }}" api node /app/scripts/test-smtp-send.js
+            fi
+
+            if [ "$TASK" = "update-smtp-creds" ]; then
+              echo "=== update-smtp-creds (обновить SMTP_USER/SMTP_PASS в .env + restart api) ==="
+              if [ -z "${{ inputs.smtp_user }}" ] || [ -z "${{ inputs.smtp_pass }}" ]; then
+                echo "ERROR: smtp_user и smtp_pass обязательны"
+                exit 1
+              fi
+              echo "::add-mask::${{ inputs.smtp_pass }}"
+              if [ ! -f .env ]; then
+                echo "ERROR: .env не найден в $(pwd)"
+                exit 1
+              fi
+              # Бэкап перед правкой — на случай отката. НЕ в папку деплоя:
+              # deploy-update.sh фейлит выкладку на неожиданных untracked-файлах
+              # (2026-09-04 один такой .env.bak заблокировал деплой).
+              ENV_BAK_DIR="/var/backups/stmichael/env-backups"
+              sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ENV_BAK_DIR"
+              install -m 600 .env "$ENV_BAK_DIR/.env.bak.$(date +%s)"
+              # Экранирование значений для sed replacement: \, &, |, / → \X.
+              # Для Exchange логина 'stmichael\broker_st' это критично, иначе \b сожрётся.
+              SMTP_USER_NEW='${{ inputs.smtp_user }}'
+              SMTP_PASS_NEW='${{ inputs.smtp_pass }}'
+              SMTP_USER_ESC=$(printf '%s' "$SMTP_USER_NEW" | sed -e 's/[&|\\/]/\\&/g')
+              SMTP_PASS_ESC=$(printf '%s' "$SMTP_PASS_NEW" | sed -e 's/[&|\\/]/\\&/g')
+              if grep -q '^SMTP_USER=' .env; then
+                sed -i "s|^SMTP_USER=.*|SMTP_USER=$SMTP_USER_ESC|" .env
+              else
+                printf '\nSMTP_USER=%s\n' "$SMTP_USER_NEW" >> .env
+              fi
+              if grep -q '^SMTP_PASS=' .env; then
+                sed -i "s|^SMTP_PASS=.*|SMTP_PASS=$SMTP_PASS_ESC|" .env
+              else
+                printf 'SMTP_PASS=%s\n' "$SMTP_PASS_NEW" >> .env
+              fi
+              echo "SMTP_USER/SMTP_PASS записаны в .env"
+              # 2026-06-15 fix: docker compose restart НЕ перечитывает .env —
+              # env-переменные подставляются в config при СОЗДАНИИ контейнера.
+              # Нужно --force-recreate чтобы compose заново подставил ${SMTP_USER}.
+              echo "Recreate api container с новыми env..."
+              $COMPOSE_CMD up -d --force-recreate --no-deps api
+              echo "Готово. Запусти test-smtp-send чтобы проверить, что AUTH проходит."
+            fi
+
+            if [ "$TASK" = "update-amo-meetings-manager" ]; then
+              echo "=== update-amo-meetings-manager (set AMO_BROKER_MEETINGS_MANAGER_ID) ==="
+              AMO_USER_ID='${{ inputs.amo_user_id }}'
+              AMO_TASK_TYPE_ID='${{ inputs.amo_meeting_task_type_id }}'
+              test -n "$AMO_USER_ID" || { echo "ERROR: amo_user_id is required"; exit 1; }
+              test -f .env || { echo "ERROR: .env not found in $(pwd)"; exit 1; }
+              # Бэкап вне папки деплоя — см. комментарий в update-smtp-creds.
+              ENV_BAK_DIR="/var/backups/stmichael/env-backups"
+              sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$ENV_BAK_DIR"
+              install -m 600 .env "$ENV_BAK_DIR/.env.bak.$(date +%s)"
+              grep -q '^AMO_BROKER_MEETINGS_MANAGER_ID=' .env \
+                && sed -i "s|^AMO_BROKER_MEETINGS_MANAGER_ID=.*|AMO_BROKER_MEETINGS_MANAGER_ID=$AMO_USER_ID|" .env \
+                || printf '\nAMO_BROKER_MEETINGS_MANAGER_ID=%s\n' "$AMO_USER_ID" >> .env
+              echo "AMO_BROKER_MEETINGS_MANAGER_ID=$AMO_USER_ID written"
+              if [ -n "$AMO_TASK_TYPE_ID" ]; then
+                grep -q '^AMO_MEETING_TASK_TYPE_ID=' .env \
+                  && sed -i "s|^AMO_MEETING_TASK_TYPE_ID=.*|AMO_MEETING_TASK_TYPE_ID=$AMO_TASK_TYPE_ID|" .env \
+                  || printf 'AMO_MEETING_TASK_TYPE_ID=%s\n' "$AMO_TASK_TYPE_ID" >> .env
+                echo "AMO_MEETING_TASK_TYPE_ID=$AMO_TASK_TYPE_ID written"
+              fi
+              echo "Recreate api container..."
+              $COMPOSE_CMD up -d --force-recreate --no-deps api
+              echo "Done. Brokers will see Ksenia's busy slots from amoCRM and meeting tasks will be created in her calendar."
+            fi
+
+            if [ "$TASK" = "api-logs" ]; then
+              echo "=== api-logs ==="
+              FILTER='${{ inputs.phone }}'
+              : ${FILTER:=__noFilter__}
+              echo "--- filter: $FILTER ---"
+              $COMPOSE_CMD logs --tail 2000 api 2>&1 | tail -300 | grep -i -E "(handleRule|fixClient|Alarm|alarm|note|task|amo |webhook|$FILTER)" | tail -150 || true
+            fi
+
+            if [ "$TASK" = "force-sync-lead" ]; then
+              echo "=== force-sync-lead ==="
+              LEAD_ID_VAL='${{ inputs.lead_id }}'
+              : ${LEAD_ID_VAL:=}
+              if [ -z "$LEAD_ID_VAL" ]; then
+                echo "ERROR: укажи lead_id"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e LEAD_ID="$LEAD_ID_VAL" api node /app/scripts/force-sync-lead.js
+            fi
+
+            if [ "$TASK" = "backfill-client-amo-lead-id" ]; then
+              echo "=== backfill-client-amo-lead-id ==="
+              APPLY_VAL='${{ inputs.apply }}'
+              : ${APPLY_VAL:=false}
+              $COMPOSE_CMD exec -T -e APPLY="$APPLY_VAL" api node /app/scripts/backfill-client-amo-lead-id.js
+            fi
+
+            if [ "$TASK" = "full-backup" ]; then
+              # Fail closed: a zero-byte/truncated dump must never be reported
+              # as a valid pre-deploy backup. Secrets from .env are deliberately
+              # excluded; they belong in the approved secret manager.
+              set -euo pipefail
+              umask 077
+              echo "=== full-backup (verified DB dump + optional uploads; no .env) ==="
+              BACKUP_DIR=/var/backups/stmichael
+              sudo mkdir -p "$BACKUP_DIR"
+              test -d "$BACKUP_DIR" && test -w "$BACKUP_DIR"
+              TS=$(date -u +%Y%m%d-%H%M%S)
+              TMP=$(mktemp -d)
+              trap 'rm -rf "$TMP"' EXIT
+              DUMP_FILE="$TMP/db-$TS.dump"
+
+              echo "→ pg_dump custom format"
+              $COMPOSE_CMD exec -T postgres bash -c \
+                'exec pg_dump -Fc -U "$POSTGRES_USER" "$POSTGRES_DB"' > "$DUMP_FILE"
+              test -s "$DUMP_FILE"
+              $COMPOSE_CMD exec -T postgres pg_restore --list < "$DUMP_FILE" > /dev/null
+              echo "  dump verified; size: $(du -h "$DUMP_FILE" | cut -f1)"
+
+              echo "→ tar named uploads volume through the running API container"
+              UPLOADS_FILE="$TMP/uploads-$TS.tar.gz"
+              $COMPOSE_CMD exec -T api sh -c \
+                'test -d /app/uploads && exec tar -C /app/uploads -czf - .' \
+                > "$UPLOADS_FILE"
+              test -s "$UPLOADS_FILE"
+              tar -tzf "$UPLOADS_FILE" > /dev/null
+              echo "  uploads volume verified; size: $(du -h "$UPLOADS_FILE" | cut -f1)"
+
+              printf 'created_at_utc=%s\ncommit=%s\n' "$TS" "$(git rev-parse HEAD)" > "$TMP/MANIFEST.txt"
+              (cd "$TMP" && sha256sum -- * > SHA256SUMS)
+
+              echo "→ собираю и проверяю tarball"
+              FINAL_BACKUP="$BACKUP_DIR/backup-$TS.tar.gz"
+              TEMP_BACKUP="$BACKUP_DIR/.backup-$TS.tar.gz.tmp"
+              tar -czf "$TEMP_BACKUP" -C "$TMP" .
+              test -s "$TEMP_BACKUP"
+              tar -tzf "$TEMP_BACKUP" > /dev/null
+              mv "$TEMP_BACKUP" "$FINAL_BACKUP"
+
+              # Чистим бэкапы старше 14 дней
+              find "$BACKUP_DIR" -name "backup-*.tar.gz" -mtime +14 -delete 2>/dev/null || true
+
+              ls -lh "$FINAL_BACKUP"
+              sha256sum "$FINAL_BACKUP"
+              echo "✓ Локальный backup verified: $FINAL_BACKUP"
+              echo "ВАЖНО: скопируйте его в утверждённое off-host encrypted storage и проверьте restore на clone."
+            fi
+
+            if [ "$TASK" = "find-test-leads" ]; then
+              echo "=== find-test-leads (поиск тестовых лидов в amoCRM — НИЧЕГО НЕ УДАЛЯЕТ) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/find-test-leads.js
+            fi
+
+            if [ "$TASK" = "list-broker-leads" ]; then
+              echo "=== list-broker-leads (список лидов amoCRM по ACTIVE-брокерам) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/list-broker-leads.js
+            fi
+
+            if [ "$TASK" = "find-contact-by-phone" ]; then
+              echo "=== find-contact-by-phone (поиск контакта в amoCRM по телефону) ==="
+              if [ -z "${{ inputs.phone }}" ]; then
+                echo "ERROR: phone обязателен"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e PHONE="${{ inputs.phone }}" api node /app/scripts/find-contact-by-phone.js
+            fi
+
+            if [ "$TASK" = "list-amo-users" ]; then
+              echo "=== list-amo-users (users + catalogs из amoCRM) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/list-amo-users.js
+            fi
+
+            if [ "$TASK" = "list-contact-fields" ]; then
+              echo "=== list-contact-fields (все custom_fields контактов в amoCRM) ==="
+              $COMPOSE_CMD exec -T api node /app/scripts/list-contact-fields.js
+            fi
+
+            if [ "$TASK" = "inspect-contact" ]; then
+              echo "=== inspect-contact (диагностика custom_fields контакта в amoCRM) ==="
+              if [ -z "${{ inputs.contact_id }}" ]; then
+                echo "ERROR: contact_id обязателен"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T -e CONTACT_ID="${{ inputs.contact_id }}" api node /app/scripts/inspect-contact.js
+            fi
+
+            if [ "$TASK" = "inspect-broker-company-links" ]; then
+              echo "=== inspect-broker-company-links (READ-ONLY) ==="
+              if [ -z "${{ inputs.broker_id }}" ]; then
+                echo "ERROR: broker_id обязателен"
+                exit 1
+              fi
+              $COMPOSE_CMD exec -T \
+                -e BROKER_ID="${{ inputs.broker_id }}" \
+                api node /app/scripts/inspect-broker-company-links.js
+            fi
+
+            if [ "$TASK" = "create-admin" ]; then
+              echo "=== create-admin (одноразовое создание ADMIN-аккаунта) ==="
+              echo "::add-mask::${{ inputs.admin_password }}"
+              $COMPOSE_CMD exec -T \
+                -e ADMIN_PHONE="${{ inputs.admin_phone }}" \
+                -e ADMIN_PASSWORD="${{ inputs.admin_password }}" \
+                -e ADMIN_NAME="${{ inputs.admin_name }}" \
+                api node /app/scripts/create-admin.js
+            fi
+
+            echo ""
+            echo "✓ Задача '$TASK' выполнена"

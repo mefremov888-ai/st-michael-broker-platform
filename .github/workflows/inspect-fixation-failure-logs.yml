@@ -1,0 +1,43 @@
+name: Inspect fixation failure logs (one-off, read-only)
+
+# v5 (05.09.2026): у брокера 6e414141-... второй день подряд падает фиксация
+# с кодом AMO_SYNC_FAILED (не сетевой). Смотрим: кто этот брокер (имя,
+# наличие amo_contact_id), его свежие записи audit_logs (какая попытка,
+# какой клиент — телефон маскируем), и хвост ошибок. Только SELECT-ы.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: SSH and inspect broker 6e414141 fixation trail (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            BID="6e414141-f2ca-4c71-8402-2032c9186568"
+            echo "=== Брокер ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT full_name, role, status, (amo_contact_id IS NOT NULL) AS has_amo_contact, left(coalesce(phone,''),5)||'***' AS phone_mask, created_at::date FROM brokers WHERE id='${BID}'" || true
+            echo ""
+            echo "=== Его audit_logs за 3 дня (действие, сущность, дата; payload: телефон маскируем) ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT created_at, action, entity, entity_id, regexp_replace(coalesce(payload::text,''), '[0-9]{7,}', '#######', 'g') FROM audit_logs WHERE user_id='${BID}' AND created_at > now() - interval '3 days' ORDER BY created_at DESC LIMIT 20" || true
+            echo ""
+            echo "=== Его клиенты за 7 дней ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT created_at::timestamp(0), left(full_name,20), left(phone,5)||'***', uniqueness_status, amo_sync_status, amo_sync_error FROM clients WHERE (broker_id='${BID}' OR responsible_broker_id='${BID}') AND created_at > now() - interval '7 days' ORDER BY created_at DESC LIMIT 15" || true
+            echo ""
+            echo "=== Готово (только чтение) ==="

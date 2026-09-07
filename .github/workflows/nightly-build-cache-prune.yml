@@ -1,0 +1,47 @@
+name: Nightly build cache prune (no restart)
+
+# 2026-09-07: диск прода забивается кэшем docker-сборок (~5-6 ГБ за деплой;
+# 07.09 после шести деплоев — 89%, ворота бэкапа требуют 8 ГБ свободного).
+# Этот воркфлоу каждую ночь удаляет ТОЛЬКО build-кэш старше 12 часов и
+# dangling-образы. Ничего не перезапускает, volumes/БД/uploads/рабочие
+# образы/логи не трогает. Следующая сборка после чистки просто дольше.
+#
+# Ручная полная чистка с перезапуском сервисов — server-disk-cleanup.yml.
+
+on:
+  schedule:
+    - cron: "15 1 * * *" # 04:15 МСК
+  workflow_dispatch: {}
+
+concurrency:
+  group: nightly-build-cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune docker build cache on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and prune build cache
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 10m
+          script: |
+            echo "=== ДО ==="
+            df -h / | tail -1
+            docker system df || true
+            echo ""
+            echo "=== build-кэш старше 12 часов ==="
+            docker builder prune -af --filter "until=12h" || true
+            echo ""
+            echo "=== dangling-образы ==="
+            docker image prune -f || true
+            echo ""
+            echo "=== ПОСЛЕ ==="
+            df -h / | tail -1
+            docker system df || true

@@ -1,0 +1,36 @@
+name: Check available Anthropic models
+
+# 2026-07-09: диагностика 403 при вызове classify-brokers-specialization.
+# Показывает какие модели видит ключ и тест-запрос к 3 haiku-моделям.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: check-anthropic
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Test Anthropic API access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH to server and run check
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' .env | cut -d= -f2- | tr -d '\r\n\t "')
+            if [ -z "$ANTHROPIC_API_KEY" ]; then
+              echo "ERR: ANTHROPIC_API_KEY нет в .env"
+              exit 1
+            fi
+            docker compose exec -T -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" api node /app/scripts/check-anthropic-models.js

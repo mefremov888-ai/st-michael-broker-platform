@@ -1,0 +1,40 @@
+name: Audit broker base (read-only)
+
+# 2026-07-17: аудит качества базы брокеров перед проектом ИИ-обзвона.
+# Read-only: гоняет scripts/audit-broker-base.sql через psql в контейнере
+# postgres на проде. Ничего не пишет в БД, контейнеры не трогает.
+#
+# Запуск: Actions → "Audit broker base (read-only)" → Run workflow,
+# или: gh workflow run audit-broker-base.yml
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: audit-broker-base
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Run audit SQL on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run read-only audit
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 10m
+          # SQL берём из origin/master через git show — не зависит от того,
+          # успел ли деплой обновить рабочую директорию на сервере.
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== SQL из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/audit-broker-base.sql | docker compose exec -T postgres psql -U postgres -d broker_platform -v ON_ERROR_STOP=0
+            echo "=== Аудит завершён ==="

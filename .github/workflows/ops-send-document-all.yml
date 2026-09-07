@@ -1,0 +1,99 @@
+name: Ops document to ALL chats (mine + server-configured)
+
+# 2026-09-07: PDF-записки (ops-send-document.yml) уходили только в чат из
+# GH-секрета OPS_ALERT_CHAT_ID — это чат Анны, владелец файлы не получал.
+# Этот воркфлоу шлёт документ во все ops-чаты: chat_id из серверного .env
+# (OPS_ALERT_CHAT_IDS / OPS_ALERT_CHAT_ID) + GH-чат, с дедупом — как
+# ops-send-note-all.yml. Файл берётся из ветки репозитория (git show на
+# сервере), на диск прода пишется только во /tmp и удаляется.
+#
+# Использование: положить файл в короткоживущую ветку (напр. data/notes-…),
+# запустить с branch/path/caption. Telegram: документ до 50 МБ.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Ветка репозитория с файлом
+        required: true
+        type: string
+      path:
+        description: Путь к файлу в ветке (например data/notes/report.pdf)
+        required: true
+        type: string
+      caption:
+        description: Подпись к документу (до ~1000 символов)
+        required: false
+        default: ''
+        type: string
+      send_to:
+        description: Куда слать — all | server_only (без GH-чата) | gh_only
+        required: false
+        default: all
+        type: string
+
+concurrency:
+  group: ops-send-document-all
+  cancel-in-progress: false
+
+jobs:
+  send:
+    name: Fetch file on server and fan out the document
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH, fetch file, merge ids, send
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+          DOC_BRANCH: ${{ inputs.branch }}
+          DOC_PATH: ${{ inputs.path }}
+          CAPTION: ${{ inputs.caption }}
+          SEND_TO: ${{ inputs.send_to }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 8m
+          envs: BOT,GH_CHAT,DOC_BRANCH,DOC_PATH,CAPTION,SEND_TO
+          script: |
+            set -eu
+            test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
+            case "$DOC_BRANCH" in ""|-*|*..*|*[!A-Za-z0-9._/-]*) echo "недопустимое имя ветки"; exit 1;; esac
+            case "$DOC_PATH" in ""|/*|*..*|*[!A-Za-z0-9._/ -]*) echo "недопустимый путь файла"; exit 1;; esac
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git fetch --quiet origin "$DOC_BRANCH"
+            tmp=$(mktemp -d /tmp/ops-doc.XXXXXX)
+            trap 'rm -rf -- "$tmp"' EXIT
+            fname=$(basename -- "$DOC_PATH")
+            git show "origin/$DOC_BRANCH:$DOC_PATH" > "$tmp/$fname"
+            size=$(wc -c < "$tmp/$fname")
+            echo "файл: $fname, байт: $size"
+            [ "$size" -gt 0 ] || { echo "пустой файл"; exit 1; }
+            server_ids=$(grep -hE 'OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | sed -e 's/^[^=]*=//' -e "s/[\"']//g" -e 's/\r//g' | tr ',;' '\n' | tr -d ' \t' | grep -E '^-?[0-9]+$' || true)
+            if [ "${SEND_TO:-all}" = "server_only" ]; then
+              all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true)
+            elif [ "${SEND_TO:-all}" = "gh_only" ]; then
+              all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true)
+            else
+              all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
+            fi
+            test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
+            echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
+            fail=0
+            for chat in $all; do
+              ok=$(curl -sS --max-time 60 -X POST "https://api.telegram.org/bot${BOT}/sendDocument" \
+                -F chat_id="$chat" \
+                -F caption="$CAPTION" \
+                -F document=@"$tmp/$fname" | head -c 160)
+              tail4=$(printf '%s' "$chat" | tail -c 4)
+              if printf '%s' "$ok" | grep -q '"ok":true'; then
+                echo "chat ...$tail4: отправлено"
+              else
+                echo "chat ...$tail4: ОШИБКА: $ok"
+                fail=1
+              fi
+            done
+            exit $fail

@@ -1,0 +1,42 @@
+name: Sync lead responsible from MoreKIT task
+
+# 2026-07-23: разово подтянуть ответственного лида из последней задачи
+# MoreKIT (кейс «заявка зависла на Админе / Без КЦ»).
+#
+# Запуск: gh workflow run sync-lead-responsible.yml -f lead_id=32262709
+
+on:
+  workflow_dispatch:
+    inputs:
+      lead_id:
+        description: 'ID лида в amoCRM'
+        required: true
+        type: string
+
+concurrency:
+  group: sync-lead-responsible
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync responsible on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run sync
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/sync-lead-responsible.js > /tmp/sync-lead-responsible.js
+            docker cp /tmp/sync-lead-responsible.js st-michael-api:/app/scripts/sync-lead-responsible.js
+            docker compose exec -T -e LEAD_ID='${{ inputs.lead_id }}' api node /app/scripts/sync-lead-responsible.js
+            echo "=== Готово ==="

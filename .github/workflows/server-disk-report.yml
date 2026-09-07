@@ -1,0 +1,59 @@
+name: Server disk report (read-only)
+
+# 2026-07-22: на сервере кончилось место (git fetch падает с
+# "No space left on device", деплой #266 упал). Этот workflow только
+# СМОТРИТ, что занимает диск: df, docker system df, размеры логов и
+# каталогов. Ничего не удаляет и не меняет.
+#
+# Запуск: gh workflow run server-disk-report.yml
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: server-disk-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Inspect disk usage on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and inspect disk (read-only)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 10m
+          script: |
+            echo '=== df -h ==='
+            df -h
+            echo ''
+            echo '=== df -i (inodes) ==='
+            df -i
+            echo ''
+            echo '=== docker system df ==='
+            docker system df || true
+            echo ''
+            echo '=== docker system df -v (детально, топ) ==='
+            docker system df -v 2>/dev/null | head -80 || true
+            echo ''
+            echo '=== Размеры логов docker-контейнеров ==='
+            sudo du -sh /var/lib/docker/containers/*/ 2>/dev/null | sort -rh | head -15 || du -sh /var/lib/docker/containers/*/ 2>/dev/null | sort -rh | head -15 || true
+            echo ''
+            echo '=== Крупнейшие каталоги / (top-level) ==='
+            sudo du -xh -d1 / 2>/dev/null | sort -rh | head -15 || du -xh -d1 / 2>/dev/null | sort -rh | head -15 || true
+            echo ''
+            echo '=== Крупнейшие каталоги /var ==='
+            sudo du -xh -d2 /var 2>/dev/null | sort -rh | head -20 || du -xh -d2 /var 2>/dev/null | sort -rh | head -20 || true
+            echo ''
+            echo '=== journalctl disk usage ==='
+            journalctl --disk-usage 2>/dev/null || true
+            echo ''
+            echo '=== Рабочая директория деплоя ==='
+            cd ${{ secrets.DEPLOY_PATH }} && du -sh .git . 2>/dev/null || true
+            echo ''
+            echo '=== Отчёт завершён ==='
