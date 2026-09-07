@@ -1,0 +1,65 @@
+name: Apply registry deal objects from amoCRM
+
+# 2026-09-07: объект сделки (площадь, этаж, корпус, номер квартиры) для строк
+# «Реестра сделок» (registry_deals) из полей лида amoCRM по amoLeadId.
+# Скрипт — scripts/enrich-registry-deals-from-amo.js: обновляет ТОЛЬКО пустые
+# поля, object_source='amo'. Требует миграции 20260907150000_registry_deal_object
+# (колонки sqm/floor/building/apartment_number/object_source) — запускать
+# только после того, как поезд с ней доехал до прода.
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (только отчёт, без записи).
+#
+# Запуск: Actions → "Apply registry deal objects from amoCRM" → Run workflow
+# (сначала dry_run=true, проверить счётчики и примеры, затем
+# dry_run=false + confirm_apply=true).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только отчёт, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    name: Enrich registry deal objects on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run enrich
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/enrich-registry-deals-from-amo.js > /tmp/enrich-registry-deals-from-amo.js
+            docker cp /tmp/enrich-registry-deals-from-amo.js st-michael-api:/app/scripts/enrich-registry-deals-from-amo.js
+            MODE=1
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/enrich-registry-deals-from-amo.js
+            echo "=== Готово (DRY_RUN=$MODE) ==="

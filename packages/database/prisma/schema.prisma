@@ -1997,6 +1997,15 @@ model RegistryDeal {
   brokerId           String?   @map("broker_id")
   broker             Broker?   @relation(fields: [brokerId], references: [id])
   brokerAmoContactId BigInt?   @map("broker_amo_contact_id")
+  // 2026-09-07: объект сделки для карточек «Нашей базы» (площадь, этаж,
+  // корпус, квартира). В исходном реестре этих полей нет — заполняются из
+  // полей лида amoCRM (scripts/enrich-registry-deals-from-amo.js);
+  // object_source = 'amo' | null. Все колонки nullable, без DEFAULT.
+  sqm                Decimal?  @db.Decimal(10, 2)
+  floor              Int?
+  building           String?
+  apartmentNumber    String?   @map("apartment_number")
+  objectSource       String?   @map("object_source")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
