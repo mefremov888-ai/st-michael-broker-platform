@@ -10500,6 +10500,32 @@ export class LoyaltyBaseService {
     };
   }
 
+  /**
+   * 2026-09-07: карточка базы Анны показывает данные НАШЕЙ карточки по
+   * подтверждённой сцепке (сверка → LINK). Требование владельца: всё, что
+   * найдено и дополнено для нашей базы (телефоны, юрназвание, ссылки amo,
+   * сделки реестра, события), должно быть видно и в карточке Анны.
+   * Берём полную нашу карточку тем же detail("ours", …); если наша запись
+   * удалена или недоступна — linkedOurRecord = null, карточка Анны не падает.
+   */
+  private async attachLinkedOurRecord(
+    item: any,
+    periodDto?: { from?: string; to?: string },
+  ) {
+    const link = item?.linkedOurs;
+    const type = link?.type === "AGENCY" ? "AGENCY" : link?.type === "BROKER" ? "BROKER" : null;
+    if (!type || !link?.id) {
+      item.linkedOurRecord = null;
+      return;
+    }
+    try {
+      const ours: any = await this.detail("ours", type, String(link.id), periodDto);
+      item.linkedOurRecord = ours?.item ?? null;
+    } catch {
+      item.linkedOurRecord = null;
+    }
+  }
+
   async detail(
     baseInput: string,
     entityType: EntityType,
@@ -10567,10 +10593,12 @@ export class LoyaltyBaseService {
           entityType,
           engagementEvents,
         );
+        const manualItem = this.mapAnnaManualRecord(manualRecord, true);
+        await this.attachLinkedOurRecord(manualItem, periodDto);
         return {
           base: "anna",
           entityType,
-          item: this.mapAnnaManualRecord(manualRecord, true),
+          item: manualItem,
         };
       }
       const workflowCalls = await this.workflowCallReadModels(
@@ -10611,6 +10639,7 @@ export class LoyaltyBaseService {
       ) {
         annaItem.periodMetrics = this.unavailablePeriodMetrics(activityPeriod);
       }
+      await this.attachLinkedOurRecord(annaItem, periodDto);
       return {
         base: "anna",
         entityType,

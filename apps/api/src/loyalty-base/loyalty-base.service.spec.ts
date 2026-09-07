@@ -6508,6 +6508,88 @@ describe("LoyaltyBaseService", () => {
       false,
     );
   });
+
+  // 2026-09-07: карточка базы Анны отдаёт НАШУ карточку по подтверждённой
+  // сцепке (linkedOurRecord) — телефоны, юрназвание, amo, события кабинета
+  // видны и у Анны. Если наша запись пропала — null, карточка не падает.
+  it("attaches the linked OUR record to the Anna detail and tolerates a missing target", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.loyaltyDataset.findUnique.mockResolvedValue({
+      id: "dataset-1",
+      activeSnapshotId: "snap-1",
+      activeSnapshot: {
+        id: "snap-1",
+        datasetId: "dataset-1",
+        status: "PUBLISHED",
+        ruleVersion: "v1",
+        summary: {},
+      },
+    });
+    const annaAgency: any = {
+      id: "record-anna-agency",
+      entityType: "AGENCY",
+      personId: null,
+      organizationId: "anna-agency",
+      displayName: "Тренд Агент (Анна)",
+      city: "Moscow",
+      attributes: {},
+      person: null,
+      organization: {
+        id: "anna-agency",
+        updatedAt: new Date("2026-09-01T00:00:00.000Z"),
+        links: [{ id: "link-1", targetType: "AGENCY", targetId: "agency-1" }],
+        contactOverrides: [],
+        personRoles: [],
+        contactPeople: [],
+      },
+      contactPoints: [],
+      externalIdentities: [],
+      metrics: [],
+      sourceAggregate: null,
+      organizationRoles: [],
+      activities: [],
+      fieldValues: [],
+    };
+    prisma.loyaltySourceRecord.findFirst.mockResolvedValue(annaAgency);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.agency.findUnique.mockResolvedValueOnce({
+      id: "agency-1",
+      name: "Trend Agent",
+      legalName: "ООО «Онлайн Недвижимость»",
+      inn: "7700000000",
+      phone: "+79060000000",
+      email: null,
+      brokerAgencies: [],
+      deals: [],
+      _count: { brokerAgencies: 0 },
+    });
+
+    const detail: any = await service.detail("anna", "AGENCY", "anna-agency");
+    expect(detail.item.linkedOurs).toEqual({
+      type: "AGENCY",
+      id: "agency-1",
+      linkId: "link-1",
+    });
+    expect(detail.item.linkedOurRecord).toMatchObject({
+      id: "agency-1",
+      legalName: "ООО «Онлайн Недвижимость»",
+      taxId: "7700000000",
+    });
+    expect(detail.item.linkedOurRecord.contactPoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "PHONE", value: "+79060000000" }),
+      ]),
+    );
+    expect(detail.item.linkedOurRecord.activityEvidence).toBeDefined();
+
+    // Наша запись удалена → сцепка остаётся, карточка Анны без падения.
+    prisma.agency.findUnique.mockResolvedValueOnce(null);
+    const orphan: any = await service.detail("anna", "AGENCY", "anna-agency");
+    expect(orphan.item.linkedOurs?.id).toBe("agency-1");
+    expect(orphan.item.linkedOurRecord).toBeNull();
+  });
 });
 
 // 2026-09-07: «имя для работы» (Broker.displayName) в «Нашей базе».

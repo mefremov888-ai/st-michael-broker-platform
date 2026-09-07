@@ -592,6 +592,13 @@ export interface LoyaltyRecord {
   // Красный бейдж «не звонить» (Broker.doNotCall, только «Наша база»).
   doNotCall: boolean | null;
   amoContactUrl: string;
+  /**
+   * 2026-09-07: сцепка записи базы Анны с нашей карточкой (сверка → LINK).
+   * linkedOurRecord — полная наша карточка (телефоны, юрназвание, amo,
+   * события), чтобы всё найденное для нашей базы было видно и у Анны.
+   */
+  linkedOurs: { type: LoyaltyEntityType; id: string; linkId: string } | null;
+  linkedOurRecord: LoyaltyRecord | null;
   archived: boolean;
   updatedAt: string;
   fixations: number | null;
@@ -1752,11 +1759,30 @@ function normalizeProvenance(value: unknown) {
   };
 }
 
+/** Сцепка с нашей карточкой: API шлёт {type: BROKER|AGENCY, id, linkId}. */
+function normalizeLinkedOurs(
+  value: unknown,
+): { type: LoyaltyEntityType; id: string; linkId: string } | null {
+  const link = nonEmptyRecord(value);
+  if (!link) return null;
+  const rawType = stringValue(link.type).toUpperCase();
+  const type: LoyaltyEntityType | null =
+    rawType === "BROKER" || rawType === "BROKERS"
+      ? "brokers"
+      : rawType === "AGENCY" || rawType === "AGENCIES"
+        ? "agencies"
+        : null;
+  const id = stringValue(link.id);
+  if (!type || !id) return null;
+  return { type, id, linkId: stringValue(link.linkId) };
+}
+
 export function normalizeLoyaltyRecord(
   value: unknown,
   entityType: LoyaltyEntityType,
 ): LoyaltyRecord {
   const item = asRecord(value);
+  const linkedOurs = normalizeLinkedOurs(item.linkedOurs);
   const metrics = nonEmptyRecord(item.metrics) || {};
   const activitySummary = nonEmptyRecord(item.activities) || {};
   const metricSourceRaw = nonEmptyRecord(item.metricSource);
@@ -2048,6 +2074,11 @@ export function normalizeLoyaltyRecord(
     hasAmo: hasAmoRaw !== undefined ? booleanValue(hasAmoRaw) : hasAmoIdentity,
     doNotCall: booleanValue(pick(item, "doNotCall")),
     amoContactUrl: safeAmoContactUrl(externalIdentities),
+    linkedOurs,
+    linkedOurRecord:
+      linkedOurs && nonEmptyRecord(item.linkedOurRecord)
+        ? normalizeLoyaltyRecord(item.linkedOurRecord, linkedOurs.type)
+        : null,
     archived:
       Boolean(pick(item, "archivedAt")) ||
       booleanValue(pick(item, "archived", "isArchived")) === true,
