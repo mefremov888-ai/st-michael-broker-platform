@@ -982,6 +982,8 @@ export class SchedulerService {
                     // 2026-07-01: мини-детали клиента в комментарии.
                     const projectLabel = (client as any)?.project === 'ZORGE9' ? 'Зорге 9'
                       : (client as any)?.project === 'SILVER_BOR' ? 'Серебряный Бор'
+                      : (client as any)?.project === 'TOLBUKHINA' ? 'Толбухина'
+                      : (client as any)?.project === 'UNKNOWN' ? 'Не указан'
                       : ((client as any)?.project || '');
                     const commentLines = [
                       `Клиент: ${client.fullName}`,

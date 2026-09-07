@@ -532,20 +532,29 @@ export function evaluateUniqueness(
 
 export const BROKER_PIPELINE_ID = AMO_PIPELINES.BROKERS;
 
-// Pipeline → Project (для маппинга в локальную БД)
-export function pipelineToProject(pipelineId: number): 'ZORGE9' | 'SILVER_BOR' {
+export type AmoProject = 'ZORGE9' | 'SILVER_BOR' | 'TOLBUKHINA' | 'UNKNOWN';
+
+// Pipeline → Project (для маппинга в локальную БД).
+// 2026-09-07 (решение владельца): Толбухина — отдельный ЖК наравне с Зорге 9
+// и Серебряным Бором (в amo — воронка «Берзарина»). Колл-центр — верхняя
+// воронка без ЖК: пока лид не перешёл в воронку проекта, проект «Не указан»
+// (UNKNOWN). Прочие воронки (старые «Продажи») по-прежнему → ZORGE9.
+export function pipelineToProject(pipelineId: number): AmoProject {
   if (pipelineId === AMO_PIPELINES.BERZARINA) return 'SILVER_BOR';
+  if (pipelineId === AMO_PIPELINES.TOLBUKHINA) return 'TOLBUKHINA';
+  if (pipelineId === AMO_PIPELINES.KC) return 'UNKNOWN';
   return 'ZORGE9';
 }
 
 // Determine project from lead custom fields (e.g. "Объект интереса")
-export function leadToProject(lead: any): 'ZORGE9' | 'SILVER_BOR' {
+export function leadToProject(lead: any): AmoProject {
   const cf = lead?.custom_fields_values || [];
   const interest = cf.find((f: any) =>
     /объект интереса|объект|корпус/i.test(String(f?.field_name || '')),
   );
   const val = String(interest?.values?.[0]?.value || '').toLowerCase();
   if (/берзарин|серебр|silver/i.test(val)) return 'SILVER_BOR';
+  if (/толбухин|tolbukhin/i.test(val)) return 'TOLBUKHINA';
   if (/зорге|zorge/i.test(val)) return 'ZORGE9';
   return pipelineToProject(lead?.pipeline_id || 0);
 }

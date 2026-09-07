@@ -18,5 +18,5 @@ export class RegistrySeriesQueryDto {
 
   @IsOptional()
   @IsIn(SERIES_PROJECTS as unknown as string[])
-  project?: 'ZORGE9' | 'SILVER_BOR';
+  project?: 'ZORGE9' | 'SILVER_BOR' | 'TOLBUKHINA';
 }

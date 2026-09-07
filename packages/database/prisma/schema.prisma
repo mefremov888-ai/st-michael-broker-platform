@@ -42,6 +42,8 @@ enum CommissionMode {
 enum Project {
   ZORGE9
   SILVER_BOR
+  TOLBUKHINA // 2026-09-07: Толбухина — отдельный ЖК (решение владельца)
+  UNKNOWN    // 2026-09-07: «Не указан» — КЦ до перехода в воронку ЖК, старый кабинет без проекта
 }
 
 enum UniquenessStatus {

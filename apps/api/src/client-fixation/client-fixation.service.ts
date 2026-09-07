@@ -1383,10 +1383,12 @@ export class ClientFixationService {
         amoVerdict.leads[0];
       const projectName =
         (
-          { ZORGE9: "Зорге 9", SILVER_BOR: "Берзарина 37" } as Record<
-            string,
-            string
-          >
+          {
+            ZORGE9: "Зорге 9",
+            SILVER_BOR: "Берзарина 37",
+            TOLBUKHINA: "Толбухина",
+            UNKNOWN: "Не указан",
+          } as Record<string, string>
         )[String(data.project)] || String(data.project);
 
       // 2026-06-17: если триггер-лид в воронке продаж (например, sales
@@ -2494,6 +2496,7 @@ export class ClientFixationService {
         v.includes("берз")
       )
         return "SILVER_BOR";
+      if (v.includes("толбухин") || v.includes("tolbukhin")) return "TOLBUKHINA";
       if (v.includes("зорге") || v.includes("zorge")) return "ZORGE9";
       return "ZORGE9";
     };
