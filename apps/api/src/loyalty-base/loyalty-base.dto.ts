@@ -1476,3 +1476,13 @@ export class LoyaltyEntityArchiveDto {
   @IsISO8601({ strict: true })
   expectedUpdatedAt!: string;
 }
+
+// 2026-09-07: правка «имени для работы» брокера кабинета из карточки
+// «Нашей базы» (PATCH ours/brokers/:id/display-name). Пустая строка —
+// сброс (снова показывается самоназвание брокера).
+export class LoyaltyDisplayNameUpdateDto {
+  @IsDefined()
+  @IsString()
+  @Length(0, 256)
+  displayName!: string;
+}

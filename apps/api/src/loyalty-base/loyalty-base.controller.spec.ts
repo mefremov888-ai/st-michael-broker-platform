@@ -8,6 +8,7 @@ import { validate } from "class-validator";
 import { LoyaltyBaseController } from "./loyalty-base.controller";
 import {
   LoyaltyActivityDto,
+  LoyaltyDisplayNameUpdateDto,
   LoyaltyImportDto,
   LoyaltyImportRecordDto,
   LoyaltyListQueryDto,
@@ -26,6 +27,8 @@ describe("LoyaltyBaseController RBAC", () => {
     "brokerChanges",
     "agencyChanges",
     "dryRunImport",
+    // 2026-09-07: «Исправить имя» (displayName брокера «Нашей базы»).
+    "updateOurBrokerDisplayName",
   ] as const)(
     "lets ADMIN/MANAGER reach %s so grants can be enforced",
     (method) => {
@@ -64,6 +67,33 @@ describe("LoyaltyBaseController RBAC", () => {
       expect(interceptors).toHaveLength(1);
     },
   );
+
+  it("keeps the display-name handler permission check as defense in depth", async () => {
+    const loyalty: any = {
+      updateOurBrokerDisplayName: jest
+        .fn()
+        .mockResolvedValue({ id: "broker-1", displayName: "Иванов Иван" }),
+    };
+    const permissions: any = {
+      require: jest.fn().mockResolvedValue(undefined),
+    };
+    const controller = new LoyaltyBaseController(loyalty, permissions);
+    const user: any = { id: "manager-1", role: "MANAGER" };
+
+    await expect(
+      controller.updateOurBrokerDisplayName(
+        "broker-1",
+        { displayName: "Иванов Иван" } as any,
+        user,
+      ),
+    ).resolves.toEqual({ id: "broker-1", displayName: "Иванов Иван" });
+    expect(permissions.require).toHaveBeenCalledWith(user, "READ_ALL");
+    expect(loyalty.updateOurBrokerDisplayName).toHaveBeenCalledWith(
+      "broker-1",
+      "Иванов Иван",
+      "manager-1",
+    );
+  });
 
   it("keeps the dry-run handler permission check as defense in depth", async () => {
     const loyalty: any = {
@@ -144,6 +174,38 @@ describe("loyalty canonical filter validation", () => {
       fieldResolutions: { city: "anna" },
     });
     expect(await validate(valid)).toEqual([]);
+  });
+});
+
+describe("loyalty display-name update validation", () => {
+  it("accepts an empty string (reset) and a normal name, rejects a missing field", async () => {
+    // Пустая строка — валидный сброс «имени для работы».
+    expect(
+      await validate(
+        plainToInstance(LoyaltyDisplayNameUpdateDto, { displayName: "" }),
+      ),
+    ).toEqual([]);
+    expect(
+      await validate(
+        plainToInstance(LoyaltyDisplayNameUpdateDto, {
+          displayName: "Иванов Иван",
+        }),
+      ),
+    ).toEqual([]);
+    expect(
+      (await validate(plainToInstance(LoyaltyDisplayNameUpdateDto, {}))).some(
+        (error) => error.property === "displayName",
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await validate(
+          plainToInstance(LoyaltyDisplayNameUpdateDto, {
+            displayName: "и".repeat(257),
+          }),
+        )
+      ).some((error) => error.property === "displayName"),
+    ).toBe(true);
   });
 });
 

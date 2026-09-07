@@ -7550,6 +7550,8 @@ export class LoyaltyBaseService {
       and.push({
         OR: [
           { fullName: { contains: search, mode: "insensitive" } },
+          // «Имя для работы» тоже ищется: КЦ ищет по исправленному имени.
+          { displayName: { contains: search, mode: "insensitive" } },
           { email: { contains: search, mode: "insensitive" } },
           {
             brokerAgencies: {
@@ -7605,6 +7607,8 @@ export class LoyaltyBaseService {
       select: {
         id: true,
         fullName: true,
+        displayName: true,
+        displayNameSource: true,
         phone: true,
         email: true,
         status: true,
@@ -9529,6 +9533,8 @@ export class LoyaltyBaseService {
         const normalizedPhone = normalizeLoyaltyContactPoint("PHONE", search);
         where.OR = [
           { fullName: { contains: search, mode: "insensitive" } },
+          // «Имя для работы» тоже ищется: КЦ ищет по исправленному имени.
+          { displayName: { contains: search, mode: "insensitive" } },
           { email: { contains: search, mode: "insensitive" } },
           ...(normalizedPhone
             ? [
@@ -9544,6 +9550,8 @@ export class LoyaltyBaseService {
           select: {
             id: true,
             fullName: true,
+            displayName: true,
+            displayNameSource: true,
             phone: true,
             email: true,
             region: true,
@@ -9780,7 +9788,15 @@ export class LoyaltyBaseService {
     const result: any = {
       id: item.id,
       entityType: "BROKER",
-      displayName: item.fullName,
+      // 2026-09-07: «имя для работы» — если КЦ/бэкфилл заполнили
+      // Broker.displayName, показываем его; иначе самоназвание брокера.
+      // cabinetFullName — всегда оригинальное самоназвание из кабинета
+      // (фронт показывает серым «в кабинете: …»).
+      displayName: item.displayName || item.fullName,
+      cabinetFullName: item.fullName ?? null,
+      displayNameSource: item.displayName
+        ? item.displayNameSource || null
+        : null,
       city: item.region,
       region: item.region,
       isRegional: item.isRegional ?? null,
@@ -10695,6 +10711,64 @@ export class LoyaltyBaseService {
       base: "ours",
       entityType,
       item: agencyItem,
+    };
+  }
+
+  /**
+   * 2026-09-07: правка «имени для работы» брокера кабинета из карточки
+   * «Нашей базы» (кнопка «Исправить имя»). Пишет Broker.displayName
+   * (source='manual'); пустая строка сбрасывает имя (снова показывается
+   * самоназвание). fullName (самоназвание брокера) НЕ трогается — брокер
+   * в своём кабинете продолжает видеть его. Аудит: DISPLAY_NAME_EDIT.
+   */
+  async updateOurBrokerDisplayName(
+    id: string,
+    displayNameInput: string,
+    actorId?: string,
+  ) {
+    const displayName =
+      String(displayNameInput ?? "")
+        .replace(/\s+/g, " ")
+        .trim() || null;
+    const broker = await this.prisma.broker.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        fullName: true,
+        displayName: true,
+        displayNameSource: true,
+      },
+    });
+    if (!broker) throw new NotFoundException("Broker not found");
+    const updated = await (this.prisma.broker as any).update({
+      where: { id },
+      data: {
+        displayName,
+        displayNameSource: displayName ? "manual" : null,
+      },
+      select: { id: true, fullName: true, displayName: true, displayNameSource: true },
+    });
+    await (this.prisma as any).auditLog.create({
+      data: {
+        userId: actorId || null,
+        action: "DISPLAY_NAME_EDIT",
+        entity: "Broker",
+        entityId: id,
+        payload: {
+          before: broker.displayName ?? null,
+          beforeSource: broker.displayNameSource ?? null,
+          after: displayName,
+          afterSource: displayName ? "manual" : null,
+        },
+      },
+    });
+    return {
+      id: updated.id,
+      displayName: updated.displayName || updated.fullName,
+      cabinetFullName: updated.fullName ?? null,
+      displayNameSource: updated.displayName
+        ? updated.displayNameSource || null
+        : null,
     };
   }
 

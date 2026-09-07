@@ -35,6 +35,7 @@ import {
 } from "../auth/current-user.decorator";
 import {
   LoyaltyChangesQueryDto,
+  LoyaltyDisplayNameUpdateDto,
   LoyaltyEntityArchiveDto,
   LoyaltyEntityUpdateDto,
   LoyaltyDetailQueryDto,
@@ -133,6 +134,30 @@ export class LoyaltyBaseController {
   ) {
     await this.permissions.require(user, "READ_ALL");
     return this.loyalty.detail(base, "BROKER", id, query);
+  }
+
+  // 2026-09-07: кнопка «Исправить имя» в карточке брокера «Нашей базы».
+  // Правит ТОЛЬКО Broker.displayName («имя для работы» для КЦ, source
+  // 'manual'); самоназвание брокера (fullName) не трогается и в его
+  // кабинете ничего не меняется. Доступ: роли ADMIN/MANAGER (класс-guard)
+  // + READ_ALL (как у остальных ручек «Нашей базы»). Аудит:
+  // AuditLog action DISPLAY_NAME_EDIT.
+  @Patch("ours/brokers/:id/display-name")
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({
+    summary: "Edit the working display name of a cabinet broker (ours base)",
+  })
+  async updateOurBrokerDisplayName(
+    @Param("id") id: string,
+    @Body() body: LoyaltyDisplayNameUpdateDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
+    return this.loyalty.updateOurBrokerDisplayName(
+      id,
+      body.displayName,
+      user?.id,
+    );
   }
 
   @Get(":base/agencies")
