@@ -1222,7 +1222,7 @@ test("normalizes the linked OUR record inside an Anna detail", () => {
   assert.equal(detail.linkedOurRecord?.name, "Trend Agent");
   assert.equal(detail.linkedOurRecord?.entityType, "agencies");
   assert.equal(detail.linkedOurRecord?.phone, "+79060000000");
-  assert.equal(detail.linkedOurRecord?.annaDetails.legalName, "ООО «Онлайн Недвижимость»");
+  assert.equal(detail.linkedOurRecord?.annaDetails?.legalName, "ООО «Онлайн Недвижимость»");
   assert.equal(detail.linkedOurRecord?.deals, 116);
   assert.equal(detail.linkedOurRecord?.history[0]?.title, "Сделка");
   assert.equal(
