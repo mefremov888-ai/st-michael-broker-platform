@@ -1,0 +1,46 @@
+name: Export agency dossier (read-only)
+
+# 2026-09-07: досье по агентству — карточки, брокеры, фиксации (старый/новый
+# кабинет), сделки, реестр, встречи. Только чтение. Разделы выводятся в лог
+# в base64 (SECTION_B64:…), собираются офлайн в xlsx.
+
+on:
+  workflow_dispatch:
+    inputs:
+      agency_query:
+        description: Регулярное выражение по названию / юрлицу / ИНН агентства (без учёта регистра)
+        required: true
+        default: "тренд|trend"
+        type: string
+
+concurrency:
+  group: export-agency-dossier
+  cancel-in-progress: false
+
+jobs:
+  export:
+    name: Export on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and export
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          AGENCY_QUERY_INPUT: ${{ inputs.agency_query }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 12m
+          envs: AGENCY_QUERY_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/export-agency-dossier.js > /tmp/export-agency-dossier.js
+            git show origin/master:scripts/enrich-agencies-from-amo.js > /tmp/enrich-agencies-from-amo.js
+            docker cp /tmp/export-agency-dossier.js st-michael-api:/app/scripts/export-agency-dossier.js
+            docker cp /tmp/enrich-agencies-from-amo.js st-michael-api:/app/scripts/enrich-agencies-from-amo.js
+            docker compose exec -T -e AGENCY_QUERY="$AGENCY_QUERY_INPUT" api node /app/scripts/export-agency-dossier.js
