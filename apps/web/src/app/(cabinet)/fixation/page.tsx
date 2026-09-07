@@ -95,6 +95,10 @@ export default function FixationPage() {
     message: string;
     managers: { fullName: string; phone: string; telegram: string | null }[];
   } | null>(null);
+  // 2026-09-07: бэк может оформить фиксацию БЕЗ привязки агентства (например,
+  // ИНН агентства не 10/12 цифр) — тогда в ответе приходит agencyWarning.
+  // Показываем жёлтой плашкой: фиксация УСПЕШНА, это предупреждение, не ошибка.
+  const [agencyWarn, setAgencyWarn] = useState<string | null>(null);
 
   // 2026-07-01: dropdown «Я фиксирую от агентства» убран. brokerAgency
   // всегда = primary агентство брокера (или первое если primary нет).
@@ -243,6 +247,7 @@ export default function FixationPage() {
 
     setLoading(true);
     setError('');
+    setAgencyWarn(null);
 
     const fullName = (lastName ? `${lastName} ${firstName}` : firstName).trim();
     // Нормализация телефона: для RU '+7' + 10 цифр, для иностранного — '+<digits>'.
@@ -312,6 +317,9 @@ export default function FixationPage() {
             managers: result2.managerContacts,
           });
         }
+        if (typeof result2?.agencyWarning === 'string' && result2.agencyWarning) {
+          setAgencyWarn(result2.agencyWarning);
+        }
         setShowSuccess(true);
       } else {
         if (result?.amoSyncStatus === 'FAILED' && Array.isArray(result?.managerContacts)) {
@@ -319,6 +327,9 @@ export default function FixationPage() {
             message: result.message || 'Заявка сохранена в кабинете, но не передана в amoCRM.',
             managers: result.managerContacts,
           });
+        }
+        if (typeof result?.agencyWarning === 'string' && result.agencyWarning) {
+          setAgencyWarn(result.agencyWarning);
         }
         setShowSuccess(true);
       }
@@ -348,6 +359,7 @@ export default function FixationPage() {
     setReadinessLevel('Тёплый');
     setShowSuccess(false);
     setAmoWarn(null);
+    setAgencyWarn(null);
     requestIdentityRef.current = null;
   };
 
@@ -826,6 +838,13 @@ export default function FixationPage() {
                   <h2 className="text-2xl font-bold mb-2">Запрос отправлен</h2>
                   <p className="text-text-muted mb-6 text-sm">Заявка на фиксацию клиента успешно создана.</p>
                 </>
+              )}
+              {/* 2026-09-07: предупреждение по агентству — жёлтая плашка.
+                  Фиксация при этом успешна, это НЕ ошибка. */}
+              {agencyWarn && (
+                <div className="text-left bg-warning/10 border border-warning/30 text-warning rounded p-3 mb-4 text-sm">
+                  {agencyWarn}
+                </div>
               )}
               <div className="flex flex-col gap-2">
                 <button

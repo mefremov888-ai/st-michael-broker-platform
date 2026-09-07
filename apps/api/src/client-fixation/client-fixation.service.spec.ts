@@ -1,6 +1,8 @@
 import {
   ClientFixationService,
   primaryAgencyForBroker,
+  AGENCY_INN_INVALID_WARNING,
+  AGENCY_ATTACH_FAILED_WARNING,
 } from "./client-fixation.service";
 import {
   AMO_CREATE_IN_PROGRESS_MARKER,
@@ -1674,5 +1676,203 @@ describe("ClientFixationService amo broker attachment", () => {
     expect(opsAlerts.sendSafely.mock.calls[0][0]).toContain(
       "Номер сделки в amoCRM: 123456",
     );
+  });
+
+  // 2026-09-07: требование владельца — проблемы агентства НЕ блокируют
+  // фиксацию. Невалидный ИНН / упавшая агентская ветка → фиксация создаётся,
+  // агентство не привязывается, в ответе agencyWarning.
+  describe("agency branch must not block fixation", () => {
+    const makeBroker = (suffix: string) => ({
+      id: `broker-agency-soft-${suffix}`,
+      fullName: "Broker",
+      phone: "+79990000201",
+      email: null,
+      amoContactId: BigInt(8201),
+      funnelStage: "FIXATION",
+      brokerAgencies: [],
+    });
+
+    beforeEach(() => {
+      amo.checkUniqueness.mockResolvedValue({
+        rule: "NO_CONFLICT",
+        verdict: "UNIQUE",
+        reason: "No conflict",
+      });
+      amo.createFixationRequest.mockResolvedValue({ id: 9301 });
+      prisma.client.findFirst.mockResolvedValue(null);
+    });
+
+    it("создаёт фиксацию с agencyWarning и без привязки агентства при 11-значном ИНН", async () => {
+      const broker = makeBroker("inn11");
+      const client = { id: "client-inn11" };
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.client.create.mockResolvedValue(client);
+      (service as any).ensureBrokerAmoContact = jest
+        .fn()
+        .mockResolvedValue(broker);
+
+      const result = await service.fixClient(
+        broker.id,
+        {
+          phone: "+79991110201",
+          fullName: "Client",
+          project: "ZORGE9" as any,
+          agencyInn: "12345678901", // 11 цифр — невалидно
+        },
+        assertAmoCreateLeaseOwned,
+      );
+
+      // Фиксация создана, агентство НЕ привязано.
+      expect(prisma.agency.findUnique).not.toHaveBeenCalled();
+      expect(prisma.agency.create).not.toHaveBeenCalled();
+      expect(prisma.client.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          fixationAgencyId: null,
+          uniquenessStatus: "CONDITIONALLY_UNIQUE",
+        }),
+      });
+      expect(amo.createFixationRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agencyName: "не привязано",
+          agencyInn: "12345678901",
+        }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({
+          client,
+          status: "CONDITIONALLY_UNIQUE",
+          amoSyncStatus: "SYNCED",
+          agencyWarning: AGENCY_INN_INVALID_WARNING,
+        }),
+      );
+    });
+
+    it("10-значный ИНН привязывает агентство и не даёт agencyWarning", async () => {
+      const broker = makeBroker("inn10");
+      const agency = { id: "agency-inn10", name: "Agency", inn: "7712345678" };
+      const client = { id: "client-inn10" };
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.agency.findUnique.mockResolvedValue(agency);
+      prisma.client.create.mockResolvedValue(client);
+      (service as any).ensureBrokerAmoContact = jest
+        .fn()
+        .mockResolvedValue(broker);
+
+      const result = await service.fixClient(
+        broker.id,
+        {
+          phone: "+79991110202",
+          fullName: "Client",
+          project: "ZORGE9" as any,
+          agencyInn: agency.inn,
+        },
+        assertAmoCreateLeaseOwned,
+      );
+
+      expect(prisma.client.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ fixationAgencyId: agency.id }),
+      });
+      expect(result.status).toBe("CONDITIONALLY_UNIQUE");
+      expect(result).not.toHaveProperty("agencyWarning");
+    });
+
+    it("12-значный ИНН создаёт новое агентство как раньше, без agencyWarning", async () => {
+      const broker = makeBroker("inn12");
+      const createdAgency = {
+        id: "agency-inn12",
+        name: "Агентство 771234567890",
+        inn: "771234567890",
+      };
+      const client = { id: "client-inn12" };
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.agency.findUnique.mockResolvedValue(null);
+      prisma.agency.create.mockResolvedValue(createdAgency);
+      amo.findCompanyByInn = jest.fn().mockResolvedValue(null);
+      amo.createCompany = jest.fn().mockResolvedValue(null);
+      prisma.client.create.mockResolvedValue(client);
+      (service as any).ensureBrokerAmoContact = jest
+        .fn()
+        .mockResolvedValue(broker);
+
+      const result = await service.fixClient(
+        broker.id,
+        {
+          phone: "+79991110203",
+          fullName: "Client",
+          project: "ZORGE9" as any,
+          agencyInn: "771234567890",
+        },
+        assertAmoCreateLeaseOwned,
+      );
+
+      expect(prisma.agency.create).toHaveBeenCalledWith({
+        data: { name: expect.any(String), inn: "771234567890" },
+      });
+      expect(prisma.client.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ fixationAgencyId: createdAgency.id }),
+      });
+      expect(result.status).toBe("CONDITIONALLY_UNIQUE");
+      expect(result).not.toHaveProperty("agencyWarning");
+    });
+
+    it("ошибка создания агентства не валит фиксацию: клиент создан + agencyWarning", async () => {
+      const broker = makeBroker("agency-crash");
+      const client = { id: "client-agency-crash" };
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.agency.findUnique.mockResolvedValue(null);
+      prisma.agency.create.mockRejectedValue(
+        new Error("database rejected agency insert"),
+      );
+      amo.findCompanyByInn = jest.fn().mockResolvedValue(null);
+      amo.createCompany = jest.fn().mockResolvedValue(null);
+      prisma.client.create.mockResolvedValue(client);
+      (service as any).ensureBrokerAmoContact = jest
+        .fn()
+        .mockResolvedValue(broker);
+
+      const result = await service.fixClient(
+        broker.id,
+        {
+          phone: "+79991110204",
+          fullName: "Client",
+          project: "ZORGE9" as any,
+          agencyInn: "7712345678", // валидный, но агентство не создалось
+        },
+        assertAmoCreateLeaseOwned,
+      );
+
+      expect(prisma.client.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ fixationAgencyId: null }),
+      });
+      expect(result).toEqual(
+        expect.objectContaining({
+          client,
+          status: "CONDITIONALLY_UNIQUE",
+          agencyWarning: AGENCY_ATTACH_FAILED_WARNING,
+        }),
+      );
+    });
+
+    it("НЕ глотает ошибки самой фиксации: падение создания Client летит наверх", async () => {
+      const broker = makeBroker("client-crash");
+      prisma.broker.findUnique.mockResolvedValue(broker);
+      prisma.client.create.mockRejectedValue(new Error("clients insert failed"));
+      (service as any).ensureBrokerAmoContact = jest
+        .fn()
+        .mockResolvedValue(broker);
+
+      await expect(
+        service.fixClient(
+          broker.id,
+          {
+            phone: "+79991110205",
+            fullName: "Client",
+            project: "ZORGE9" as any,
+            agencyInn: "12345678901",
+          },
+          assertAmoCreateLeaseOwned,
+        ),
+      ).rejects.toThrow("clients insert failed");
+    });
   });
 });
