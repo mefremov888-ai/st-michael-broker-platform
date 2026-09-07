@@ -267,8 +267,9 @@ async function findFreeInn(prisma, generator, label) {
 }
 
 async function buildPlan(prisma, amo) {
-  const clientPhones = await findCleanPhones(prisma, amo, CLIENT_PHONE_PREFIX, 3, "клиенты");
-  const brokerPhones = await findCleanPhones(prisma, amo, BROKER_PHONE_PREFIX, 3, "брокеры");
+  // 2026-09-07: +1 клиент и +1 брокер — сценарий координатора (см. stepRun).
+  const clientPhones = await findCleanPhones(prisma, amo, CLIENT_PHONE_PREFIX, 4, "клиенты");
+  const brokerPhones = await findCleanPhones(prisma, amo, BROKER_PHONE_PREFIX, 4, "брокеры");
   const inn10 = await findFreeInn(prisma, generateInn10, "10, юрлицо, валидный по ФНС");
   const inn12 = await findFreeInn(prisma, generateInn12, "12, ИП, валидный по ФНС");
   const inn11 = await findFreeInn(prisma, generateInn11, "11, заведомо невалидная длина");
@@ -288,7 +289,17 @@ async function buildPlan(prisma, amo) {
     clientName: `${PREFIX} Клиент ${k.clientLetter}`,
     project: "ZORGE9",
   }));
-  return { generatedAt: new Date().toISOString(), prefix: PREFIX, kits };
+  // 2026-09-07: сценарий координатора — сотрудник того же агентства
+  // (комплект ИНН10) фиксирует клиента НА брокера ИНН10 (responsibleBrokerId),
+  // как это делает форма фиксации «Фиксирую на другого».
+  const coordinator = {
+    brokerPhone: brokerPhones[3],
+    brokerName: `${PREFIX} Координатор ИНН10`,
+    clientPhone: clientPhones[3],
+    clientName: `${PREFIX} Клиент Г`,
+    project: "ZORGE9",
+  };
+  return { generatedAt: new Date().toISOString(), prefix: PREFIX, kits, coordinator };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -350,6 +361,7 @@ async function stepRun(prisma, amo) {
     console.log(`[${kit.kit}] POST /auth/register → HTTP ${reg.status}: ${shortBody(reg.body)}`);
     if (reg.status === 201 && reg.body && reg.body.brokerId) {
       brokerId = reg.body.brokerId;
+      kit.brokerId = brokerId;
       r.brokerCreated = "да (register)";
       r.agency = "ok (создано при регистрации)";
     } else {
@@ -375,6 +387,7 @@ async function stepRun(prisma, amo) {
         select: { id: true },
       });
       brokerId = created.id;
+      kit.brokerId = brokerId;
       r.brokerCreated = "да (напрямую в БД: register отклонил ИНН)";
       const tokenTmp = signJwt({ sub: brokerId, phone: kit.brokerPhone, role: "BROKER" }, secret);
       const attach = await http("POST", "/auth/me/agency", { inn: kit.inn }, tokenTmp);
@@ -444,6 +457,73 @@ async function stepRun(prisma, amo) {
       }
     } else {
       console.log(`[${kit.kit}] клиент в БД НЕ создан`);
+    }
+  }
+
+  // ── 5. Сценарий координатора: коллега по агентству ИНН10 фиксирует
+  //       клиента на брокера ИНН10 (responsibleBrokerId). Ожидание:
+  //       клиент создан, brokerId = координатор (кто завёл),
+  //       responsibleBrokerId = брокер ИНН10 (на кого зафиксировано).
+  const kit10 = plan.kits.find((k) => k.kit === "ИНН10");
+  const co = plan.coordinator;
+  const rc = { kit: "КООРД", inn: kit10 ? kit10.inn : "-", brokerCreated: "нет", agency: "-", fixation: "-", status: "-", amoLink: "-" };
+  results.push(rc);
+  if (!kit10 || !kit10.brokerId || !co) {
+    rc.fixation = "пропуск: нет брокера ИНН10 для сценария";
+  } else {
+    console.log(`\n########## СЦЕНАРИЙ КООРДИНАТОРА (агентство ИНН ${kit10.inn}) ##########`);
+    const coPassword = `Testkit!${randomDigits(8)}`;
+    const coEmail = `testkit-coord-${Date.now()}@example.com`;
+    const coReg = await http("POST", "/auth/register", {
+      phone: co.brokerPhone, fullName: co.brokerName, email: coEmail, password: coPassword,
+      inn: kit10.inn, innType: kit10.innType, agencyName: kit10.agencyName,
+    });
+    console.log(`[КООРД] POST /auth/register (то же агентство) → HTTP ${coReg.status}: ${shortBody(coReg.body)}`);
+    const coId = coReg.status === 201 && coReg.body && coReg.body.brokerId ? coReg.body.brokerId : null;
+    if (!coId) {
+      rc.agency = `ошибка регистрации координатора: ${shortBody((coReg.body && coReg.body.message) || coReg.body, 160)}`;
+    } else {
+      rc.brokerCreated = "да (register, то же агентство)";
+      rc.agency = "ok (общее с ИНН10)";
+      await prisma.broker.update({ where: { id: coId }, data: { isCoordinator: true } });
+      const coLogin = await http("POST", "/auth/login", { phone: co.brokerPhone, password: coPassword });
+      const coToken = coLogin.status === 200 && coLogin.body && coLogin.body.accessToken
+        ? coLogin.body.accessToken
+        : signJwt({ sub: coId, phone: co.brokerPhone, role: "BROKER" }, secret);
+      // Коллеги по агентству — должен быть виден брокер ИНН10.
+      const colleagues = await http("GET", "/clients/agency-colleagues", undefined, coToken);
+      const list = Array.isArray(colleagues.body) ? colleagues.body : (colleagues.body && colleagues.body.items) || [];
+      const seesTarget = list.some((b) => b && b.id === kit10.brokerId);
+      console.log(`[КООРД] GET /clients/agency-colleagues → HTTP ${colleagues.status}, коллег: ${list.length}, брокер ИНН10 в списке: ${seesTarget ? "да" : "НЕТ"}`);
+      const fix = await http("POST", "/clients/fix", {
+        idempotencyKey: crypto.randomUUID(),
+        phone: co.clientPhone,
+        fullName: co.clientName,
+        project: co.project,
+        agencyInn: kit10.inn,
+        responsibleBrokerId: kit10.brokerId,
+        comment: `${PREFIX}: фиксация координатором на брокера ИНН10`,
+      }, coToken);
+      console.log(`[КООРД] POST /clients/fix (responsibleBrokerId=ИНН10) → HTTP ${fix.status}: ${shortBody(fix.body, 700)}`);
+      const client = await prisma.client.findFirst({
+        where: { phone: co.clientPhone },
+        select: { id: true, brokerId: true, responsibleBrokerId: true, uniquenessStatus: true, amoLeadId: true, amoSyncStatus: true, amoSyncError: true },
+        orderBy: { createdAt: "desc" },
+      });
+      if (fix.status === 200 || fix.status === 201) {
+        const okOwner = client && client.brokerId === coId && client.responsibleBrokerId === kit10.brokerId;
+        rc.fixation = okOwner
+          ? "ok (завёл координатор, зафиксировано на ИНН10)"
+          : `ok, но владельцы не те: brokerId=${client ? (client.brokerId === coId ? "координатор" : "другой") : "нет клиента"}, responsible=${client ? (client.responsibleBrokerId === kit10.brokerId ? "ИНН10" : String(client.responsibleBrokerId)) : "-"}`;
+        if (!seesTarget) rc.fixation += "; ВНИМАНИЕ: agency-colleagues не показал брокера ИНН10";
+      } else {
+        rc.fixation = `ошибка ${fix.status}: ${shortBody((fix.body && (fix.body.message || JSON.stringify(fix.body))) || fix.status, 160)}`;
+      }
+      if (client) {
+        rc.status = String(client.uniquenessStatus);
+        console.log(`[КООРД] клиент в БД: id=${client.id} brokerId=${client.brokerId} responsibleBrokerId=${client.responsibleBrokerId} amoSyncStatus=${client.amoSyncStatus} amoLeadId=${client.amoLeadId || "нет"}${client.amoSyncError ? ` amoSyncError=${client.amoSyncError}` : ""}`);
+        if (client.amoLeadId) rc.amoLink = AMO_LEAD_URL(client.amoLeadId);
+      }
     }
   }
 
