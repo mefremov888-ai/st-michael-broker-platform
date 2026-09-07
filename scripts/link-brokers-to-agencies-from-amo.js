@@ -46,7 +46,14 @@ function cleanInn(value) {
 }
 
 /** Индексы карточек агентств: по ИНН и по уникальному ключу названия. */
-function buildAgencyIndex(agencies) {
+// Тестовые карточки агентств (agency_test, «Тест», ТЕСТКИТ …) в привязках не участвуют.
+const TEST_AGENCY_RE = /(^|[^a-zа-яё])(test|тест)([^a-zа-яё]|$)|тесткит|agency_test/i;
+function isTestAgency(a) {
+  return TEST_AGENCY_RE.test(String(a?.name || "")) || TEST_AGENCY_RE.test(String(a?.legalName || ""));
+}
+
+function buildAgencyIndex(agenciesAll) {
+  const agencies = agenciesAll.filter((a) => !isTestAgency(a));
   const byInn = new Map();
   const byKey = new Map();
   for (const a of agencies) {
@@ -200,4 +207,4 @@ if (require.main === module) {
   main().catch((e) => { console.error("FATAL:", e?.message || e); process.exit(1); });
 }
 
-module.exports = { resolveAgency, buildAgencyIndex, cleanInn };
+module.exports = { resolveAgency, buildAgencyIndex, cleanInn, isTestAgency };
