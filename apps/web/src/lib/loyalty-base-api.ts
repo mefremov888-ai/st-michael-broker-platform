@@ -408,6 +408,48 @@ export interface LoyaltyMetricSource {
   sourceVersions: string[];
 }
 
+// 2026-09-07: карточка говорит по-русски. Старые версии бэкенда шлют
+// английские label — переводим известные; новые уже присылают русский текст.
+const METRIC_SOURCE_LABELS_RU: Record<string, string> = {
+  "Current local broker-owned operational rows":
+    "Данные кабинета: фиксации, встречи и сделки этого брокера",
+  "Current local BrokerAgency relation rows":
+    "Данные кабинета: активность брокеров, связанных с агентством",
+  "Current local operational rows": "Данные кабинета (текущие записи)",
+  "Event-level activities": "Точные события снимка (выверенные)",
+  "Exact event-level KPI is unavailable for this snapshot":
+    "Точные события для этого снимка недоступны",
+  "Exact event-level KPI is unavailable; source rollup is separate":
+    "Точные события недоступны; сводка источника показана отдельно",
+  "No event-level data": "Событийных данных нет",
+};
+
+export function loyaltyMetricSourceLabelRu(label: string): string {
+  return METRIC_SOURCE_LABELS_RU[label] || label;
+}
+
+/** Точность метрик по-русски: VERIFIED → «проверено», APPROXIMATE → «оценка». */
+export function loyaltyExactnessLabelRu(code: string): string {
+  const normalized = code.trim().toUpperCase();
+  if (!normalized) return "";
+  if (normalized === "VERIFIED") return "проверено";
+  if (normalized === "EXACT") return "точно";
+  if (normalized === "APPROXIMATE") return "приблизительная оценка";
+  if (normalized === "UNKNOWN") return "нет данных";
+  return code;
+}
+
+/** Доступность данных по-русски (LOCAL_PRELIMINARY и др. коды). */
+export function loyaltyAvailabilityLabelRu(code: string): string {
+  const normalized = code.trim().toUpperCase();
+  if (!normalized) return "";
+  if (normalized === "LOCAL_PRELIMINARY") return "данные кабинета";
+  if (normalized === "EXACT") return "точные события";
+  if (normalized === "UNAVAILABLE") return "недоступно";
+  if (normalized === "UNKNOWN") return "нет данных";
+  return code;
+}
+
 export interface LoyaltyActivityEvidence {
   count: number | null;
   loadedCount: number;
@@ -598,6 +640,8 @@ export interface LoyaltyRecord {
     occurredAt: string;
     title: string;
     description: string;
+    /** Раскрываемые детали записи-основания (клиент, проект, статус...). */
+    details?: Array<{ label: string; value: string }>;
     assignmentId?: string;
     campaignId?: string;
     campaignName?: string;
@@ -1349,6 +1393,109 @@ function normalizeContact(value: unknown) {
   };
 }
 
+// 2026-09-07: словари для читаемых записей «События и карточки-основания».
+// Бэкенд шлёт машинные коды (тип/статус/проект) — карточка показывает русский
+// заголовок «Фиксация клиента — Иванов Иван · зафиксирован» вместо безликой
+// «Записи источника».
+const EVIDENCE_TYPE_LABELS: Record<string, string> = {
+  FIXATION: "Фиксация клиента",
+  MEETING: "Встреча",
+  DEAL: "Сделка",
+  CALL: "Звонок",
+  APPLICATION: "Заявка",
+  REQUEST: "Заявка",
+  BROKER_TOUR: "Брокер-тур",
+};
+
+const EVIDENCE_STATUS_LABELS: Record<string, string> = {
+  // Фиксация (FixationStatus)
+  FIXED: "зафиксирован",
+  NOT_FIXED: "не зафиксирован",
+  ANNULLED: "аннулирована",
+  // Встреча (MeetingStatus)
+  PENDING: "запланирована",
+  CONFIRMED: "подтверждена",
+  COMPLETED: "состоялась",
+  CANCELLED: "отменена",
+  // Сделка (DealStatus)
+  SIGNED: "подписана",
+  PAID: "оплачена",
+  COMMISSION_PAID: "комиссия выплачена",
+  // Общий для фиксаций и сделок
+  EXPIRED: "срок истёк",
+};
+
+const EVIDENCE_PROJECT_LABELS: Record<string, string> = {
+  ZORGE9: "Зорге 9",
+  SILVER_BOR: "Серебряный Бор",
+};
+
+const EVIDENCE_MEETING_TYPE_LABELS: Record<string, string> = {
+  OFFICE_VISIT: "в офисе",
+  ONLINE: "онлайн",
+  BROKER_TOUR: "брокер-тур",
+};
+
+export function loyaltyEvidenceStatusLabel(status: string): string {
+  return EVIDENCE_STATUS_LABELS[status.toUpperCase()] || status;
+}
+
+export function loyaltyEvidenceProjectLabel(project: string): string {
+  return EVIDENCE_PROJECT_LABELS[project.toUpperCase()] || project;
+}
+
+/** Заголовок и детали для строки-основания (FIXATION/MEETING/DEAL/CALL). */
+function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
+  const typeLabel = EVIDENCE_TYPE_LABELS[rawType];
+  if (!typeLabel) return null;
+  const clientName = stringValue(pick(item, "clientName", "client"));
+  const status = stringValue(item.status);
+  const statusLabel = status ? loyaltyEvidenceStatusLabel(status) : "";
+  const project = stringValue(item.project);
+  const projectLabel = project ? loyaltyEvidenceProjectLabel(project) : "";
+  const meetingType = stringValue(item.meetingType);
+  const meetingTypeLabel = meetingType
+    ? EVIDENCE_MEETING_TYPE_LABELS[meetingType.toUpperCase()] || meetingType
+    : "";
+  const callResult = stringValue(pick(item, "resultCode", "result"));
+  const amount = stringValue(item.amount);
+  // Главное имя записи: клиент → проект → результат звонка.
+  const mainName = clientName || projectLabel || callResult;
+  const title = mainName ? `${typeLabel} — ${mainName}` : typeLabel;
+  const summary = [
+    statusLabel,
+    meetingTypeLabel,
+    clientName && projectLabel ? projectLabel : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const detailRows = [
+    statusLabel && { label: "Статус", value: statusLabel },
+    clientName && { label: "Клиент", value: clientName },
+    projectLabel && { label: "Проект", value: projectLabel },
+    meetingTypeLabel && { label: "Формат встречи", value: meetingTypeLabel },
+    amount && { label: "Сумма", value: `${amount} ₽` },
+    stringValue(item.amoLeadId) && {
+      label: "Лид amoCRM",
+      value: stringValue(item.amoLeadId),
+    },
+    stringValue(item.amoDealId) && {
+      label: "Сделка amoCRM",
+      value: stringValue(item.amoDealId),
+    },
+  ].filter(Boolean) as Array<{ label: string; value: string }>;
+  return {
+    id: stringValue(pick(item, "id", "externalId")),
+    type: rawType,
+    occurredAt: stringValue(pick(item, "occurredAt", "date", "createdAt")),
+    title,
+    description: summary,
+    details: detailRows,
+    result: callResult,
+    comment: "",
+  };
+}
+
 function normalizeHistory(value: unknown) {
   if (Array.isArray(value)) {
     const label = stringValue(value[0], "Запись источника");
@@ -1370,6 +1517,14 @@ function normalizeHistory(value: unknown) {
     };
   }
   const item = asRecord(value);
+  // Строки-основания из кабинета (activities) — читаемый заголовок и детали.
+  const rawEvidenceType = stringValue(
+    pick(item, "type", "eventType", "kind"),
+  ).toUpperCase();
+  if (rawEvidenceType && rawEvidenceType !== "CALL") {
+    const evidence = evidenceHistoryEntry(item, rawEvidenceType);
+    if (evidence) return evidence;
+  }
   const title = stringValue(
     pick(
       item,
@@ -2520,9 +2675,14 @@ export async function getLoyaltyDetail(
   base: LoyaltyBaseKey,
   entityType: LoyaltyEntityType,
   id: string,
+  // 2026-09-07: выбранный «Период встреч и сделок» применяется и к карточке.
+  options?: { activityPeriod?: { from: string; to: string } },
 ) {
+  const period = options?.activityPeriod;
   const value = await apiGet<unknown>(
-    `/loyalty-base/${base}/${entityType}/${encodeURIComponent(id)}`,
+    `/loyalty-base/${base}/${entityType}/${encodeURIComponent(id)}${queryString(
+      period ? { from: period.from, to: period.to } : {},
+    )}`,
   );
   return normalizeLoyaltyDetail(value, entityType);
 }

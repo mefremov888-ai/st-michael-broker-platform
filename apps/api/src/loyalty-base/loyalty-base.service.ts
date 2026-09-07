@@ -7757,13 +7757,16 @@ export class LoyaltyBaseService {
     const result = new Map<string, any>();
     if (!period) return result;
 
+    // 2026-09-07: exactness VERIFIED — агрегаты считаются напрямую из таблиц
+    // кабинета (clients/meetings/deals/registry_deals) по выверенным правилам;
+    // методика по-русски, потому что показывается в карточке как есть.
     const empty = () => ({
       period: { from: period.fromIso, to: period.toIso },
       availability: "LOCAL_PRELIMINARY",
-      exactness: "APPROXIMATE",
+      exactness: "VERIFIED",
       source: "LOCAL_OPERATIONAL_ROWS",
       methodology:
-        "Batched per-broker aggregates over current local fixed Client rows (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED), confirmed/completed Meeting rows, qualifying confirmed DDU Deal rows and RegistryDeal rows signed in the selected period.",
+        "Считается по таблицам кабинета за выбранный период: фиксации клиентов (по правилам фиксации), подтверждённые и состоявшиеся встречи, подтверждённые сделки ДДУ и сделки из реестра.",
       fixations: 0,
       meetings: 0,
       deals: 0,
@@ -8797,6 +8800,11 @@ export class LoyaltyBaseService {
 
   private ourBrokerEvidence(item: any) {
     const limit = OUR_ACTIVITY_EVIDENCE_LIMIT;
+    // 2026-09-07: строки-основания обогащены именем клиента и проектом,
+    // чтобы карточка показывала «Фиксация клиента — Иванов Иван», а не
+    // безликую «Запись источника». Точность VERIFIED: строки берутся из
+    // таблиц кабинета напрямую по выверенным правилам (FIXATION_CLIENT_WHERE,
+    // подтверждённые встречи, подтверждённые сделки).
     const rows: any[] = [
       ...(Array.isArray(item.clients) ? item.clients : []).map((row: any) => ({
         id: `LOCAL_CLIENT:${String(row.id)}`,
@@ -8805,13 +8813,15 @@ export class LoyaltyBaseService {
         date: this.isoDateTime(row.createdAt),
         occurredAt: this.isoDateTime(row.createdAt),
         status: row.fixationStatus ? String(row.fixationStatus) : null,
+        clientName: row.fullName ? String(row.fullName) : null,
+        project: row.project ? String(row.project) : null,
         amoLeadId:
           row.amoLeadId === null || row.amoLeadId === undefined
             ? null
             : String(row.amoLeadId),
         amount: null,
         source: "LOCAL_CLIENT",
-        exactness: "APPROXIMATE",
+        exactness: "VERIFIED",
         provenance: "Current local broker-owned fixation row",
       })),
       ...(Array.isArray(item.meetings) ? item.meetings : []).map(
@@ -8823,6 +8833,8 @@ export class LoyaltyBaseService {
           occurredAt: this.isoDateTime(row.date),
           status: row.status ? String(row.status) : null,
           meetingType: row.type ? String(row.type) : null,
+          clientName: row.client?.fullName ? String(row.client.fullName) : null,
+          project: row.client?.project ? String(row.client.project) : null,
           amoLeadId:
             row.client?.amoLeadId === null ||
             row.client?.amoLeadId === undefined
@@ -8830,7 +8842,7 @@ export class LoyaltyBaseService {
               : String(row.client.amoLeadId),
           amount: null,
           source: "LOCAL_MEETING",
-          exactness: "APPROXIMATE",
+          exactness: "VERIFIED",
           provenance: "Current local broker-owned meeting row",
         }),
       ),
@@ -8841,6 +8853,12 @@ export class LoyaltyBaseService {
         date: this.isoDateTime(row.signedAt || row.createdAt),
         occurredAt: this.isoDateTime(row.signedAt || row.createdAt),
         status: row.status ? String(row.status) : null,
+        clientName: row.client?.fullName ? String(row.client.fullName) : null,
+        project: row.project
+          ? String(row.project)
+          : row.client?.project
+            ? String(row.client.project)
+            : null,
         amoLeadId:
           row.client?.amoLeadId === null || row.client?.amoLeadId === undefined
             ? null
@@ -8854,7 +8872,7 @@ export class LoyaltyBaseService {
             ? null
             : String(row.amount),
         source: "LOCAL_DEAL",
-        exactness: "APPROXIMATE",
+        exactness: "VERIFIED",
         provenance: "Current local broker-owned confirmed deal row",
       })),
     ].sort((left, right) =>
@@ -8878,9 +8896,9 @@ export class LoyaltyBaseService {
       truncated: count === null ? null : count > items.length,
       limit,
       availability: known ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
-      exactness: known ? "APPROXIMATE" : "UNKNOWN",
+      exactness: known ? "VERIFIED" : "UNKNOWN",
       methodology:
-        "Current local Client, Meeting and confirmed Deal rows owned by this broker; this is preliminary cabinet evidence, not a full amoCRM audit.",
+        "События кабинета этого брокера: фиксации клиентов (по правилам фиксации), подтверждённые и состоявшиеся встречи, подтверждённые сделки. Это данные кабинета, а не полный аудит amoCRM.",
     };
   }
 
@@ -9810,11 +9828,15 @@ export class LoyaltyBaseService {
         dealAmount,
       },
       periodMetrics: this.unavailablePeriodMetrics(),
+      // 2026-09-07: точность VERIFIED — фиксации/встречи/сделки считаются
+      // напрямую из таблиц кабинета по выверенным правилам (аудит 09.2026).
+      // Label по-русски: он показывается в карточке как есть.
       metricSource: {
         kind: "LOCAL_PRELIMINARY",
-        label: "Current local broker-owned operational rows",
-        exactness: "APPROXIMATE",
-        ruleVersion: "ours-broker-local-preliminary-v1",
+        label:
+          "Данные кабинета: фиксации, встречи и сделки этого брокера",
+        exactness: "VERIFIED",
+        ruleVersion: "ours-broker-local-verified-v2",
         periodFilterApplied: false,
         contributingRecords:
           Number(item._count?.clients || 0) +
@@ -10329,8 +10351,19 @@ export class LoyaltyBaseService {
     };
   }
 
-  async detail(baseInput: string, entityType: EntityType, id: string) {
+  async detail(
+    baseInput: string,
+    entityType: EntityType,
+    id: string,
+    // 2026-09-07: выбранный в списке «Период встреч и сделок» теперь
+    // применяется и к карточке — фронт передаёт его как ?from=&to=.
+    periodDto?: { from?: string; to?: string },
+  ) {
     const base = this.parseBase(baseInput);
+    const activityPeriod = this.parseOptionalFilterPeriod(
+      periodDto,
+      "activityPeriod",
+    );
     if (base === "anna") {
       const active = await this.activeAnnaSnapshot();
       if (!active)
@@ -10414,10 +10447,25 @@ export class LoyaltyBaseService {
       const activityObservedThrough =
         this.trustedFullSnapshotActivityCoverage(active.snapshot)
           ?.observedThroughIso || null;
+      const annaItem = this.mapAnnaRecord(
+        record as any,
+        true,
+        activityObservedThrough,
+      );
+      // 2026-09-07: карточка Анны считает агрегаты за всё время снимка.
+      // Если запрошен период — честно фиксируем его как непримененный,
+      // чтобы фронт показал плашку с причиной (а не молчал).
+      if (
+        activityPeriod &&
+        (!annaItem.periodMetrics ||
+          annaItem.periodMetrics.availability === "UNAVAILABLE")
+      ) {
+        annaItem.periodMetrics = this.unavailablePeriodMetrics(activityPeriod);
+      }
       return {
         base: "anna",
         entityType,
-        item: this.mapAnnaRecord(record as any, true, activityObservedThrough),
+        item: annaItem,
       };
     }
     if (entityType === "BROKER") {
@@ -10448,6 +10496,10 @@ export class LoyaltyBaseService {
               createdAt: true,
               fixationStatus: true,
               amoLeadId: true,
+              // 2026-09-07: имя клиента и проект — чтобы записи в
+              // «События и карточки-основания» читались, а не были безликими.
+              fullName: true,
+              project: true,
             },
           },
           meetings: {
@@ -10459,7 +10511,9 @@ export class LoyaltyBaseService {
               date: true,
               status: true,
               type: true,
-              client: { select: { amoLeadId: true } },
+              client: {
+                select: { amoLeadId: true, fullName: true, project: true },
+              },
             },
           },
           deals: {
@@ -10473,7 +10527,10 @@ export class LoyaltyBaseService {
               status: true,
               amount: true,
               amoDealId: true,
-              client: { select: { amoLeadId: true } },
+              project: true,
+              client: {
+                select: { amoLeadId: true, fullName: true, project: true },
+              },
             },
           },
           _count: {
@@ -10538,18 +10595,27 @@ export class LoyaltyBaseService {
         "BROKER",
         engagementEvents,
       );
-      return {
-        base: "ours",
-        entityType,
-        item: this.mapOurBroker(
-          broker,
-          centsToMoney(
-            moneyToCents(String(dealAmount._sum.amount || "0")) +
-              registryAmountCents,
-          ),
-          true,
+      const item = this.mapOurBroker(
+        broker,
+        centsToMoney(
+          moneyToCents(String(dealAmount._sum.amount || "0")) +
+            registryAmountCents,
         ),
-      };
+        true,
+      );
+      // 2026-09-07: применяем выбранный период к периодным метрикам карточки
+      // тем же батч-агрегатом, что и в списке (ourBrokerPeriodMetrics).
+      if (activityPeriod) {
+        const periodMetrics = await this.ourBrokerPeriodMetrics(
+          [String(broker.id)],
+          activityPeriod,
+        );
+        item.periodMetrics =
+          periodMetrics.get(String(broker.id)) ||
+          this.unavailablePeriodMetrics(activityPeriod);
+        item.metricSource.periodFilterApplied = true;
+      }
+      return { base: "ours", entityType, item };
     }
     const agency = await this.prisma.agency.findUnique({
       where: { id },
@@ -10584,10 +10650,20 @@ export class LoyaltyBaseService {
       "AGENCY",
       engagementEvents,
     );
+    const agencyItem = this.mapOurAgency(agency, null, true);
+    // 2026-09-07: период применяется и к карточке агентства — те же строки
+    // relation-графа, что и в списке (ourAgencyPeriodMetrics).
+    if (activityPeriod) {
+      agencyItem.periodMetrics = this.ourAgencyPeriodMetrics(
+        this.ourAgencyRelationMetrics(agency),
+        activityPeriod,
+      );
+      agencyItem.metricSource.periodFilterApplied = true;
+    }
     return {
       base: "ours",
       entityType,
-      item: this.mapOurAgency(agency, null, true),
+      item: agencyItem,
     };
   }
 

@@ -1895,6 +1895,178 @@ describe("LoyaltyBaseService", () => {
     });
   });
 
+  // 2026-09-07: записи «События и карточки-основания» должны читаться —
+  // тип + имя клиента + проект + статус, точность «проверено» (VERIFIED).
+  it("enriches OUR broker evidence rows with client name, project and VERIFIED exactness", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Broker",
+      phone: "+79990000001",
+      phones: [],
+      brokerAgencies: [],
+      mergedIntoId: null,
+      clients: [
+        {
+          id: "client-1",
+          createdAt: new Date("2026-08-01T10:00:00.000Z"),
+          fixationStatus: "FIXED",
+          amoLeadId: 501n,
+          fullName: "Иванов Иван",
+          project: "ZORGE9",
+        },
+      ],
+      meetings: [
+        {
+          id: "meeting-1",
+          date: new Date("2026-08-02T10:00:00.000Z"),
+          status: "COMPLETED",
+          type: "OFFICE_VISIT",
+          client: {
+            amoLeadId: 501n,
+            fullName: "Иванов Иван",
+            project: "ZORGE9",
+          },
+        },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          signedAt: new Date("2026-08-03T10:00:00.000Z"),
+          createdAt: new Date("2026-08-03T10:00:00.000Z"),
+          status: "SIGNED",
+          amount: "100.10",
+          amoDealId: 601n,
+          project: "SILVER_BOR",
+          client: {
+            amoLeadId: 501n,
+            fullName: "Иванов Иван",
+            project: "ZORGE9",
+          },
+        },
+      ],
+      callLogs: [],
+      _count: { clients: 1, deals: 1, meetings: 1, callLogs: 0 },
+    });
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: "100.10" } });
+
+    const result: any = await service.detail("ours", "BROKER", "broker-1");
+
+    // Select карточки обязан тянуть имя клиента и проект.
+    const include = prisma.broker.findUnique.mock.calls[0][0].include;
+    expect(include.clients.select).toMatchObject({
+      fullName: true,
+      project: true,
+    });
+    expect(include.meetings.select.client.select).toMatchObject({
+      fullName: true,
+      project: true,
+    });
+    expect(include.deals.select).toMatchObject({ project: true });
+
+    expect(result.item.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "FIXATION",
+          clientName: "Иванов Иван",
+          project: "ZORGE9",
+          status: "FIXED",
+          exactness: "VERIFIED",
+        }),
+        expect.objectContaining({
+          type: "MEETING",
+          clientName: "Иванов Иван",
+          project: "ZORGE9",
+          meetingType: "OFFICE_VISIT",
+          status: "COMPLETED",
+          exactness: "VERIFIED",
+        }),
+        expect.objectContaining({
+          type: "DEAL",
+          clientName: "Иванов Иван",
+          project: "SILVER_BOR",
+          status: "SIGNED",
+          amount: "100.10",
+          exactness: "VERIFIED",
+        }),
+      ]),
+    );
+    expect(result.item.activityEvidence).toMatchObject({
+      exactness: "VERIFIED",
+      availability: "LOCAL_PRELIMINARY",
+    });
+    // Методика — по-русски (показывается в карточке как есть).
+    expect(result.item.activityEvidence.methodology).toMatch(/кабинета/);
+    expect(result.item.metricSource.label).toMatch(/Данные кабинета/);
+    expect(result.item.metricSource.exactness).toBe("VERIFIED");
+  });
+
+  // 2026-09-07: выбранный период применяется к периодным метрикам карточки
+  // тем же батч-агрегатом, что и в списке; плашка «период не применён»
+  // снимается через periodFilterApplied=true.
+  it("applies the requested activity period to OUR broker detail period metrics", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Broker",
+      phone: "+79990000001",
+      phones: [],
+      brokerAgencies: [],
+      mergedIntoId: null,
+      clients: [],
+      meetings: [],
+      deals: [],
+      callLogs: [],
+      _count: { clients: 3, deals: 1, meetings: 2, callLogs: 0 },
+    });
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: "900.00" } });
+    prisma.client.groupBy.mockResolvedValue([
+      {
+        brokerId: "broker-1",
+        _count: { _all: 1 },
+        _max: { createdAt: new Date("2026-08-07T10:00:00.000Z") },
+      },
+    ]);
+    prisma.meeting.groupBy.mockResolvedValue([
+      {
+        brokerId: "broker-1",
+        _count: { _all: 2 },
+        _max: { date: new Date("2026-08-08T10:00:00.000Z") },
+      },
+    ]);
+    prisma.deal.groupBy.mockResolvedValue([
+      {
+        brokerId: "broker-1",
+        _count: { _all: 1 },
+        _sum: { amount: "200.00" },
+        _max: { signedAt: new Date("2026-08-09T10:00:00.000Z") },
+      },
+    ]);
+
+    const result: any = await service.detail("ours", "BROKER", "broker-1", {
+      from: "2026-08-01",
+      to: "2026-08-31",
+    });
+
+    expect(result.item.periodMetrics).toMatchObject({
+      period: { from: "2026-08-01", to: "2026-08-31" },
+      availability: "LOCAL_PRELIMINARY",
+      exactness: "VERIFIED",
+      fixations: 1,
+      meetings: 2,
+      deals: 1,
+      dealAmount: "200.00",
+    });
+    expect(result.item.metricSource.periodFilterApplied).toBe(true);
+
+    // Без периода — прежнее поведение: lifetime и periodFilterApplied=false.
+    const lifetime: any = await service.detail("ours", "BROKER", "broker-1");
+    expect(lifetime.item.periodMetrics.availability).toBe("UNAVAILABLE");
+    expect(lifetime.item.metricSource.periodFilterApplied).toBe(false);
+  });
+
   it("includes broker contacts only in OUR agency detail", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
@@ -4963,7 +5135,9 @@ describe("LoyaltyBaseService", () => {
     ]);
     expect(ranked.items[0].periodMetrics).toMatchObject({
       availability: "LOCAL_PRELIMINARY",
-      exactness: "APPROXIMATE",
+      // 2026-09-07: периодные метрики брокера считаются напрямую из таблиц
+      // кабинета по выверенным правилам — точность «проверено».
+      exactness: "VERIFIED",
       fixations: 1,
       meetings: 1,
       deals: 2,

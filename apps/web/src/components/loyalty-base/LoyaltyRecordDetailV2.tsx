@@ -29,6 +29,9 @@ import {
   getLoyaltyCallResultOptions,
   getAnnaLoyaltyChanges,
   loyaltyActivityEvidenceCompleteness,
+  loyaltyAvailabilityLabelRu,
+  loyaltyExactnessLabelRu,
+  loyaltyMetricSourceLabelRu,
   updateAnnaLoyaltyRecord,
   type LoyaltyBaseKey,
   type LoyaltyCallResult,
@@ -299,9 +302,9 @@ function ActivityMetrics({ record }: { record: LoyaltyRecord }) {
           </h3>
           <span className="text-xs text-text-muted">
             {period?.availability === "LOCAL_PRELIMINARY"
-              ? "Локальные предварительные данные по текущим связям"
+              ? "Данные кабинета за выбранный период"
               : period?.availability === "EXACT"
-                ? "Точные event-level данные"
+                ? "Точные события за выбранный период"
                 : "Периодные данные недоступны"}
           </span>
         </div>
@@ -329,7 +332,7 @@ function ActivityMetrics({ record }: { record: LoyaltyRecord }) {
       </section>
       <section>
         <h3 className="mb-2 font-semibold">
-          Срез источника · не подтверждено event-level событиями
+          Срез источника · не подтверждено событиями кабинета
         </h3>
         <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Metric label="Фиксации">{count(source?.fixations ?? null)}</Metric>
@@ -370,7 +373,12 @@ function ActivityEvidenceCompleteness({
       <p>{summary}</p>
       {(evidence.availability || evidence.exactness) && (
         <p className="mt-1 text-xs text-text-muted">
-          {[evidence.availability, evidence.exactness]
+          {[
+            loyaltyAvailabilityLabelRu(evidence.availability) &&
+              `Источник: ${loyaltyAvailabilityLabelRu(evidence.availability)}`,
+            loyaltyExactnessLabelRu(evidence.exactness) &&
+              `точность: ${loyaltyExactnessLabelRu(evidence.exactness)}`,
+          ]
             .filter(Boolean)
             .join(" · ")}
         </p>
@@ -428,6 +436,25 @@ function Timeline({
                 <p className="mt-1 whitespace-pre-wrap text-text-muted">
                   {item.description}
                 </p>
+              )}
+              {/* 2026-09-07: разворот «Детали записи» — все поля, которые
+                  уже приходят с бэка (клиент, проект, статус, сумма...). */}
+              {item.details && item.details.length > 0 && (
+                <details className="mt-2 text-xs">
+                  <summary className="cursor-pointer text-text-muted">
+                    Детали записи
+                  </summary>
+                  <dl className="mt-1 grid gap-1 sm:grid-cols-2">
+                    {item.details.map((detail) => (
+                      <div key={detail.label}>
+                        <dt className="inline text-text-muted">
+                          {detail.label}:{" "}
+                        </dt>
+                        <dd className="inline">{detail.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </details>
               )}
               {item.result && (
                 <LoyaltyCallResultBadge
@@ -1922,7 +1949,11 @@ function DetailBody({
             <Metric label="Стадия отношений">
               {text(stageLabel(record.stage))}
             </Metric>
-            <Metric label="Качество данных">{text(record.dataQuality)}</Metric>
+            {/* 2026-09-07: пустое качество данных не показываем вовсе —
+                плитка «Качество: Нет данных» только пугала. */}
+            {record.dataQuality && (
+              <Metric label="Качество данных">{text(record.dataQuality)}</Metric>
+            )}
             <Metric label="Последний контакт">
               {date(record.lastActivityAt)}
             </Metric>
@@ -1934,14 +1965,32 @@ function DetailBody({
           )}
           {record.metricSource && (
             <div className="rounded-xl border border-accent/25 bg-accent/5 p-3 text-sm">
-              <b>Источник метрик:</b> {text(record.metricSource.label)} ·
-              точность: {text(record.metricSource.exactness)} · качество:{" "}
-              {text(record.metricSource.quality)}
-              {record.metricSource.periodFilterApplied === false && (
-                <p className="mt-1 text-warning">
-                  Выбранный период к этим агрегатам не применён.
-                </p>
-              )}
+              {/* 2026-09-07: источник и точность — по-русски; пустое
+                  качество не показываем. */}
+              <b>Источник:</b>{" "}
+              {text(loyaltyMetricSourceLabelRu(record.metricSource.label))} ·
+              точность:{" "}
+              {loyaltyExactnessLabelRu(record.metricSource.exactness) ||
+                "нет данных"}
+              {record.metricSource.quality
+                ? ` · качество: ${record.metricSource.quality}`
+                : ""}
+              {/* Плашка о периоде — только когда период действительно выбран
+                  (periodMetrics.period). Если периодные метрики посчитаны,
+                  это спокойная подсказка; если нет — предупреждение. */}
+              {record.metricSource.periodFilterApplied === false &&
+                record.periodMetrics?.period &&
+                (record.periodMetrics.availability === "UNAVAILABLE" ? (
+                  <p className="mt-1 text-warning">
+                    Выбранный период к этим цифрам применить нельзя — данные
+                    источника не разложены по датам, показатели за всё время.
+                  </p>
+                ) : (
+                  <p className="mt-1 text-text-muted">
+                    Цифры в этом блоке — за всё время. Выбранный период
+                    применён в блоке «За выбранный период» (вкладка «Метрики»).
+                  </p>
+                ))}
             </div>
           )}
         </div>

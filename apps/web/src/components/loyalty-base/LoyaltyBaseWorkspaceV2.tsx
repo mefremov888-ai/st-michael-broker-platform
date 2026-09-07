@@ -1038,13 +1038,25 @@ export function LoyaltyBaseWorkspaceV2() {
     let active = true;
     setDetailLoading(true);
     setDetailError("");
-    getLoyaltyDetail(base, entityType, detailId)
+    // 2026-09-07: выбранный «Период встреч и сделок» уезжает в карточку —
+    // бэкенд применяет его к периодным метрикам (и снимает плашку
+    // «период не применён»).
+    getLoyaltyDetail(base, entityType, detailId, {
+      activityPeriod: toCanonicalFilter(filters, entityType, base)
+        .activityPeriod,
+    })
       .then((record) => {
         const row = list?.items.find((item) => item.id === detailId);
         if (active)
           setDetail({
             ...record,
-            periodMetrics: row?.periodMetrics || record.periodMetrics,
+            // Периодные метрики: приоритет — применённые бэкендом в карточке;
+            // иначе строка списка (например, точные метрики Анны за период).
+            periodMetrics:
+              record.periodMetrics &&
+              record.periodMetrics.availability !== "UNAVAILABLE"
+                ? record.periodMetrics
+                : row?.periodMetrics || record.periodMetrics,
           });
       })
       .catch((reason) => {
@@ -1061,7 +1073,7 @@ export function LoyaltyBaseWorkspaceV2() {
     return () => {
       active = false;
     };
-  }, [base, canReadAll, detailId, entityType, list]);
+  }, [base, canReadAll, detailId, entityType, filters, list]);
   // Задача A: «выбрано всё по фильтру» для обзвона в «Нашей базе» требует
   // фильтр «Без “не звонить”» — иначе счётчик фронта включал бы брокеров,
   // которых бэкенд из обзвона всегда исключает (несовпадение выборки).
