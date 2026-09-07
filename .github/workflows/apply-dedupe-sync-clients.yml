@@ -1,0 +1,69 @@
+name: Apply dedupe of sync-created client duplicates
+
+# 2026-09-08: удаление дублей клиентов (телефон+брокер+лид), созданных синком
+# amo из-за бага NULL-комментария (исправлен hotfix поезда 26). Оставляется
+# самая старая запись; дубли со сделками/встречами не трогаются. По умолчанию
+# dry-run; запись — dry_run=false + confirm_apply=true. Аудит удалённых — в логе.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только отчёт)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю удаление (нужно вместе с dry_run=false)'
+        required: false
+        default: false
+        type: boolean
+      since:
+        description: Удалять только дубли, созданные с (ISO); пусто = только с 2026-09-07T06:00Z
+        required: false
+        default: "2026-09-07T06:00:00Z"
+        type: string
+      all_duplicates:
+        description: Взять все дубли без ограничения по дате (ALL=1)
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  dedupe:
+    name: Dedupe on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_INPUT: ${{ inputs.confirm_apply }}
+          SINCE_INPUT: ${{ inputs.since }}
+          ALL_INPUT: ${{ inputs.all_duplicates }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 12m
+          envs: DRY_INPUT,CONFIRM_INPUT,SINCE_INPUT,ALL_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/dedupe-sync-clients.js > /tmp/dedupe-sync-clients.js
+            docker cp /tmp/dedupe-sync-clients.js st-michael-api:/app/scripts/dedupe-sync-clients.js
+            DRY=1
+            if [ "$DRY_INPUT" = "false" ]; then
+              if [ "$CONFIRM_INPUT" != "true" ]; then echo "dry_run=false требует confirm_apply=true"; exit 1; fi
+              DRY=0
+            fi
+            ALL=0; if [ "$ALL_INPUT" = "true" ]; then ALL=1; fi
+            docker compose exec -T -e DRY_RUN=$DRY -e SINCE="$SINCE_INPUT" -e ALL=$ALL api node /app/scripts/dedupe-sync-clients.js
