@@ -1,0 +1,49 @@
+name: Inspect fixation case (read-only)
+
+# 2026-09-07: разбор обращения «зафиксировал клиента, а в “Мои клиенты” его
+# нет»: карточки брокера по телефону, записи клиента по телефону (у всех
+# брокеров), контакт и лиды клиента в amoCRM, вероятная причина. Только
+# чтение; телефоны в логе маскируются.
+
+on:
+  workflow_dispatch:
+    inputs:
+      broker_phone:
+        description: Телефон брокера (любой формат)
+        required: true
+        type: string
+      client_phone:
+        description: Телефон клиента (любой формат)
+        required: true
+        type: string
+
+concurrency:
+  group: inspect-fixation-case
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Inspect on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          BROKER_PHONE_INPUT: ${{ inputs.broker_phone }}
+          CLIENT_PHONE_INPUT: ${{ inputs.client_phone }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          envs: BROKER_PHONE_INPUT,CLIENT_PHONE_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/inspect-fixation-case.js > /tmp/inspect-fixation-case.js
+            docker cp /tmp/inspect-fixation-case.js st-michael-api:/app/scripts/inspect-fixation-case.js
+            docker compose exec -T -e BROKER_PHONE="$BROKER_PHONE_INPUT" -e CLIENT_PHONE="$CLIENT_PHONE_INPUT" api node /app/scripts/inspect-fixation-case.js
