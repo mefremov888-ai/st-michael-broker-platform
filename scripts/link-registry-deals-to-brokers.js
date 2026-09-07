@@ -82,6 +82,18 @@ async function main() {
     const paidRows = rows.filter((r) => r.paidAt);
     console.log(`Строк реестра без брокера с лидом amo: ${rows.length} (из них оплаченных: ${paidRows.length})`);
 
+    // Канал 0 (2026-09-08): в строке уже записан amo-контакт брокера из выгрузки
+    // (brokerAmoContactId), но карточка тогда не нашлась — после привязок
+    // брокер↔amo многие карточки уже имеют amoContactId.
+    const byContactUpdates = [];
+    for (const r of rows) {
+      if (!r.brokerAmoContactId) continue;
+      const b = brokerByContact.get(String(r.brokerAmoContactId));
+      if (b) byContactUpdates.push({ id: r.id, brokerId: b, contract: r.contractNumber });
+    }
+    console.log(`Канал brokerAmoContactId → карточка: ${byContactUpdates.length} из ${rows.filter((r) => r.brokerAmoContactId).length} строк с контактом`);
+    const viaContactIds = new Set(byContactUpdates.map((u) => u.id));
+
     const leadIds = [...new Set(rows.map((r) => Number(r.amoLeadId)).filter((n) => Number.isSafeInteger(n) && n > 0))];
     const leads = new Map();
     let errors = 0;
@@ -103,6 +115,7 @@ async function main() {
     const updates = [];
     const examples = [];
     for (const r of rows) {
+      if (viaContactIds.has(r.id)) continue; // уже решено каналом 0
       const lead = leads.get(Number(r.amoLeadId));
       if (!lead) { stats.leadMissing++; continue; }
       const contactIds = (lead._embedded?.contacts || []).map((c) => c.id);
@@ -120,6 +133,7 @@ async function main() {
       }
     }
     console.log("\n=== Сводка ===");
+    console.log(`К привязке по brokerAmoContactId строки:        ${byContactUpdates.length}`);
     console.log(`К привязке (ровно один брокер-контакт у лида): ${stats.linked}`);
     console.log(`Несколько брокеров-контактов (пропуск):        ${stats.ambiguous}`);
     console.log(`Контакты есть, но ни один не брокер кабинета:  ${stats.noBrokerContact}`);
@@ -127,9 +141,13 @@ async function main() {
     console.log(`Лид не найден в amo:                           ${stats.leadMissing}`);
     console.log(`Из пропущенных — заполнено поле «Агент» (ФИО): ${stats.agentFieldFilled}`);
     console.log(`Примеры: ${examples.join("; ")}`);
-    console.log("RESULT: " + JSON.stringify({ rows: rows.length, paidRows: paidRows.length, ...stats, dryRun }));
+    console.log("RESULT: " + JSON.stringify({ rows: rows.length, paidRows: paidRows.length, viaRowContact: byContactUpdates.length, ...stats, dryRun }));
     if (dryRun) { console.log("\nDRY-RUN: ничего не записано. Для записи DRY_RUN=0."); return; }
     let done = 0;
+    for (const u of byContactUpdates) {
+      await prisma.registryDeal.update({ where: { id: u.id }, data: { brokerId: u.brokerId } });
+      done++;
+    }
     for (const u of updates) {
       const data = { brokerId: u.brokerId };
       if (u.brokerAmoContactId) data.brokerAmoContactId = BigInt(u.brokerAmoContactId);
