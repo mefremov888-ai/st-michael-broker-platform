@@ -27,6 +27,11 @@ on:
         required: true
         default: false
         type: boolean
+      fix_apartment:
+        description: 'Перезаписать номер квартиры из номера договора у всех строк (исправление прогона 07.09)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: production-deploy
@@ -43,6 +48,7 @@ jobs:
         env:
           DRY_RUN_INPUT: ${{ inputs.dry_run }}
           CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+          FIX_APARTMENT_INPUT: ${{ inputs.fix_apartment }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -50,7 +56,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 25m
-          envs: DRY_RUN_INPUT,CONFIRM_APPLY
+          envs: DRY_RUN_INPUT,CONFIRM_APPLY,FIX_APARTMENT_INPUT
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
@@ -61,5 +67,6 @@ jobs:
             MODE=1
             if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
             if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
-            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/enrich-registry-deals-from-amo.js
+            FIXAPT=0; if [ "$FIX_APARTMENT_INPUT" = "true" ]; then FIXAPT=1; fi
+            docker compose exec -T -e DRY_RUN=$MODE -e FIX_APARTMENT=$FIXAPT api node /app/scripts/enrich-registry-deals-from-amo.js
             echo "=== Готово (DRY_RUN=$MODE) ==="

@@ -1,11 +1,35 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  apartmentFromContract,
   parseSqm,
   parseFloor,
   pickApartmentField,
   planRowUpdate,
 } = require("./enrich-registry-deals-from-amo");
+
+test("номер квартиры — последний сегмент номера договора", () => {
+  assert.equal(apartmentFromContract("СБ2-5-1с-190"), "190");
+  assert.equal(apartmentFromContract("ЗГ3-22-294-353/3"), "353/3");
+  assert.equal(apartmentFromContract("ММ-085"), "085");
+  assert.equal(apartmentFromContract("без номера"), null);
+  assert.equal(apartmentFromContract(null), null);
+});
+
+test("FIX_APARTMENT перезаписывает квартиру из номера договора даже без лида", () => {
+  const plan = planRowUpdate(
+    { contractNumber: "СБ2-5-1с-190", apartmentNumber: "6", sqm: 19.39, floor: 5, building: "Корпус 2", objectSource: "amo" },
+    null,
+    null,
+    { fixApartment: true },
+  );
+  assert.deepEqual(plan.fields, ["apartmentNumber"]);
+  assert.equal(plan.data.apartmentNumber, "190");
+  assert.equal(
+    planRowUpdate({ contractNumber: "СБ2-5-1с-190", apartmentNumber: "190" }, null, null, { fixApartment: true }),
+    null,
+  );
+});
 
 test("площадь: запятая, единицы, мусор", () => {
   assert.equal(parseSqm("54,3"), 54.3);
@@ -25,13 +49,15 @@ test("этаж: число, «7 этаж», «7/25», мусор", () => {
   assert.equal(parseFloor("999"), null);
 });
 
-test("поле номера квартиры ищется по названию", () => {
+test("поле номера квартиры ищется по названию, «№ квартиры на этаже» не подходит", () => {
   const fields = [
     { id: 1, name: "Этаж", type: "text" },
+    { id: 4, name: "№ квартиры на этаже", type: "text" },
     { id: 2, name: "№ квартиры", type: "text" },
     { id: 3, name: "Комментарий к квартире", type: "textarea" },
   ];
   assert.equal(pickApartmentField(fields)?.id, 2);
+  assert.equal(pickApartmentField([{ id: 4, name: "№ квартиры на этаже", type: "text" }]), null);
   assert.equal(pickApartmentField([{ id: 9, name: "Дом", type: "text" }]), null);
 });
 
@@ -45,17 +71,20 @@ test("план заполняет только пустые поля и став
     ],
   };
   const plan = planRowUpdate(
-    { sqm: null, floor: 3, building: null, apartmentNumber: null },
+    { contractNumber: "СБ1-3-1с-017", sqm: null, floor: 3, building: null, apartmentNumber: null },
     lead,
     777,
   );
+  // Квартира — из номера договора (017), а не из поля amo (190).
   assert.deepEqual(plan.fields, ["sqm", "building", "apartmentNumber"]);
   assert.deepEqual(plan.data, {
     sqm: 54.3,
     building: "Корпус 2. Gold",
-    apartmentNumber: "190",
+    apartmentNumber: "017",
     objectSource: "amo",
   });
+  const fallback = planRowUpdate({ contractNumber: "", sqm: 1, floor: 1, building: "x", apartmentNumber: null }, lead, 777);
+  assert.equal(fallback.data.apartmentNumber, "190");
   // Всё заполнено или лида нет — плана нет.
   assert.equal(
     planRowUpdate(
