@@ -1,0 +1,44 @@
+name: Inspect registry vs amo (read-only)
+
+# 2026-09-07: отчёт расхождений «Реестр сделок» ↔ amoCRM (даты ДДУ, суммы,
+# № договора, проект, оплата ↔ стадия лида; лиды на стадиях сделки без
+# строки в реестре). Только чтение: ничего не пишет ни в БД, ни в amo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      examples:
+        description: Сколько примеров показывать на каждый вид расхождения
+        required: false
+        default: "25"
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Compare registry deals with amo on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: SSH and compare
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          EXAMPLES_INPUT: ${{ inputs.examples }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 18m
+          envs: EXAMPLES_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/inspect-registry-vs-amo.js > /tmp/inspect-registry-vs-amo.js
+            docker cp /tmp/inspect-registry-vs-amo.js st-michael-api:/app/scripts/inspect-registry-vs-amo.js
+            docker compose exec -T -e EXAMPLES="$EXAMPLES_INPUT" api node /app/scripts/inspect-registry-vs-amo.js
