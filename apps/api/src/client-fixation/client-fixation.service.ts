@@ -1,4 +1,8 @@
 import {
+  isHistoricalClient,
+  notHistoricalClientWhere,
+} from "../common/historical-client";
+import {
   Injectable,
   Inject,
   Optional,
@@ -1679,6 +1683,16 @@ export class ClientFixationService {
       }
     }
 
+    // 2026-09-07 (решение владельца): исторические фиксации старого кабинета
+    // («[old-cabinet:…]» в комментарии) видят только ADMIN/MANAGER и КЦ;
+    // брокеру в его кабинете они не показываются.
+    if (!query.asStaff) {
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        notHistoricalClientWhere,
+      ];
+    }
+
     const orderBy: any = {};
     orderBy[query.sortBy || "createdAt"] = query.sortOrder || "desc";
 
@@ -2248,7 +2262,9 @@ export class ClientFixationService {
     // a coordinator created this client and assigned me as responsible).
     const iAmOwner = client.brokerId === brokerId;
     const iAmResponsible = client.responsibleBrokerId === brokerId;
-    if (!iAmOwner && !iAmResponsible) {
+    // 2026-09-07: историческая запись старого кабинета для брокера — как
+    // несуществующая (видна только ADMIN/MANAGER).
+    if ((!iAmOwner && !iAmResponsible) || isHistoricalClient(client)) {
       const requester = await this.prisma.broker.findUnique({
         where: { id: brokerId },
       });

@@ -849,6 +849,8 @@ export class SchedulerService {
                   uniquenessStatus: UniquenessStatus.CONDITIONALLY_UNIQUE,
                   // Уникальность = 30 дней от даты создания лида в amoCRM (правка 2026-05-14).
                   uniquenessExpiresAt: new Date((leadCreatedAt ? leadCreatedAt.getTime() : Date.now()) + 30 * 24 * 60 * 60 * 1000),
+                  // 2026-09-07 (правило владельца): дата фиксации = дата создания лида, не дата синка.
+                  ...(leadCreatedAt ? { createdAt: leadCreatedAt } : {}),
                   amoCreatedAt: leadCreatedAt,
                   amoUpdatedAt: leadUpdatedAt,
                 },
