@@ -1,0 +1,43 @@
+name: Inspect Tatyana duplicate (read-only)
+
+# 2026-09-07: диагностика ежечасной ошибки
+#   «amoCRM sync failed for broker Татьяна брокер:
+#    Unique constraint failed on the fields: (amo_contact_id)».
+# Скрипт scripts/inspect-tatyana-dup.js повторяет lookup синка
+# (findBrokerContactByPhone — только чтение amo), вычисляет кандидата
+# amo_contact_id и находит его владельца в БД. В БД ничего не пишет.
+#
+# Запуск: Actions → "Inspect Tatyana duplicate (read-only)" → Run workflow,
+# или: gh workflow run inspect-tatyana-dup.yml
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: inspect-tatyana-dup
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Run diagnostics on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run read-only diagnostics
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 10m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/inspect-tatyana-dup.js > /tmp/inspect-tatyana-dup.js
+            docker cp /tmp/inspect-tatyana-dup.js st-michael-api:/app/scripts/inspect-tatyana-dup.js
+            docker compose exec -T api node /app/scripts/inspect-tatyana-dup.js
+            echo "=== Готово ==="
