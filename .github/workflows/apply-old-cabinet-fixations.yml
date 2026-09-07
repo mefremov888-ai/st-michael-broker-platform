@@ -1,7 +1,7 @@
 name: Apply old cabinet fixations import
 
 # 2026-09-07: перенос исторических фиксаций старого кабинета (orders.xlsx, 2020–2026) в клиентов кабинета; решение владельца 07.09.
-# Скрипт scripts/apply-old-cabinet-fixations.js читается с origin/master, данные — из data-ветки
+# Скрипт scripts/import-old-cabinet-fixations.js читается с origin/master, данные — из data-ветки
 # (data/old-cabinet-fixations.json). Боевой режим требует dry_run=false И confirm_apply=true.
 
 on:
@@ -54,13 +54,13 @@ jobs:
             git fetch origin master
             echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
             git show "origin/$DATA_BRANCH:data/old-cabinet-fixations.json" > /tmp/old-cabinet-fixations.json
-            git show origin/master:scripts/apply-old-cabinet-fixations.js > /tmp/apply-old-cabinet-fixations.js
+            git show origin/master:scripts/import-old-cabinet-fixations.js > /tmp/import-old-cabinet-fixations.js
             git show origin/master:scripts/enrich-agencies-from-amo.js > /tmp/enrich-agencies-from-amo.js
             docker cp /tmp/old-cabinet-fixations.json st-michael-api:/app/old-cabinet-fixations.json
-            docker cp /tmp/apply-old-cabinet-fixations.js st-michael-api:/app/scripts/apply-old-cabinet-fixations.js
+            docker cp /tmp/import-old-cabinet-fixations.js st-michael-api:/app/scripts/import-old-cabinet-fixations.js
             docker cp /tmp/enrich-agencies-from-amo.js st-michael-api:/app/scripts/enrich-agencies-from-amo.js
             MODE=1
             if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
             if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
-            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/apply-old-cabinet-fixations.js /app/old-cabinet-fixations.json
+            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/import-old-cabinet-fixations.js /app/old-cabinet-fixations.json
             echo "=== Готово (DRY_RUN=$MODE) ==="
