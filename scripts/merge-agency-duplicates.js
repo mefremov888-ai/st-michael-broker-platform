@@ -101,19 +101,34 @@ async function resolveCluster(prisma, cluster) {
       if (hits.length) byName.set(n, hits);
     }
   }
+  // Правила мягкости (07.09, после первого сухого прогона):
+  //  - неоднозначное имя (2+ карточки) — вся группа пропускается;
+  //  - поглощаемое имя не найдено (карточка уже удалена/переименована) —
+  //    пропускается только это имя, группа склеивается по остальным;
+  //  - два написания указывают на одну карточку — учитывается один раз;
+  //  - выживающая карточка не найдена — группа пропускается.
   const problems = [];
+  const warnings = [];
   for (const n of names) {
     const list = byName.get(n) || [];
-    if (list.length === 0) problems.push(`не найдено: «${n}»`);
-    else if (list.length > 1) problems.push(`неоднозначно (${list.length} карточек): «${n}»`);
+    if (list.length > 1) problems.push(`неоднозначно (${list.length} карточек): «${n}»`);
   }
   if (problems.length) return { ok: false, problems };
-  const survivor = byName.get(names[0])[0];
-  const losers = names.slice(1).map((n) => byName.get(n)[0]);
-  // Одна и та же карточка под двумя написаниями — не склеиваем саму с собой.
-  const ids = new Set([survivor.id, ...losers.map((l) => l.id)]);
-  if (ids.size !== losers.length + 1) return { ok: false, problems: ["одна карточка найдена под двумя именами"] };
-  return { ok: true, survivor, losers };
+  const survivorList = byName.get(names[0]) || [];
+  if (!survivorList.length) return { ok: false, problems: [`не найдена выживающая карточка: «${names[0]}»`] };
+  const survivor = survivorList[0];
+  const seen = new Set([survivor.id]);
+  const losers = [];
+  for (const n of names.slice(1)) {
+    const list = byName.get(n) || [];
+    if (!list.length) { warnings.push(`нет карточки «${n}» — пропущено имя`); continue; }
+    const card = list[0];
+    if (seen.has(card.id)) { warnings.push(`«${n}» — та же карточка, что уже учтена`); continue; }
+    seen.add(card.id);
+    losers.push(card);
+  }
+  if (!losers.length) return { ok: false, problems: ["нечего склеивать: все поглощаемые имена не найдены", ...warnings] };
+  return { ok: true, survivor, losers, warnings };
 }
 
 async function main() {
@@ -142,6 +157,7 @@ async function main() {
         continue;
       }
       const { survivor, losers } = res;
+      for (const w of res.warnings || []) console.log(`   предупреждение ${label}: ${w}`);
       const loserIds = losers.map((l) => l.id);
       totals.clusters++;
       totals.losers += losers.length;
