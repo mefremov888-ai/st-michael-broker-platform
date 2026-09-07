@@ -39,11 +39,11 @@ const MARK = (id) => `[old-cabinet:${id}]`;
 const MARK_RE = /\[old-cabinet:(\d+)\]/;
 
 function buildComment(row) {
-  const parts = [MARK(row.oldId), "Импорт из старого кабинета"];
+  const parts = ["Импорт из старого кабинета"];
   if (row.projectRaw && !row.project) parts.push(`проект: ${row.projectRaw}`);
   if (row.status === 2) parts.push("статус в старом кабинете: отклонена");
   if (row.info) parts.push(row.info);
-  return parts.join(" · ").slice(0, 1000);
+  return `${MARK(row.oldId)} ${parts.join(" · ")}`.slice(0, 1000);
 }
 
 /** Данные Client для одной строки (чистая функция). */
