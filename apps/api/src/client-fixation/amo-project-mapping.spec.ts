@@ -7,11 +7,11 @@ import {
 // 2026-09-07 (решение владельца): Толбухина — отдельный ЖК; воронка
 // Толбухиной больше не относится к Зорге 9.
 describe("amo pipeline/lead → project", () => {
-  it("pipelineToProject: три ЖК; прочие воронки (КЦ, брокеры) → ZORGE9 (пока нет «Не указан»)", () => {
+  it("pipelineToProject: три ЖК; Колл-центр → UNKNOWN («Не указан»); прочие → ZORGE9", () => {
     expect(pipelineToProject(AMO_PIPELINES.ZORGE9)).toBe("ZORGE9");
     expect(pipelineToProject(AMO_PIPELINES.BERZARINA)).toBe("SILVER_BOR");
     expect(pipelineToProject(AMO_PIPELINES.TOLBUKHINA)).toBe("TOLBUKHINA");
-    expect(pipelineToProject(AMO_PIPELINES.KC)).toBe("ZORGE9");
+    expect(pipelineToProject(AMO_PIPELINES.KC)).toBe("UNKNOWN");
     expect(pipelineToProject(0)).toBe("ZORGE9");
   });
 
@@ -26,6 +26,6 @@ describe("amo pipeline/lead → project", () => {
     expect(leadToProject(lead(AMO_PIPELINES.KC, "ЖК Толбухина 3"))).toBe("TOLBUKHINA");
     expect(leadToProject(lead(AMO_PIPELINES.KC, "Берзарина 37"))).toBe("SILVER_BOR");
     expect(leadToProject(lead(AMO_PIPELINES.TOLBUKHINA, "Зорге 9"))).toBe("ZORGE9");
-    expect(leadToProject(lead(AMO_PIPELINES.KC))).toBe("ZORGE9");
+    expect(leadToProject(lead(AMO_PIPELINES.KC))).toBe("UNKNOWN");
   });
 });

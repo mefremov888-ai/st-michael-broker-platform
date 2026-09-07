@@ -851,7 +851,9 @@ export class AuthService {
                       ? "Серебряный Бор"
                       : (client as any)?.project === "TOLBUKHINA"
                         ? "Толбухина"
-                        : (client as any)?.project || "";
+                        : (client as any)?.project === "UNKNOWN"
+                          ? "Не указан"
+                          : (client as any)?.project || "";
                 const commentLines = [
                   `Клиент: ${client.fullName}`,
                   `Телефон: ${client.phone}`,

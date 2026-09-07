@@ -10,7 +10,7 @@ const channelLabels: Record<string, string> = {
   EMAIL: 'Email', PUSH: 'Push',
 };
 
-const projectLabels: Record<string, string> = { ZORGE9: 'Зорге 9', SILVER_BOR: 'Серебряный Бор', TOLBUKHINA: 'Толбухина' };
+const projectLabels: Record<string, string> = { ZORGE9: 'Зорге 9', SILVER_BOR: 'Серебряный Бор', TOLBUKHINA: 'Толбухина', UNKNOWN: 'Не указан' };
 const stageLabels: Record<string, string> = {
   NEW_BROKER: 'Новый брокер', BROKER_TOUR: 'Брокер-тур',
   FIXATION: 'Фиксация', MEETING: 'Встреча', DEAL: 'Сделка',

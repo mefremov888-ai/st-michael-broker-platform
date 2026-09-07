@@ -1387,6 +1387,7 @@ export class ClientFixationService {
             ZORGE9: "Зорге 9",
             SILVER_BOR: "Берзарина 37",
             TOLBUKHINA: "Толбухина",
+            UNKNOWN: "Не указан",
           } as Record<string, string>
         )[String(data.project)] || String(data.project);
 

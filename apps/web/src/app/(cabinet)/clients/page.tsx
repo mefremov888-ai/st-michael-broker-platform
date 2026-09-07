@@ -29,6 +29,7 @@ const projectLabels: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный бор',
   TOLBUKHINA: 'Толбухина',
+  UNKNOWN: 'Не указан',
 };
 
 // Форматирование телефона в формат +7 (XXX) XXX-XX-XX.
@@ -600,6 +601,7 @@ export default function ClientsPage() {
             <option value="ZORGE9">Зорге 9</option>
             <option value="SILVER_BOR">Серебряный бор</option>
             <option value="TOLBUKHINA">Толбухина</option>
+            <option value="UNKNOWN">Не указан</option>
           </select>
           <select
             className="input w-auto"

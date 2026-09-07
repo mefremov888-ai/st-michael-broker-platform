@@ -57,7 +57,7 @@ function buildClientData(row, brokerId, now = new Date()) {
     phone: row.clientPhone,
     email: row.email || null,
     comment: buildComment(row),
-    project: row.project || "ZORGE9",
+    project: row.project || "UNKNOWN", // 2026-09-07 (владелец): без проекта → «Не указан», НЕ Зорге 9
     uniquenessStatus: accepted ? (expiresAt > now ? "CONDITIONALLY_UNIQUE" : "EXPIRED") : "REJECTED",
     uniquenessReason: accepted ? "перенос из старого кабинета" : "отклонена в старом кабинете",
     uniquenessExpiresAt: accepted ? expiresAt : null,

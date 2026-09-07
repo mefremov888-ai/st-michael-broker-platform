@@ -1455,6 +1455,7 @@ const EVIDENCE_PROJECT_LABELS: Record<string, string> = {
   ZORGE9: "Зорге 9",
   SILVER_BOR: "Серебряный Бор",
   TOLBUKHINA: "Толбухина",
+  UNKNOWN: "Не указан",
 };
 
 const EVIDENCE_MEETING_TYPE_LABELS: Record<string, string> = {

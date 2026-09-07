@@ -532,16 +532,17 @@ export function evaluateUniqueness(
 
 export const BROKER_PIPELINE_ID = AMO_PIPELINES.BROKERS;
 
-export type AmoProject = 'ZORGE9' | 'SILVER_BOR' | 'TOLBUKHINA';
+export type AmoProject = 'ZORGE9' | 'SILVER_BOR' | 'TOLBUKHINA' | 'UNKNOWN';
 
 // Pipeline → Project (для маппинга в локальную БД).
 // 2026-09-07 (решение владельца): Толбухина — отдельный ЖК наравне с Зорге 9
-// и Серебряным Бором (в amo — воронка «Берзарина»). Колл-центр и прочие
-// воронки без своего ЖК по-прежнему дают ZORGE9 (значение «Не указан» в
-// справочнике пока не заведено — отдельное решение).
+// и Серебряным Бором (в amo — воронка «Берзарина»). Колл-центр — верхняя
+// воронка без ЖК: пока лид не перешёл в воронку проекта, проект «Не указан»
+// (UNKNOWN). Прочие воронки (старые «Продажи») по-прежнему → ZORGE9.
 export function pipelineToProject(pipelineId: number): AmoProject {
   if (pipelineId === AMO_PIPELINES.BERZARINA) return 'SILVER_BOR';
   if (pipelineId === AMO_PIPELINES.TOLBUKHINA) return 'TOLBUKHINA';
+  if (pipelineId === AMO_PIPELINES.KC) return 'UNKNOWN';
   return 'ZORGE9';
 }
 

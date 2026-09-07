@@ -41,7 +41,7 @@ const PROJECT_LABELS: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный Бор',
   TOLBUKHINA: 'Толбухина',
-  UNKNOWN: 'Проект не указан',
+  UNKNOWN: 'Не указан',
 };
 
 const GRANULARITY_LABELS: Record<Granularity, string> = {

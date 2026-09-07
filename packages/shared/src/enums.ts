@@ -26,6 +26,7 @@ export enum Project {
   ZORGE9 = 'ZORGE9',
   SILVER_BOR = 'SILVER_BOR',
   TOLBUKHINA = 'TOLBUKHINA', // 2026-09-07: отдельный ЖК
+  UNKNOWN = 'UNKNOWN', // 2026-09-07: «Не указан» (КЦ, старый кабинет без проекта)
 }
 
 export enum UniquenessStatus {

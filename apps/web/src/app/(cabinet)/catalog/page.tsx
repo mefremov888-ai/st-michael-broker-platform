@@ -15,6 +15,7 @@ const projectLabels: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный бор',
   TOLBUKHINA: 'Толбухина',
+  UNKNOWN: 'Не указан',
 };
 
 // КБ6 (2026-05-25): «Сдан» если срок сдачи уже наступил.
