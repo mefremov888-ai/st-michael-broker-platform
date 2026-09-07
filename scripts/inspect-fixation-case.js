@@ -4,7 +4,9 @@
  * нет». Read-only: по телефону брокера и телефону клиента показывает, что
  * есть в кабинете и в amoCRM, и называет вероятную причину.
  *
- * Вход (env): BROKER_PHONE, CLIENT_PHONE (любой формат).
+ * Вход (env): BROKER_PHONE, CLIENT_PHONE (любой формат); BROKER_NAME — необязательно,
+ * подстрока ФИО брокера (ищем карточки и по имени: телефон мог быть указан
+ * у другого человека).
  * Телефоны в выводе маскируются (первые 6 цифр + ****), кроме id.
  *
  * Запуск в контейнере api (workflow inspect-fixation-case.yml):
@@ -48,6 +50,23 @@ async function main() {
     if (brokers.length > 1) findings.push(`У брокера ${brokers.length} карточки в кабинете — клиент мог лечь на другую карточку (вход под другим аккаунтом).`);
     const brokerIds = brokers.map((b) => b.id);
 
+    // 1б. Карточки брокера по имени (если задано) — телефон мог быть чужим.
+    const nameQuery = String(process.env.BROKER_NAME || "").trim();
+    if (nameQuery) {
+      const byName = await prisma.broker.findMany({
+        where: { fullName: { contains: nameQuery, mode: "insensitive" } },
+        select: { id: true, fullName: true, phone: true, role: true, status: true, mergedIntoId: true, amoContactId: true, createdAt: true, brokerAgencies: { select: { isPrimary: true, agency: { select: { name: true } } } } },
+        orderBy: { createdAt: "asc" },
+      });
+      console.log(`
+=== Брокер по имени «${nameQuery}»: карточек ${byName.length} ===`);
+      for (const b of byName) {
+        console.log(`  • ${b.fullName} | id ${b.id} | ${b.role}/${b.status} | тел. ${mask(b.phone)}${brokerIds.includes(b.id) ? " (та же карточка, что по телефону)" : ""} | amo контакт ${b.amoContactId ?? "—"} | слита в ${b.mergedIntoId ?? "—"} | создана ${iso(b.createdAt)} | агентства: ${b.brokerAgencies.map((a) => a.agency.name + (a.isPrimary ? " (осн.)" : "")).join("; ") || "—"}`);
+        if (!brokerIds.includes(b.id)) { brokerIds.push(b.id); brokers.push(b); }
+      }
+      if (byName.length && !byName.some((b) => digits(b.phone).endsWith(brokerPhone))) findings.push("Телефон из обращения принадлежит ДРУГОЙ карточке, чем ФИО агента: клиент привязан к карточке по телефону, а агент заходит под своей.");
+    }
+
     // 2. Клиент по телефону — у всех брокеров.
     const clients = await prisma.$queryRawUnsafe(
       `SELECT c.id, c.full_name AS "fullName", c.phone, c.project, c.broker_id AS "brokerId", c.responsible_broker_id AS "responsibleBrokerId", c.uniqueness_status AS "uniquenessStatus", c.uniqueness_reason AS "uniquenessReason", c.fixation_status AS "fixationStatus", c.amo_lead_id AS "amoLeadId", c.amo_sync_status AS "amoSyncStatus", c.amo_sync_error AS "amoSyncError", c.created_at AS "createdAt", c.comment
@@ -57,7 +76,7 @@ async function main() {
     console.log(`\n=== Клиент по телефону ${mask(clientPhone)}: записей ${clients.length} ===`);
     const brokerName = new Map(brokers.map((b) => [b.id, b.fullName]));
     for (const c of clients) {
-      const owner = brokerName.get(c.brokerId) || (await prisma.broker.findUnique({ where: { id: c.brokerId }, select: { fullName: true, phone: true } }).then((b) => (b ? `${b.fullName} (${mask(b.phone)}, ДРУГОЙ брокер)` : c.brokerId)));
+      const owner = brokerName.get(c.brokerId) || (await prisma.broker.findUnique({ where: { id: c.brokerId }, select: { fullName: true, phone: true, role: true, status: true, isCoordinator: true } }).then((b) => (b ? `${b.fullName} (${mask(b.phone)}, ${b.role}/${b.status}${b.isCoordinator ? ", координатор" : ""}, ДРУГОЙ брокер)` : c.brokerId)));
       const hist = String(c.comment || "").startsWith(HIST);
       console.log(`  • ${iso(c.createdAt)} | ${c.fullName} | проект ${c.project} | уникальность ${c.uniquenessStatus}${c.uniquenessReason ? ` (${c.uniquenessReason})` : ""} | фиксация ${c.fixationStatus} | лид amo ${c.amoLeadId ?? "—"} | синк ${c.amoSyncStatus}${c.amoSyncError ? ` (${String(c.amoSyncError).slice(0, 120)})` : ""} | брокер: ${owner}${c.responsibleBrokerId && c.responsibleBrokerId !== c.brokerId ? ` | ответственный: ${c.responsibleBrokerId}` : ""}${hist ? " | ИСТОРИЯ старого кабинета (брокеру не видна)" : ""}`);
     }

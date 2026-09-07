@@ -16,6 +16,11 @@ on:
         description: Телефон клиента (любой формат)
         required: true
         type: string
+      broker_name:
+        description: ФИО агента из обращения (необязательно)
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: inspect-fixation-case
@@ -32,6 +37,7 @@ jobs:
         env:
           BROKER_PHONE_INPUT: ${{ inputs.broker_phone }}
           CLIENT_PHONE_INPUT: ${{ inputs.client_phone }}
+          BROKER_NAME_INPUT: ${{ inputs.broker_name }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -39,11 +45,11 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 8m
-          envs: BROKER_PHONE_INPUT,CLIENT_PHONE_INPUT
+          envs: BROKER_PHONE_INPUT,CLIENT_PHONE_INPUT,BROKER_NAME_INPUT
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
             git fetch origin master
             git show origin/master:scripts/inspect-fixation-case.js > /tmp/inspect-fixation-case.js
             docker cp /tmp/inspect-fixation-case.js st-michael-api:/app/scripts/inspect-fixation-case.js
-            docker compose exec -T -e BROKER_PHONE="$BROKER_PHONE_INPUT" -e CLIENT_PHONE="$CLIENT_PHONE_INPUT" api node /app/scripts/inspect-fixation-case.js
+            docker compose exec -T -e BROKER_PHONE="$BROKER_PHONE_INPUT" -e CLIENT_PHONE="$CLIENT_PHONE_INPUT" -e BROKER_NAME="$BROKER_NAME_INPUT" api node /app/scripts/inspect-fixation-case.js
