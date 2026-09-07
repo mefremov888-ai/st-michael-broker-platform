@@ -174,12 +174,21 @@ async function main() {
           const identity = `${snapshotId}:${p.kind}:${p.kind === "BROKER" ? "PERSON" : "ORGANIZATION"}:${p.personId || p.organizationId}:${p.targetId}`;
           const caseId = stableUuid("reconciliation-v2:case:" + identity);
           const caseData = { datasetId: dataset.id, snapshotId, ...owner, targetType: p.kind, targetId: p.targetId, matchCodes: p.matchCodes, score: p.score, evidence: { generatedBy: "link-anna-entities", note: p.note, ownerDecision: "2026-09-07: сцепки без слияния" }, ruleVersion: RULE_VERSION, status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now };
-          const kase = await tx.loyaltyReconciliationCase.upsert({
-            where: { id: caseId },
-            create: { id: caseId, ...caseData },
-            update: { status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now, version: { increment: 1 } },
-            select: { id: true },
+          // В БД есть уникальный индекс (snapshot_id, person_id|organization_id,
+          // target_type, target_id), которого нет в Prisma-схеме: case для этой
+          // пары мог быть создан раньше модулем сверки с другим id — ищем по
+          // естественному ключу, иначе создаём с детерминированным id.
+          let kase = await tx.loyaltyReconciliationCase.findFirst({
+            where: { snapshotId, ...owner, targetType: p.kind, targetId: p.targetId },
+            select: { id: true, status: true },
           });
+          if (kase) {
+            if (kase.status !== "RESOLVED") {
+              await tx.loyaltyReconciliationCase.update({ where: { id: kase.id }, data: { status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now, version: { increment: 1 } } });
+            }
+          } else {
+            kase = await tx.loyaltyReconciliationCase.create({ data: { id: caseId, ...caseData }, select: { id: true, status: true } });
+          }
           if (!kase?.id) throw new Error(`case not created for ${identity}`);
           await tx.loyaltyEntityLink.create({
             data: { ...owner, targetType: p.kind, targetId: p.targetId, status: "CONFIRMED", reconciliationCaseId: kase.id, evidence: { matchCodes: p.matchCodes, decision: "LINK", generatedBy: "link-anna-entities", note: p.note }, ruleVersion: RULE_VERSION, createdById: ACTOR, decidedById: ACTOR, decidedAt: now },
