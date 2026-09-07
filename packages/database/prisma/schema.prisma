@@ -437,6 +437,15 @@ model Broker {
   id                                String                       @id @default(uuid())
   amoContactId                      BigInt?                      @unique @map("amo_contact_id")
   fullName                          String                       @map("full_name")
+  // 2026-09-07: «имя для работы» — то, что видит КЦ в «Нашей базе» (список
+  // и карточка). Брокер в своём кабинете продолжает видеть fullName
+  // (самоназвание), displayName в брокерские ответы НЕ отдаётся.
+  // Источник заполнения: 'self' (здоровое fullName) | 'old_cabinet'
+  // (ФИО из старого кабинета по телефону) | 'amo' (имя контакта amo) |
+  // 'manual' (правка КЦ из карточки). Бэкфилл: scripts/backfill-display-names.js
+  // — уже заполненный displayName никогда не перезаписывает.
+  displayName                       String?                      @map("display_name")
+  displayNameSource                 String?                      @map("display_name_source")
   phone                             String                       @unique
   email                             String?
   avatarUrl                         String?                      @map("avatar_url")
