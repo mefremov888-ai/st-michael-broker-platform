@@ -491,8 +491,12 @@ async function stepRun(prisma, amo) {
         ? coLogin.body.accessToken
         : signJwt({ sub: coId, phone: co.brokerPhone, role: "BROKER" }, secret);
       // Коллеги по агентству — должен быть виден брокер ИНН10.
-      const colleagues = await http("GET", "/clients/agency-colleagues", undefined, coToken);
-      const list = Array.isArray(colleagues.body) ? colleagues.body : (colleagues.body && colleagues.body.items) || [];
+      // Ответ — { brokers: [...] }; без search список любых активных брокеров
+      // (top-50 по имени), поэтому ищем целевого брокера по его телефону.
+      const colleagues = await http("GET", `/clients/agency-colleagues?search=${encodeURIComponent(kit10.brokerPhone)}`, undefined, coToken);
+      const list = Array.isArray(colleagues.body)
+        ? colleagues.body
+        : (colleagues.body && (colleagues.body.brokers || colleagues.body.items)) || [];
       const seesTarget = list.some((b) => b && b.id === kit10.brokerId);
       console.log(`[КООРД] GET /clients/agency-colleagues → HTTP ${colleagues.status}, коллег: ${list.length}, брокер ИНН10 в списке: ${seesTarget ? "да" : "НЕТ"}`);
       const fix = await http("POST", "/clients/fix", {
