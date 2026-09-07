@@ -59,7 +59,7 @@ async function main() {
       status: "ACTIVE",
       role: "BROKER",
       mergedIntoId: null,
-      NOT: [{ amoContactId: null }, { phone: null }],
+      NOT: { amoContactId: null },
     },
     select: { id: true, fullName: true, phone: true, amoContactId: true },
     orderBy: { createdAt: "asc" },
