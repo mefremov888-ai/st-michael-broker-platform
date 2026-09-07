@@ -25,6 +25,7 @@ import {
   normalizeLoyaltyOverview,
   normalizeReconciliation,
   publishAnnaImport,
+  safeAmoLeadUrl,
   selectLoyaltyLeader,
   stageAnnaImport,
   unlinkActiveLoyaltyLink,
@@ -1101,8 +1102,15 @@ test("maps evidence rows to readable Russian titles with details", () => {
             occurredAt: "2026-08-03T10:00:00.000Z",
             status: "SIGNED",
             project: "SILVER_BOR",
-            amount: "100.10",
+            amount: "35684619.08",
             amoDealId: "601",
+            amoLeadId: "not-a-number",
+            contractNumber: "СБ2-5-1с-190",
+            sqm: "54.3",
+            floor: "7",
+            building: "Корпус 2",
+            buildingSection: "5",
+            apartmentNumber: "190",
           },
         ],
       },
@@ -1118,9 +1126,14 @@ test("maps evidence rows to readable Russian titles with details", () => {
     fixation.details?.find((row) => row.label === "Клиент"),
     { label: "Клиент", value: "Иванов Иван" },
   );
+  // 2026-09-07: номер лида — ссылка на карточку в amoCRM.
   assert.deepEqual(
     fixation.details?.find((row) => row.label === "Лид amoCRM"),
-    { label: "Лид amoCRM", value: "501" },
+    {
+      label: "Лид amoCRM",
+      value: "501",
+      href: "https://stmichael.amocrm.ru/leads/detail/501",
+    },
   );
 
   assert.equal(meeting.title, "Встреча — Иванов Иван");
@@ -1132,8 +1145,27 @@ test("maps evidence rows to readable Russian titles with details", () => {
   assert.match(deal.description, /подписана/);
   assert.deepEqual(
     deal.details?.find((row) => row.label === "Сумма"),
-    { label: "Сумма", value: "100.10 ₽" },
+    { label: "Сумма", value: "35 684 619,08 ₽" },
   );
+  // 2026-09-07: объект сделки и ссылка на сделку amoCRM.
+  const dealRows = Object.fromEntries(
+    (deal.details || []).map((row) => [row.label, row]),
+  );
+  assert.equal(dealRows["Номер договора"]?.value, "СБ2-5-1с-190");
+  assert.equal(dealRows["Дата ДДУ"]?.value, "03.08.2026");
+  assert.equal(dealRows["Площадь"]?.value, "54,3 м²");
+  assert.equal(dealRows["Этаж"]?.value, "7");
+  assert.equal(dealRows["Корпус"]?.value, "Корпус 2, секция 5");
+  assert.equal(dealRows["Квартира"]?.value, "190");
+  assert.deepEqual(dealRows["Сделка amoCRM"], {
+    label: "Сделка amoCRM",
+    value: "601",
+    href: "https://stmichael.amocrm.ru/leads/detail/601",
+  });
+  // Нечисловой идентификатор лида ссылкой не становится.
+  assert.equal(dealRows["Лид amoCRM"]?.value, "not-a-number");
+  assert.equal(dealRows["Лид amoCRM"]?.href, undefined);
+  assert.equal(safeAmoLeadUrl("12; DROP"), "");
 
   // Записи без известного типа остаются «Записью источника».
   const fallback = normalizeLoyaltyDetail(

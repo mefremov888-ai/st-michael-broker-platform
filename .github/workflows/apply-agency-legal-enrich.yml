@@ -1,0 +1,65 @@
+name: Apply agency legal requisites from registry (DaData)
+
+# 2026-09-07: юридическое название и юрадрес агентств (Agency.legalName,
+# Agency.legalAddress) из госреестра через DaData по ИНН. Только карточки с
+# настоящим ИНН (10/12 цифр); плейсхолдеры NOINN-* пропускаются. Обновляются
+# ТОЛЬКО пустые поля; имя карточки меняется только если это плейсхолдер
+# «Агентство <ИНН>». Скрипт — scripts/enrich-agencies-legal-from-dadata.js,
+# ключ DADATA_API_KEY берётся из окружения api-контейнера.
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (только отчёт, без записи).
+#
+# Запуск: Actions → "Apply agency legal requisites from registry (DaData)"
+# → Run workflow (сначала dry_run=true, проверить счётчики и примеры,
+# затем dry_run=false + confirm_apply=true).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только отчёт, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    name: Enrich agency legal requisites on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run enrich
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/enrich-agencies-legal-from-dadata.js > /tmp/enrich-agencies-legal-from-dadata.js
+            docker cp /tmp/enrich-agencies-legal-from-dadata.js st-michael-api:/app/scripts/enrich-agencies-legal-from-dadata.js
+            MODE=1
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/enrich-agencies-legal-from-dadata.js
+            echo "=== Готово (DRY_RUN=$MODE) ==="

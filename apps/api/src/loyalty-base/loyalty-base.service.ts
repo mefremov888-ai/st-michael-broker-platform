@@ -4705,7 +4705,23 @@ export class LoyaltyBaseService {
   private async attachOurAgencyRegistryDeals(records: any[]) {
     if (!records.length || !this.registryDealModel) return;
     const attachedIds = new Map<any, Set<string>>();
-    const pushRow = (record: any, row: any) => {
+    // 2026-09-07: в карточку уходят также номер договора, проект и лид amo
+    // (для ссылки), а attribution говорит, как строка попала к агентству:
+    // через брокера (оценка) или по названию агентства в реестре (прямая
+    // привязка, считается проверенной).
+    const registrySelect = {
+      id: true,
+      signedAt: true,
+      amount: true,
+      contractNumber: true,
+      project: true,
+      amoLeadId: true,
+    };
+    const pushRow = (
+      record: any,
+      row: any,
+      attribution: "BROKER" | "AGENCY_NAME",
+    ) => {
       const rowId = String(row?.id || "");
       if (!rowId) return;
       const seen = attachedIds.get(record) || new Set<string>();
@@ -4721,6 +4737,13 @@ export class LoyaltyBaseService {
           row.amount === null || row.amount === undefined
             ? "0"
             : String(row.amount),
+        contractNumber: row.contractNumber ? String(row.contractNumber) : null,
+        project: row.project ? String(row.project) : null,
+        amoLeadId:
+          row.amoLeadId === null || row.amoLeadId === undefined
+            ? null
+            : String(row.amoLeadId),
+        attribution,
       });
     };
     const brokerToRecords = new Map<string, any[]>();
@@ -4754,11 +4777,11 @@ export class LoyaltyBaseService {
       const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
       const rows = await this.registryDealModel.findMany({
         where: { brokerId: { in: batch } },
-        select: { id: true, brokerId: true, signedAt: true, amount: true },
+        select: { ...registrySelect, brokerId: true },
       });
       for (const row of rows as any[]) {
         for (const record of brokerToRecords.get(String(row.brokerId)) || []) {
-          pushRow(record, row);
+          pushRow(record, row, "BROKER");
         }
       }
     }
@@ -4773,11 +4796,9 @@ export class LoyaltyBaseService {
         ],
       },
       select: {
-        id: true,
+        ...registrySelect,
         agencyCanonical: true,
         agencyNameRaw: true,
-        signedAt: true,
-        amount: true,
       },
     });
     for (const row of namedRows as any[]) {
@@ -4786,7 +4807,7 @@ export class LoyaltyBaseService {
         canonicalAgencyMatchKey(row.agencyNameRaw);
       if (!key) continue;
       for (const record of nameToRecords.get(key) || []) {
-        pushRow(record, row);
+        pushRow(record, row, "AGENCY_NAME");
       }
     }
   }
@@ -8054,6 +8075,30 @@ export class LoyaltyBaseService {
 
   private ourAgencyReadInclude(): any {
     const confirmedDeals = this.ourConfirmedDealWhere();
+    // 2026-09-07: у сделки агентства в карточке нужны те же поля, что у
+    // брокера (клиент, проект, лид amo) плюс объект: площадь, этаж, корпус,
+    // номер квартиры — из Deal.sqm и Lot. Lot загружается только для
+    // подтверждённых сделок (их немного), на список это не влияет.
+    const dealSelect = {
+      id: true,
+      signedAt: true,
+      amount: true,
+      agencyId: true,
+      status: true,
+      amoDealId: true,
+      project: true,
+      sqm: true,
+      client: { select: { amoLeadId: true, fullName: true, project: true } },
+      lot: {
+        select: {
+          number: true,
+          building: true,
+          floor: true,
+          buildingSection: true,
+          sqm: true,
+        },
+      },
+    };
     return {
       brokerAgencies: {
         include: {
@@ -8073,22 +8118,30 @@ export class LoyaltyBaseService {
                   createdAt: true,
                   fixationStatus: true,
                   amoLeadId: true,
+                  // 2026-09-07: имя клиента и проект — как у брокера, чтобы
+                  // событие читалось «Фиксация клиента — Иванов Иван».
+                  fullName: true,
+                  project: true,
+                  // Прямая привязка фиксации к агентству: такая строка
+                  // считается проверенной, а не выведенной через брокера.
+                  fixationAgencyId: true,
                 },
               },
               meetings: {
                 where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
-                select: { id: true, date: true, status: true, type: true },
+                select: {
+                  id: true,
+                  date: true,
+                  status: true,
+                  type: true,
+                  client: {
+                    select: { amoLeadId: true, fullName: true, project: true },
+                  },
+                },
               },
               deals: {
                 where: confirmedDeals,
-                select: {
-                  id: true,
-                  signedAt: true,
-                  amount: true,
-                  agencyId: true,
-                  status: true,
-                  amoDealId: true,
-                },
+                select: dealSelect,
               },
               callLogs: {
                 select: {
@@ -8107,14 +8160,7 @@ export class LoyaltyBaseService {
       },
       deals: {
         where: confirmedDeals,
-        select: {
-          id: true,
-          signedAt: true,
-          amount: true,
-          agencyId: true,
-          status: true,
-          amoDealId: true,
-        },
+        select: dealSelect,
       },
       _count: { select: { brokerAgencies: true } },
     };
@@ -8197,16 +8243,20 @@ export class LoyaltyBaseService {
         exactness: "APPROXIMATE",
         methodology:
           entityType === "AGENCY"
-            ? "Current BrokerAgency relation rows, deduplicated by row ID; historical agency attribution is unavailable"
-            : "Current local broker-owned rows; definitions remain preliminary until source reconciliation",
+            ? "Активность агентства собрана по брокерам, которые сейчас к нему привязаны (без повторов). История привязок не хранится, поэтому при смене агентства прошлые события брокера показываются у нового."
+            : "Текущие записи кабинета по брокеру; определения предварительные до сверки с источником",
         sourceReportedAggregates: false,
         ...availability,
         unknownValuesRemainNull: true,
         defaultVisibilityApplied:
-          entityType === "AGENCY" && !filter.includeLowSignal,
+          entityType === "AGENCY" &&
+          !filter.includeLowSignal &&
+          !(filter.columns?.activity || filter.activityType),
         visibilityRule:
           entityType === "AGENCY" && !filter.includeLowSignal
-            ? "Hide agencies with no normalized phone and known zero deals, unless a qualifying meeting occurred within the last three months"
+            ? filter.columns?.activity || filter.activityType
+              ? "Выбран фильтр по активности — скрытие малозначимых агентств не применяется"
+              : "Скрыты агентства без телефона, без сделок, без фиксаций и без подтверждённых встреч за последние три месяца"
             : null,
         unavailableFilters:
           entityType === "AGENCY"
@@ -8703,6 +8753,7 @@ export class LoyaltyBaseService {
 
   private ourAgencyEvidence(
     relationMetrics: ReturnType<LoyaltyBaseService["ourAgencyRelationMetrics"]>,
+    agencyId: string | null = null,
   ) {
     const limit = OUR_ACTIVITY_EVIDENCE_LIMIT;
     const categoriesKnown = [
@@ -8711,6 +8762,21 @@ export class LoyaltyBaseService {
       relationMetrics.deals,
       relationMetrics.calls,
     ].every(Array.isArray);
+    // 2026-09-07: строки-основания агентства обогащены как у брокера
+    // (клиент, проект, лид amo) плюс объект сделки (площадь, этаж, корпус,
+    // квартира, номер договора). Точность теперь по строке: если запись
+    // привязана к агентству напрямую (Client.fixationAgencyId, Deal.agencyId,
+    // строка реестра по названию агентства) — «проверено»; если выведена
+    // через текущую связь брокер↔агентство — «оценка».
+    const str = (value: unknown) =>
+      value === null || value === undefined || value === ""
+        ? null
+        : String(value);
+    const directFixation = (row: any) =>
+      Boolean(agencyId) && str(row.fixationAgencyId) === agencyId;
+    const directDeal = (row: any) =>
+      (Boolean(agencyId) && str(row.agencyId) === agencyId) ||
+      row.attribution === "AGENCY_NAME";
     const rows: any[] = [
       ...(relationMetrics.fixations || []).map((row: any) => ({
         id: `LOCAL_CLIENT:${String(row.id)}`,
@@ -8719,16 +8785,16 @@ export class LoyaltyBaseService {
         date: this.isoDateTime(row.createdAt),
         occurredAt: this.isoDateTime(row.createdAt),
         status: row.fixationStatus ? String(row.fixationStatus) : null,
-        amoLeadId:
-          row.amoLeadId === null || row.amoLeadId === undefined
-            ? null
-            : String(row.amoLeadId),
+        clientName: str(row.fullName),
+        project: str(row.project),
+        amoLeadId: str(row.amoLeadId),
         amoDealId: null,
         amount: null,
         source: "LOCAL_CLIENT",
-        exactness: "APPROXIMATE",
-        provenance:
-          "Owned by a broker in the current BrokerAgency relation graph",
+        exactness: directFixation(row) ? "VERIFIED" : "APPROXIMATE",
+        provenance: directFixation(row)
+          ? "Фиксация оформлена на это агентство"
+          : "Фиксация брокера, который сейчас привязан к агентству",
       })),
       ...(relationMetrics.meetings || []).map((row: any) => ({
         id: `LOCAL_MEETING:${String(row.id)}`,
@@ -8738,12 +8804,14 @@ export class LoyaltyBaseService {
         occurredAt: this.isoDateTime(row.date),
         status: row.status ? String(row.status) : null,
         meetingType: row.type ? String(row.type) : null,
+        clientName: str(row.client?.fullName),
+        project: str(row.client?.project),
+        amoLeadId: str(row.client?.amoLeadId),
         amoDealId: null,
         amount: null,
         source: "LOCAL_MEETING",
         exactness: "APPROXIMATE",
-        provenance:
-          "Owned by a broker in the current BrokerAgency relation graph",
+        provenance: "Встреча брокера, который сейчас привязан к агентству",
       })),
       ...(relationMetrics.deals || []).map((row: any) => ({
         id: `LOCAL_DEAL:${String(row.id)}`,
@@ -8752,18 +8820,27 @@ export class LoyaltyBaseService {
         date: this.isoDateTime(row.signedAt),
         occurredAt: this.isoDateTime(row.signedAt),
         status: row.status ? String(row.status) : null,
-        amoDealId:
-          row.amoDealId === null || row.amoDealId === undefined
-            ? null
-            : String(row.amoDealId),
-        amount:
-          row.amount === null || row.amount === undefined
-            ? null
-            : String(row.amount),
-        source: "LOCAL_DEAL",
-        exactness: "APPROXIMATE",
-        provenance:
-          "Direct agency deal or deal owned by a broker in the current BrokerAgency relation graph",
+        clientName: str(row.client?.fullName),
+        project: str(row.project) ?? str(row.client?.project),
+        amoLeadId: str(row.amoLeadId) ?? str(row.client?.amoLeadId),
+        amoDealId: str(row.amoDealId),
+        amount: str(row.amount),
+        contractNumber: str(row.contractNumber),
+        // Площадь: из сделки, иначе из лота. Этаж/корпус/квартира — из лота.
+        sqm: str(row.sqm) ?? str(row.lot?.sqm),
+        floor: str(row.lot?.floor),
+        building: str(row.lot?.building),
+        buildingSection: str(row.lot?.buildingSection),
+        apartmentNumber: str(row.lot?.number),
+        source: String(row.id).startsWith("REGISTRY:")
+          ? "REGISTRY_DEAL"
+          : "LOCAL_DEAL",
+        exactness: directDeal(row) ? "VERIFIED" : "APPROXIMATE",
+        provenance: directDeal(row)
+          ? row.attribution === "AGENCY_NAME"
+            ? "Сделка из реестра ДДУ с названием этого агентства"
+            : "Сделка оформлена на это агентство"
+          : "Сделка брокера, который сейчас привязан к агентству",
       })),
       ...(relationMetrics.calls || []).map((row: LoyaltyCallView) => ({
         id: `${String(row.source || "LOCAL_CALL")}:${String(row.id)}`,
@@ -8781,7 +8858,7 @@ export class LoyaltyBaseService {
         source: row.source || "LOCAL_CALL",
         exactness: "APPROXIMATE",
         provenance:
-          "Agency call or call of a broker in the current BrokerAgency relation graph",
+          "Звонок агентству или брокеру, который сейчас привязан к агентству",
       })),
     ].sort((left, right) =>
       String(right.occurredAt || "").localeCompare(
@@ -8790,15 +8867,21 @@ export class LoyaltyBaseService {
     );
     const items = rows.slice(0, limit);
     const count = categoriesKnown ? rows.length : null;
+    const allVerified =
+      rows.length > 0 && rows.every((row) => row.exactness === "VERIFIED");
     return {
       items,
       count,
       truncated: count === null ? null : count > items.length,
       limit,
       availability: categoriesKnown ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
-      exactness: categoriesKnown ? "APPROXIMATE" : "UNKNOWN",
+      exactness: !categoriesKnown
+        ? "UNKNOWN"
+        : allVerified
+          ? "VERIFIED"
+          : "APPROXIMATE",
       methodology:
-        "PII-free local evidence rows; current BrokerAgency membership is used for approximate agency attribution",
+        "События собраны из данных кабинета: фиксации, подтверждённые и состоявшиеся встречи, подтверждённые сделки и сделки из реестра ДДУ. Запись считается проверенной, если она оформлена на само агентство (фиксация с указанием агентства, сделка агентства, строка реестра с его названием). Остальные записи взяты у брокеров, которые сейчас привязаны к агентству; история привязок не хранится, поэтому такие записи — оценка: если брокер сменил агентство, его прошлые события показываются у нового.",
     };
   }
 
@@ -9256,10 +9339,23 @@ export class LoyaltyBaseService {
               value <= new Date()
             );
           });
+    // 2026-09-07: правило скрытия «малозначимых» агентств уточнено.
+    // Раньше оно смотрело только на телефон, сделки и встречи за 3 месяца и
+    // срабатывало РАНЬШЕ фильтра «Есть фиксации» — агентство с фиксациями,
+    // но без телефона в карточке (таких большинство после импорта 05.09)
+    // вырезалось, и фильтр показывал 4 записи вместо реальных. Теперь:
+    // известные фиксации — тоже признак значимости, а при явном фильтре по
+    // активности (колонка «Активность» или тип активности) правило не
+    // применяется вовсе — пользователь сам сказал, что ищет.
+    const explicitActivityFilter = Boolean(
+      filter.columns?.activity || filter.activityType,
+    );
     if (
       !filter.includeLowSignal &&
+      !explicitActivityFilter &&
       !hasPhone &&
       deals === 0 &&
+      fixations === 0 &&
       hasRecentMeeting === false
     ) {
       return false;
@@ -10064,20 +10160,18 @@ export class LoyaltyBaseService {
         contributingRecords,
         sourceVersions: ["LOCAL_DB:CURRENT"],
         methodology: {
-          brokers:
-            "Current BrokerAgency memberships, deduplicated by broker ID",
+          brokers: "Брокеры, привязанные к агентству сейчас (без повторов)",
           fixations:
-            "Fixed Client rows (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED) owned by currently related brokers, deduplicated by Client ID",
+            "Фиксации клиентов этих брокеров по правилам фиксации (статус «зафиксирован» или «условно уникален»), без повторов",
           meetings:
-            "CONFIRMED/COMPLETED Meeting rows owned by currently related brokers, deduplicated by Meeting ID",
+            "Подтверждённые и состоявшиеся встречи этих брокеров, без повторов",
           deals:
-            "Confirmed positive DDU Deal rows linked directly to the agency or owned by currently related brokers, plus RegistryDeal rows of those brokers or with a matching normalized agency name, deduplicated by row ID",
+            "Подтверждённые сделки ДДУ агентства и этих брокеров плюс строки реестра ДДУ этих брокеров или с названием агентства, без повторов",
           calls:
-            "Legacy CallLog and effective loyalty workflow attempts of the agency/currently related brokers, deduplicated by source and row ID",
-          brokerTours:
-            "BT flags/dates of brokers in the current BrokerAgency relation graph",
+            "Звонки агентству и этим брокерам из журнала звонков и кампаний обзвона, без повторов",
+          brokerTours: "Брокер-туры этих брокеров",
           attribution:
-            "BrokerAgency membership is current-state; historical agency attribution is unavailable",
+            "История привязок брокер↔агентство не хранится, поэтому события брокера относятся к его текущему агентству — это оценка, а не точная история",
         },
       },
     };
@@ -10104,7 +10198,10 @@ export class LoyaltyBaseService {
     }
     if (detailed) {
       const history = this.ourAgencyCallHistory(item);
-      const evidence = this.ourAgencyEvidence(relationMetrics);
+      const evidence = this.ourAgencyEvidence(
+        relationMetrics,
+        item?.id ? String(item.id) : null,
+      );
       result.calls = history;
       result.callHistory = history;
       result.activities = evidence.items;

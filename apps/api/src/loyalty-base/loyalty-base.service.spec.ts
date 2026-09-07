@@ -6252,6 +6252,254 @@ describe("LoyaltyBaseService", () => {
       }),
     });
   });
+
+  // 2026-09-07: правило скрытия малозначимых агентств срабатывало раньше
+  // фильтра «Есть фиксации» и прятало агентства с фиксациями, но без
+  // телефона в карточке — фильтр показывал 4 записи вместо реальных.
+  it("keeps OUR agencies with known fixations visible and disables the low-signal rule under an explicit activity filter", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const brokerWithFixation = {
+      id: "broker-fix",
+      fullName: "Broker Fix",
+      phone: "+79990000002",
+      email: null,
+      lastCallAt: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      clients: [
+        {
+          id: "client-fix",
+          createdAt: new Date("2026-01-10T10:00:00.000Z"),
+          fixationStatus: "FIXED",
+          amoLeadId: 32290623n,
+          fullName: "Петров Пётр",
+          project: "ZORGE9",
+          fixationAgencyId: null,
+        },
+      ],
+      meetings: [],
+      deals: [],
+      callLogs: [],
+    };
+    const withFixations: any = {
+      id: "agency-with-fixations",
+      name: "Agency With Fixations",
+      inn: "7700000010",
+      phone: null,
+      email: null,
+      brokerAgencies: [{ isPrimary: true, broker: brokerWithFixation }],
+      deals: [],
+      _count: { brokerAgencies: 1 },
+    };
+    const silent: any = {
+      id: "agency-silent",
+      name: "Silent Agency",
+      inn: "7700000011",
+      phone: null,
+      email: null,
+      brokerAgencies: [],
+      deals: [],
+      _count: { brokerAgencies: 0 },
+    };
+    prisma.agency.findMany.mockResolvedValue([withFixations, silent]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+
+    // По умолчанию: агентство с фиксациями видно, «пустое» скрыто.
+    const byDefault: any = await service.list("ours", "AGENCY", {
+      page: 1,
+      pageSize: 30,
+    } as any);
+    expect(byDefault.items.map((item: any) => item.id)).toEqual([
+      "agency-with-fixations",
+    ]);
+    expect(byDefault.dataAvailability.defaultVisibilityApplied).toBe(true);
+    expect(byDefault.dataAvailability.visibilityRule).toMatch(/без фиксаций/);
+
+    // Явный фильтр «Есть фиксации»: правило скрытия не применяется.
+    const hasFixations: any = await service.list("ours", "AGENCY", {
+      page: 1,
+      pageSize: 30,
+      columns: { activity: "HAS_FIXATIONS" },
+    } as any);
+    expect(hasFixations.total).toBe(1);
+    expect(hasFixations.items[0].id).toBe("agency-with-fixations");
+    expect(hasFixations.dataAvailability.defaultVisibilityApplied).toBe(false);
+    expect(hasFixations.dataAvailability.visibilityRule).toMatch(
+      /не применяется/,
+    );
+
+    // Явный фильтр «Нет фиксаций»: «пустое» агентство тоже показывается —
+    // пользователь сам его ищет.
+    const noFixations: any = await service.list("ours", "AGENCY", {
+      page: 1,
+      pageSize: 30,
+      columns: { activity: "NO_FIXATIONS" },
+    } as any);
+    expect(noFixations.items.map((item: any) => item.id)).toEqual([
+      "agency-silent",
+    ]);
+  });
+
+  // 2026-09-07: строки-основания агентства — имя клиента, проект, лид amo,
+  // объект сделки (площадь/этаж/корпус/квартира), номер договора реестра,
+  // точность по строке (прямая привязка → VERIFIED).
+  it("enriches OUR agency evidence rows with client, object and per-row exactness", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const brokerRow = {
+      id: "broker-1",
+      fullName: "Broker 1",
+      phone: "+79990000001",
+      email: null,
+      lastCallAt: null,
+      brokerTourVisited: false,
+      brokerTourDate: null,
+      clients: [
+        {
+          id: "client-direct",
+          createdAt: new Date("2026-08-02T10:00:00.000Z"),
+          fixationStatus: "FIXED",
+          amoLeadId: 501n,
+          fullName: "Иванов Иван",
+          project: "ZORGE9",
+          fixationAgencyId: "agency-1",
+        },
+        {
+          id: "client-indirect",
+          createdAt: new Date("2026-08-01T10:00:00.000Z"),
+          fixationStatus: "FIXED",
+          amoLeadId: null,
+          fullName: "Сидоров Сидор",
+          project: null,
+          fixationAgencyId: "agency-other",
+        },
+      ],
+      meetings: [
+        {
+          id: "meeting-1",
+          date: new Date("2026-08-03T10:00:00.000Z"),
+          status: "COMPLETED",
+          type: "BROKER_TOUR",
+          client: { amoLeadId: 501n, fullName: "Иванов Иван", project: "ZORGE9" },
+        },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          signedAt: new Date("2026-08-04T10:00:00.000Z"),
+          amount: "35684619.08",
+          agencyId: "agency-1",
+          status: "SIGNED",
+          amoDealId: 601n,
+          project: "SILVER_BOR",
+          sqm: "54.30",
+          client: { amoLeadId: 501n, fullName: "Иванов Иван", project: null },
+          lot: {
+            number: "190",
+            building: "Корпус 2",
+            floor: 7,
+            buildingSection: "5",
+            sqm: "54.30",
+          },
+        },
+      ],
+      callLogs: [],
+    };
+    const agency: any = {
+      id: "agency-1",
+      name: "Trend Agent",
+      legalName: null,
+      inn: "7700000000",
+      phone: null,
+      email: null,
+      brokerAgencies: [{ isPrimary: true, broker: brokerRow }],
+      deals: [],
+      _count: { brokerAgencies: 1 },
+    };
+    prisma.agency.findUnique.mockResolvedValue(agency);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.registryDeal.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? []
+          : [
+              {
+                id: "registry-1",
+                signedAt: new Date("2024-03-25T00:00:00.000Z"),
+                amount: "11761691",
+                contractNumber: "СБ2-5-1с-190",
+                project: "SILVER_BOR",
+                amoLeadId: 30445106n,
+                agencyCanonical: "trend agent",
+                agencyNameRaw: "Trend Agent",
+              },
+            ],
+      ),
+    );
+
+    const detail: any = await service.detail("ours", "AGENCY", "agency-1");
+    const byId = new Map(
+      detail.item.activities.map((row: any) => [row.id, row]),
+    );
+
+    expect(byId.get("LOCAL_CLIENT:client-direct")).toMatchObject({
+      type: "FIXATION",
+      clientName: "Иванов Иван",
+      project: "ZORGE9",
+      amoLeadId: "501",
+      exactness: "VERIFIED",
+    });
+    expect(byId.get("LOCAL_CLIENT:client-indirect")).toMatchObject({
+      clientName: "Сидоров Сидор",
+      exactness: "APPROXIMATE",
+    });
+    expect(byId.get("LOCAL_MEETING:meeting-1")).toMatchObject({
+      meetingType: "BROKER_TOUR",
+      clientName: "Иванов Иван",
+      amoLeadId: "501",
+      exactness: "APPROXIMATE",
+    });
+    expect(byId.get("LOCAL_DEAL:deal-1")).toMatchObject({
+      type: "DEAL",
+      clientName: "Иванов Иван",
+      project: "SILVER_BOR",
+      amoLeadId: "501",
+      amoDealId: "601",
+      amount: "35684619.08",
+      sqm: "54.30",
+      floor: "7",
+      building: "Корпус 2",
+      buildingSection: "5",
+      apartmentNumber: "190",
+      source: "LOCAL_DEAL",
+      exactness: "VERIFIED",
+    });
+    expect(byId.get("LOCAL_DEAL:REGISTRY:registry-1")).toMatchObject({
+      type: "DEAL",
+      contractNumber: "СБ2-5-1с-190",
+      project: "SILVER_BOR",
+      amoLeadId: "30445106",
+      amount: "11761691",
+      source: "REGISTRY_DEAL",
+      exactness: "VERIFIED",
+    });
+    // Смешанная точность строк → сводная остаётся оценкой, текст русский.
+    expect(detail.item.activityEvidence).toMatchObject({
+      count: 5,
+      exactness: "APPROXIMATE",
+    });
+    expect(detail.item.activityEvidence.methodology).toMatch(/проверенной/);
+    expect(detail.item.metricSource.methodology.attribution).toMatch(
+      /История привязок/,
+    );
+    // Сырой comment по-прежнему не утекает.
+    expect(detail.item.activities.some((row: any) => "comment" in row)).toBe(
+      false,
+    );
+  });
 });
 
 // 2026-09-07: «имя для работы» (Broker.displayName) в «Нашей базе».
