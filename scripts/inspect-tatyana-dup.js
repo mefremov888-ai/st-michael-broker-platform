@@ -159,6 +159,33 @@ const mask = (p) => (p ? String(p).slice(0, 5) + "***" : "—");
       console.log(`amoCRM-адаптер недоступен, раздел пропущен: ${e?.message || e}\n`);
     }
 
+    // ─── 2b. ВСЕ контакты amo по телефону каждой Татьяны (07.09: владелец
+    // подтвердил, что 47146559 и 47050643 — один человек; проверяем, нет ли
+    // третьего и далее) ───
+    if (amoOk) {
+      console.log("=== 2b. Все контакты amoCRM с таким телефоном (query-поиск) ===\n");
+      for (const b of tatyanaBrokers) {
+        if (!b.phone) continue;
+        const digits = String(b.phone).replace(/\D/g, "").slice(-10);
+        if (digits.length < 10) continue;
+        try {
+          const res = await amo["request"](`/contacts?query=${digits}&limit=50`);
+          const list = res?._embedded?.contacts || [];
+          console.log(`  «${b.fullName}» (${mask(b.phone)}): найдено контактов: ${list.length}`);
+          for (const c of list) {
+            const created = c.created_at
+              ? new Date(c.created_at * 1000).toISOString().slice(0, 10)
+              : "—";
+            console.log(`    • ${c.id} | «${String(c.name || "").slice(0, 50)}» | создан ${created}`);
+          }
+        } catch (e) {
+          console.log(`  «${b.fullName}»: query-поиск не удался — ${e?.message || e}`);
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      console.log("");
+    }
+
     const conflictOwnerIds = new Set();
     if (amoOk) {
       for (const b of tatyanaBrokers) {
