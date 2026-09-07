@@ -8798,6 +8798,23 @@ export class LoyaltyBaseService {
     };
   }
 
+  /**
+   * 2026-09-07: метка backfill-а встреч (scripts/backfill-meetings.js).
+   * PENDING-встреча с «[amo:...]» в comment означает «статус из amoCRM
+   * вернуть не удалось» — фронт показывает оранжевый бейдж. Наружу идёт
+   * только код метки, не сырой comment (там бывает телефон клиента).
+   */
+  private meetingAmoStatusMark(row: {
+    status?: unknown;
+    comment?: unknown;
+  }): "UNCONFIRMED" | "LEAD_DELETED" | null {
+    if (String(row.status || "") !== "PENDING") return null;
+    const comment = String(row.comment || "");
+    if (comment.includes("[amo:лид удалён]")) return "LEAD_DELETED";
+    if (comment.includes("[amo:статус не подтверждён]")) return "UNCONFIRMED";
+    return null;
+  }
+
   private ourBrokerEvidence(item: any) {
     const limit = OUR_ACTIVITY_EVIDENCE_LIMIT;
     // 2026-09-07: строки-основания обогащены именем клиента и проектом,
@@ -8833,6 +8850,10 @@ export class LoyaltyBaseService {
           occurredAt: this.isoDateTime(row.date),
           status: row.status ? String(row.status) : null,
           meetingType: row.type ? String(row.type) : null,
+          // 2026-09-07: маркер backfill-а для бейджа «статус не
+          // подтверждён — нет ответа из amo». Сырой comment не шлём
+          // (в нём бывает телефон клиента), наружу идёт только код.
+          amoStatusMark: this.meetingAmoStatusMark(row),
           clientName: row.client?.fullName ? String(row.client.fullName) : null,
           project: row.client?.project ? String(row.client.project) : null,
           amoLeadId:
@@ -8898,7 +8919,7 @@ export class LoyaltyBaseService {
       availability: known ? "LOCAL_PRELIMINARY" : "UNAVAILABLE",
       exactness: known ? "VERIFIED" : "UNKNOWN",
       methodology:
-        "События кабинета этого брокера: фиксации клиентов (по правилам фиксации), подтверждённые и состоявшиеся встречи, подтверждённые сделки. Это данные кабинета, а не полный аудит amoCRM.",
+        "События кабинета этого брокера: фиксации клиентов (по правилам фиксации), подтверждённые и состоявшиеся встречи (плюс встречи с пометкой «статус не подтверждён — нет ответа из amo»), подтверждённые сделки. Это данные кабинета, а не полный аудит amoCRM.",
     };
   }
 
@@ -10503,7 +10524,16 @@ export class LoyaltyBaseService {
             },
           },
           meetings: {
-            where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+            // 2026-09-07: помимо подтверждённых — PENDING с меткой
+            // backfill-а «[amo:...]» (статус из amoCRM вернуть не удалось).
+            // Требование владельца: такие встречи должны быть ЯВНО видны
+            // в карточке (оранжевый бейдж), а не пропадать из истории.
+            where: {
+              OR: [
+                { status: { in: ["CONFIRMED", "COMPLETED"] } },
+                { status: "PENDING", comment: { contains: "[amo:" } },
+              ],
+            },
             orderBy: [{ date: "desc" }, { id: "desc" }],
             take: OUR_ACTIVITY_EVIDENCE_LIMIT,
             select: {
@@ -10511,6 +10541,7 @@ export class LoyaltyBaseService {
               date: true,
               status: true,
               type: true,
+              comment: true,
               client: {
                 select: { amoLeadId: true, fullName: true, project: true },
               },

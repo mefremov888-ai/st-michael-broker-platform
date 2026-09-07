@@ -47,6 +47,11 @@ import {
   loyaltyStatusLabel,
 } from "./loyalty-status";
 import {
+  meetingAmoMark,
+  meetingAmoMarkLabel,
+  stripMeetingAmoMarks,
+} from "./meeting-amo-marks";
+import {
   ANNA_AGENCY_CALL_RESULT_LABELS,
   ANNA_AGENCY_SCENARIO_LABELS,
   ANNA_APPLY_FILTERS_LABEL,
@@ -2475,4 +2480,84 @@ test("normalizes campaign progress and its persisted recoverable selection", asy
     "/api/loyalty-workflow/campaigns/campaign-1?page=1&limit=200",
   );
   assert.equal(urls[2], "/api/loyalty-workflow/campaigns/campaign-1/export");
+});
+
+// 2026-09-07: backfill встреч — PENDING с меткой «нет ответа из amo»
+// должен нести amoMark для оранжевого бейджа и не сливаться с обычным
+// «запланирована»; подтверждённые встречи метку не получают.
+test("marks unconfirmed backfilled meetings with amoMark for the orange badge", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "broker-amo-marks",
+        entityType: "BROKER",
+        displayName: "Broker",
+        activities: [
+          {
+            id: "LOCAL_MEETING:meeting-unconfirmed",
+            type: "MEETING",
+            occurredAt: "2026-05-02T10:00:00.000Z",
+            status: "PENDING",
+            meetingType: "OFFICE_VISIT",
+            amoStatusMark: "UNCONFIRMED",
+          },
+          {
+            id: "LOCAL_MEETING:meeting-deleted-lead",
+            type: "MEETING",
+            occurredAt: "2026-05-03T10:00:00.000Z",
+            status: "PENDING",
+            meetingType: "OFFICE_VISIT",
+            amoStatusMark: "LEAD_DELETED",
+          },
+          {
+            id: "LOCAL_MEETING:meeting-completed",
+            type: "MEETING",
+            occurredAt: "2026-05-04T10:00:00.000Z",
+            status: "COMPLETED",
+            meetingType: "OFFICE_VISIT",
+          },
+          {
+            // Запасной путь: метка прямо в comment (без кода с бэка).
+            id: "LOCAL_MEETING:meeting-comment-mark",
+            type: "MEETING",
+            occurredAt: "2026-05-05T10:00:00.000Z",
+            status: "PENDING",
+            meetingType: "OFFICE_VISIT",
+            comment: "Клиент: X\n[amo:статус не подтверждён]",
+          },
+        ],
+      },
+    },
+    "brokers",
+  );
+
+  const [unconfirmed, deletedLead, completed, viaComment] = detail.history;
+  assert.equal(unconfirmed.amoMark, "UNCONFIRMED");
+  assert.equal(deletedLead.amoMark, "LEAD_DELETED");
+  assert.equal(completed.amoMark, undefined);
+  assert.equal(viaComment.amoMark, "UNCONFIRMED");
+
+  assert.equal(
+    meetingAmoMarkLabel("UNCONFIRMED"),
+    "Статус не подтверждён · нет ответа из amo",
+  );
+  assert.equal(meetingAmoMarkLabel("LEAD_DELETED"), "Лид удалён в amo");
+  // Метка гасится, как только статус дотянули.
+  assert.equal(meetingAmoMark("[amo:статус не подтверждён]", "COMPLETED"), null);
+  // Служебные метки не показываются в комментарии как текст.
+  assert.equal(
+    stripMeetingAmoMarks("Клиент: X\n[amo:статус не подтверждён]"),
+    "Клиент: X",
+  );
+
+  // Карточка действительно рендерит бейдж по amoMark.
+  const componentSource = readFileSync(
+    new URL(
+      "../components/loyalty-base/LoyaltyRecordDetailV2.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(componentSource, /item\.amoMark/);
+  assert.match(componentSource, /meetingAmoMarkLabel\(item\.amoMark\)/);
 });

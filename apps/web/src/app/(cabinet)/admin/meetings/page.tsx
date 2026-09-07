@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { api, apiGet } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { meetingAmoMark, meetingAmoMarkLabel, stripMeetingAmoMarks } from '@/lib/meeting-amo-marks';
 import { Calendar, Check, X, Clock, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const statusLabels: Record<string, { label: string; cls: string }> = {
@@ -105,7 +106,16 @@ export default function AdminMeetingsPage() {
                   <div className="text-xs text-text-muted">
                     {m.client?.phone} → брокер: <span className="text-text">{m.broker?.fullName}</span> ({m.broker?.phone})
                   </div>
-                  {m.comment && <div className="text-xs text-text-muted mt-1 whitespace-pre-wrap break-words">{m.comment}</div>}
+                  {stripMeetingAmoMarks(m.comment) && <div className="text-xs text-text-muted mt-1 whitespace-pre-wrap break-words">{stripMeetingAmoMarks(m.comment)}</div>}
+                  {/* 2026-09-07: встреча PENDING с меткой backfill-а «[amo:...]» —
+                      статус из amoCRM вернуть не удалось. Явный оранжевый бейдж,
+                      чтобы не сливалась с обычным «Ожидает». */}
+                  {meetingAmoMark(m.comment, m.status) && (
+                    <span className="mt-1 inline-flex items-center gap-1 rounded-full border border-orange-300 bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-900">
+                      <span className="h-1.5 w-1.5 rounded-full bg-orange-600" aria-hidden />
+                      {meetingAmoMarkLabel(meetingAmoMark(m.comment, m.status)!)}
+                    </span>
+                  )}
                 </div>
 
                 <span className={`text-xs px-2 py-1 rounded whitespace-nowrap ${statusLabels[m.status]?.cls || ''}`}>
