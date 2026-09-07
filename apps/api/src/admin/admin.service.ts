@@ -1002,6 +1002,12 @@ export class AdminService {
           uniquenessReason: `Передан от ${oldBroker.fullName} (${oldBroker.phone}). Причина: ${reason}`,
         },
       });
+      // 2026-09-07: если ответственным был прежний брокер — переносим и его,
+      // иначе заявка остаётся «на» карточке, которую никто не видит.
+      await tx.client.updateMany({
+        where: { id: clientId, responsibleBrokerId: oldBroker.id },
+        data: { responsibleBrokerId: newBrokerId },
+      });
       await tx.deal.updateMany({
         where: { clientId },
         data: { brokerId: newBrokerId },
