@@ -37,6 +37,7 @@ import {
   LoyaltyChangesQueryDto,
   LoyaltyEntityArchiveDto,
   LoyaltyEntityUpdateDto,
+  LoyaltyDetailQueryDto,
   LoyaltyExportDto,
   LoyaltyImportDto,
   LoyaltyListQueryDto,
@@ -127,10 +128,11 @@ export class LoyaltyBaseController {
   async brokerDetail(
     @Param("base") base: string,
     @Param("id") id: string,
+    @Query() query: LoyaltyDetailQueryDto,
     @CurrentUser() user: CurrentUserPayload,
   ) {
     await this.permissions.require(user, "READ_ALL");
-    return this.loyalty.detail(base, "BROKER", id);
+    return this.loyalty.detail(base, "BROKER", id, query);
   }
 
   @Get(":base/agencies")
@@ -177,10 +179,11 @@ export class LoyaltyBaseController {
   async agencyDetail(
     @Param("base") base: string,
     @Param("id") id: string,
+    @Query() query: LoyaltyDetailQueryDto,
     @CurrentUser() user: CurrentUserPayload,
   ) {
     await this.permissions.require(user, "READ_ALL");
-    return this.loyalty.detail(base, "AGENCY", id);
+    return this.loyalty.detail(base, "AGENCY", id, query);
   }
 
   @Get("anna/brokers/:id/changes")

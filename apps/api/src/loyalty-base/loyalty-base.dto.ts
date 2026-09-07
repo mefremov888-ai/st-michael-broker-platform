@@ -250,6 +250,18 @@ export class LoyaltyOverviewQueryDto {
   to?: string;
 }
 
+// 2026-09-07: карточка контакта принимает выбранный «Период встреч и сделок»,
+// чтобы применить его к периодным метрикам карточки (как в списке).
+export class LoyaltyDetailQueryDto {
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  from?: string;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  to?: string;
+}
+
 export class LoyaltyListFiltersDto {
   @IsOptional()
   @IsISO8601({ strict: true })
