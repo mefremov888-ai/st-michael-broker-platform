@@ -40,6 +40,7 @@ import {
   sanitizeAmoSyncError,
 } from '../common/amo-sync-retry';
 import { isTestClient } from '../common/test-client-rule';
+import { notHistoricalClientWhere } from '../common/historical-client';
 import {
   AmoFixationPhoneLease,
   AmoFixationPhoneLockService,
@@ -813,12 +814,12 @@ export class SchedulerService {
             // Не склеиваем заявки разных брокеров по телефону. Синк может
             // переиспользовать только заявку того же фактического брокера.
             let client = await this.prisma.client.findFirst({
-              where: { phone, amoLeadId: BigInt(leadRef.id), ...brokerOwnership },
+              where: { phone, amoLeadId: BigInt(leadRef.id), ...brokerOwnership, ...notHistoricalClientWhere },
               orderBy: { createdAt: 'desc' },
             });
             if (!client) {
               client = await this.prisma.client.findFirst({
-                where: { phone, amoLeadId: null, ...brokerOwnership },
+                where: { phone, amoLeadId: null, ...brokerOwnership, ...notHistoricalClientWhere },
                 orderBy: { createdAt: 'desc' },
               });
               if (client) {

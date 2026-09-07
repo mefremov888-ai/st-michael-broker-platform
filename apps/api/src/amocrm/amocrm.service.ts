@@ -3,6 +3,7 @@ import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID } from '@st-michael/integrations';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
 import { isTestClient } from '../common/test-client-rule';
+import { notHistoricalClientWhere } from '../common/historical-client';
 @Injectable()
 export class AmocrmService {
   private amo: AmoCrmAdapter;
@@ -344,14 +345,15 @@ export class AmocrmService {
         // Upsert client с реальной датой создания/изменения из amoCRM (правка 2026-05-14).
         const leadCreatedAt = lead.created_at ? new Date(lead.created_at * 1000) : null;
         const leadUpdatedAt = lead.updated_at ? new Date(lead.updated_at * 1000) : null;
-        let client = await this.prisma.client.findFirst({ where: { phone, brokerId } });
+        // 2026-09-07: исторические строки старого кабинета не переиспользуем.
+        let client = await this.prisma.client.findFirst({ where: { phone, brokerId, ...notHistoricalClientWhere } });
         // 2026-07-02: если клиент уже есть у ДРУГОГО брокера (напр. фиксация
         // А → на Б создала Client с brokerId=А), синк Б переиспользует
         // существующего вместо создания дубля. Плюс назначаем Б как
         // responsibleBrokerId, если поле пустое.
         if (!client) {
           const existingAnyBroker = await this.prisma.client.findFirst({
-            where: { phone },
+            where: { phone, ...notHistoricalClientWhere },
             orderBy: { createdAt: 'asc' },
           });
           if (existingAnyBroker) {

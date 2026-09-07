@@ -717,10 +717,15 @@ export function loyaltyFilterHash(value: unknown): string {
 // случай), а fixationStatus=FIXED ставится только редкой ручной кнопкой
 // «отметить зафиксированным» после акта осмотра. Раньше метрики считали
 // только FIXED — и «Фиксации: 0» у всех (жалоба пользователя).
+// 2026-09-07: «за всё время» включает и ИСТЁКШИЕ фиксации (решение владельца
+// 04.09, вариант В: lifetime отдельно от «Действующая фиксация»). Без этого
+// перенесённые фиксации старого кабинета 2020–2026 (все истёкшие) не
+// попадали бы ни в счётчики, ни в фильтр «Есть фиксации». REJECTED и
+// UNDER_REVIEW фиксациями не считаются.
 const FIXATION_CLIENT_WHERE = {
   OR: [
-    { fixationStatus: "FIXED" as const },
-    { uniquenessStatus: "CONDITIONALLY_UNIQUE" as const },
+    { fixationStatus: { in: ["FIXED", "EXPIRED"] as Array<"FIXED" | "EXPIRED"> } },
+    { uniquenessStatus: { in: ["CONDITIONALLY_UNIQUE", "EXPIRED"] as Array<"CONDITIONALLY_UNIQUE" | "EXPIRED"> } },
   ],
 };
 
