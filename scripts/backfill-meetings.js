@@ -26,12 +26,10 @@
  *     7600542 в статусе 142 (закрытые успешные), контакт которых
  *     мэтчится по телефону на clients.phone → создать Meeting
  *     status=COMPLETED (дедуп по (client_id, дата::date)).
- *     Мэтч только на brokers.phone (без клиента) НЕ создаёт встречу:
- *     meetings.client_id NOT NULL, а миграции запрещены — такие лиды
- *     считаются и попадают в отчёт отдельным решением. Брокер-туры
- *     (Broker.brokerTour*) по той же причине не создаются как Meeting —
- *     только считаются в отчёте (в базе лояльности туры и так видны
- *     через brokerTourVisited/brokerTourDate).
+ *     Мэтч только на brokers.phone (без клиента) здесь по-прежнему НЕ
+ *     создаёт встречу — эти лиды забирает LAYER=history_brokers (ниже),
+ *     появившийся после миграции client_id → nullable. Брокер-туры из
+ *     Broker.brokerTour* создаёт LAYER=tours.
  *
  *   LAYER=mark    — видимость «статус не вернулся» без похода в amo:
  *     PENDING-встречи с датой в прошлом, у клиента которых НЕТ
@@ -39,6 +37,27 @@
  *     comment меткой «[amo:статус не подтверждён]». UI показывает по
  *     метке оранжевый бейдж (админка встреч + карточка брокера в базе
  *     лояльности). Схема НЕ меняется, миграций нет.
+ *
+ *   LAYER=history_brokers — 2026-09-07: встречи КЦ «с брокером». Те же
+ *     лиды КЦ 7600542/142, но контакт лида — БРОКЕР (dry-run history
+ *     показал: клиентский мэтч почти пуст, встречи КЦ — с брокерами).
+ *     Мэтч телефона контакта на brokers.phone + broker_phones через
+ *     кандидатные ключи (см. phoneKeyCandidates: добавочные «доб. NNN»
+ *     и несколько номеров в одном значении ломали старый slice(-10) —
+ *     одна из причин, почему первый прогон дал только 84 мэтча).
+ *     Слитые (merged) брокеры резолвятся в каноничного. Требует
+ *     миграции 20260907120000_meeting_client_optional (client_id NULL):
+ *     создаётся Meeting broker_id=брокер, client_id=NULL,
+ *     status=COMPLETED, type=BROKER_TOUR если лид говорит «тур», иначе
+ *     OFFICE_VISIT; дедуп по (broker_id, дата::date, type). Dry-run
+ *     печатает распределение «не смэтчился» по причинам: номера нет в
+ *     базе вообще / номер у слитого merged-брокера (нерезолвится) /
+ *     неразборчивый формат.
+ *
+ *   LAYER=tours   — 2026-09-07: брокер-туры из Broker.brokerTourDate →
+ *     Meeting type=BROKER_TOUR, client_id=NULL, status=COMPLETED (дедуп
+ *     тот же (broker_id, дата::date, type)). brokerTourVisited=true без
+ *     даты — пропуск со счётчиком no_tour_date_skipped.
  *
  * Боевой режим: DRY_RUN=0 (workflow apply-meetings-backfill.yml требует
  * dry_run=false И confirm_apply=true). Любое другое значение — dry-run.
@@ -48,9 +67,11 @@
  * Логи PII-free: только id встреч/клиентов/лидов, без ФИО и телефонов.
  *
  * Запуск в контейнере api:
- *   DRY_RUN=1 LAYER=status  node /app/scripts/backfill-meetings.js
- *   DRY_RUN=1 LAYER=history node /app/scripts/backfill-meetings.js
- *   DRY_RUN=1 LAYER=mark    node /app/scripts/backfill-meetings.js
+ *   DRY_RUN=1 LAYER=status          node /app/scripts/backfill-meetings.js
+ *   DRY_RUN=1 LAYER=history         node /app/scripts/backfill-meetings.js
+ *   DRY_RUN=1 LAYER=history_brokers node /app/scripts/backfill-meetings.js
+ *   DRY_RUN=1 LAYER=tours           node /app/scripts/backfill-meetings.js
+ *   DRY_RUN=1 LAYER=mark            node /app/scripts/backfill-meetings.js
  */
 
 const KC_PIPELINE_ID = 7600542;
@@ -111,6 +132,61 @@ function normalizePhoneKey(raw) {
 }
 
 /**
+ * 2026-09-07: кандидатные 10-значные ключи из СЫРОГО значения телефона.
+ *
+ * Почему не normalizePhoneKey (slice(-10)): amo хранит телефоны в
+ * произвольном виде — «89161112233 доб. 45» даёт 13 цифр, и последние 10
+ * («6111223345») это хвост номера + добавочный, мэтч на брокеров БД
+ * (+7XXXXXXXXXX) молча промахивается. Аналогично «79161112233, 79261112233»
+ * (два номера в одном значении) давал мусорный ключ. Это одна из причин,
+ * почему первый history-прогон смэтчил лишь 84 лида из ~4.5к.
+ *
+ * Правила:
+ *   - значение режем по разделителям (, ; / «или» «и») — в одном поле
+ *     бывает несколько номеров;
+ *   - кусок → только цифры:
+ *       10 цифр                  → ключ как есть;
+ *       11 цифр, первая 7 или 8  → последние 10 (код страны отброшен);
+ *       >11 цифр, первая 7 или 8 → цифры 2..11 (номер идёт первым,
+ *                                  добавочный приклеен в хвост);
+ *       иначе                    → неразборчивый формат (badFormat).
+ * Возвращает { keys: string[], badFormat: boolean }.
+ */
+function phoneKeyCandidates(raw) {
+  const keys = new Set();
+  let badFormat = false;
+  // \b не работает с кириллицей — разделители «или»/«и» ловим через \s.
+  const chunks = String(raw || '').split(/[,;\/]|\s(?:или|и)\s/);
+  for (const chunk of chunks) {
+    const digits = chunk.replace(/\D/g, '');
+    if (!digits) continue;
+    if (digits.length === 10) {
+      keys.add(digits);
+    } else if (digits.length === 11 && (digits[0] === '7' || digits[0] === '8')) {
+      keys.add(digits.slice(1));
+    } else if (digits.length > 11 && (digits[0] === '7' || digits[0] === '8')) {
+      keys.add(digits.slice(1, 11));
+    } else {
+      badFormat = true;
+    }
+  }
+  return { keys: [...keys], badFormat };
+}
+
+/**
+ * Тип встречи «КЦ ↔ брокер»: лид говорит «тур» (поле «Встреча» или
+ * название лида, там живёт бренд «Брокер-тур») → BROKER_TOUR, иначе
+ * OFFICE_VISIT. Слово «брокер» само по себе тут НЕ признак тура — в этом
+ * слое ВСЕ встречи с брокерами (ср. leadMeetingType, где «брокер»
+ * означал брокер-тур в клиентских лидах).
+ */
+function brokerLeadMeetingType(lead) {
+  const text = `${leadCustomField(lead, 'Встреча') || ''} ${lead?.name || ''}`.toLowerCase();
+  if (text.includes('тур') || text.includes('tour')) return 'BROKER_TOUR';
+  return 'OFFICE_VISIT';
+}
+
+/**
  * Идемпотентное добавление amo-метки в comment встречи.
  * Возвращает новый comment или null, если какая-либо amo-метка уже стоит
  * (не дублируем и не переписываем).
@@ -161,6 +237,8 @@ function monthKey(date) {
 module.exports = {
   decideMeetingOutcome,
   normalizePhoneKey,
+  phoneKeyCandidates,
+  brokerLeadMeetingType,
   appendAmoMark,
   leadMeetingDate,
   leadMeetingType,
@@ -345,28 +423,11 @@ async function runStatusLayer(prisma, dryRun) {
 
 // ─── LAYER=history ───────────────────────────────────────────────────────────
 
-async function runHistoryLayer(prisma, dryRun) {
-  const amo = await initAmo(prisma, 'backfill-meetings');
-
-  const counters = {
-    kc_leads_scanned: 0,
-    kc_success_142: 0,
-    without_contact: 0,
-    contact_not_fetched: 0,
-    contact_without_phone: 0,
-    matched_client: 0,
-    matched_broker_only_skipped: 0,
-    unmatched_phone: 0,
-    ambiguous_client_skipped: 0,
-    no_meeting_date: 0,
-    dedup_existing: 0,
-    to_create: 0,
-    created: 0,
-    broker_tours_candidates_not_created: 0,
-  };
-  const samples = {};
-
-  // 1. Лиды воронки КЦ со статусом 142 (закрытые успешные).
+/**
+ * Лиды воронки КЦ со статусом 142 («встреча состоялась»). Пагинация по 250,
+ * counters.kc_leads_scanned / counters.kc_success_142 инкрементируются.
+ */
+async function fetchKcSuccessLeads(amo, counters) {
   const successLeads = [];
   let page = 1;
   for (;;) {
@@ -392,9 +453,11 @@ async function runHistoryLayer(prisma, dryRun) {
     page++;
     await sleep(AMO_PAUSE_MS);
   }
+  return successLeads;
+}
 
-  // 2. Контакты этих лидов (телефоны) — пачками по 250.
-  const contactIds = [];
+/** id основного контакта по каждому лиду; лиды без контакта → counters.without_contact. */
+function mainContactIdByLead(successLeads, counters) {
   const contactIdByLead = new Map();
   for (const lead of successLeads) {
     const contacts = lead?._embedded?.contacts || [];
@@ -404,11 +467,57 @@ async function runHistoryLayer(prisma, dryRun) {
       continue;
     }
     contactIdByLead.set(lead.id, Number(main.id));
-    contactIds.push(Number(main.id));
   }
-  const contactMap = await amo.getContactsByIds([...new Set(contactIds)]);
+  return contactIdByLead;
+}
 
-  const AMO_PHONE_FIELD_ID = 557903;
+const AMO_PHONE_FIELD_ID = 557903;
+
+/** Кандидатные ключи телефонов контакта amo + флаг неразборчивого формата. */
+function contactPhoneCandidates(contact) {
+  const keys = new Set();
+  let badFormat = false;
+  for (const field of contact?.custom_fields_values || []) {
+    const isPhone =
+      field.field_id === AMO_PHONE_FIELD_ID || field.field_code === 'PHONE';
+    if (!isPhone) continue;
+    for (const v of field.values || []) {
+      const parsed = phoneKeyCandidates(v?.value);
+      for (const key of parsed.keys) keys.add(key);
+      if (parsed.badFormat) badFormat = true;
+    }
+  }
+  return { keys: [...keys], badFormat };
+}
+
+async function runHistoryLayer(prisma, dryRun) {
+  const amo = await initAmo(prisma, 'backfill-meetings');
+
+  const counters = {
+    kc_leads_scanned: 0,
+    kc_success_142: 0,
+    without_contact: 0,
+    contact_not_fetched: 0,
+    contact_without_phone: 0,
+    matched_client: 0,
+    matched_broker_only_skipped: 0,
+    unmatched_phone: 0,
+    ambiguous_client_skipped: 0,
+    no_meeting_date: 0,
+    dedup_existing: 0,
+    to_create: 0,
+    created: 0,
+    broker_tours_candidates_not_created: 0,
+  };
+  const samples = {};
+
+  // 1. Лиды воронки КЦ со статусом 142 (закрытые успешные).
+  const successLeads = await fetchKcSuccessLeads(amo, counters);
+
+  // 2. Контакты этих лидов (телефоны) — пачками по 250.
+  const contactIdByLead = mainContactIdByLead(successLeads, counters);
+  const contactMap = await amo.getContactsByIds([...new Set(contactIdByLead.values())]);
+
   const contactPhoneKeys = (contact) => {
     const keys = new Set();
     for (const field of contact?.custom_fields_values || []) {
@@ -484,8 +593,8 @@ async function runHistoryLayer(prisma, dryRun) {
     if (!client) {
       const brokerOnly = phoneKeys.some((key) => brokerIdsByPhone.has(key));
       if (brokerOnly) {
-        // Meeting.client_id NOT NULL, миграции запрещены — встречу
-        // «КЦ ↔ брокер» без клиента создать нельзя. Отдельное решение.
+        // Встречу «КЦ ↔ брокер» без клиента создаёт LAYER=history_brokers
+        // (после миграции client_id → nullable) — здесь только считаем.
         counters.matched_broker_only_skipped++;
         pushSample(samples, 'matched_broker_only_skipped', `lead=${lead.id}`);
       } else {
@@ -546,10 +655,8 @@ async function runHistoryLayer(prisma, dryRun) {
     }
   }
 
-  // 6. Брокер-туры: тип BROKER_TOUR в enum есть, но Meeting.client_id
-  // NOT NULL (клиента у тура нет), миграции запрещены → НЕ создаём,
-  // считаем кандидатов для отдельного решения. В базе лояльности туры
-  // уже видны через Broker.brokerTourVisited/brokerTourDate.
+  // 6. Брокер-туры: создаёт LAYER=tours (после миграции client_id →
+  // nullable) — здесь по-прежнему только считаем кандидатов для сверки.
   counters.broker_tours_candidates_not_created = await prisma.broker.count({
     where: {
       mergedIntoId: null,
@@ -565,6 +672,309 @@ async function runHistoryLayer(prisma, dryRun) {
   for (const item of toCreate.slice(0, SAMPLE_LIMIT)) {
     console.log(`  пример to_create: lead=${item.lead.id} client=${item.client.id} date=${dayKey(item.date)} type=${item.type}`);
   }
+}
+
+// ─── LAYER=history_brokers ───────────────────────────────────────────────────
+
+const IMPORT_COMMENT_BROKER = 'Импорт из amoCRM (КЦ, встреча с брокером)';
+const IMPORT_COMMENT_TOUR = 'Импорт из amoCRM (брокер-тур)';
+
+/**
+ * Дедуп-ключ встречи «с брокером»: (broker_id, дата::date, type).
+ */
+function brokerDedupKey(brokerId, date, type) {
+  return `${brokerId}:${dayKey(date)}:${type}`;
+}
+
+/**
+ * Индексы телефонов брокеров: активные и слитые (merged) отдельно.
+ * merged-брокеры резолвятся в каноничного по цепочке mergedIntoId
+ * (защита от циклов); нерезолвящиеся дают null в mergedByKey.
+ */
+async function buildBrokerPhoneIndexes(prisma) {
+  const brokers = await prisma.broker.findMany({
+    select: {
+      id: true,
+      phone: true,
+      mergedIntoId: true,
+      phones: { select: { phone: true } },
+    },
+  });
+  const byId = new Map(brokers.map((b) => [b.id, b]));
+  const resolveCanonical = (id) => {
+    let cur = byId.get(id);
+    const seen = new Set();
+    while (cur && cur.mergedIntoId) {
+      if (seen.has(cur.id)) return null; // цикл в цепочке слияний
+      seen.add(cur.id);
+      cur = byId.get(cur.mergedIntoId);
+    }
+    return cur && !cur.mergedIntoId ? cur.id : null;
+  };
+  const activeByKey = new Map(); // ключ → Set(brokerId), только не-слитые
+  const mergedByKey = new Map(); // ключ → Set(canonicalId | null)
+  for (const broker of brokers) {
+    for (const raw of [broker.phone, ...broker.phones.map((p) => p.phone)]) {
+      for (const key of phoneKeyCandidates(raw).keys) {
+        if (broker.mergedIntoId === null) {
+          if (!activeByKey.has(key)) activeByKey.set(key, new Set());
+          activeByKey.get(key).add(broker.id);
+        } else {
+          if (!mergedByKey.has(key)) mergedByKey.set(key, new Set());
+          mergedByKey.get(key).add(resolveCanonical(broker.id));
+        }
+      }
+    }
+  }
+  return { activeByKey, mergedByKey };
+}
+
+async function runHistoryBrokersLayer(prisma, dryRun) {
+  const amo = await initAmo(prisma, 'backfill-meetings');
+
+  const counters = {
+    kc_leads_scanned: 0,
+    kc_success_142: 0,
+    without_contact: 0,
+    contact_not_fetched: 0,
+    contact_without_phone: 0,
+    client_matched_skipped: 0, // территория LAYER=history — не дублируем
+    matched_broker: 0,
+    matched_via_merged: 0,
+    ambiguous_broker_skipped: 0,
+    unmatched_phone_not_in_db: 0, // номера нет ни у кого в базе
+    unmatched_merged_unresolved: 0, // номер у merged-брокера, каноничный не резолвится
+    unmatched_bad_format: 0, // из значения не извлечь ни одного 10-значного ключа
+    no_meeting_date: 0,
+    dedup_existing: 0,
+    to_create: 0,
+    created: 0,
+  };
+  const samples = {};
+
+  // 1. Те же лиды КЦ 142, что и в LAYER=history.
+  const successLeads = await fetchKcSuccessLeads(amo, counters);
+  const contactIdByLead = mainContactIdByLead(successLeads, counters);
+  const contactMap = await amo.getContactsByIds([...new Set(contactIdByLead.values())]);
+
+  // 2. Индексы телефонов: клиенты (чтобы не дублировать LAYER=history) и брокеры.
+  const clients = await prisma.client.findMany({
+    select: { id: true, phone: true },
+  });
+  const clientKeys = new Set();
+  for (const client of clients) {
+    for (const key of phoneKeyCandidates(client.phone).keys) clientKeys.add(key);
+  }
+  const { activeByKey, mergedByKey } = await buildBrokerPhoneIndexes(prisma);
+
+  // 3. Мэтчинг.
+  const plan = [];
+  for (const lead of successLeads) {
+    const contactId = contactIdByLead.get(lead.id);
+    if (!contactId) continue; // уже посчитан как without_contact
+    const contact = contactMap.get(contactId);
+    if (!contact) {
+      counters.contact_not_fetched++;
+      continue;
+    }
+    const { keys: phoneKeys, badFormat } = contactPhoneCandidates(contact);
+    if (!phoneKeys.length) {
+      if (badFormat) {
+        counters.unmatched_bad_format++;
+        pushSample(samples, 'unmatched_bad_format', `lead=${lead.id} contact=${contactId}`);
+      } else {
+        counters.contact_without_phone++;
+      }
+      continue;
+    }
+    // Контакт мэтчится на клиента → встречу с клиентом делает LAYER=history.
+    if (phoneKeys.some((key) => clientKeys.has(key))) {
+      counters.client_matched_skipped++;
+      continue;
+    }
+    const activeIds = new Set();
+    for (const key of phoneKeys) {
+      for (const id of activeByKey.get(key) || []) activeIds.add(id);
+    }
+    let brokerId = null;
+    let viaMerged = false;
+    if (activeIds.size === 1) {
+      brokerId = [...activeIds][0];
+    } else if (activeIds.size > 1) {
+      counters.ambiguous_broker_skipped++;
+      pushSample(samples, 'ambiguous_broker_skipped', `lead=${lead.id} кандидатов=${activeIds.size}`);
+      continue;
+    } else {
+      // Номер только у слитых брокеров → резолвим в каноничного.
+      const canonicals = new Set();
+      let sawMerged = false;
+      for (const key of phoneKeys) {
+        for (const id of mergedByKey.get(key) || []) {
+          sawMerged = true;
+          if (id) canonicals.add(id);
+        }
+      }
+      if (canonicals.size === 1) {
+        brokerId = [...canonicals][0];
+        viaMerged = true;
+      } else if (canonicals.size > 1) {
+        counters.ambiguous_broker_skipped++;
+        pushSample(samples, 'ambiguous_broker_skipped', `lead=${lead.id} merged-кандидатов=${canonicals.size}`);
+        continue;
+      } else if (sawMerged) {
+        counters.unmatched_merged_unresolved++;
+        pushSample(samples, 'unmatched_merged_unresolved', `lead=${lead.id}`);
+        continue;
+      } else {
+        counters.unmatched_phone_not_in_db++;
+        continue;
+      }
+    }
+    counters[viaMerged ? 'matched_via_merged' : 'matched_broker']++;
+    const date = leadMeetingDate(lead);
+    if (!date) {
+      counters.no_meeting_date++;
+      pushSample(samples, 'no_meeting_date', `lead=${lead.id} broker=${brokerId}`);
+      continue;
+    }
+    plan.push({ lead, brokerId, date, type: brokerLeadMeetingType(lead) });
+  }
+
+  // 4. Дедуп по (broker_id, дата::date, type) против существующих встреч.
+  const planBrokerIds = [...new Set(plan.map((p) => p.brokerId))];
+  const existingKeys = new Set();
+  const BATCH = 500;
+  for (let i = 0; i < planBrokerIds.length; i += BATCH) {
+    const rows = await prisma.meeting.findMany({
+      where: { brokerId: { in: planBrokerIds.slice(i, i + BATCH) } },
+      select: { brokerId: true, date: true, type: true },
+    });
+    for (const row of rows) {
+      existingKeys.add(brokerDedupKey(row.brokerId, row.date, row.type));
+    }
+  }
+
+  const monthCounts = new Map();
+  const toCreate = [];
+  for (const item of plan) {
+    const dedupKey = brokerDedupKey(item.brokerId, item.date, item.type);
+    if (existingKeys.has(dedupKey)) {
+      counters.dedup_existing++;
+      continue;
+    }
+    existingKeys.add(dedupKey); // два 142-лида на один день брокера → одна встреча
+    toCreate.push(item);
+    const mk = monthKey(item.date);
+    monthCounts.set(mk, (monthCounts.get(mk) || 0) + 1);
+  }
+  counters.to_create = toCreate.length;
+
+  if (!dryRun) {
+    for (const item of toCreate) {
+      await prisma.meeting.create({
+        data: {
+          // clientId НЕ задаём: встреча «КЦ ↔ брокер» без клиента
+          // (миграция 20260907120000_meeting_client_optional).
+          brokerId: item.brokerId,
+          type: item.type,
+          date: item.date,
+          status: 'COMPLETED',
+          comment: IMPORT_COMMENT_BROKER,
+        },
+      });
+      counters.created++;
+    }
+  }
+
+  printCounters(`LAYER=history_brokers (${dryRun ? 'DRY-RUN' : 'APPLY'})`, counters);
+  const unmatched =
+    counters.unmatched_phone_not_in_db +
+    counters.unmatched_merged_unresolved +
+    counters.unmatched_bad_format;
+  console.log('  распределение «не смэтчился»:');
+  console.log(`    номера нет в базе вообще: ${counters.unmatched_phone_not_in_db}`);
+  console.log(`    номер у слитого merged-брокера (не резолвится): ${counters.unmatched_merged_unresolved}`);
+  console.log(`    неразборчивый формат телефона: ${counters.unmatched_bad_format}`);
+  console.log(`    всего: ${unmatched}`);
+  const months = [...monthCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  console.log('  топ-месяцы создаваемых встреч:');
+  for (const [mk, count] of months) console.log(`    ${mk}: ${count}`);
+  printSamples(samples);
+  for (const item of toCreate.slice(0, SAMPLE_LIMIT)) {
+    console.log(`  пример to_create: lead=${item.lead.id} broker=${item.brokerId} date=${dayKey(item.date)} type=${item.type}`);
+  }
+}
+
+// ─── LAYER=tours ─────────────────────────────────────────────────────────────
+
+async function runToursLayer(prisma, dryRun) {
+  const counters = {
+    tour_brokers_total: 0,
+    no_tour_date_skipped: 0, // brokerTourVisited=true, но даты нет
+    dedup_existing: 0,
+    to_create: 0,
+    created: 0,
+  };
+  const samples = {};
+
+  const brokers = await prisma.broker.findMany({
+    where: {
+      mergedIntoId: null,
+      OR: [{ brokerTourVisited: true }, { brokerTourDate: { not: null } }],
+    },
+    select: { id: true, brokerTourVisited: true, brokerTourDate: true },
+  });
+  counters.tour_brokers_total = brokers.length;
+
+  const withDate = brokers.filter((b) => b.brokerTourDate);
+  counters.no_tour_date_skipped = brokers.length - withDate.length;
+
+  // Дедуп по (broker_id, дата::date, BROKER_TOUR).
+  const existingKeys = new Set();
+  const BATCH = 500;
+  const ids = withDate.map((b) => b.id);
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const rows = await prisma.meeting.findMany({
+      where: { brokerId: { in: ids.slice(i, i + BATCH) }, type: 'BROKER_TOUR' },
+      select: { brokerId: true, date: true, type: true },
+    });
+    for (const row of rows) {
+      existingKeys.add(brokerDedupKey(row.brokerId, row.date, row.type));
+    }
+  }
+
+  const toCreate = [];
+  for (const broker of withDate) {
+    const dedupKey = brokerDedupKey(broker.id, broker.brokerTourDate, 'BROKER_TOUR');
+    if (existingKeys.has(dedupKey)) {
+      counters.dedup_existing++;
+      continue;
+    }
+    existingKeys.add(dedupKey);
+    toCreate.push(broker);
+  }
+  counters.to_create = toCreate.length;
+
+  if (!dryRun) {
+    for (const broker of toCreate) {
+      await prisma.meeting.create({
+        data: {
+          brokerId: broker.id,
+          type: 'BROKER_TOUR',
+          date: broker.brokerTourDate,
+          status: 'COMPLETED',
+          comment: IMPORT_COMMENT_TOUR,
+        },
+      });
+      counters.created++;
+    }
+  }
+
+  printCounters(`LAYER=tours (${dryRun ? 'DRY-RUN' : 'APPLY'})`, counters);
+  for (const broker of toCreate.slice(0, SAMPLE_LIMIT)) {
+    pushSample(samples, 'to_create', `broker=${broker.id} date=${dayKey(broker.brokerTourDate)}`);
+  }
+  printSamples(samples);
 }
 
 // ─── LAYER=mark ──────────────────────────────────────────────────────────────
@@ -620,8 +1030,8 @@ async function runMarkLayer(prisma, dryRun) {
 
 async function main() {
   const layer = String(process.env.LAYER || '').toLowerCase();
-  if (!['status', 'history', 'mark'].includes(layer)) {
-    console.error('Задайте LAYER=status|history|mark');
+  if (!['status', 'history', 'history_brokers', 'tours', 'mark'].includes(layer)) {
+    console.error('Задайте LAYER=status|history|history_brokers|tours|mark');
     process.exit(2);
   }
   // Боевой режим ТОЛЬКО при DRY_RUN=0; всё остальное — dry-run.
@@ -633,6 +1043,8 @@ async function main() {
   try {
     if (layer === 'status') await runStatusLayer(prisma, dryRun);
     else if (layer === 'history') await runHistoryLayer(prisma, dryRun);
+    else if (layer === 'history_brokers') await runHistoryBrokersLayer(prisma, dryRun);
+    else if (layer === 'tours') await runToursLayer(prisma, dryRun);
     else await runMarkLayer(prisma, dryRun);
     console.log('=== Готово ===');
   } finally {

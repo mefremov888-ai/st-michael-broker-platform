@@ -1,11 +1,19 @@
 name: Apply meetings backfill (amoCRM)
 
-# 2026-09-07: backfill встреч кабинета из amoCRM тремя слоями
+# 2026-09-07: backfill встреч кабинета из amoCRM слоями
 # (scripts/backfill-meetings.js):
 #   status  — дотянуть статусы существующих PENDING-встреч по лидам amo
 #             (КЦ 7600542 + 142 = встреча состоялась; 143 = отменена);
 #   history — импорт исторических встреч из закрытых успешных лидов КЦ
 #             (мэтч контакта по телефону на clients.phone, дедуп по дню);
+#   history_brokers — 2026-09-07: те же лиды КЦ 142, но контакт = БРОКЕР:
+#             Meeting c client_id=NULL (нужна миграция
+#             20260907120000_meeting_client_optional на проде!), мэтч по
+#             кандидатным 10-значным ключам на brokers.phone+broker_phones,
+#             merged-брокеры резолвятся в каноничного; дедуп по
+#             (broker_id, день, type);
+#   tours   — брокер-туры из Broker.brokerTourDate → Meeting BROKER_TOUR
+#             c client_id=NULL (та же миграция), дедуп тот же;
 #   mark    — идемпотентная метка «[amo:статус не подтверждён]» для
 #             вечных PENDING без amo-лида (для оранжевого бейджа в UI).
 #
@@ -15,19 +23,24 @@ name: Apply meetings backfill (amoCRM)
 # Запуск: Actions → "Apply meetings backfill (amoCRM)" → Run workflow
 # (каждый слой сначала dry_run=true, проверить счётчики и примеры в логе,
 # затем dry_run=false + confirm_apply=true). Рекомендуемый порядок слоёв:
-# status → history → mark.
+# status → history → history_brokers → tours → mark.
+# ВАЖНО: history_brokers и tours пишут client_id=NULL — запускать только
+# после того, как деплой-поезд прогнал prisma migrate deploy с миграцией
+# 20260907120000_meeting_client_optional (иначе NOT NULL constraint).
 
 on:
   workflow_dispatch:
     inputs:
       layer:
-        description: 'Слой (status | history | mark)'
+        description: 'Слой (status | history | history_brokers | tours | mark)'
         required: true
         default: status
         type: choice
         options:
           - status
           - history
+          - history_brokers
+          - tours
           - mark
       dry_run:
         description: 'Dry-run (только отчёт, ничего не пишется)'
