@@ -572,6 +572,11 @@ export interface LoyaltyRecord {
   id: string;
   entityType: LoyaltyEntityType;
   name: string;
+  // 2026-09-07: самоназвание брокера из кабинета («Наша база», BROKER).
+  // Когда КЦ/бэкфилл исправили «имя для работы», name — рабочее имя,
+  // а cabinetFullName — оригинал; UI показывает его серым
+  // («в кабинете: …»). Пустая строка — оригинал совпадает или не задан.
+  cabinetFullName: string;
   company: string;
   phone: string;
   email: string;
@@ -1862,13 +1867,20 @@ export function normalizeLoyaltyRecord(
         : []
   ) as LoyaltyComputedStatus[];
 
+  const recordName = stringValue(
+    pick(item, "name", "displayName", "fullName", "title", "legalName"),
+    "Без названия",
+  );
+  // 2026-09-07: самоназвание брокера из кабинета (поле cabinetFullName
+  // приходит только для брокеров «Нашей базы»). Оставляем только когда
+  // отличается от показываемого имени — UI рисует его серым.
+  const cabinetFullName = stringValue(pick(item, "cabinetFullName"));
   return {
     id: stringValue(pick(item, "id", "externalId", "contactId", "uuid")),
     entityType,
-    name: stringValue(
-      pick(item, "name", "displayName", "fullName", "title", "legalName"),
-      "Без названия",
-    ),
+    name: recordName,
+    cabinetFullName:
+      cabinetFullName && cabinetFullName !== recordName ? cabinetFullName : "",
     company: stringValue(
       pick(item, "company", "agencyName", "organization", "legalName"),
       stringValue(
@@ -2720,6 +2732,23 @@ export async function updateAnnaLoyaltyRecord(
     body,
   );
   return normalizeLoyaltyDetail(value, entityType);
+}
+
+// 2026-09-07: кнопка «Исправить имя» в карточке брокера «Нашей базы».
+// Правит «имя для работы» (Broker.displayName, source='manual');
+// самоназвание брокера в его кабинете не меняется. Пустая строка — сброс.
+export async function updateOurBrokerDisplayName(id: string, displayName: string) {
+  const value = asRecord(
+    await apiPatch<unknown>(
+      `/loyalty-base/ours/brokers/${encodeURIComponent(id)}/display-name`,
+      { displayName },
+    ),
+  );
+  return {
+    id: stringValue(value.id),
+    name: stringValue(value.displayName),
+    cabinetFullName: stringValue(value.cabinetFullName),
+  };
 }
 
 export interface LoyaltyChangeEntry {
