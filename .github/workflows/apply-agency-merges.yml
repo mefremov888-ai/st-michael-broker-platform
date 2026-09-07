@@ -1,0 +1,66 @@
+name: Apply agency duplicate merges
+
+# 2026-09-07: склейка дублей агентств (латиница ↔ кириллица) по решению владельца 07.09: выживает карточка с бОльшим числом сделок/брокеров, имя — русское написание; переносятся связи брокеров, сделки, фиксации, лояльность, атрибуция реестра.
+# Скрипт scripts/merge-agency-duplicates.js читается с origin/master, данные — из data-ветки
+# (data/agency-merges.json). Боевой режим требует dry_run=false И confirm_apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_branch:
+        description: Ветка с data/agency-merges.json
+        required: true
+        default: data/agency-merges-20260907
+        type: string
+      dry_run:
+        description: 'Dry-run (только план, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DATA_BRANCH: ${{ inputs.data_branch }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: DATA_BRANCH,DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin "$DATA_BRANCH"
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show "origin/$DATA_BRANCH:data/agency-merges.json" > /tmp/agency-merges.json
+            git show origin/master:scripts/merge-agency-duplicates.js > /tmp/merge-agency-duplicates.js
+            git show origin/master:scripts/enrich-agencies-from-amo.js > /tmp/enrich-agencies-from-amo.js
+            docker cp /tmp/agency-merges.json st-michael-api:/app/agency-merges.json
+            docker cp /tmp/merge-agency-duplicates.js st-michael-api:/app/scripts/merge-agency-duplicates.js
+            docker cp /tmp/enrich-agencies-from-amo.js st-michael-api:/app/scripts/enrich-agencies-from-amo.js
+            MODE=1
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE api node /app/scripts/merge-agency-duplicates.js /app/agency-merges.json
+            echo "=== Готово (DRY_RUN=$MODE) ==="
