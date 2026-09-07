@@ -1,0 +1,43 @@
+name: Inspect client duplicates (read-only)
+
+# 2026-09-08: проверка дублей клиентов (тот же телефон + брокер) после бага
+# NULL-комментария в правиле «не исторический клиент». Только чтение.
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: С какого момента считать новые записи (ISO)
+        required: false
+        default: "2026-09-07T06:00:00Z"
+        type: string
+
+concurrency:
+  group: inspect-client-duplicates
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Inspect on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SINCE_INPUT: ${{ inputs.since }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          envs: SINCE_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/inspect-client-duplicates.js > /tmp/inspect-client-duplicates.js
+            docker cp /tmp/inspect-client-duplicates.js st-michael-api:/app/scripts/inspect-client-duplicates.js
+            docker compose exec -T -e SINCE="$SINCE_INPUT" api node /app/scripts/inspect-client-duplicates.js
