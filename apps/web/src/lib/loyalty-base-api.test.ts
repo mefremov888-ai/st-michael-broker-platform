@@ -13,7 +13,10 @@ import {
   formatRubles,
   hasLoyaltyActivityEvidence,
   loyaltyActivityEvidenceCompleteness,
+  loyaltyAvailabilityLabelRu,
+  loyaltyExactnessLabelRu,
   loyaltyLeaderMode,
+  loyaltyMetricSourceLabelRu,
   loyaltyMetricsForDisplay,
   normalizeActiveLinks,
   normalizeImportResult,
@@ -1001,6 +1004,108 @@ test("preserves activity evidence completeness metadata from raw activity rows",
   assert.equal(
     loyaltyActivityEvidenceCompleteness(unknown.activityEvidence),
     "unknown",
+  );
+});
+
+// 2026-09-07: записи-основания в карточке читаются: русский тип + имя
+// клиента/проект + статус, плюс раскрываемые детали.
+test("maps evidence rows to readable Russian titles with details", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "broker-evidence",
+        entityType: "BROKER",
+        displayName: "Broker",
+        activities: [
+          {
+            id: "LOCAL_CLIENT:client-1",
+            type: "FIXATION",
+            occurredAt: "2026-08-01T10:00:00.000Z",
+            status: "FIXED",
+            clientName: "Иванов Иван",
+            project: "ZORGE9",
+            amoLeadId: "501",
+          },
+          {
+            id: "LOCAL_MEETING:meeting-1",
+            type: "MEETING",
+            occurredAt: "2026-08-02T10:00:00.000Z",
+            status: "COMPLETED",
+            meetingType: "OFFICE_VISIT",
+            clientName: "Иванов Иван",
+            project: "ZORGE9",
+          },
+          {
+            id: "LOCAL_DEAL:deal-1",
+            type: "DEAL",
+            occurredAt: "2026-08-03T10:00:00.000Z",
+            status: "SIGNED",
+            project: "SILVER_BOR",
+            amount: "100.10",
+            amoDealId: "601",
+          },
+        ],
+      },
+    },
+    "brokers",
+  );
+
+  const [fixation, meeting, deal] = detail.history;
+  assert.equal(fixation.title, "Фиксация клиента — Иванов Иван");
+  assert.match(fixation.description, /зафиксирован/);
+  assert.match(fixation.description, /Зорге 9/);
+  assert.deepEqual(
+    fixation.details?.find((row) => row.label === "Клиент"),
+    { label: "Клиент", value: "Иванов Иван" },
+  );
+  assert.deepEqual(
+    fixation.details?.find((row) => row.label === "Лид amoCRM"),
+    { label: "Лид amoCRM", value: "501" },
+  );
+
+  assert.equal(meeting.title, "Встреча — Иванов Иван");
+  assert.match(meeting.description, /состоялась/);
+  assert.match(meeting.description, /в офисе/);
+
+  // Без имени клиента главным именем становится проект.
+  assert.equal(deal.title, "Сделка — Серебряный Бор");
+  assert.match(deal.description, /подписана/);
+  assert.deepEqual(
+    deal.details?.find((row) => row.label === "Сумма"),
+    { label: "Сумма", value: "100.10 ₽" },
+  );
+
+  // Записи без известного типа остаются «Записью источника».
+  const fallback = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "fallback",
+        entityType: "BROKER",
+        displayName: "Broker",
+        activities: [{ id: "row-1", type: "SOURCE_HISTORY" }],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(fallback.history[0].title, "Запись источника");
+});
+
+// 2026-09-07: коды точности/доступности переводятся на русский для карточки.
+test("translates metric source labels and exactness codes to Russian", () => {
+  assert.equal(loyaltyExactnessLabelRu("VERIFIED"), "проверено");
+  assert.equal(loyaltyExactnessLabelRu("APPROXIMATE"), "приблизительная оценка");
+  assert.equal(loyaltyExactnessLabelRu("EXACT"), "точно");
+  assert.equal(loyaltyExactnessLabelRu(""), "");
+  assert.equal(loyaltyAvailabilityLabelRu("LOCAL_PRELIMINARY"), "данные кабинета");
+  assert.equal(loyaltyAvailabilityLabelRu("UNAVAILABLE"), "недоступно");
+  assert.equal(
+    loyaltyMetricSourceLabelRu("Current local broker-owned operational rows"),
+    "Данные кабинета: фиксации, встречи и сделки этого брокера",
+  );
+  // Русский label нового бэкенда проходит без изменений.
+  assert.equal(
+    loyaltyMetricSourceLabelRu("Данные кабинета: фиксации, встречи и сделки этого брокера"),
+    "Данные кабинета: фиксации, встречи и сделки этого брокера",
   );
 });
 
