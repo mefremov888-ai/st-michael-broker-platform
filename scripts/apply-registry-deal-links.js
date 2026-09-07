@@ -15,6 +15,15 @@
  *   DRY_RUN=1 node /app/scripts/apply-registry-deal-links.js /app/registry-deal-links.json
  */
 
+/** Номер договора без различий латиница/кириллица, регистра и пробелов. */
+function contractKey(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[abcekmhopxyt]/g, (ch) => ({ a: "а", b: "в", c: "с", e: "е", k: "к", m: "м", h: "н", o: "о", p: "р", x: "х", y: "у", t: "т" })[ch] || ch)
+    .replace(/\s+/g, "")
+    .trim();
+}
+
 function planLink(link, candidates, amoOnlyRow) {
   const target = candidates.filter((r) => r.amoLeadId === null || r.amoLeadId === undefined);
   if (candidates.some((r) => r.amoLeadId !== null && r.amoLeadId !== undefined && String(r.amoLeadId) === String(link.amoLeadId))) {
@@ -36,10 +45,16 @@ async function main() {
   const totals = { linked: 0, already: 0, notFound: 0, ambiguous: 0, amoOnlyDropped: 0, failed: 0 };
   try {
     for (const link of links) {
-      const candidates = await prisma.registryDeal.findMany({
-        where: { contractNumber: String(link.contractNumber), amount: link.amountRub },
-        select: { id: true, rowKey: true, source: true, amount: true, signedAt: true, amoLeadId: true },
+      // Сумма ±1 ₽ (копейки/округление), номер договора — по мягкому ключу
+      // (в базе бывает латинская «a» вместо кириллической).
+      const byAmount = await prisma.registryDeal.findMany({
+        where: { amount: { gte: Number(link.amountRub) - 1, lte: Number(link.amountRub) + 1 } },
+        select: { id: true, rowKey: true, source: true, amount: true, signedAt: true, amoLeadId: true, contractNumber: true },
       });
+      const candidates = byAmount.filter((r) => contractKey(r.contractNumber) === contractKey(link.contractNumber));
+      if (!candidates.length && byAmount.length) {
+        console.log(`   подсказка: с такой суммой есть строки с другими номерами: ${byAmount.map((r) => r.contractNumber).join(", ")}`);
+      }
       const amoOnlyRow = await prisma.registryDeal.findUnique({
         where: { rowKey: `amo:${link.amoLeadId}` },
         select: { id: true, rowKey: true, source: true, amount: true },
@@ -75,4 +90,4 @@ if (require.main === module) {
   main().catch((e) => { console.error("FATAL:", e?.message || e); process.exit(1); });
 }
 
-module.exports = { planLink };
+module.exports = { planLink, contractKey };

@@ -1,6 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { planLink } = require("./apply-registry-deal-links");
+const { planLink, contractKey } = require("./apply-registry-deal-links");
+
+test("ключ номера договора не различает латиницу/кириллицу и пробелы", () => {
+  assert.equal(contractKey("ЗГ2-16-1-173a"), contractKey("ЗГ2-16-1-173а"));
+  assert.equal(contractKey("MM-100"), contractKey("ММ-100"));
+  assert.notEqual(contractKey("ЗГ2-2-3-004"), contractKey("ЗГ1-2-3-009"));
+});
 
 const link = { amoLeadId: 31140291, contractNumber: "ММ-100", amountRub: 2133111 };
 
