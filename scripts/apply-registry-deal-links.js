@@ -52,8 +52,13 @@ async function main() {
         select: { id: true, rowKey: true, source: true, amount: true, signedAt: true, amoLeadId: true, contractNumber: true },
       });
       const candidates = byAmount.filter((r) => contractKey(r.contractNumber) === contractKey(link.contractNumber));
-      if (!candidates.length && byAmount.length) {
-        console.log(`   подсказка: с такой суммой есть строки с другими номерами: ${byAmount.map((r) => r.contractNumber).join(", ")}`);
+      if (!candidates.length) {
+        if (byAmount.length) console.log(`   подсказка: с такой суммой есть строки с другими номерами: ${byAmount.map((r) => r.contractNumber).join(", ")}`);
+        // Строки с тем же номером договора, но другой суммой — чтобы увидеть расхождение.
+        const sameContract = (await prisma.registryDeal.findMany({
+          select: { contractNumber: true, amount: true, source: true, signedAt: true, amoLeadId: true },
+        })).filter((r) => contractKey(r.contractNumber) === contractKey(link.contractNumber));
+        if (sameContract.length) console.log(`   подсказка: по номеру договора есть строки: ${sameContract.map((r) => `${r.contractNumber} · ${r.amount} ₽ · ${r.source} · ${r.signedAt ? new Date(r.signedAt).toISOString().slice(0, 10) : "без даты"} · лид ${r.amoLeadId ?? "—"}`).join(" | ")}`);
       }
       const amoOnlyRow = await prisma.registryDeal.findUnique({
         where: { rowKey: `amo:${link.amoLeadId}` },
