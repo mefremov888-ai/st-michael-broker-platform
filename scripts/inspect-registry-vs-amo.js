@@ -95,9 +95,15 @@ function contractKey(value) {
     .replace(/[\s№]+/g, "");
 }
 
+// 142/143 — общие финальные статусы всех воронок. «Успешно» засчитывается
+// только в воронках ЖК (Зорге 9 / Берзарина / Толбухина); в Колл-центре 142 =
+// «Встреча проведена» — это не сделка (уточнение владельца 07.09).
+const SALES_PIPELINES = new Set([7600550, 7600546, 7600554]);
 function stageGroup(lead) {
   if (!lead) return "NO_LEAD";
-  return STAGE_GROUP[Number(lead.status_id)] || "OTHER";
+  const status = Number(lead.status_id);
+  if (status === 142) return SALES_PIPELINES.has(Number(lead.pipeline_id)) ? "SUCCESS" : "KC_MEETING_DONE";
+  return STAGE_GROUP[status] || "OTHER";
 }
 
 /** Сравнение одной строки реестра с лидом (чистая функция). */

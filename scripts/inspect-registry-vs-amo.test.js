@@ -54,5 +54,6 @@ test("compareRow: лид не найден / поля пустые в amo / оп
   );
   assert.deepEqual(c.issues.sort(), ["amount_missing_in_amo", "contract_missing_in_amo", "date_missing_in_amo", "paid_but_amo_lost"]);
   assert.equal(stageGroup(lead({ status_id: 62907442 })), "PAID_BOOKING");
+  assert.equal(stageGroup(lead({ status_id: 142, pipeline_id: 7600542 })), "KC_MEETING_DONE"); // КЦ: 142 = встреча проведена, не сделка
   assert.equal(stageGroup(null), "NO_LEAD");
 });
