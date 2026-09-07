@@ -1,0 +1,36 @@
+name: QA loyalty filters (read-only)
+
+# 2026-09-07: контрольная проверка фильтров «Нашей базы» через реальный API
+# (POST …/search, GET …/overview под ADMIN-JWT, как в test-kit) против прямых
+# подсчётов в БД: «Есть/Нет фиксаций», «Действующая фиксация», источник
+# старый/новый/оба, период активности, сделки в периоде, обзор. Только чтение.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: qa-loyalty-filters
+  cancel-in-progress: false
+
+jobs:
+  qa:
+    name: Run filter checks on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 12m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/qa-loyalty-filters.js > /tmp/qa-loyalty-filters.js
+            docker cp /tmp/qa-loyalty-filters.js st-michael-api:/app/scripts/qa-loyalty-filters.js
+            docker compose exec -T api node /app/scripts/qa-loyalty-filters.js
