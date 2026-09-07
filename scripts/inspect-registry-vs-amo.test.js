@@ -7,11 +7,12 @@ const lead = (over = {}) => ({
   id: 1,
   pipeline_id: 7600550,
   status_id: 142,
-  custom_fields_values: [cf(558353, "1721952000"), cf(833065, "12 345 678,50"), cf(558577, "ЗР1-1-1-050")],
+  custom_fields_values: [cf(558353, "1721941200"), cf(833065, "12 345 678,50"), cf(558577, "ЗР1-1-1-050-240")],
   ...over,
 });
 
 test("toIsoDate: unix-секунды, дд.мм.гггг, ISO, Date", () => {
+  assert.equal(toIsoDate("1721941200"), "2024-07-26"); // 00:00 МСК 26.07 = 21:00 UTC 25.07
   assert.equal(toIsoDate("1721952000"), "2024-07-26");
   assert.equal(toIsoDate("26.07.2024"), "2024-07-26");
   assert.equal(toIsoDate("2024-07-26T00:00:00.000Z"), "2024-07-26");
