@@ -1936,8 +1936,8 @@ describe("LoyaltyBaseService", () => {
         .where,
     ).toEqual({
       OR: [
-        { fixationStatus: "FIXED" },
-        { uniquenessStatus: "CONDITIONALLY_UNIQUE" },
+        { fixationStatus: { in: ["FIXED", "EXPIRED"] } },
+        { uniquenessStatus: { in: ["CONDITIONALLY_UNIQUE", "EXPIRED"] } },
       ],
     });
     expect(prisma.deal.aggregate.mock.calls[0][0].where).toMatchObject({
