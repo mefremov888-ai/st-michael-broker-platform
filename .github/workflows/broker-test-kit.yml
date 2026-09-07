@@ -1,0 +1,76 @@
+name: Тест-кит фиксаций (брокер → агентство → фиксация → amo)
+
+# 2026-09-07: сквозной приёмочный тест «новый брокер → агентство с ИНН →
+# фиксация клиента → лид в amo». Три комплекта с ИНН длиной 10, 11 и 12
+# знаков (11 — заведомо невалидная длина: ключевой вопрос владельца,
+# блокирует ли такой ИНН фиксацию).
+#
+# Шаги (input step):
+#   prepare — read-only: подобрать чистые телефоны/ИНН, напечатать JSON-план;
+#   run     — пишущий прогон (нужен confirm=true);
+#   cleanup — удалить ТЕСТКИТ-артефакты из БД (нужен confirm=true);
+#             amo-лиды не удаляются — id печатаются для ручного удаления.
+#
+# Скрипт scripts/broker-test-kit.js доставляется через git show из
+# канонического master и запускается внутри контейнера api (приёмы
+# apply-agencies-import.yml / canary-fixation.yml).
+#
+# ГРАБЛИ ssh-action: многострочный case/awk ломается — только if/elif;
+# heredoc в ssh-script не использовать; sed только однострочный.
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: 'Шаг теста'
+        required: true
+        default: prepare
+        type: choice
+        options:
+          - prepare
+          - run
+          - cleanup
+      confirm:
+        description: 'Подтверждаю пишущий шаг (обязательно для run и cleanup)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  test-kit:
+    name: Broker fixation test kit on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run test kit step
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          STEP_INPUT: ${{ inputs.step }}
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: STEP_INPUT,CONFIRM_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            CONFIRM_ENV=no
+            if [ "$CONFIRM_INPUT" = "true" ]; then CONFIRM_ENV=yes; fi
+            if [ "$STEP_INPUT" = "run" ] && [ "$CONFIRM_ENV" != "yes" ]; then echo "step=run требует confirm=true — остановка"; exit 1; fi
+            if [ "$STEP_INPUT" = "cleanup" ] && [ "$CONFIRM_ENV" != "yes" ]; then echo "step=cleanup требует confirm=true — остановка"; exit 1; fi
+            git fetch https://github.com/sereganikitin/st-michael-broker-platform.git master
+            MASTER_SHA=$(git rev-parse FETCH_HEAD)
+            echo "=== Скрипт из канонического master: $MASTER_SHA ==="
+            git show "${MASTER_SHA}:scripts/broker-test-kit.js" > /tmp/broker-test-kit.js
+            docker cp /tmp/broker-test-kit.js st-michael-api:/app/scripts/broker-test-kit.js
+            echo "=== Шаг: $STEP_INPUT (CONFIRM=$CONFIRM_ENV) ==="
+            docker compose exec -T -e STEP="$STEP_INPUT" -e CONFIRM="$CONFIRM_ENV" api node /app/scripts/broker-test-kit.js
+            echo "=== Готово: $STEP_INPUT ==="
