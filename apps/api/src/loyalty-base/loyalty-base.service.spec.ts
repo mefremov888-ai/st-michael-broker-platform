@@ -347,6 +347,59 @@ describe("LoyaltyBaseService", () => {
     expect(prisma.agency.update).not.toHaveBeenCalled();
   });
 
+  // 2026-09-07: backfill встреч — PENDING с меткой «[amo:...]» в comment
+  // выходит в evidence с кодом amoStatusMark (для оранжевого бейджа),
+  // но сырой comment (там бывает телефон клиента) наружу не отдаётся.
+  it("exposes the backfill amo status mark for pending meetings without leaking the raw comment", () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    const evidence = (service as any).ourBrokerEvidence({
+      clients: [],
+      deals: [],
+      meetings: [
+        {
+          id: "m-unconfirmed",
+          date: new Date("2026-05-01T10:00:00.000Z"),
+          status: "PENDING",
+          type: "OFFICE_VISIT",
+          comment: "Телефон: +79161112233\n[amo:статус не подтверждён]",
+          client: { fullName: "Иванов", project: "ZORGE9", amoLeadId: 501n },
+        },
+        {
+          id: "m-deleted-lead",
+          date: new Date("2026-05-02T10:00:00.000Z"),
+          status: "PENDING",
+          type: "OFFICE_VISIT",
+          comment: "[amo:лид удалён]",
+          client: null,
+        },
+        {
+          id: "m-completed",
+          date: new Date("2026-05-03T10:00:00.000Z"),
+          status: "COMPLETED",
+          type: "OFFICE_VISIT",
+          comment: "[amo:статус не подтверждён]",
+          client: null,
+        },
+      ],
+      _count: { clients: 0, meetings: 3, deals: 0 },
+    });
+
+    const byId = new Map(
+      evidence.items.map((row: any) => [row.sourceId, row]),
+    );
+    expect((byId.get("m-unconfirmed") as any).amoStatusMark).toBe(
+      "UNCONFIRMED",
+    );
+    expect((byId.get("m-deleted-lead") as any).amoStatusMark).toBe(
+      "LEAD_DELETED",
+    );
+    // Метка гаснет, как только статус дотянули до COMPLETED.
+    expect((byId.get("m-completed") as any).amoStatusMark).toBeNull();
+    // Телефон из comment не покидает бэкенд.
+    expect(JSON.stringify(evidence)).not.toContain("79161112233");
+  });
+
   it("keeps the HTTP-sized default while bounding trusted CLI overrides", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);

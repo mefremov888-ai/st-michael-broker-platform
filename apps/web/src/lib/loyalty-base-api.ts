@@ -1,4 +1,5 @@
 import { apiDownload, apiGet, apiPatch, apiPost, apiUpload } from "./api";
+import { meetingAmoMark, type MeetingAmoMark } from "./meeting-amo-marks";
 
 export type LoyaltyBaseKey = "anna" | "ours";
 export type LoyaltyEntityType = "brokers" | "agencies";
@@ -642,6 +643,11 @@ export interface LoyaltyRecord {
     description: string;
     /** Раскрываемые детали записи-основания (клиент, проект, статус...). */
     details?: Array<{ label: string; value: string }>;
+    /**
+     * 2026-09-07: встреча PENDING с меткой backfill-а «нет ответа из amo»
+     * (см. meeting-amo-marks.ts) — карточка показывает оранжевый бейдж.
+     */
+    amoMark?: MeetingAmoMark;
     assignmentId?: string;
     campaignId?: string;
     campaignName?: string;
@@ -1459,6 +1465,16 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
     : "";
   const callResult = stringValue(pick(item, "resultCode", "result"));
   const amount = stringValue(item.amount);
+  // 2026-09-07: встреча PENDING с меткой backfill-а «нет ответа из amo» —
+  // карточка показывает оранжевый бейдж. Бэкенд шлёт готовый код
+  // (amoStatusMark, без сырого comment); parsing comment — запасной путь.
+  const rawAmoMarkCode = stringValue(item.amoStatusMark).toUpperCase();
+  const amoMark =
+    rawType === "MEETING" && status.toUpperCase() === "PENDING"
+      ? rawAmoMarkCode === "UNCONFIRMED" || rawAmoMarkCode === "LEAD_DELETED"
+        ? (rawAmoMarkCode as MeetingAmoMark)
+        : meetingAmoMark(stringValue(item.comment), status)
+      : null;
   // Главное имя записи: клиент → проект → результат звонка.
   const mainName = clientName || projectLabel || callResult;
   const title = mainName ? `${typeLabel} — ${mainName}` : typeLabel;
@@ -1493,6 +1509,7 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
     details: detailRows,
     result: callResult,
     comment: "",
+    ...(amoMark ? { amoMark } : {}),
   };
 }
 

@@ -73,6 +73,7 @@ import {
   type LoyaltyTask,
 } from "@/lib/loyalty-workflow-api";
 import { loyaltyStatusLabel } from "@/lib/loyalty-status";
+import { meetingAmoMarkLabel } from "@/lib/meeting-amo-marks";
 import { LoyaltyStatusBadges } from "./LoyaltyStatusBadges";
 import { LoyaltyCallResultBadge } from "./LoyaltyCallResultBadge";
 
@@ -455,6 +456,18 @@ function Timeline({
                     ))}
                   </dl>
                 </details>
+              )}
+              {/* 2026-09-07: встреча PENDING, статус из amo вернуть не
+                  удалось (метка backfill-а) — явный оранжевый бейдж,
+                  чтобы не сливалась с обычным «запланирована». */}
+              {item.amoMark && (
+                <span className="mt-2 inline-flex items-center gap-1 rounded-full border border-orange-300 bg-orange-50 px-2 py-1 text-xs font-medium text-orange-900">
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-orange-600"
+                    aria-hidden
+                  />
+                  {meetingAmoMarkLabel(item.amoMark)}
+                </span>
               )}
               {item.result && (
                 <LoyaltyCallResultBadge
