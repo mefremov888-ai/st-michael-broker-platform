@@ -560,6 +560,7 @@ export interface LoyaltyOverview {
     fixations: number | null;
     meetings: number | null;
     deals: number | null;
+    paidBookings: number | null;
   };
   dealAmount: string | null;
   period: { from: string; to: string } | null;
@@ -1311,6 +1312,9 @@ export function normalizeLoyaltyOverview(
         pick(activities, "meetings", "meetingCount"),
       ),
       deals: nullableNumberValue(pick(activities, "deals", "dealCount")),
+      paidBookings: nullableNumberValue(
+        pick(activities, "paidBookings", "paidBookingCount"),
+      ),
     },
     dealAmount: nullableDecimalValue(
       pick(overview, "dealAmount", "dealAmountRub", "amount"),

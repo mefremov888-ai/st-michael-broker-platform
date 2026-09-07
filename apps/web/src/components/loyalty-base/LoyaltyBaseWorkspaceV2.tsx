@@ -1,6 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect, @typescript-eslint/no-unused-expressions */
 
+import RegistrySeriesPanel from "@/components/registry/RegistrySeriesPanel";
 import {
   useCallback,
   useEffect,
@@ -1795,7 +1796,7 @@ export function LoyaltyBaseWorkspaceV2() {
                 {exactness}
               </span>
             </div>
-            <dl className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <dl className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
               <Metric
                 label="Фиксации"
                 onClick={() => openActivityDrilldown("fixations")}
@@ -1817,11 +1818,20 @@ export function LoyaltyBaseWorkspaceV2() {
                 {number(overview?.activities.meetings ?? null)}
               </Metric>
               <Metric
+                label="Платные брони"
+                explanation={metricExplanation(
+                  "activities.paidBookings",
+                  "Оплаченные ДВОУ из «Реестра сделок» за выбранный период (по дате оплаты ДВОУ)",
+                )}
+              >
+                {number(overview?.activities.paidBookings ?? null)}
+              </Metric>
+              <Metric
                 label="Сделки"
                 onClick={() => openActivityDrilldown("deals")}
                 explanation={metricExplanation(
                   "activities.deals",
-                  "Количество подтверждённых сделок за выбранный период",
+                  "Оплаченные ДДУ за выбранный период (по «Дате оплаты ДДУ»)",
                 )}
               >
                 {number(overview?.activities.deals ?? null)}
@@ -1838,6 +1848,15 @@ export function LoyaltyBaseWorkspaceV2() {
               </Metric>
             </dl>
           </section>
+          )}
+          {base === "ours" && canReadAll && (
+            <RegistrySeriesPanel
+              compact
+              title="Динамика по дням, неделям и месяцам"
+              initialFrom={ratingRange.from?.slice(0, 10)}
+              initialTo={ratingRange.to?.slice(0, 10)}
+              initialGranularity="day"
+            />
           )}
           {base === "anna" && sourceReported && (
             <section className="card border-warning/40 bg-warning/5">

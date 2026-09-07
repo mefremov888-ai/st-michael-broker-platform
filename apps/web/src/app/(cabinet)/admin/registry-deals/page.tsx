@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiGet } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { ArrowDown, ArrowUp, FileSpreadsheet } from 'lucide-react';
+import RegistrySeriesPanel from '@/components/registry/RegistrySeriesPanel';
 
 type RegistryAgencyRow = {
   agencyCanonical: string;
@@ -17,6 +18,7 @@ type RegistryAgencyRow = {
   firstDeal: string | null;
   lastDeal: string | null;
   linkedLeads: number;
+  paidBookings: number;
 };
 
 type RegistrySummary = {
@@ -24,9 +26,12 @@ type RegistrySummary = {
   bySource: Record<string, number>;
   withBroker: number;
   withAgency: number;
+  paidDeals: number;
+  unpaidRows: number;
+  paidBookings: number;
 };
 
-type SortKey = 'agencyCanonical' | 'deals' | 'amountSum' | 'firstDeal' | 'lastDeal' | 'linkedLeads';
+type SortKey = 'agencyCanonical' | 'deals' | 'amountSum' | 'firstDeal' | 'lastDeal' | 'linkedLeads' | 'paidBookings';
 
 const fmtDate = (value: string | null) => {
   if (!value) return '—';
@@ -122,9 +127,10 @@ export default function RegistryDealsPage() {
 
   const summaryCards = summary
     ? [
-        { label: 'Всего сделок', value: summary.total },
-        { label: 'Из реестра', value: summary.bySource?.REGISTRY || 0 },
-        { label: 'Реестр + amo', value: summary.bySource?.BOTH || 0 },
+        { label: 'Сделок (оплаченных ДДУ)', value: summary.paidDeals ?? 0 },
+        { label: 'Платных броней (ДВОУ)', value: summary.paidBookings ?? 0 },
+        { label: 'Строк без даты оплаты', value: summary.unpaidRows ?? 0 },
+        { label: 'Всего строк реестра', value: summary.total },
         { label: 'Только amo', value: summary.bySource?.AMO_ONLY || 0 },
         { label: 'С брокером', value: summary.withBroker },
         { label: 'С агентством', value: summary.withAgency },
@@ -138,7 +144,9 @@ export default function RegistryDealsPage() {
       </h1>
       <p className="text-sm text-text-muted mb-6">
         Сквозная аналитика ДДУ из реестра сделок, сшитого с amoCRM: сколько сделок
-        закрывает каждое агентство, на какую сумму и в какой период.
+        закрывает каждое агентство, на какую сумму и в какой период. Сделка — договор с
+        «Датой оплаты ДДУ» (комиссия считается по факту оплаты); строки без даты оплаты в
+        сделки не входят. Платная бронь — оплаченный ДВОУ.
       </p>
 
       {error && (
@@ -148,7 +156,7 @@ export default function RegistryDealsPage() {
       {loading && <div className="card">Загрузка…</div>}
 
       {!loading && summary && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-6">
           {summaryCards.map((cardItem) => (
             <div key={cardItem.label} className="card !p-4">
               <div className="text-2xl font-bold">
@@ -157,6 +165,12 @@ export default function RegistryDealsPage() {
               <div className="text-xs text-text-muted mt-1">{cardItem.label}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {!loading && (
+        <div className="mb-6">
+          <RegistrySeriesPanel />
         </div>
       )}
 
@@ -176,10 +190,11 @@ export default function RegistryDealsPage() {
                 <thead>
                   <tr className="text-text-muted border-b border-border">
                     {headerCell('agencyCanonical', 'Агентство')}
-                    {headerCell('deals', 'Сделок', true)}
+                    {headerCell('deals', 'Сделок (оплач. ДДУ)', true)}
                     {headerCell('amountSum', 'Сумма ₽', true)}
-                    {headerCell('firstDeal', 'Первая')}
-                    {headerCell('lastDeal', 'Последняя')}
+                    {headerCell('paidBookings', 'Платных броней', true)}
+                    {headerCell('firstDeal', 'Первая оплата')}
+                    {headerCell('lastDeal', 'Последняя оплата')}
                     {headerCell('linkedLeads', 'Связано с amo', true)}
                   </tr>
                 </thead>
@@ -192,6 +207,7 @@ export default function RegistryDealsPage() {
                       <td className="py-3 font-medium">{row.agencyCanonical}</td>
                       <td className="py-3 text-right">{row.deals.toLocaleString('ru-RU')}</td>
                       <td className="py-3 text-right whitespace-nowrap">{fmtAmount(row.amountSum)}</td>
+                      <td className="py-3 text-right">{(row.paidBookings ?? 0).toLocaleString('ru-RU')}</td>
                       <td className="py-3">{fmtDate(row.firstDeal)}</td>
                       <td className="py-3">{fmtDate(row.lastDeal)}</td>
                       <td className="py-3 text-right">

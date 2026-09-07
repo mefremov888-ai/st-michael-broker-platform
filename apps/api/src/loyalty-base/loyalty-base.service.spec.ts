@@ -5058,12 +5058,17 @@ describe("LoyaltyBaseService", () => {
     expect(result.kpiMetadata["activities.deals"]).toMatchObject({
       source: "LOCAL_PRELIMINARY",
       exactness: "APPROXIMATE",
-      provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.brokerId",
+      provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.paidAt / RegistryDeal.brokerId",
     });
     expect(result.kpiMetadata["agencies.top"].formula).toContain(
       "explicit Deal.agencyId",
     );
-    expect(result.activities).toEqual({ fixations: 3, meetings: 2, deals: 1 });
+    expect(result.activities).toEqual({
+      fixations: 3,
+      meetings: 2,
+      deals: 1,
+      paidBookings: 0,
+    });
     expect(result.dealAmount).toBe("12500000.50");
   });
 

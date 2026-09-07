@@ -722,7 +722,7 @@ export function loyaltyFilterHash(value: unknown): string {
 // перенесённые фиксации старого кабинета 2020–2026 (все истёкшие) не
 // попадали бы ни в счётчики, ни в фильтр «Есть фиксации». REJECTED и
 // UNDER_REVIEW фиксациями не считаются.
-const FIXATION_CLIENT_WHERE = {
+export const FIXATION_CLIENT_WHERE = {
   OR: [
     { fixationStatus: { in: ["FIXED", "EXPIRED"] as Array<"FIXED" | "EXPIRED"> } },
     { uniquenessStatus: { in: ["CONDITIONALLY_UNIQUE", "EXPIRED"] as Array<"CONDITIONALLY_UNIQUE" | "EXPIRED"> } },
@@ -4056,6 +4056,8 @@ export class LoyaltyBaseService {
       birthdayRows,
       brokerTop,
       agencyTop,
+      paidBookings,
+      paidBookingsTotal,
     ] = await Promise.all([
       this.prisma.broker.count({
         where: { role: "BROKER", mergedIntoId: null },
@@ -4154,7 +4156,28 @@ export class LoyaltyBaseService {
       }),
       this.oursDealLeaders("BROKER", period),
       this.oursDealLeaders("AGENCY", period),
+      // «Платные брони» (правило владельца 07.09.2026: ДВОУ = платная бронь,
+      // дата — оплата ДВОУ). Как и сделки: в KPI — привязанные к действующему
+      // брокеру, остальные — «+N без брокера» в metadata.
+      this.registryDealModel
+        ? this.registryDealModel.count({
+            where: {
+              dvouPaidAt: { gte: period.from, lte: period.to },
+              brokerId: { not: null },
+              broker: brokerOwner,
+            },
+          })
+        : Promise.resolve(0),
+      this.registryDealModel
+        ? this.registryDealModel.count({
+            where: { dvouPaidAt: { gte: period.from, lte: period.to } },
+          })
+        : Promise.resolve(0),
     ]);
+    const unattributedPaidBookings = Math.max(
+      0,
+      Number(paidBookingsTotal || 0) - Number(paidBookings || 0),
+    );
     const newCount = (newRows as any[]).filter((row) =>
       hasLoyaltyAcquisitionPhone([row.phone, ...(row.phones || [])]),
     ).length;
@@ -4216,7 +4239,12 @@ export class LoyaltyBaseService {
         top: brokerTop,
       },
       agencies: { total: agencyTotal, top: agencyTop },
-      activities: { fixations, meetings, deals: totalDeals },
+      activities: {
+        fixations,
+        meetings,
+        deals: totalDeals,
+        paidBookings: Number(paidBookings || 0),
+      },
       dealAmount: totalDealAmount,
       dataAvailability: {
         exactActivities: false,
@@ -4243,6 +4271,7 @@ export class LoyaltyBaseService {
       kpiMetadata: this.oursKpiMetadata(periodDto, {
         unattributedRegistryDeals,
         unattributedRegistryAmount,
+        unattributedPaidBookings,
       }),
     };
   }
@@ -4252,6 +4281,7 @@ export class LoyaltyBaseService {
     registryGap: {
       unattributedRegistryDeals: number;
       unattributedRegistryAmount: string | null;
+      unattributedPaidBookings?: number;
     } = { unattributedRegistryDeals: 0, unattributedRegistryAmount: null },
   ) {
     const shared = {
@@ -4280,13 +4310,19 @@ export class LoyaltyBaseService {
       },
       "activities.deals": {
         ...shared,
-        formula: `COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID, signedAt in requested period and owner role=BROKER without merge) + COUNT(RegistryDeal rows with signedAt in requested period linked to such a broker)${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker (не видны в списке брокеров)` : ""}`,
-        provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.brokerId",
+        formula: `COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID, signedAt in requested period and owner role=BROKER without merge) + COUNT(RegistryDeal rows with «Дата оплаты ДДУ» (paidAt) in requested period linked to such a broker; rows without paidAt are not deals)${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker (не видны в списке брокеров)` : ""}`,
+        provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.paidAt / RegistryDeal.brokerId",
         unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
+      },
+      "activities.paidBookings": {
+        ...shared,
+        formula: `COUNT(RegistryDeal rows with «Дата оплаты ДВОУ» (dvouPaidAt) in requested period linked to an active unmerged BROKER)${registryGap.unattributedPaidBookings ? `; excludes ${registryGap.unattributedPaidBookings} paid booking(s) without an attributable broker` : ""}`,
+        provenance: "RegistryDeal.dvouPaidAt / RegistryDeal.brokerId",
+        unattributedPaidBookings: registryGap.unattributedPaidBookings || 0,
       },
       dealAmount: {
         ...shared,
-        formula: `Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over broker-attributed registry rows signed in the requested period${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker${registryGap.unattributedRegistryAmount ? ` totalling ${registryGap.unattributedRegistryAmount}` : ""}` : ""}`,
+        formula: `Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over broker-attributed registry rows with «Дата оплаты ДДУ» in the requested period${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker${registryGap.unattributedRegistryAmount ? ` totalling ${registryGap.unattributedRegistryAmount}` : ""}` : ""}`,
         provenance: "Deal.id / Deal.amount / RegistryDeal.brokerId",
         unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
         unattributedRegistryAmount: registryGap.unattributedRegistryAmount,
@@ -4856,7 +4892,7 @@ export class LoyaltyBaseService {
         top: [],
       },
       agencies: { total: 0, top: [] },
-      activities: { fixations: 0, meetings: 0, deals: 0 },
+      activities: { fixations: 0, meetings: 0, deals: 0, paidBookings: 0 },
       dealAmount: "0",
       dataAvailable: false,
       metricSource: {
