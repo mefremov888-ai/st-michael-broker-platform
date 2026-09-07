@@ -1,0 +1,65 @@
+name: Ops amo cleanup (test leads / broker contact)
+
+# 2026-09-07 (решения владельца п.16, п.17): закрыть тестовые лиды test-kit в
+# amo (API не удаляет — «Закрыто и не реализовано» + переименование) и
+# привязать карточку брокера к одному из нескольких amo-контактов (Татьяна).
+# По умолчанию dry-run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: close_test_leads | link_broker_contact
+        required: true
+        default: close_test_leads
+        type: string
+      ids:
+        description: ID через запятую (лиды или контакты amo)
+        required: true
+        type: string
+      apply:
+        description: 'Выполнить (false = dry-run)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: ops-amo-cleanup
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          ACTION_INPUT: ${{ inputs.action }}
+          IDS_INPUT: ${{ inputs.ids }}
+          APPLY_INPUT: ${{ inputs.apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          envs: ACTION_INPUT,IDS_INPUT,APPLY_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            DRY=1; if [ "$APPLY_INPUT" = "true" ]; then DRY=0; fi
+            if [ "$ACTION_INPUT" = "close_test_leads" ]; then
+              git show origin/master:scripts/close-amo-test-leads.js > /tmp/close-amo-test-leads.js
+              docker cp /tmp/close-amo-test-leads.js st-michael-api:/app/scripts/close-amo-test-leads.js
+              docker compose exec -T -e DRY_RUN=$DRY -e LEAD_IDS="$IDS_INPUT" api node /app/scripts/close-amo-test-leads.js
+            elif [ "$ACTION_INPUT" = "link_broker_contact" ]; then
+              git show origin/master:scripts/link-broker-amo-contact.js > /tmp/link-broker-amo-contact.js
+              docker cp /tmp/link-broker-amo-contact.js st-michael-api:/app/scripts/link-broker-amo-contact.js
+              docker compose exec -T -e DRY_RUN=$DRY -e CONTACT_IDS="$IDS_INPUT" api node /app/scripts/link-broker-amo-contact.js
+            else
+              echo "неизвестное action: $ACTION_INPUT"; exit 1
+            fi
