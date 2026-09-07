@@ -27,6 +27,9 @@
  */
 
 const APPLY = process.argv.includes("--apply");
+// 2026-09-07: ONLY_INNS="1,2" — ограничить прогон перечисленными ИНН из списка
+// (например, удалить только карточку ИНН Сбербанка, не трогая остальные).
+const ONLY_INNS = String(process.env.ONLY_INNS || "").split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ИНН тестовых агентств, подтверждённых к удалению (2026-09-03).
@@ -64,7 +67,7 @@ const TEST_INNS = [
 
     // ─── 1. Агентства по ИНН ───
     const agencies = await prisma.agency.findMany({
-      where: { inn: { in: TEST_INNS } },
+      where: { inn: { in: ONLY_INNS.length ? TEST_INNS.filter((i) => ONLY_INNS.includes(i)) : TEST_INNS } },
       select: { id: true, name: true, legalName: true, inn: true },
       orderBy: { name: "asc" },
     });
