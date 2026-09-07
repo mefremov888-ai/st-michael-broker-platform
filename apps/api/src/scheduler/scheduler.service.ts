@@ -39,6 +39,7 @@ import {
   requiresAmoCreateReconciliation,
   sanitizeAmoSyncError,
 } from '../common/amo-sync-retry';
+import { isTestClient } from '../common/test-client-rule';
 import {
   AmoFixationPhoneLease,
   AmoFixationPhoneLockService,
@@ -728,6 +729,7 @@ export class SchedulerService {
     });
     let totalDeals = 0;
     let totalClients = 0;
+    let skippedTestLeads = 0;
     for (const broker of brokers) {
       try {
         // Cleanup: удалить устаревшие Meeting/Deal/Client с fake-телефонами +70000XXX.
@@ -825,6 +827,13 @@ export class SchedulerService {
                   data: { amoLeadId: BigInt(leadRef.id) },
                 });
               }
+            }
+            if (!client && isTestClient({ fullName, phone })) {
+              // 2026-09-07: тестовые лиды из amo (имена «тест…», телефоны
+              // +7999123…/+79999999…) в кабинет не заводим — после чистки они
+              // возвращались синком. Существующего клиента не трогаем.
+              skippedTestLeads++;
+              continue;
             }
             if (!client) {
               // 2026-09-05: у модели Client нет колонки `source` — поле, добавленное
@@ -1016,7 +1025,7 @@ export class SchedulerService {
         this.logger.error(`amoCRM sync failed for broker ${broker.fullName}: ${e}`);
       }
     }
-    this.logger.log(`amoCRM sync complete: ${totalDeals} new deals, ${totalClients} new clients, ${brokers.length} brokers`);
+    this.logger.log(`amoCRM sync complete: ${totalDeals} new deals, ${totalClients} new clients, ${brokers.length} brokers, ${skippedTestLeads} test leads skipped`);
   }
 
   // 2026-08-19: без этого флага зависший amoCRM (fetch без ответа) позволял

@@ -2,6 +2,7 @@ import { Injectable, Inject, BadRequestException, NotFoundException } from '@nes
 import { PrismaClient, UniquenessStatus } from '@st-michael/database';
 import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID } from '@st-michael/integrations';
 import { levelForSqm, rateFor, rateForWithPolicy } from '../commission/commission.service';
+import { isTestClient } from '../common/test-client-rule';
 @Injectable()
 export class AmocrmService {
   private amo: AmoCrmAdapter;
@@ -270,6 +271,7 @@ export class AmocrmService {
     let dealsCreated = 0;
     let dealsUpdated = 0;
     let clientsCreated = 0;
+    let skippedTestLeads = 0;
     let skipped = 0;
     // Cleanup: удалить устаревшие Meeting/Deal/Client с fake-телефонами +70000XXX.
     // Правка 2026-05-14. Сначала Meeting и Deal (зависят от Client через FK), потом Client.
@@ -364,6 +366,12 @@ export class AmocrmService {
               }
             }
           }
+        }
+        if (!client && isTestClient({ fullName, phone })) {
+          // 2026-09-07: тестовые лиды amo в кабинет не заводим (см.
+          // common/test-client-rule.ts) — после чистки они возвращались синком.
+          skippedTestLeads++;
+          continue;
         }
         if (!client) {
           client = await this.prisma.client.create({
@@ -526,7 +534,7 @@ export class AmocrmService {
     await this.recalcAgencyTotalSqm(brokerId);
     // Second-pass recalc убран 2026-05-14: amoCRM-значения комиссии (673169/673171)
     // теперь авторитетный источник, локальный пересчёт перетирал бы их.
-    return { dealsCreated, dealsUpdated, clientsCreated, skipped, totalLeads: allLeadIds.length, amoContactId, amoUserId };
+    return { dealsCreated, dealsUpdated, clientsCreated, skipped, skippedTestLeads, totalLeads: allLeadIds.length, amoContactId, amoUserId };
   }
   /**
    * Пересчитывает agency.totalSqmSold = SUM(sqm) по всем PAID/COMMISSION_PAID

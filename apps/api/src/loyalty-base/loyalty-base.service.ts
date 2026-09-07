@@ -4716,6 +4716,11 @@ export class LoyaltyBaseService {
       contractNumber: true,
       project: true,
       amoLeadId: true,
+      // 2026-09-07: объект сделки (заполняется из лида amo, поезд №18).
+      sqm: true,
+      floor: true,
+      building: true,
+      apartmentNumber: true,
     };
     const pushRow = (
       record: any,
@@ -4743,6 +4748,15 @@ export class LoyaltyBaseService {
           row.amoLeadId === null || row.amoLeadId === undefined
             ? null
             : String(row.amoLeadId),
+        sqm: row.sqm === null || row.sqm === undefined ? null : String(row.sqm),
+        floor:
+          row.floor === null || row.floor === undefined
+            ? null
+            : String(row.floor),
+        building: row.building ? String(row.building) : null,
+        apartmentNumber: row.apartmentNumber
+          ? String(row.apartmentNumber)
+          : null,
         attribution,
       });
     };
@@ -8826,12 +8840,13 @@ export class LoyaltyBaseService {
         amoDealId: str(row.amoDealId),
         amount: str(row.amount),
         contractNumber: str(row.contractNumber),
-        // Площадь: из сделки, иначе из лота. Этаж/корпус/квартира — из лота.
+        // Площадь: из сделки/строки реестра, иначе из лота. Этаж/корпус/
+        // квартира — из строки реестра (объект из amo) или из лота.
         sqm: str(row.sqm) ?? str(row.lot?.sqm),
-        floor: str(row.lot?.floor),
-        building: str(row.lot?.building),
+        floor: str(row.floor) ?? str(row.lot?.floor),
+        building: str(row.building) ?? str(row.lot?.building),
         buildingSection: str(row.lot?.buildingSection),
-        apartmentNumber: str(row.lot?.number),
+        apartmentNumber: str(row.apartmentNumber) ?? str(row.lot?.number),
         source: String(row.id).startsWith("REGISTRY:")
           ? "REGISTRY_DEAL"
           : "LOCAL_DEAL",
