@@ -163,26 +163,32 @@ async function main() {
 
     let written = 0;
     const now = new Date();
-    for (let i = 0; i < plan.length; i += 100) {
-      const chunk = plan.slice(i, i + 100);
+    // Пишем небольшими транзакциями (таймаут интерактивной транзакции Prisma
+    // по умолчанию 5 с). Case — upsert по детерминированному id, затем
+    // проверяем, что он есть, и только потом создаём link с FK на него.
+    for (let i = 0; i < plan.length; i += 25) {
+      const chunk = plan.slice(i, i + 25);
       await prisma.$transaction(async (tx) => {
         for (const p of chunk) {
           const owner = p.kind === "BROKER" ? { personId: p.personId } : { organizationId: p.organizationId };
           const identity = `${snapshotId}:${p.kind}:${p.kind === "BROKER" ? "PERSON" : "ORGANIZATION"}:${p.personId || p.organizationId}:${p.targetId}`;
           const caseId = stableUuid("reconciliation-v2:case:" + identity);
-          await tx.loyaltyReconciliationCase.createMany({
-            data: [{ id: caseId, datasetId: dataset.id, snapshotId, ...owner, targetType: p.kind, targetId: p.targetId, matchCodes: p.matchCodes, score: p.score, evidence: { generatedBy: "link-anna-entities", note: p.note, ownerDecision: "2026-09-07: сцепки без слияния" }, ruleVersion: RULE_VERSION, status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now }],
-            skipDuplicates: true,
+          const caseData = { datasetId: dataset.id, snapshotId, ...owner, targetType: p.kind, targetId: p.targetId, matchCodes: p.matchCodes, score: p.score, evidence: { generatedBy: "link-anna-entities", note: p.note, ownerDecision: "2026-09-07: сцепки без слияния" }, ruleVersion: RULE_VERSION, status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now };
+          const kase = await tx.loyaltyReconciliationCase.upsert({
+            where: { id: caseId },
+            create: { id: caseId, ...caseData },
+            update: { status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now, version: { increment: 1 } },
+            select: { id: true },
           });
-          await tx.loyaltyReconciliationCase.updateMany({ where: { id: caseId, status: "OPEN" }, data: { status: "RESOLVED", decision: "LINK", decisionReason: "auto: " + p.note, resolvedAt: now, version: { increment: 1 } } });
+          if (!kase?.id) throw new Error(`case not created for ${identity}`);
           await tx.loyaltyEntityLink.create({
-            data: { ...owner, targetType: p.kind, targetId: p.targetId, status: "CONFIRMED", reconciliationCaseId: caseId, evidence: { matchCodes: p.matchCodes, decision: "LINK", generatedBy: "link-anna-entities", note: p.note }, ruleVersion: RULE_VERSION, createdById: ACTOR, decidedById: ACTOR, decidedAt: now },
+            data: { ...owner, targetType: p.kind, targetId: p.targetId, status: "CONFIRMED", reconciliationCaseId: kase.id, evidence: { matchCodes: p.matchCodes, decision: "LINK", generatedBy: "link-anna-entities", note: p.note }, ruleVersion: RULE_VERSION, createdById: ACTOR, decidedById: ACTOR, decidedAt: now },
           });
           await tx.loyaltyEntityChange.create({ data: { ...owner, action: "UPDATE", changedFields: ["reconciliationDecision"], beforeValues: { link: null }, afterValues: { link: { targetType: p.kind, targetId: p.targetId, decision: "LINK" } }, actorId: ACTOR } });
           written++;
         }
-      });
-      console.log(`— записано ${written}/${plan.length} —`);
+      }, { timeout: 60000, maxWait: 15000 });
+      if (written % 500 < 25) console.log(`— записано ${written}/${plan.length} —`);
     }
     console.log(`written=${written}`);
   } finally {
