@@ -133,6 +133,33 @@ async function main() {
     const deals = await search("brokers", { activityPeriod: period, dealsInPeriod: true });
     check("брокеры: «сделки в периоде» — у строк periodMetrics.deals > 0", deals.items.every((i) => Number(i.periodMetrics?.deals) > 0), `строк ${deals.items.length}, всего ${deals.total}`);
 
+    // ── Ссылки на amo в карточке активности агентства (просьба владельца) ──
+    try {
+      const topAgency = agHas.items.find((i) => Number(i.metrics?.fixations) > 0) || agHas.items[0];
+      if (topAgency) {
+        const det = await http("GET", `/loyalty-base/ours/agencies/${encodeURIComponent(topAgency.id)}`);
+        const rows = Array.isArray(det.body?.item?.activities) ? det.body.item.activities : [];
+        const withLead = rows.filter((r) => r.amoLeadId).length;
+        const brokerIds = await prisma.brokerAgency.findMany({ where: { agencyId: topAgency.id }, select: { brokerId: true } });
+        const dbLeads = await prisma.client.count({ where: { brokerId: { in: brokerIds.map((b) => b.brokerId) }, ...FIX, amoLeadId: { not: null } } });
+        check("карточка агентства: события с лидом amo (ссылка) есть, если они есть в БД", det.status === 200 && (dbLeads === 0 || withLead > 0), `HTTP ${det.status}, событий ${rows.length}, с лидом amo ${withLead}, в БД фиксаций с лидом ${dbLeads}`);
+      }
+    } catch (e) { check("карточка агентства: события с лидом amo", false, String(e?.message || e)); }
+
+    // ── База Анны: сцепки → linkedOurs в списке и linkedOurRecord в карточке ──
+    try {
+      const anna = await http("POST", `/loyalty-base/anna/brokers/search`, { page: 1, pageSize: 50, archived: "exclude", sortBy: "name", sortOrder: "asc", filter: {}, columns: {} });
+      const items = Array.isArray(anna.body?.items) ? anna.body.items : [];
+      const linked = items.filter((i) => i.linkedOurs?.id);
+      check("Анна: у брокеров списка есть сцепка linkedOurs (≥ 80% первой страницы)", items.length > 0 && linked.length >= Math.ceil(items.length * 0.8), `сцеплено ${linked.length} из ${items.length}`);
+      if (linked[0]) {
+        const det = await http("GET", `/loyalty-base/anna/brokers/${encodeURIComponent(linked[0].id)}`);
+        check("Анна: карточка показывает нашу карточку (linkedOurRecord)", det.status === 200 && det.body?.item?.linkedOurRecord?.id, `HTTP ${det.status}, linkedOurRecord ${det.body?.item?.linkedOurRecord?.id ? "есть" : "нет"}`);
+      }
+      const dbLinks = await prisma.loyaltyEntityLink.count({ where: { status: "CONFIRMED", revokedAt: null } });
+      check("Анна: подтверждённых сцепок в БД ≥ 6000", dbLinks >= 6000, `${dbLinks}`);
+    } catch (e) { check("Анна: сцепки", false, String(e?.message || e)); }
+
     const failed = results.filter((r) => !r.ok).length;
     console.log(`\nИтого: ${results.length - failed} PASS, ${failed} FAIL`);
     console.log("RESULT: " + JSON.stringify({ pass: results.length - failed, fail: failed, checks: results.map((r) => ({ n: r.name, ok: r.ok, d: r.detail })) }));
