@@ -751,6 +751,14 @@ export class AuthService {
           where: { phone: clientPhone, brokerId },
         });
         if (!client) {
+          // 2026-09-07 (правило владельца): дата фиксации и срок уникальности —
+          // от даты создания лида в amo, а не от момента первого входа брокера.
+          const leadCreatedAt = lead.created_at
+            ? new Date(Number(lead.created_at) * 1000)
+            : null;
+          const leadUpdatedAt = lead.updated_at
+            ? new Date(Number(lead.updated_at) * 1000)
+            : null;
           client = await this.prisma.client.create({
             data: {
               brokerId,
@@ -761,8 +769,12 @@ export class AuthService {
               amoLeadId: BigInt(lead.id),
               uniquenessStatus: "CONDITIONALLY_UNIQUE" as any,
               uniquenessExpiresAt: new Date(
-                Date.now() + 30 * 24 * 60 * 60 * 1000,
+                (leadCreatedAt ? leadCreatedAt.getTime() : Date.now()) +
+                  30 * 24 * 60 * 60 * 1000,
               ),
+              ...(leadCreatedAt ? { createdAt: leadCreatedAt } : {}),
+              amoCreatedAt: leadCreatedAt,
+              amoUpdatedAt: leadUpdatedAt,
             },
           });
         }

@@ -1,3 +1,4 @@
+import { notHistoricalClientWhere } from '../common/historical-client';
 import { BadRequestException, Injectable, Inject } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 
@@ -71,7 +72,9 @@ export class AnalyticsService {
     // только в списке /clients как «Исполнитель по фиксации».
     // Раньше был OR по responsibleBrokerId — из-за этого у Б в дашборде
     // считались клиенты, за которых он не получает ни денег, ни зачёта.
-    const clientOwnership = { brokerId } as any;
+    // 2026-09-07: исторические фиксации старого кабинета в дашборд брокера
+    // не входят (видны только ADMIN/MANAGER).
+    const clientOwnership = { brokerId, ...notHistoricalClientWhere } as any;
     const [
       totalClients,
       activeFixations,
@@ -108,7 +111,7 @@ export class AnalyticsService {
       this.prisma.client.count({
         where: {
           responsibleBrokerId: brokerId,
-          NOT: { brokerId },
+          AND: [{ NOT: { brokerId } }, notHistoricalClientWhere],
         },
       }),
       this.prisma.deal.count({ where: { brokerId } }),
@@ -667,6 +670,7 @@ export class AnalyticsService {
       this.prisma.client.count({
         where: {
           brokerId,
+          ...notHistoricalClientWhere,
           ...(hasDateFilter ? { createdAt: dateFilter } : {}),
         },
       }),
@@ -677,6 +681,7 @@ export class AnalyticsService {
       this.prisma.client.count({
         where: {
           brokerId,
+          ...notHistoricalClientWhere,
           uniquenessStatus: 'CONDITIONALLY_UNIQUE',
           ...(hasDateFilter ? { createdAt: dateFilter } : {}),
         },
