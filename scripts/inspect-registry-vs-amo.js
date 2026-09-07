@@ -22,8 +22,16 @@
  *
  * Запуск в контейнере api (workflow inspect-registry-vs-amo.yml):
  *   node /app/scripts/inspect-registry-vs-amo.js
- * Переменные: EXAMPLES (кол-во примеров на раздел, по умолчанию 25).
+ * Переменные: EXAMPLES (кол-во примеров на раздел, по умолчанию 25);
+ *             FULL_LISTS=1 — дополнительно выдать полные списки разделов в лог
+ *             строками SECTION_B64:<имя>:<i/n>:<base64 JSON> (для xlsx аналитику).
  */
+const emitSection = (name, rows) => {
+  const b64 = Buffer.from(JSON.stringify(rows), "utf8").toString("base64");
+  const CHUNK = 60000;
+  const parts = Math.ceil(b64.length / CHUNK) || 1;
+  for (let i = 0; i < parts; i++) console.log(`SECTION_B64:${name}:${i + 1}/${parts}:${b64.slice(i * CHUNK, (i + 1) * CHUNK)}`);
+};
 
 const AMO_PAGE_PAUSE_MS = 280;
 const BATCH = 250;
@@ -223,7 +231,7 @@ async function main() {
     const { leads, errors } = await fetchLeadsByIds(amo, ids);
     console.log(`Лидов запрошено: ${ids.length}; получено: ${leads.size}; ошибок страниц: ${errors}\n`);
 
-    const counts = {}; const examples = {}; const stageMatrix = {};
+    const counts = {}; const examples = {}; const stageMatrix = {}; const full = {};
     const add = (issue, line) => {
       counts[issue] = (counts[issue] || 0) + 1;
       examples[issue] = examples[issue] || [];
@@ -236,6 +244,13 @@ async function main() {
       stageMatrix[key] = (stageMatrix[key] || 0) + 1;
       const base = `${fmt(row.contractNumber)} [${fmt(row.project)}] лид ${row.amoLeadId}`;
       for (const issue of c.issues) {
+        (full[issue] = full[issue] || []).push({
+          contractNumber: row.contractNumber, project: row.project, amoLeadId: String(row.amoLeadId),
+          registrySignedAt: c.regDate ?? null, amoContractDate: c.amoDate ?? null,
+          registryAmount: c.regAmount ?? null, amoAmount: c.amoAmount ?? null,
+          registryPaidAt: row.paidAt ? new Date(row.paidAt).toISOString().slice(0, 10) : null,
+          amoStage: c.stage ?? null, amoContract: c.amoContract ?? null, brokerId: row.brokerId ?? null,
+        });
         let detail = "";
         if (issue.startsWith("date")) detail = `реестр ${fmt(c.regDate)} / amo ${fmt(c.amoDate)}`;
         else if (issue.startsWith("amount")) detail = `реестр ${fmt(c.regAmount)} / amo ${fmt(c.amoAmount)}`;
@@ -286,6 +301,14 @@ async function main() {
       console.log(`  лид ${l.id} [${PIPELINES[Number(l.pipeline_id)] || l.pipeline_id}/${stageGroup(l)}] № ${fmt(cfValueById(l, LEAD_FIELD.CONTRACT_NUMBER))} дата ${fmt(toIsoDate(cfValueById(l, LEAD_FIELD.CONTRACT_DATE)))} сумма ${fmt(toMoney(cfValueById(l, LEAD_FIELD.PRICE_DDU)))}`);
     }
 
+    if (process.env.FULL_LISTS === "1") {
+      for (const [issue, rows] of Object.entries(full)) emitSection(issue, rows);
+      emitSection("deal_leads_missing_in_registry", missing.map((l) => ({
+        amoLeadId: String(l.id), pipeline: PIPELINES[Number(l.pipeline_id)] || String(l.pipeline_id), stage: stageGroup(l),
+        contractNumber: cfValueById(l, LEAD_FIELD.CONTRACT_NUMBER), amoContractDate: toIsoDate(cfValueById(l, LEAD_FIELD.CONTRACT_DATE)),
+        amoAmount: toMoney(cfValueById(l, LEAD_FIELD.PRICE_DDU)), createdAt: toIsoDate(l.created_at), responsibleUserId: l.responsible_user_id ?? null,
+      })));
+    }
     console.log("\nRESULT: " + JSON.stringify({ total, paidTotal, withLead: withLead.length, leadsFetched: leads.size, counts, stageMatrix, dealStageLeads: dealLeads.length, dealLeadsMissingInRegistry: missing.length, missingByPipe }));
   } finally {
     await prisma.$disconnect();
