@@ -94,7 +94,7 @@ function EditMeetingModal({ meeting, onClose, onSaved }: { meeting: any; onClose
           <X className="w-5 h-5" />
         </button>
         <h2 className="text-xl font-bold mb-1">Редактировать встречу</h2>
-        <p className="text-text-muted text-sm mb-4">{meeting.client?.fullName} · {meeting.client?.phone}</p>
+        <p className="text-text-muted text-sm mb-4">{meeting.client ? `${meeting.client.fullName} · ${meeting.client.phone}` : 'Встреча с брокером (без клиента)'}</p>
 
         {err && <div className="mb-3 p-3 bg-error/20 text-error rounded-lg text-sm">{err}</div>}
 
@@ -527,7 +527,9 @@ export default function MeetingsPage() {
                         <span className="text-text-muted">{new Date(m.date).toLocaleDateString('ru-RU', { month: 'short', timeZone: 'Europe/Moscow' })}</span>
                       </div>
                       <div className="min-w-0">
-                        <div className="font-medium text-sm truncate">{m.client?.fullName}</div>
+                        {/* 2026-09-07: client nullable — импортированные встречи КЦ
+                            «с брокером» и брокер-туры клиента не имеют */}
+                        <div className="font-medium text-sm truncate">{m.client?.fullName || 'Встреча с брокером'}</div>
                         <div className="text-xs text-text-muted">
                           {typeLabels[m.type] || m.type} · {new Date(m.date).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' })}
                         </div>

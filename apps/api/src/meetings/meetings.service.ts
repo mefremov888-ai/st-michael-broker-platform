@@ -218,7 +218,10 @@ export class MeetingsService {
 
     const typeLabel = data.type === 'OFFICE_VISIT' ? 'в офисе' : data.type === 'ONLINE' ? 'онлайн' : 'брокер-тур';
     const dateStr = meetingDate.toLocaleString('ru-RU', { day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' });
-    const body = `Встреча ${typeLabel} с клиентом ${meeting.client.fullName} запланирована на ${dateStr}`;
+    // client провалидирован выше (findUnique + NotFound) — meeting.client в
+    // этом методе есть всегда, но после миграции clientId nullable тип
+    // include-а стал Client | null, поэтому берём локальную переменную.
+    const body = `Встреча ${typeLabel} с клиентом ${client.fullName} запланирована на ${dateStr}`;
 
     try {
       if (data.notifySms) {
@@ -232,7 +235,7 @@ export class MeetingsService {
         const delay = Math.max(0, reminderAt.getTime() - Date.now());
         await this.notificationQueue.add(
           'send',
-          { brokerId, channel: 'SMS', body: `Напоминание: встреча с ${meeting.client.fullName} через 2 часа (${dateStr})` },
+          { brokerId, channel: 'SMS', body: `Напоминание: встреча с ${client.fullName} через 2 часа (${dateStr})` },
           { delay },
         );
       }
@@ -269,7 +272,7 @@ export class MeetingsService {
       if (leadPipelineId && isSalesPipeline(leadPipelineId)) {
         console.log(`[createMeeting] лид ${clientForAmo.amoLeadId} в sales-pipeline ${leadPipelineId} — пропускаем amo-запись`);
       } else {
-        const note = `Брокер запланировал встречу: ${typeLabel}\nКлиент: ${meeting.client.fullName} (${meeting.client.phone})\nКогда: ${dateStr}\nКомментарий: ${meeting.comment || '(без комментария)'}`;
+        const note = `Брокер запланировал встречу: ${typeLabel}\nКлиент: ${client.fullName} (${client.phone})\nКогда: ${dateStr}\nКомментарий: ${meeting.comment || '(без комментария)'}`;
         this.amo.addNoteToLead(Number(clientForAmo.amoLeadId), note).catch((e) => {
           console.error('amoCRM addNoteToLead failed:', e?.message || e);
         });
@@ -280,7 +283,7 @@ export class MeetingsService {
         const managerId = Number(process.env.AMO_BROKER_MEETINGS_MANAGER_ID || 0);
         if (managerId) {
           const meetingTaskTypeId = Number(process.env.AMO_MEETING_TASK_TYPE_ID || 2);
-          const taskText = `Встреча ${typeLabel} с клиентом ${meeting.client.fullName} (${meeting.client.phone}). Брокер: ${broker?.fullName || '—'}.${meeting.comment ? ` Коммент: ${meeting.comment}` : ''}`;
+          const taskText = `Встреча ${typeLabel} с клиентом ${client.fullName} (${client.phone}). Брокер: ${broker?.fullName || '—'}.${meeting.comment ? ` Коммент: ${meeting.comment}` : ''}`;
           this.amo.createTask({
             text: taskText,
             entityType: 'leads',
@@ -544,15 +547,19 @@ export class MeetingsService {
       data: { actSigned: true, status: 'COMPLETED' },
     });
 
-    // Update client fixation status when act is signed
-    await this.prisma.client.update({
-      where: { id: meeting.clientId },
-      data: {
-        fixationStatus: 'FIXED',
-        fixationExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        inspectionActSigned: true,
-      },
-    });
+    // Update client fixation status when act is signed.
+    // 2026-09-07: clientId nullable (встречи «с брокером» из КЦ/брокер-туры
+    // клиента не имеют) — фиксацию обновляем только когда клиент есть.
+    if (meeting.clientId) {
+      await this.prisma.client.update({
+        where: { id: meeting.clientId },
+        data: {
+          fixationStatus: 'FIXED',
+          fixationExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          inspectionActSigned: true,
+        },
+      });
+    }
 
     await this.prisma.auditLog.create({
       data: {

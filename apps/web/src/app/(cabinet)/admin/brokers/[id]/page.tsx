@@ -379,7 +379,7 @@ export default function AdminBrokerDetailPage() {
               {meetings.map((m: any) => (
                 <div key={m.id} className="flex justify-between items-center py-2 border-b border-border last:border-0 text-sm">
                   <div>
-                    <div className="font-medium">{m.client?.fullName}</div>
+                    <div className="font-medium">{m.client?.fullName || 'Встреча с брокером'}</div>
                     <div className="text-text-muted text-xs">{m.type} · {new Date(m.date).toLocaleString('ru-RU')}</div>
                   </div>
                   <div className="text-text-muted text-xs">{m.status}</div>

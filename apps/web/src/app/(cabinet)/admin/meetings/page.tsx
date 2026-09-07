@@ -102,9 +102,11 @@ export default function AdminMeetingsPage() {
                 </div>
 
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-sm">{m.client?.fullName} <span className="text-text-muted">·</span> {typeLabels[m.type] || m.type}</div>
+                  {/* 2026-09-07: client nullable — встречи КЦ «с брокером» и
+                      брокер-туры без клиента, показываем явный фолбэк */}
+                  <div className="font-medium text-sm">{m.client?.fullName || 'Встреча с брокером'} <span className="text-text-muted">·</span> {typeLabels[m.type] || m.type}</div>
                   <div className="text-xs text-text-muted">
-                    {m.client?.phone} → брокер: <span className="text-text">{m.broker?.fullName}</span> ({m.broker?.phone})
+                    {m.client ? `${m.client.phone} → ` : ''}брокер: <span className="text-text">{m.broker?.fullName}</span> ({m.broker?.phone})
                   </div>
                   {stripMeetingAmoMarks(m.comment) && <div className="text-xs text-text-muted mt-1 whitespace-pre-wrap break-words">{stripMeetingAmoMarks(m.comment)}</div>}
                   {/* 2026-09-07: встреча PENDING с меткой backfill-а «[amo:...]» —
