@@ -1182,6 +1182,62 @@ test("maps evidence rows to readable Russian titles with details", () => {
   assert.equal(fallback.history[0].title, "Запись источника");
 });
 
+// 2026-09-07: карточка Анны несёт нашу карточку по сцепке (linkedOurRecord).
+test("normalizes the linked OUR record inside an Anna detail", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "anna-agency",
+        entityType: "AGENCY",
+        displayName: "Тренд Агент (Анна)",
+        linkedOurs: { type: "AGENCY", id: "agency-1", linkId: "link-1" },
+        linkedOurRecord: {
+          id: "agency-1",
+          entityType: "AGENCY",
+          displayName: "Trend Agent",
+          legalName: "ООО «Онлайн Недвижимость»",
+          contactPoints: [{ type: "PHONE", value: "+79060000000", isPrimary: true }],
+          metrics: { fixations: 137, meetings: 44, deals: 116, dealAmount: "2157961207.52" },
+          activities: [
+            {
+              id: "LOCAL_DEAL:REGISTRY:r1",
+              type: "DEAL",
+              occurredAt: "2024-03-25T00:00:00.000Z",
+              amount: "11761691",
+              contractNumber: "СБ2-5-1с-190",
+              amoLeadId: "30445106",
+            },
+          ],
+        },
+      },
+    },
+    "agencies",
+  );
+  assert.deepEqual(detail.linkedOurs, {
+    type: "agencies",
+    id: "agency-1",
+    linkId: "link-1",
+  });
+  assert.ok(detail.linkedOurRecord);
+  assert.equal(detail.linkedOurRecord?.name, "Trend Agent");
+  assert.equal(detail.linkedOurRecord?.entityType, "agencies");
+  assert.equal(detail.linkedOurRecord?.phone, "+79060000000");
+  assert.equal(detail.linkedOurRecord?.annaDetails.legalName, "ООО «Онлайн Недвижимость»");
+  assert.equal(detail.linkedOurRecord?.deals, 116);
+  assert.equal(detail.linkedOurRecord?.history[0]?.title, "Сделка");
+  assert.equal(
+    detail.linkedOurRecord?.history[0]?.details?.find((r) => r.label === "Лид amoCRM")?.href,
+    "https://stmichael.amocrm.ru/leads/detail/30445106",
+  );
+  // Без сцепки — null, вложенная запись игнорируется.
+  const plain = normalizeLoyaltyDetail(
+    { item: { id: "x", entityType: "AGENCY", displayName: "X", linkedOurRecord: { id: "y" } } },
+    "agencies",
+  );
+  assert.equal(plain.linkedOurs, null);
+  assert.equal(plain.linkedOurRecord, null);
+});
+
 // 2026-09-07: коды точности/доступности переводятся на русский для карточки.
 test("translates metric source labels and exactness codes to Russian", () => {
   assert.equal(loyaltyExactnessLabelRu("VERIFIED"), "проверено");

@@ -235,6 +235,62 @@ function BrokerProfile({ record }: { record: LoyaltyRecord }) {
   );
 }
 
+/**
+ * 2026-09-07: блок «Наша карточка по сцепке» в карточке базы Анны —
+ * телефон, email, amoCRM, метрики кабинета и профиль нашей записи.
+ */
+function LinkedOurRecordSummary({ linked }: { linked: LoyaltyRecord }) {
+  const counts = [
+    linked.fixations === null ? "—" : String(linked.fixations),
+    linked.meetings === null ? "—" : String(linked.meetings),
+    linked.deals === null ? "—" : String(linked.deals),
+  ].join(" / ");
+  return (
+    <div className="space-y-3 rounded-xl border border-accent/40 bg-accent/5 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <span className="text-xs uppercase tracking-wide text-text-muted">
+            Наша база · сцепка подтверждена
+          </span>
+          <h3 className="font-semibold">{linked.name}</h3>
+          {linked.cabinetFullName && (
+            <p className="text-xs text-text-muted">
+              в кабинете: {linked.cabinetFullName}
+            </p>
+          )}
+        </div>
+        {linked.amoContactUrl && (
+          <a
+            className="btn btn-secondary"
+            href={linked.amoContactUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            amoCRM <ExternalLink className="h-4 w-4" />
+          </a>
+        )}
+      </div>
+      <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="Телефон">{text(linked.phone)}</Metric>
+        <Metric label="Email">{text(linked.email)}</Metric>
+        <Metric label="Фиксации / встречи / сделки">{counts}</Metric>
+        <Metric label="Сумма ДДУ">
+          {formatRubles(linked.dealAmount ?? null).replace("—", "Нет данных")}
+        </Metric>
+      </dl>
+      {linked.entityType === "brokers" ? (
+        <BrokerProfile record={linked} />
+      ) : (
+        <AgencyProfile record={linked} />
+      )}
+      <p className="text-xs text-text-muted">
+        Данные кабинета по подтверждённой сцепке: телефоны, юрназвание,
+        ссылки amoCRM и события берутся из нашей базы и обновляются вместе с ней.
+      </p>
+    </div>
+  );
+}
+
 function AgencyProfile({ record }: { record: LoyaltyRecord }) {
   const details = record.annaDetails;
   return (
@@ -2032,6 +2088,12 @@ function DetailBody({
           ) : (
             <AgencyProfile record={record} />
           )}
+          {/* 2026-09-07: данные нашей карточки по сцепке (сверка → LINK):
+              всё, что найдено/дополнено для нашей базы (телефоны,
+              юрназвание, amoCRM, сделки), видно и в карточке Анны. */}
+          {record.linkedOurRecord && (
+            <LinkedOurRecordSummary linked={record.linkedOurRecord} />
+          )}
           {record.metricSource && (
             <div className="rounded-xl border border-accent/25 bg-accent/5 p-3 text-sm">
               {/* 2026-09-07: источник и точность — по-русски; пустое
@@ -2397,6 +2459,24 @@ function DetailBody({
             evidence={record.activityEvidence}
             empty="События-основания в ответе отсутствуют."
           />
+          {/* 2026-09-07: события нашей карточки по сцепке — фиксации,
+              встречи, сделки кабинета и реестра ДДУ, ссылки на amoCRM. */}
+          {record.linkedOurRecord && (
+            <>
+              <h3 className="font-semibold">
+                События нашей карточки по сцепке ·{" "}
+                {record.linkedOurRecord.name}
+              </h3>
+              <Timeline
+                items={record.linkedOurRecord.history.filter(
+                  (item) => !/call|звон/i.test(`${item.type} ${item.title}`),
+                )}
+                entityType={record.linkedOurRecord.entityType}
+                evidence={record.linkedOurRecord.activityEvidence}
+                empty="В нашей карточке событий пока нет."
+              />
+            </>
+          )}
         </div>
       )}
       {tab === "calls" && (
