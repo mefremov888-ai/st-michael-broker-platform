@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Inject } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
-import { FIXATION_CLIENT_WHERE } from '../loyalty-base/loyalty-base.service';
+import { fixationClientWhere } from '../loyalty-base/loyalty-base.service';
 import {
   SERIES_MAX_BUCKETS,
   SeriesBucket,
@@ -168,6 +168,7 @@ export class RegistryDealsService {
     to?: string;
     granularity?: SeriesGranularity;
     project?: SeriesProject;
+    cabinetSource?: 'old' | 'new' | 'all';
   }): Promise<RegistrySeries> {
     const granularity: SeriesGranularity = query.granularity || 'month';
     const now = new Date();
@@ -206,7 +207,7 @@ export class RegistryDealsService {
       }),
       this.prisma.client.findMany({
         where: {
-          ...FIXATION_CLIENT_WHERE,
+          ...fixationClientWhere(query.cabinetSource),
           createdAt: range,
           broker: { is: { role: 'BROKER', mergedIntoId: null } },
           ...projectWhere,

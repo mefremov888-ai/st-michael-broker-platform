@@ -305,6 +305,8 @@ export interface LoyaltyCanonicalFilter {
   // «Не звонить» (Broker.doNotCall) — только «Наша база»/брокеры.
   // Отсутствие значения = показать всех (по умолчанию).
   doNotCall?: "exclude" | "only";
+  // Источник фиксаций «старый / новый кабинет / оба» — только «Наша база».
+  cabinetSource?: "old" | "new" | "all";
 }
 
 export interface LoyaltyColumnFilters {
@@ -2738,9 +2740,13 @@ const queryString = (entries: object) => {
 export async function getLoyaltyOverview(
   base: LoyaltyBaseKey,
   range?: { from: string; to: string },
+  options?: { cabinetSource?: "old" | "new" | "all" },
 ) {
   const value = await apiGet<unknown>(
-    `/loyalty-base/${base}/overview${queryString(range || {})}`,
+    `/loyalty-base/${base}/overview${queryString({
+      ...(range || {}),
+      cabinetSource: options?.cabinetSource,
+    })}`,
   );
   return normalizeLoyaltyOverview(value, base);
 }
@@ -2826,13 +2832,17 @@ export async function getLoyaltyDetail(
   entityType: LoyaltyEntityType,
   id: string,
   // 2026-09-07: выбранный «Период встреч и сделок» применяется и к карточке.
-  options?: { activityPeriod?: { from: string; to: string } },
+  options?: {
+    activityPeriod?: { from: string; to: string };
+    cabinetSource?: "old" | "new" | "all";
+  },
 ) {
   const period = options?.activityPeriod;
   const value = await apiGet<unknown>(
-    `/loyalty-base/${base}/${entityType}/${encodeURIComponent(id)}${queryString(
-      period ? { from: period.from, to: period.to } : {},
-    )}`,
+    `/loyalty-base/${base}/${entityType}/${encodeURIComponent(id)}${queryString({
+      ...(period ? { from: period.from, to: period.to } : {}),
+      cabinetSource: options?.cabinetSource,
+    })}`,
   );
   return normalizeLoyaltyDetail(value, entityType);
 }

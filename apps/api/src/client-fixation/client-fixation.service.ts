@@ -1,4 +1,5 @@
 import {
+  cabinetSourceWhere,
   isHistoricalClient,
   notHistoricalClientWhere,
 } from "../common/historical-client";
@@ -1642,6 +1643,7 @@ export class ClientFixationService {
       search?: string;
       brokerId?: string;
       asStaff?: boolean;
+      cabinetSource?: string;
     },
   ) {
     const page = Number(query.page) || 1;
@@ -1690,6 +1692,12 @@ export class ClientFixationService {
       where.AND = [
         ...(Array.isArray(where.AND) ? where.AND : []),
         notHistoricalClientWhere,
+      ];
+    } else if (query.cabinetSource === "old" || query.cabinetSource === "new") {
+      // Сотрудник: фильтр источника «старый / новый кабинет» (пусто = оба).
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : []),
+        cabinetSourceWhere(query.cabinetSource),
       ];
     }
 

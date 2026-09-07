@@ -113,6 +113,8 @@ export class ClientFixationController {
       project: query.project,
       search: query.search,
       brokerId: typeof query.brokerId === 'string' ? query.brokerId : undefined,
+      // 2026-09-07: источник «старый / новый кабинет» (только для ADMIN/MANAGER).
+      cabinetSource: typeof query.cabinetSource === 'string' ? query.cabinetSource : undefined,
       asStaff: user.role === 'ADMIN' || user.role === 'MANAGER',
     });
   }
