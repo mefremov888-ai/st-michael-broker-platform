@@ -187,8 +187,16 @@ function pickCompanyFields(customFields) {
  *   agencies:  [{id, name, legalName, inn, phone, address}]
  * Возвращает { stats, updates, examples }.
  */
-function planEnrichment(companies, agencies) {
+function planEnrichment(companies, agencies, options = {}) {
+  // 2026-09-07: исключения по решению владельца — карточки с этими ИНН не
+  // трогаем (пример: «Агентство 7707083893» по ИНН мэтчится на компанию amo
+  // «не работаем», адрес от неё брать нельзя). Передаётся через env
+  // EXCLUDE_AGENCY_INNS="7707083893,..." (workflow input exclude_inns).
+  const excludeInns = new Set(
+    (options.excludeInns || []).map((v) => String(v).trim()).filter(Boolean),
+  );
   const stats = {
+    excludedByOwner: 0,
     companiesTotal: companies.length,
     agenciesTotal: agencies.length,
     ambiguousAgencies: 0, // 2+ карточки с одним ключом — все пропущены
@@ -254,6 +262,10 @@ function planEnrichment(companies, agencies) {
   const examples = [];
 
   for (const a of agencies) {
+    if (excludeInns.has(String(a.inn ?? "").trim())) {
+      stats.excludedByOwner++;
+      continue;
+    }
     if (ambiguousAgencyIds.has(a.id)) {
       stats.ambiguousAgencies++;
       continue;
@@ -358,6 +370,7 @@ function printReport(stats, updates, examples) {
   console.log(`Заполнится настоящий ИНН:           ${stats.fillInn}`);
   console.log(`  конфликтов ИНН (занят, пропуск):  ${stats.innConflict}`);
   console.log(`Неоднозначных карточек (пропуск):   ${stats.ambiguousAgencies}`);
+  console.log(`Исключено по решению владельца:     ${stats.excludedByOwner}`);
   console.log(`Неоднозначных ключей компаний:      ${stats.ambiguousCompanyKeys}`);
   console.log(
     `Ответственный известен (некуда писать, у Agency нет поля): ${stats.responsibleKnown}`,
@@ -484,7 +497,15 @@ async function main() {
       },
     });
 
-    const { stats, updates, examples } = planEnrichment(companies, agencies);
+    const excludeInns = String(process.env.EXCLUDE_AGENCY_INNS || "")
+      .split(/[,\s;]+/)
+      .filter(Boolean);
+    if (excludeInns.length) {
+      console.log(`Исключены по решению владельца (ИНН): ${excludeInns.join(", ")}`);
+    }
+    const { stats, updates, examples } = planEnrichment(companies, agencies, {
+      excludeInns,
+    });
     printReport(stats, updates, examples);
 
     if (dryRun) {
