@@ -4,9 +4,11 @@ import {
   GoneException,
 } from "@nestjs/common";
 import {
+  AGENCY_KEY_ALIASES,
   LoyaltyBaseService,
   MAX_LOYALTY_CLI_IMPORT_BYTES,
   activeFixationClientWhere,
+  canonicalAgencyMatchKey,
   explicitGeography,
   isLoyaltyAcquisitionPhone,
   loyaltyContentHash,
@@ -47,6 +49,26 @@ describe("loyalty filter boundary helpers", () => {
     expect(normalizeAgencyMatchKey("ООО Ромашка")).not.toBe(
       normalizeAgencyMatchKey("ООО Василёк"),
     );
+  });
+
+  it("maps historical registry agency names onto the canonical card key", () => {
+    // «Trend Agent» из реестра и карточка «ООО «Онлайн Недвижимость»» —
+    // один ключ через алиас.
+    expect(canonicalAgencyMatchKey("Trend Agent")).toBe(
+      canonicalAgencyMatchKey("ООО «Онлайн Недвижимость»"),
+    );
+    expect(canonicalAgencyMatchKey("Нмаркет.Про")).toBe(
+      canonicalAgencyMatchKey("Нмаркет"),
+    );
+    // Значения алиасов — валидные нормализованные ключи.
+    for (const [alias, target] of Object.entries(AGENCY_KEY_ALIASES)) {
+      expect(normalizeAgencyMatchKey(alias)).toBe(alias);
+      expect(normalizeAgencyMatchKey(target)).toBe(target);
+    }
+    // Без алиаса поведение идентично normalizeAgencyMatchKey.
+    expect(canonicalAgencyMatchKey('ООО "Ромашка"')).toBe("ромашка");
+    expect(canonicalAgencyMatchKey("")).toBeNull();
+    expect(canonicalAgencyMatchKey(null)).toBeNull();
   });
 
   it("excludes Moscow landlines from broker acquisition", () => {
@@ -5354,6 +5376,112 @@ describe("LoyaltyBaseService", () => {
     // rd-1 (через брокера) + rd-2 (по названию); rd-1 не задвоен, rd-3 чужой.
     expect(result.items[0].metrics.deals).toBe(2);
     expect(result.items[0].metrics.dealAmount).toBe("300000.00");
+  });
+
+  it("attributes registry deals through AGENCY_KEY_ALIASES with dedup intact", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.agency.findMany.mockResolvedValue([
+      {
+        id: "agency-online",
+        name: "ООО «Онлайн Недвижимость»",
+        legalName: null,
+        inn: null,
+        phone: "+74950000000",
+        email: null,
+        brokerAgencies: [
+          {
+            isPrimary: true,
+            broker: {
+              id: "broker-1",
+              fullName: "Broker",
+              phone: "+79990000001",
+              email: null,
+              lastCallAt: null,
+              brokerTourVisited: false,
+              brokerTourDate: null,
+              clients: [],
+              meetings: [],
+              deals: [],
+              callLogs: [],
+            },
+          },
+        ],
+        deals: [],
+        _count: { brokerAgencies: 1 },
+      },
+      {
+        id: "agency-nmarket",
+        name: "Нмаркет",
+        legalName: null,
+        inn: null,
+        phone: "+74950000001",
+        email: null,
+        brokerAgencies: [],
+        deals: [],
+        _count: { brokerAgencies: 0 },
+      },
+    ]);
+    prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
+    prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
+    prisma.registryDeal.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?.where?.brokerId
+          ? // Канал по брокеру: rd-1 привязана к broker-1.
+            [
+              {
+                id: "rd-1",
+                brokerId: "broker-1",
+                signedAt: new Date("2026-08-10T00:00:00.000Z"),
+                amount: "100000.00",
+              },
+            ]
+          : // Канал по названию: rd-1 «trend agent» — дубль через алиас, не
+            // должна добавиться второй раз; rd-2 «Trend Agent» → карточка
+            // «ООО «Онлайн Недвижимость»»; rd-3 «Нмаркет.Про» → «Нмаркет».
+            [
+              {
+                id: "rd-1",
+                agencyCanonical: "trend agent",
+                agencyNameRaw: null,
+                signedAt: new Date("2026-08-10T00:00:00.000Z"),
+                amount: "100000.00",
+              },
+              {
+                id: "rd-2",
+                agencyCanonical: "Trend Agent",
+                agencyNameRaw: null,
+                signedAt: new Date("2026-08-12T00:00:00.000Z"),
+                amount: "200000.00",
+              },
+              {
+                id: "rd-3",
+                agencyCanonical: "Нмаркет.Про",
+                agencyNameRaw: null,
+                signedAt: new Date("2026-08-13T00:00:00.000Z"),
+                amount: "50000.00",
+              },
+            ],
+      ),
+    );
+
+    const result: any = await service.list(
+      "ours",
+      "AGENCY",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { dealCount: { min: 1 } } as any,
+    );
+
+    const byId = new Map(
+      result.items.map((item: any) => [item.id, item.metrics]),
+    );
+    // rd-1 (через брокера) + rd-2 (по алиасу); rd-1 не задвоена.
+    expect((byId.get("agency-online") as any)?.deals).toBe(2);
+    expect((byId.get("agency-online") as any)?.dealAmount).toBe("300000.00");
+    // «Нмаркет.Про» из реестра попадает карточке «Нмаркет».
+    expect((byId.get("agency-nmarket") as any)?.deals).toBe(1);
+    expect((byId.get("agency-nmarket") as any)?.dealAmount).toBe("50000.00");
   });
 
   it("counts the OUR top agency by the agency-card union rule with dedup", async () => {
