@@ -81,7 +81,8 @@ async function main() {
     const oldOnly = await search("brokers", { cabinetSource: "old" }, { activity: "HAS_FIXATIONS" });
     const newOnly = await search("brokers", { cabinetSource: "new" }, { activity: "HAS_FIXATIONS" });
     const dbOld = await prisma.broker.count({ where: { role: "BROKER", mergedIntoId: null, clients: { some: { AND: [FIX, { comment: { startsWith: HIST } }] } } } });
-    const dbNew = await prisma.broker.count({ where: { role: "BROKER", mergedIntoId: null, clients: { some: { AND: [FIX, { NOT: { comment: { startsWith: HIST } } }] } } } });
+    const NOT_HIST = { OR: [{ comment: null }, { NOT: { comment: { startsWith: HIST } } }] }; // как notHistoricalClientWhere (NULL-safe)
+    const dbNew = await prisma.broker.count({ where: { role: "BROKER", mergedIntoId: null, clients: { some: { AND: [FIX, NOT_HIST] } } } });
     check("источник: старый кабинет = БД", oldOnly.total === dbOld, `API ${oldOnly.total} vs БД ${dbOld}`);
     check("источник: новый кабинет = БД", newOnly.total === dbNew, `API ${newOnly.total} vs БД ${dbNew}`);
     check("источник: old ≤ оба и new ≤ оба", oldOnly.total <= has.total && newOnly.total <= has.total, `${oldOnly.total}, ${newOnly.total} ≤ ${has.total}`);
@@ -111,13 +112,19 @@ async function main() {
     check("обзор: сделки реестра (paidAt, с брокером) за 30 дней ≤ activities.deals", Number(ov.body?.activities?.deals) >= dbPaid, `API ${ov.body?.activities?.deals} vs реестр ${dbPaid}`);
 
     // ── Агентства: «Есть фиксации» ──
-    const agAll = await search("agencies");
+    // Список агентств по умолчанию скрывает «малозаметные» карточки (без активности),
+    // а явный фильтр активности этот порог снимает — поэтому сумму сверяем с
+    // includeLowSignal=true.
+    const agAll = await search("agencies", { includeLowSignal: true });
     const agHas = await search("agencies", {}, { activity: "HAS_FIXATIONS" });
     const agNone = await search("agencies", {}, { activity: "NO_FIXATIONS" });
-    check("агентства: HAS_FIXATIONS + NO_FIXATIONS = всего", agHas.total + agNone.total === agAll.total, `${agHas.total} + ${agNone.total} vs ${agAll.total}`);
+    check("агентства: HAS_FIXATIONS + NO_FIXATIONS = всего (с малозаметными)", agHas.total + agNone.total === agAll.total, `${agHas.total} + ${agNone.total} vs ${agAll.total}`);
     check("агентства: у строк HAS_FIXATIONS metrics.fixations > 0", agHas.items.every((i) => Number(i.metrics?.fixations) > 0), `проверено ${agHas.items.length}`);
-    const dbAgHas = await prisma.agency.count({ where: { brokerAgencies: { some: { broker: { role: "BROKER", mergedIntoId: null, clients: { some: FIX } } } } } });
-    check("агентства: HAS_FIXATIONS ≈ БД (агентства с брокером с фиксацией)", agHas.total === dbAgHas, `API ${agHas.total} vs БД ${dbAgHas} (расхождение = правило low-signal/архив, смотреть текст)`);
+    // Фиксация агентства: через брокера агентства ИЛИ прямая привязка заявки (fixationAgencyId).
+    const dbAgViaBroker = await prisma.agency.findMany({ where: { brokerAgencies: { some: { broker: { role: "BROKER", mergedIntoId: null, clients: { some: FIX } } } } }, select: { id: true } });
+    const directIds = await prisma.client.findMany({ where: { ...FIX, fixationAgencyId: { not: null } }, select: { fixationAgencyId: true }, distinct: ["fixationAgencyId"] });
+    const dbAgHas = new Set([...dbAgViaBroker.map((a) => a.id), ...directIds.map((c) => c.fixationAgencyId)]).size;
+    check("агентства: HAS_FIXATIONS = БД (через брокера или прямая привязка)", agHas.total === dbAgHas, `API ${agHas.total} vs БД ${dbAgHas}`);
     const agOld = await search("agencies", { cabinetSource: "old" }, { activity: "HAS_FIXATIONS" });
     const agNew = await search("agencies", { cabinetSource: "new" }, { activity: "HAS_FIXATIONS" });
     check("агентства: источник old/new ≤ оба", agOld.total <= agHas.total && agNew.total <= agHas.total, `${agOld.total}, ${agNew.total} ≤ ${agHas.total}`);
