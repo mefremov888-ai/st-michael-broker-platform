@@ -106,7 +106,7 @@ async function main() {
           select: {
             id: true, createdAt: true, fullName: true, phone: true, email: true, project: true,
             uniquenessStatus: true, uniquenessExpiresAt: true, fixationStatus: true, fixationExpiresAt: true,
-            amoLeadId: true, comment: true, brokerId: true, responsibleBrokerId: true, propertyType: true, budget: true,
+            amoLeadId: true, comment: true, brokerId: true, responsibleBrokerId: true, propertyType: true,
           },
           orderBy: { createdAt: "asc" },
         })
@@ -121,7 +121,6 @@ async function main() {
       clientEmail: c.email,
       project: c.project,
       propertyType: c.propertyType || null,
-      budget: c.budget === null || c.budget === undefined ? null : String(c.budget),
       uniquenessStatus: c.uniquenessStatus,
       uniquenessExpiresAt: iso(c.uniquenessExpiresAt),
       fixationStatus: c.fixationStatus,
@@ -139,7 +138,7 @@ async function main() {
           select: {
             id: true, createdAt: true, signedAt: true, status: true, amount: true, commissionAmount: true, project: true,
             contractType: true, brokerId: true, amoDealId: true, client: { select: { fullName: true, phone: true } },
-            lot: { select: { number: true, floor: true, area: true, building: true } },
+            lot: { select: { number: true, floor: true, sqm: true, building: true } },
           },
           orderBy: { signedAt: "asc" },
         })
@@ -156,7 +155,7 @@ async function main() {
       contractType: d.contractType || null,
       amount: d.amount === null ? null : String(d.amount),
       commission: d.commissionAmount === null || d.commissionAmount === undefined ? null : String(d.commissionAmount),
-      lot: d.lot ? `${d.lot.number || ""}${d.lot.building ? ` / ${d.lot.building}` : ""}${d.lot.floor ? ` / эт. ${d.lot.floor}` : ""}${d.lot.area ? ` / ${d.lot.area} м²` : ""}` : null,
+      lot: d.lot ? `${d.lot.number || ""}${d.lot.building ? ` / ${d.lot.building}` : ""}${d.lot.floor ? ` / эт. ${d.lot.floor}` : ""}${d.lot.sqm ? ` / ${d.lot.sqm} м²` : ""}` : null,
       amoLeadId: d.amoDealId ? String(d.amoDealId) : null,
     }));
     console.log(`Сделок (Deal): ${dealRows.length}`);
@@ -200,13 +199,13 @@ async function main() {
     const meetings = brokerIds.length
       ? await prisma.meeting.findMany({
           where: { brokerId: { in: brokerIds } },
-          select: { date: true, status: true, brokerId: true, project: true, client: { select: { fullName: true, phone: true } } },
+          select: { date: true, status: true, brokerId: true, client: { select: { fullName: true, phone: true, project: true } } },
           orderBy: { date: "asc" },
         })
       : [];
     const meetingRows = meetings.map((m) => ({
       date: iso(m.date), status: m.status, broker: brokerName.get(m.brokerId) || m.brokerId,
-      client: m.client?.fullName || null, clientPhone: m.client?.phone || null, project: m.project || null,
+      client: m.client?.fullName || null, clientPhone: m.client?.phone || null, project: m.client?.project || null,
     }));
     console.log(`Встреч: ${meetingRows.length}`);
 

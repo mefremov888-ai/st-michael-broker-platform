@@ -58,12 +58,17 @@ function cfValueById(entity, fieldId) {
   return null;
 }
 
-/** unix-секунды / ISO / «дд.мм.гггг» → YYYY-MM-DD (UTC-дата), иначе null. */
+/**
+ * unix-секунды / ISO / «дд.мм.гггг» → YYYY-MM-DD, иначе null.
+ * Поля-даты amo приходят как unix-секунды полуночи по Москве (UTC+3):
+ * без сдвига UTC-дата получается на сутки раньше — добавляем 3 часа.
+ */
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 function toIsoDate(value) {
   if (value === null || value === undefined || value === "") return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
   const s = String(value).trim();
-  if (/^\d{9,11}$/.test(s)) return new Date(Number(s) * 1000).toISOString().slice(0, 10);
+  if (/^\d{9,11}$/.test(s)) return new Date(Number(s) * 1000 + MSK_OFFSET_MS).toISOString().slice(0, 10);
   const ru = s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
   if (ru) return `${ru[3]}-${ru[2]}-${ru[1]}`;
   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -115,7 +120,11 @@ function compareRow(row, lead) {
 
   const amoContract = cfValueById(lead, LEAD_FIELD.CONTRACT_NUMBER);
   out.amoContract = amoContract;
-  if (amoContract && contractKey(amoContract) !== contractKey(row.contractNumber)) out.issues.push("contract_mismatch");
+  // В amo № договора часто с довеском («…-240» — номер квартиры, «ДВОУ …»):
+  // совпадением считаем, если один ключ содержит другой.
+  const a = contractKey(amoContract);
+  const r = contractKey(row.contractNumber);
+  if (amoContract && !(a === r || (r && a.includes(r)) || (a && r.includes(a)))) out.issues.push("contract_mismatch");
   else if (!amoContract) out.issues.push("contract_missing_in_amo");
 
   const amoProject = PIPELINES[Number(lead.pipeline_id)] || "OTHER_PIPELINE";
