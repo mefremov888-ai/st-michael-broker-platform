@@ -1875,6 +1875,11 @@ export class AmoCrmAdapter {
     clientPhone: string;
     clientEmail?: string; // правка 2026-05-15: записывается на контакт
     clientName: string;
+    // 2026-09-07: ФИО агента и кто фактически подал заявку (координатор) —
+    // только для примечания лида, чтобы КЦ видел агента не по одному телефону.
+    brokerName?: string;
+    filedByName?: string;
+    filedByPhone?: string;
     clientRegion?: string; // правка 2026-05-22: регион клиента (REGION=589265)
     presentationSent?: boolean; // правка 2026-05-22: «Отправлена презентация» на контакт клиента
     existingClientAmoContactId?: number;
@@ -2313,7 +2318,14 @@ export class AmoCrmAdapter {
       if (data.readinessLevel)
         lines.push(`Готовность к сделке: ${data.readinessLevel}`);
       lines.push(``);
-      lines.push(`Брокер-агент: ${data.brokerPhone}`);
+      lines.push(
+        `Брокер-агент: ${data.brokerName ? `${data.brokerName}, ` : ""}${data.brokerPhone}`,
+      );
+      if (data.filedByName) {
+        lines.push(
+          `Подал координатор: ${data.filedByName}${data.filedByPhone ? ` (${data.filedByPhone})` : ""}`,
+        );
+      }
       lines.push(`Агентство: ${data.agencyName} (ИНН ${data.agencyInn})`);
       if (data.comment) {
         lines.push(``);

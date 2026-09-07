@@ -637,7 +637,18 @@ export default function ClientsPage() {
           <div className="text-center py-8 text-text-muted">Загрузка...</div>
         ) : clients.length === 0 ? (
           <div className="text-center py-8 text-text-muted">
-            Клиенты появятся после синхронизации с amoCRM
+            {search || statusFilter || projectFilter || sourceFilter ? (
+              <>По выбранным условиям заявок нет. Сбросьте фильтры или измените поиск.</>
+            ) : (
+              <>
+                <div className="font-medium text-text">Заявок пока нет</div>
+                <div className="mt-2 text-sm max-w-xl mx-auto">
+                  Заявка привязывается к брокеру по номеру телефона. Если вы подавали заявку
+                  или её подавали на вас, а здесь пусто — проверьте, под каким номером вы
+                  вошли в кабинет, или напишите в поддержку с телефоном клиента: мы найдём заявку.
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <>
@@ -663,7 +674,21 @@ export default function ClientsPage() {
                       className="border-b border-border last:border-0 hover:bg-surface-secondary cursor-pointer transition"
                       onClick={() => setSelectedClient(c)}
                     >
-                      <td className="py-3 font-medium">{c.fullName}</td>
+                      <td className="py-3 font-medium">
+                        {c.fullName}
+                        {/* 2026-09-07 (решение владельца): брокер видит, кто подал
+                            заявку на него и на кого подал он. */}
+                        {!isStaff && c.broker && c.broker.id !== broker?.id && (
+                          <div className="text-xs text-text-muted font-normal">
+                            Подал: {c.broker.fullName}{c.broker.isCoordinator ? ' (координатор)' : ''}
+                          </div>
+                        )}
+                        {!isStaff && c.responsibleBroker && c.responsibleBroker.id !== broker?.id && c.broker?.id === broker?.id && (
+                          <div className="text-xs text-text-muted font-normal">
+                            На брокера: {c.responsibleBroker.fullName}
+                          </div>
+                        )}
+                      </td>
                       <td className="py-3 text-text-muted">{formatPhone(c.phone)}</td>
                       {isStaff && (
                         <td className="py-3">

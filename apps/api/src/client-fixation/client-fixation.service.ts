@@ -162,6 +162,44 @@ function amoCreateOutcomeWrite(
   };
 }
 
+/**
+ * 2026-09-07: конфликт «номер занят другой карточкой». Тот же человек, если у
+ * ФИО есть общее слово длиной ≥ 3 (порядок/склонение не важны). Экспорт для
+ * тестов.
+ */
+export function brokerPhoneConflict(
+  existing: { fullName?: string | null; status?: string | null; mergedIntoId?: string | null },
+  requestedName: string,
+): string | null {
+  const words = (v: string | null | undefined) =>
+    new Set(
+      String(v || "")
+        .toLowerCase()
+        .replace(/ё/g, "е")
+        .split(/[^a-zа-я]+/i)
+        .filter((w) => w.length >= 3),
+    );
+  const a = words(existing.fullName);
+  const b = words(requestedName);
+  const samePerson = [...a].some((w) => b.has(w));
+  const statusLabel =
+    existing.status === "PENDING"
+      ? "ожидает активации"
+      : existing.status === "BLOCKED"
+        ? "заблокирован"
+        : "активен";
+  if (existing.mergedIntoId) {
+    return `Этот номер принадлежит карточке «${existing.fullName}», объединённой с другой. Уточните номер или обратитесь в поддержку.`;
+  }
+  if (existing.status === "BLOCKED") {
+    return `Этот номер принадлежит заблокированному брокеру «${existing.fullName}». Обратитесь в поддержку.`;
+  }
+  if (!samePerson) {
+    return `Этот номер уже зарегистрирован на брокера «${existing.fullName}» (${statusLabel}). Заявка привязывается к брокеру по телефону — проверьте номер. Если это тот же человек с другим написанием ФИО, обратитесь в поддержку.`;
+  }
+  return null;
+}
+
 @Injectable()
 export class ClientFixationService {
   // 2026-06-04: прямой webhook в Morekit (без посредничества Salesbot).
@@ -297,6 +335,18 @@ export class ClientFixationService {
       if (!candidate) {
         throw new BadRequestException(
           "Указанный ответственный брокер не найден",
+        );
+      }
+      // 2026-09-07: заявку нельзя повесить на заблокированную или слитую
+      // карточку — её владелец не сможет её увидеть.
+      if ((candidate as any).status === "BLOCKED") {
+        throw new BadRequestException(
+          "Указанный ответственный брокер заблокирован — выберите другого или обратитесь в поддержку",
+        );
+      }
+      if ((candidate as any).mergedIntoId) {
+        throw new BadRequestException(
+          "Карточка ответственного брокера объединена с другой — выберите актуальную карточку",
         );
       }
       responsibleBroker = candidate;
@@ -729,6 +779,13 @@ export class ClientFixationService {
           clientRegion: data.clientRegion,
           presentationSent: data.presentationSent,
           brokerPhone: responsibleBroker.phone,
+          // 2026-09-07: в примечании лида — ФИО агента и кто фактически подал
+          // (координатор), чтобы КЦ видел несоответствие агента и телефона.
+          brokerName: responsibleBroker.fullName,
+          filedByName:
+            responsibleBroker.id !== broker.id ? broker.fullName : undefined,
+          filedByPhone:
+            responsibleBroker.id !== broker.id ? broker.phone : undefined,
           brokerAmoContactId,
           agencyName: agency?.name ?? "не привязано",
           agencyInn: agency?.inn ?? cleanAgencyInn,
@@ -2054,16 +2111,35 @@ export class ClientFixationService {
         phone: true,
         email: true,
         isCoordinator: true,
+        status: true,
+        mergedIntoId: true,
       },
     });
     if (existingByPhone) {
+      // 2026-09-07 (кейс Кравченко/Климшина, решение владельца): номер уже
+      // зарегистрирован на ДРУГОГО человека или карточка заблокирована/слита —
+      // не «молча уходим на него», а возвращаем понятный конфликт. Тот же
+      // человек с другим написанием ФИО (есть общее слово) — как раньше.
+      const conflict = brokerPhoneConflict(existingByPhone, data.fullName);
+      if (conflict) {
+        throw new BadRequestException({
+          message: conflict,
+          field: "phone",
+          code: "BROKER_PHONE_CONFLICT",
+          existing: {
+            fullName: existingByPhone.fullName,
+            status: existingByPhone.status,
+          },
+        });
+      }
       await this.ensureBrokerAmoContact(existingByPhone.id).catch((e: any) => {
         console.error(
           "[createBrokerByCreator] existing broker amo sync failed:",
           e?.message || e,
         );
       });
-      return { broker: existingByPhone, created: false };
+      const { status, mergedIntoId, ...publicBroker } = existingByPhone;
+      return { broker: publicBroker, created: false, status };
     }
     if (data.email) {
       const existingByEmail = await this.prisma.broker.findFirst({
