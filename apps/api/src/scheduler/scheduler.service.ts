@@ -648,7 +648,9 @@ export class SchedulerService {
     }
   }
   private async fanOutMeetingReminder(
-    m: { id: string; brokerId: string; date: Date; type: string; client: { fullName: string; phone: string }; broker: { telegramChatId: bigint | null } },
+    // 2026-09-07: client nullable — у импортированных встреч «с брокером»
+    // (КЦ) и брокер-туров клиента нет; напоминание тогда без имени клиента.
+    m: { id: string; brokerId: string; date: Date; type: string; client: { fullName: string; phone: string } | null; broker: { telegramChatId: bigint | null } },
     when: string,
   ) {
     const dateStr = new Date(m.date).toLocaleString('ru-RU', {
@@ -656,7 +658,8 @@ export class SchedulerService {
     });
     const typeLabel = m.type === 'OFFICE_VISIT' ? 'в офисе' : m.type === 'ONLINE' ? 'онлайн' : 'брокер-тур';
     const subject = `Напоминание о встрече`;
-    const body = `Напоминание: встреча ${typeLabel} с ${m.client.fullName} (${m.client.phone}) через ${when} — ${dateStr}.`;
+    const withWhom = m.client ? ` с ${m.client.fullName} (${m.client.phone})` : '';
+    const body = `Напоминание: встреча ${typeLabel}${withWhom} через ${when} — ${dateStr}.`;
     await this.notificationQueue.add('send', {
       brokerId: m.brokerId, channel: 'PUSH', subject, body,
       eventType: 'MEETING_REMINDER',

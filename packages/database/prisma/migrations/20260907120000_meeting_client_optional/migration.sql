@@ -1,0 +1,16 @@
+-- 2026-09-07: Meeting.client_id становится nullable.
+--
+-- Зачем: встречи воронки КЦ (pipeline 7600542, статус 142 «встреча
+-- состоялась», ~4.7к) — это встречи С БРОКЕРАМИ: контакт лида — брокер,
+-- клиента у встречи нет. Плюс брокер-туры (MeetingType BROKER_TOUR).
+-- Владелец одобрил: такие встречи должны попасть в кабинет, фильтр
+-- «Есть встречи» должен показывать реальность.
+--
+-- FK meetings_client_id_fkey НЕ трогаем: политика ON DELETE RESTRICT
+-- ON UPDATE CASCADE сохраняется (в schema.prisma теперь задана явно как
+-- onDelete: Restrict, иначе Prisma сменила бы дефолт optional-связи на
+-- SetNull и пересоздала constraint).
+--
+-- DROP NOT NULL идемпотентно-безопасен: на уже-nullable колонке это no-op
+-- без ошибки, повторный прогон migrate deploy ничего не ломает.
+ALTER TABLE "meetings" ALTER COLUMN "client_id" DROP NOT NULL;

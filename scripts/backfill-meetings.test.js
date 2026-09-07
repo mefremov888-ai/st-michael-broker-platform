@@ -8,6 +8,8 @@
 const {
   decideMeetingOutcome,
   normalizePhoneKey,
+  phoneKeyCandidates,
+  brokerLeadMeetingType,
   appendAmoMark,
   leadMeetingDate,
   leadMeetingType,
@@ -58,6 +60,25 @@ check('+7 и 8 дают один ключ', normalizePhoneKey('+7 (916) 111-22-3
 check('ключ = последние 10 цифр', normalizePhoneKey('+79161112233'), '9161112233');
 check('короткий номер не мэтчится', normalizePhoneKey('12345'), null);
 check('пусто → null', normalizePhoneKey(''), null);
+
+// ─── phoneKeyCandidates (брокер-мэтч, LAYER=history_brokers) ───
+// Причина 84/4500: slice(-10) на «номер + добавочный» давал мусорный ключ.
+check('чистый +7 → один ключ', phoneKeyCandidates('+7 (916) 111-22-33'), { keys: ['9161112233'], badFormat: false });
+check('8XXXXXXXXXX → тот же ключ', phoneKeyCandidates('8 916 111 22 33'), { keys: ['9161112233'], badFormat: false });
+check('10 цифр без кода страны', phoneKeyCandidates('9161112233'), { keys: ['9161112233'], badFormat: false });
+check('добавочный в хвосте НЕ ломает ключ', phoneKeyCandidates('89161112233 доб. 45'), { keys: ['9161112233'], badFormat: false });
+check('два номера через запятую → два ключа', phoneKeyCandidates('79161112233, 79261112234'), { keys: ['9161112233', '9261112234'], badFormat: false });
+check('два номера через « и »', phoneKeyCandidates('89161112233 и 89261112234'), { keys: ['9161112233', '9261112234'], badFormat: false });
+check('короткий номер → badFormat', phoneKeyCandidates('12345'), { keys: [], badFormat: true });
+check('пусто → без ключей и без badFormat', phoneKeyCandidates(''), { keys: [], badFormat: false });
+check('длинный не-российский → badFormat', phoneKeyCandidates('001234567890123'), { keys: [], badFormat: true });
+check('дубль одного номера в двух форматах → один ключ', phoneKeyCandidates('+79161112233; 8(916)111-22-33'), { keys: ['9161112233'], badFormat: false });
+
+// ─── brokerLeadMeetingType ───
+check('поле «Встреча» = Брокер-тур → BROKER_TOUR', brokerLeadMeetingType({ custom_fields_values: [{ field_name: 'Встреча', values: [{ value: 'Брокер-тур' }] }] }), 'BROKER_TOUR');
+check('«тур» в названии лида → BROKER_TOUR', brokerLeadMeetingType({ name: 'Запись на Брокер-Тур 12.05' }), 'BROKER_TOUR');
+check('слово «брокер» без «тур» → OFFICE_VISIT (в этом слое все встречи с брокерами)', brokerLeadMeetingType({ name: 'Фиксация брокера Иванова' }), 'OFFICE_VISIT');
+check('пустой лид → OFFICE_VISIT', brokerLeadMeetingType({}), 'OFFICE_VISIT');
 
 // ─── leadMeetingDate / leadMeetingType ───
 const leadWithField = {

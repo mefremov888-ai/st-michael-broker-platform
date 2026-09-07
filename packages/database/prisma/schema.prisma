@@ -787,8 +787,12 @@ model Campaign {
 
 model Meeting {
   id          String        @id @default(uuid())
-  clientId    String        @map("client_id")
-  client      Client        @relation(fields: [clientId], references: [id])
+  // 2026-09-07: clientId nullable — встречи КЦ «с брокером» (воронка 7600542,
+  // статус 142) и брокер-туры не имеют клиента. onDelete: Restrict задан явно:
+  // до этого поле было required (дефолт Prisma = Restrict), политика удаления
+  // клиентов не меняется — меняется только NOT NULL.
+  clientId    String?       @map("client_id")
+  client      Client?       @relation(fields: [clientId], references: [id], onDelete: Restrict)
   brokerId    String        @map("broker_id")
   broker      Broker        @relation(fields: [brokerId], references: [id])
   managerId   String?       @map("manager_id")
