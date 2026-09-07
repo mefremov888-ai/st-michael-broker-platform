@@ -61,8 +61,9 @@ jobs:
           script: |
             set -eu
             test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
-            case "$DOC_BRANCH" in ""|-*|*..*|*[!A-Za-z0-9._/-]*) echo "недопустимое имя ветки"; exit 1;; esac
-            case "$DOC_PATH" in ""|/*|*..*|*[!A-Za-z0-9._/ -]*) echo "недопустимый путь файла"; exit 1;; esac
+            # без case: ssh-action переносит строки, и case ломается (грабли 04.09)
+            if ! printf '%s' "$DOC_BRANCH" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$DOC_BRANCH" | grep -q '\.\.'; then echo "недопустимое имя ветки"; exit 1; fi
+            if ! printf '%s' "$DOC_PATH" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/ -]*$' || printf '%s' "$DOC_PATH" | grep -q '\.\.'; then echo "недопустимый путь файла"; exit 1; fi
             cd "${{ secrets.DEPLOY_PATH }}"
             git fetch --quiet origin "$DOC_BRANCH"
             tmp=$(mktemp -d /tmp/ops-doc.XXXXXX)
