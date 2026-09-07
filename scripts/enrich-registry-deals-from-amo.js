@@ -79,6 +79,18 @@ function parseText(raw, maxLen = 120) {
   return value ? value.slice(0, maxLen) : null;
 }
 
+/**
+ * Номер квартиры из номера договора: «СБ2-5-1с-190» → «190», «ЗГ3-22-294-353/3»
+ * → «353/3». Последний сегмент после дефиса — номер квартиры в проекте
+ * (подтверждено сверкой с amo 07.09: поле amo «№ квартиры на этаже» — это
+ * позиция на этаже 1–10, НЕ номер квартиры).
+ */
+function apartmentFromContract(contractNumber) {
+  const value = String(contractNumber ?? "").trim();
+  const m = value.match(/-(\d{1,4}(?:\/\d{1,3})?)\s*$/);
+  return m ? m[1] : null;
+}
+
 /** Поле «номер квартиры» среди кастом-полей лида — по названию. */
 function pickApartmentField(customFields) {
   const list = Array.isArray(customFields) ? customFields : [];
@@ -86,6 +98,8 @@ function pickApartmentField(customFields) {
     list.find(
       (f) =>
         re.test(String(f?.name || "")) &&
+        // «№ квартиры на этаже» — позиция на этаже, а не номер квартиры.
+        !/на\s+этаже/i.test(String(f?.name || "")) &&
         /text|numeric/i.test(String(f?.type || "text")),
     );
   return (
@@ -96,18 +110,32 @@ function pickApartmentField(customFields) {
   );
 }
 
-/** План обновления строки реестра по лиду (чистая функция). */
-function planRowUpdate(row, lead, apartmentFieldId) {
-  if (!lead) return null;
+/**
+ * План обновления строки реестра по лиду (чистая функция).
+ * options.fixApartment=true — перезаписать apartmentNumber значением из
+ * номера договора, даже если поле уже заполнено (исправление прогона 07.09,
+ * когда туда попал «№ квартиры на этаже»).
+ */
+function planRowUpdate(row, lead, apartmentFieldId, options = {}) {
   const data = {};
   const fields = [];
+  const empty = (v) => v === null || v === undefined || String(v).trim() === "";
+  const fromContract = apartmentFromContract(row.contractNumber);
+  if (options.fixApartment && fromContract && String(row.apartmentNumber ?? "") !== fromContract) {
+    data.apartmentNumber = fromContract;
+    fields.push("apartmentNumber");
+  }
+  if (!lead) {
+    if (!fields.length) return null;
+    data.objectSource = row.objectSource || "amo";
+    return { data, fields };
+  }
   const sqm = parseSqm(cfValueById(lead, LEAD_FIELD_SQM));
   const floor = parseFloor(cfValueById(lead, LEAD_FIELD_FLOOR));
   const building = parseText(cfValueById(lead, LEAD_FIELD_BUILDING));
-  const apartment = apartmentFieldId
-    ? parseText(cfValueById(lead, apartmentFieldId), 32)
-    : null;
-  const empty = (v) => v === null || v === undefined || String(v).trim() === "";
+  const apartment =
+    fromContract ||
+    (apartmentFieldId ? parseText(cfValueById(lead, apartmentFieldId), 32) : null);
   if (empty(row.sqm) && sqm !== null) {
     data.sqm = sqm;
     fields.push("sqm");
@@ -120,7 +148,7 @@ function planRowUpdate(row, lead, apartmentFieldId) {
     data.building = building;
     fields.push("building");
   }
-  if (empty(row.apartmentNumber) && apartment) {
+  if (empty(row.apartmentNumber) && apartment && !fields.includes("apartmentNumber")) {
     data.apartmentNumber = apartment;
     fields.push("apartmentNumber");
   }
@@ -131,8 +159,9 @@ function planRowUpdate(row, lead, apartmentFieldId) {
 
 async function main() {
   const dryRun = process.env.DRY_RUN !== "0";
+  const fixApartment = process.env.FIX_APARTMENT === "1";
   console.log(
-    `=== Режим: ${dryRun ? "DRY-RUN (только отчёт)" : "APPLY (запись в БД!)"} ===\n`,
+    `=== Режим: ${dryRun ? "DRY-RUN (только отчёт)" : "APPLY (запись в БД!)"}${fixApartment ? " + FIX_APARTMENT (квартира из номера договора)" : ""} ===\n`,
   );
   const {
     AmoCrmAdapter,
@@ -185,15 +214,17 @@ async function main() {
 
     // 2. Кандидаты.
     const rows = await prisma.registryDeal.findMany({
-      where: {
-        amoLeadId: { not: null },
-        OR: [
-          { sqm: null },
-          { floor: null },
-          { building: null },
-          { apartmentNumber: null },
-        ],
-      },
+      where: fixApartment
+        ? {}
+        : {
+            amoLeadId: { not: null },
+            OR: [
+              { sqm: null },
+              { floor: null },
+              { building: null },
+              { apartmentNumber: null },
+            ],
+          },
       select: {
         id: true,
         contractNumber: true,
@@ -202,6 +233,7 @@ async function main() {
         floor: true,
         building: true,
         apartmentNumber: true,
+        objectSource: true,
       },
     });
     console.log(`Строк реестра с лидом amo и пустым объектом: ${rows.length}`);
@@ -247,13 +279,10 @@ async function main() {
     const updates = [];
     const examples = [];
     for (const row of rows) {
-      const lead = leads.get(Number(row.amoLeadId));
-      if (!lead) {
-        stats.leadMissing++;
-        continue;
-      }
-      stats.leadFound++;
-      const plan = planRowUpdate(row, lead, apartmentField?.id || null);
+      const lead = row.amoLeadId ? leads.get(Number(row.amoLeadId)) : null;
+      if (lead) stats.leadFound++;
+      else if (row.amoLeadId) stats.leadMissing++;
+      const plan = planRowUpdate(row, lead, apartmentField?.id || null, { fixApartment });
       if (!plan) {
         stats.nothingToFill++;
         continue;
@@ -320,6 +349,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  apartmentFromContract,
   cfValueById,
   parseSqm,
   parseFloor,
