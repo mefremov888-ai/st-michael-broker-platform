@@ -25,6 +25,7 @@ export enum CommissionLevel {
 export enum Project {
   ZORGE9 = 'ZORGE9',
   SILVER_BOR = 'SILVER_BOR',
+  TOLBUKHINA = 'TOLBUKHINA', // 2026-09-07: отдельный ЖК
 }
 
 export enum UniquenessStatus {

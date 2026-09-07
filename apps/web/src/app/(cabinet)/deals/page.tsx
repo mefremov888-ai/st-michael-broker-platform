@@ -15,6 +15,7 @@ const statusLabels: Record<string, { label: string; cls: string }> = {
 const projectLabels: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный Бор',
+  TOLBUKHINA: 'Толбухина',
 };
 
 // Форматирование телефона +7 (XXX) XXX-XX-XX (правка 2026-05-13).

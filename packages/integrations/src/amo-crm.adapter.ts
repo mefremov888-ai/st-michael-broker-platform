@@ -2073,6 +2073,7 @@ export class AmoCrmAdapter {
     const objectByProject: Record<string, string> = {
       ZORGE9: "Зорге 9",
       SILVER_BOR: "Берзарина 37",
+      TOLBUKHINA: "Толбухина",
     };
     const projectObj = objectByProject[String(data.project)] || "Зорге 9";
     customFields.push({ field_id: 839179, values: [{ value: projectObj }] });
@@ -2276,10 +2277,11 @@ export class AmoCrmAdapter {
     if (resultLead?.id) {
       const projectName =
         (
-          { ZORGE9: "Зорге 9", SILVER_BOR: "Берзарина 37" } as Record<
-            string,
-            string
-          >
+          {
+            ZORGE9: "Зорге 9",
+            SILVER_BOR: "Берзарина 37",
+            TOLBUKHINA: "Толбухина",
+          } as Record<string, string>
         )[String(data.project)] || String(data.project);
       const lines: string[] = [];
       if (data.reuseLeadId) {

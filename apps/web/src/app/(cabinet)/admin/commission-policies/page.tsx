@@ -8,7 +8,7 @@ import { Plus, Edit2, Trash2, X } from 'lucide-react';
 // CRUD политик комиссии. Admin only.
 // Правка 2026-05-13: добавлена возможность переключения PROGRESSIVE/FLAT для проекта.
 
-const projectLabels: Record<string, string> = { ZORGE9: 'Зорге 9', SILVER_BOR: 'Серебряный Бор' };
+const projectLabels: Record<string, string> = { ZORGE9: 'Зорге 9', SILVER_BOR: 'Серебряный Бор', TOLBUKHINA: 'Толбухина' };
 const modeLabels: Record<string, string> = { PROGRESSIVE: 'Прогрессивная', FLAT: 'Фиксированная' };
 
 const DEFAULT_LEVELS_ZORGE9 = [

@@ -77,6 +77,7 @@ export class AmocrmService {
       });
       const projectLabel = client?.project === 'ZORGE9' ? 'Зорге 9'
         : client?.project === 'SILVER_BOR' ? 'Серебряный Бор'
+        : client?.project === 'TOLBUKHINA' ? 'Толбухина'
         : (client?.project || '');
       const commentLines = client
         ? [

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { apiGet } from '@/lib/api';
 
 type Granularity = 'day' | 'week' | 'month';
-type ProjectFilter = '' | 'ZORGE9' | 'SILVER_BOR';
+type ProjectFilter = '' | 'ZORGE9' | 'SILVER_BOR' | 'TOLBUKHINA';
 
 type SeriesCounts = {
   deals: number;
@@ -40,6 +40,7 @@ type SeriesResponse = {
 const PROJECT_LABELS: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный Бор',
+  TOLBUKHINA: 'Толбухина',
   UNKNOWN: 'Проект не указан',
 };
 
@@ -243,6 +244,7 @@ export default function RegistrySeriesPanel({
                 <option value="">Все проекты</option>
                 <option value="ZORGE9">Зорге 9</option>
                 <option value="SILVER_BOR">Серебряный Бор</option>
+                <option value="TOLBUKHINA">Толбухина</option>
               </select>
             </label>
             <div className="flex gap-1">

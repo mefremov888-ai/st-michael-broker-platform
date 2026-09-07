@@ -7,7 +7,7 @@
 
 export type SeriesGranularity = 'day' | 'week' | 'month';
 export const SERIES_GRANULARITIES: SeriesGranularity[] = ['day', 'week', 'month'];
-export const SERIES_PROJECTS = ['ZORGE9', 'SILVER_BOR'] as const;
+export const SERIES_PROJECTS = ['ZORGE9', 'SILVER_BOR', 'TOLBUKHINA'] as const;
 export type SeriesProject = (typeof SERIES_PROJECTS)[number];
 
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;

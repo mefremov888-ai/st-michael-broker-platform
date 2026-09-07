@@ -9,6 +9,7 @@ import { Heart, ArrowRight } from 'lucide-react';
 const projectLabels: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный бор',
+  TOLBUKHINA: 'Толбухина',
 };
 
 const statusLabels: Record<string, { label: string; cls: string }> = {

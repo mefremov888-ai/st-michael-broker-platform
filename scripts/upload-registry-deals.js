@@ -23,7 +23,7 @@ const ONLY_FIELDS = process.env.ONLY_FIELDS === '1';
 
 const BATCH_SIZE = 200;
 const VALID_SOURCES = new Set(['REGISTRY', 'BOTH', 'AMO_ONLY']);
-const VALID_PROJECTS = new Set(['ZORGE9', 'SILVER_BOR']);
+const VALID_PROJECTS = new Set(['ZORGE9', 'SILVER_BOR', 'TOLBUKHINA']);
 
 const toBigIntOrNull = (v) => {
   if (v === null || v === undefined || v === '') return null;
