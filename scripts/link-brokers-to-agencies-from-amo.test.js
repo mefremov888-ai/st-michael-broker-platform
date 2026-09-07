@@ -1,6 +1,15 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { resolveAgency, buildAgencyIndex, cleanInn } = require("./link-brokers-to-agencies-from-amo");
+const { resolveAgency, buildAgencyIndex, cleanInn, isTestAgency } = require("./link-brokers-to-agencies-from-amo");
+
+test("тестовые карточки агентств исключаются из индекса", () => {
+  assert.equal(isTestAgency({ name: "agency_test" }), true);
+  assert.equal(isTestAgency({ name: "Тест" }), true);
+  assert.equal(isTestAgency({ name: "ТЕСТКИТ Агентство 10" }), true);
+  assert.equal(isTestAgency({ name: "Простор" }), false);
+  const idx = buildAgencyIndex([{ id: "t", name: "agency_test", inn: "7700000009" }]);
+  assert.equal(idx.byInn.has("7700000009"), false);
+});
 
 const index = buildAgencyIndex([
   { id: "a1", name: "Trend Agent", legalName: null, inn: "7700000001" },
