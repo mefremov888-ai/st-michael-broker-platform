@@ -1,0 +1,74 @@
+name: Ночная сводка качества данных
+
+# 2026-09-07 (решение владельца): каждое утро в 09:30 МСК — сводка по данным
+# кабинета (брокеры, агентства, клиенты по источникам, фиксации, реестр,
+# база Анны, кандидаты в дубли, новое за сутки) в Telegram владельцу и Анне.
+# Чаты: GH-секрет OPS_ALERT_CHAT_ID + серверные OPS_ALERT_CHAT_ID(S) из .env.
+# Скрипт scripts/data-quality-digest.js — только чтение, без ПД.
+
+on:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+    inputs:
+      send_to:
+        description: Куда слать — all | server_only | gh_only | none (только показать)
+        required: false
+        default: all
+        type: string
+
+concurrency:
+  group: nightly-data-quality-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    name: Build digest on production and send
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH, build, send
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+          SEND_TO: ${{ inputs.send_to || 'all' }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          envs: BOT,GH_CHAT,SEND_TO
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            git fetch origin master
+            git show origin/master:scripts/data-quality-digest.js > /tmp/data-quality-digest.js
+            git show origin/master:scripts/enrich-agencies-from-amo.js > /tmp/enrich-agencies-from-amo.js
+            docker cp /tmp/data-quality-digest.js st-michael-api:/app/scripts/data-quality-digest.js
+            docker cp /tmp/enrich-agencies-from-amo.js st-michael-api:/app/scripts/enrich-agencies-from-amo.js
+            docker compose exec -T api node /app/scripts/data-quality-digest.js > /tmp/digest.out
+            TEXT=$(sed -n '/^DIGEST_BEGIN$/,/^DIGEST_END$/p' /tmp/digest.out | sed '1d;$d')
+            test -n "$TEXT" || { echo "сводка пустая"; cat /tmp/digest.out; exit 1; }
+            echo "$TEXT"
+            if [ "$SEND_TO" = "none" ]; then echo "(без отправки)"; exit 0; fi
+            test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
+            server_ids=$(grep -hE 'OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | sed -e 's/^[^=]*=//' -e "s/[\"']//g" -e 's/\r//g' | tr ',;' '\n' | tr -d ' \t' | grep -E '^-?[0-9]+$' || true)
+            if [ "$SEND_TO" = "server_only" ]; then
+              all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true)
+            elif [ "$SEND_TO" = "gh_only" ]; then
+              all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true)
+            else
+              all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
+            fi
+            test -n "$all" || { echo "не найдено ни одного chat_id"; exit 1; }
+            echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
+            fail=0
+            for chat in $all; do
+              ok=$(curl -sS --max-time 30 -X POST "https://api.telegram.org/bot${BOT}/sendMessage" --data-urlencode chat_id="$chat" --data-urlencode text="$TEXT" | head -c 120)
+              tail4=$(printf '%s' "$chat" | tail -c 4)
+              if printf '%s' "$ok" | grep -q '"ok":true'; then echo "chat ...$tail4: отправлено"; else echo "chat ...$tail4: ОШИБКА: $ok"; fail=1; fi
+            done
+            exit $fail
