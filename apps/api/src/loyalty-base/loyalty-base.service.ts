@@ -787,6 +787,30 @@ export function normalizeAgencyMatchKey(value: unknown): string | null {
   return (meaningful.length ? meaningful : tokens).join("") || null;
 }
 
+// 2026-09-07: сделки реестра приходят с «историческими» названиями агентств,
+// которые не совпадают с карточкой в нашей базе даже после нормализации
+// (registry: «trend agent», карточка: «ООО «Онлайн Недвижимость»»). Алиасы
+// склеивают такие ключи в канонический ключ карточки, чтобы атрибуция
+// реестр↔агентство (топ, карточка) не показывала 0. Ключ и значение — уже
+// нормализованные normalizeAgencyMatchKey ключи.
+export const AGENCY_KEY_ALIASES: Record<string, string> = {
+  // registry_deals.agencyCanonical «trend agent» → карточка «ООО «Онлайн Недвижимость»»
+  trendagent: normalizeAgencyMatchKey("ООО «Онлайн Недвижимость»")!,
+  // registry_deals.agencyCanonical «нмаркет.про» → карточка «Нмаркет»
+  нмаркетпро: normalizeAgencyMatchKey("Нмаркет")!,
+};
+
+// Канонический ключ мэтчинга: нормализация + алиас. Использовать во ВСЕХ
+// местах сопоставления реестр↔агентство (обе стороны), чтобы алиас работал
+// независимо от того, с какой стороны пришло «историческое» название.
+export function canonicalAgencyMatchKey(value: unknown): string | null {
+  const key = normalizeAgencyMatchKey(value);
+  if (!key) return null;
+  return Object.prototype.hasOwnProperty.call(AGENCY_KEY_ALIASES, key)
+    ? AGENCY_KEY_ALIASES[key]
+    : key;
+}
+
 @Injectable()
 export class LoyaltyBaseService {
   constructor(@Inject("PrismaClient") private readonly prisma: PrismaClient) {}
@@ -4425,7 +4449,8 @@ export class LoyaltyBaseService {
       // карточка агентства (ourAgencyRelationMetrics + attachOurAgency-
       // RegistryDeals): union из Deal с явным agencyId, Deal брокеров
       // агентства (broker_agencies) и строк реестра — по brokerId этих
-      // брокеров И по нормализованному названию (normalizeAgencyMatchKey).
+      // брокеров И по нормализованному названию (canonicalAgencyMatchKey =
+      // normalizeAgencyMatchKey + AGENCY_KEY_ALIASES).
       // Дедуп по id строки: сделка не считается дважды, если пришла и через
       // agencyId, и через брокера, или через брокера и название.
       const seenByAgency = new Map<string, Set<string>>();
@@ -4510,7 +4535,7 @@ export class LoyaltyBaseService {
         });
         for (const agency of agencies as any[]) {
           for (const value of [agency.name, agency.legalName]) {
-            const key = normalizeAgencyMatchKey(value);
+            const key = canonicalAgencyMatchKey(value);
             if (!key) continue;
             const list = nameKeyToAgencies.get(key) || [];
             if (!list.includes(String(agency.id))) list.push(String(agency.id));
@@ -4537,8 +4562,8 @@ export class LoyaltyBaseService {
       }
       for (const row of registryNamedRows as any[]) {
         const key =
-          normalizeAgencyMatchKey(row.agencyCanonical) ??
-          normalizeAgencyMatchKey(row.agencyNameRaw);
+          canonicalAgencyMatchKey(row.agencyCanonical) ??
+          canonicalAgencyMatchKey(row.agencyNameRaw);
         if (!key) continue;
         for (const agencyId of nameKeyToAgencies.get(key) || []) {
           addRow(agencyId, `R:${String(row.id)}`, row.amount, row.signedAt);
@@ -4665,9 +4690,10 @@ export class LoyaltyBaseService {
    * Реестровые сделки агентств нашей базы: у Agency нет прямой связи с
    * registry_deals, поэтому агентские строки собираются по двум каналам:
    * 1) brokerId входит в текущих брокеров агентства (broker_agencies);
-   * 2) 2026-09-04: текстовое совпадение названия — normalizeAgencyMatchKey
-   *    (Agency.name/legalName) === normalizeAgencyMatchKey
-   *    (RegistryDeal.agencyCanonical/agencyNameRaw). Так сделки реестра без
+   * 2) 2026-09-04: текстовое совпадение названия — canonicalAgencyMatchKey
+   *    (Agency.name/legalName) === canonicalAgencyMatchKey
+   *    (RegistryDeal.agencyCanonical/agencyNameRaw); 2026-09-07 ключ
+   *    пропускается через AGENCY_KEY_ALIASES. Так сделки реестра без
    *    привязанного брокера всё равно попадают в аналитику агентства.
    * Дедуп по id строки реестра: сделка, уже пришедшая через брокера
    * агентства, второй раз по названию не добавляется.
@@ -4712,7 +4738,7 @@ export class LoyaltyBaseService {
         brokerToRecords.set(brokerId, list);
       }
       for (const value of [record?.name, record?.legalName]) {
-        const key = normalizeAgencyMatchKey(value);
+        const key = canonicalAgencyMatchKey(value);
         if (!key) continue;
         const list = nameToRecords.get(key) || [];
         if (!list.includes(record)) list.push(record);
@@ -4756,8 +4782,8 @@ export class LoyaltyBaseService {
     });
     for (const row of namedRows as any[]) {
       const key =
-        normalizeAgencyMatchKey(row.agencyCanonical) ??
-        normalizeAgencyMatchKey(row.agencyNameRaw);
+        canonicalAgencyMatchKey(row.agencyCanonical) ??
+        canonicalAgencyMatchKey(row.agencyNameRaw);
       if (!key) continue;
       for (const record of nameToRecords.get(key) || []) {
         pushRow(record, row);
