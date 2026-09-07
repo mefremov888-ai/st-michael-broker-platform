@@ -646,8 +646,12 @@ export interface LoyaltyRecord {
     occurredAt: string;
     title: string;
     description: string;
-    /** Раскрываемые детали записи-основания (клиент, проект, статус...). */
-    details?: Array<{ label: string; value: string }>;
+    /**
+     * Раскрываемые детали записи-основания (клиент, проект, статус...).
+     * 2026-09-07: href — ссылка на карточку в amoCRM (лид/сделка), карточка
+     * рендерит значение как внешнюю ссылку.
+     */
+    details?: Array<{ label: string; value: string; href?: string }>;
     /**
      * 2026-09-07: встреча PENDING с меткой backfill-а «нет ответа из amo»
      * (см. meeting-amo-marks.ts) — карточка показывает оранжевый бейдж.
@@ -1455,6 +1459,44 @@ export function loyaltyEvidenceProjectLabel(project: string): string {
   return EVIDENCE_PROJECT_LABELS[project.toUpperCase()] || project;
 }
 
+/**
+ * 2026-09-07: ссылка на лид/сделку в amoCRM. В amo сделка — это тот же
+ * «лид» (/leads/detail/<id>), поэтому один билдер для обоих идентификаторов.
+ * Хост канонический, как у safeAmoContactUrl; принимаются только числовые id.
+ */
+export function safeAmoLeadUrl(rawId: unknown): string {
+  const id = stringValue(rawId);
+  if (!/^\d+$/.test(id)) return "";
+  return `https://stmichael.amocrm.ru/leads/detail/${id}`;
+}
+
+/** Дата события в формате ДД.ММ.ГГГГ для строк «Детали записи». */
+function evidenceDateLabel(raw: unknown): string {
+  const value = stringValue(raw);
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "Europe/Moscow",
+  });
+}
+
+/** Число с русским разделителем: "35684619.08" → "35 684 619,08". */
+function evidenceNumberLabel(raw: unknown, maximumFractionDigits = 2): string {
+  const value = stringValue(raw).replace(",", ".");
+  if (!value) return "";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  // ICU ставит неразрывные пробелы (U+00A0/U+202F) — приводим к обычным,
+  // чтобы значение одинаково искалось, копировалось и сравнивалось.
+  return parsed
+    .toLocaleString("ru-RU", { maximumFractionDigits })
+    .replace(/[  ]/g, " ");
+}
+
 /** Заголовок и детали для строки-основания (FIXATION/MEETING/DEAL/CALL). */
 function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
   const typeLabel = EVIDENCE_TYPE_LABELS[rawType];
@@ -1470,6 +1512,24 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
     : "";
   const callResult = stringValue(pick(item, "resultCode", "result"));
   const amount = stringValue(item.amount);
+  // 2026-09-07: объект сделки (площадь, этаж, корпус, квартира, номер
+  // договора, дата ДДУ) и ссылки на amoCRM — по просьбе владельца, чтобы
+  // из карточки агентства/брокера было видно чуть больше, чем сумму.
+  const occurredAtRaw = pick(item, "occurredAt", "date", "createdAt");
+  const isDeal = rawType === "DEAL";
+  const contractNumber = stringValue(item.contractNumber);
+  const sqm = stringValue(item.sqm);
+  const floor = stringValue(item.floor);
+  const building = stringValue(item.building);
+  const buildingSection = stringValue(item.buildingSection);
+  const apartmentNumber = stringValue(item.apartmentNumber);
+  const buildingLabel = [building, buildingSection && `секция ${buildingSection}`]
+    .filter(Boolean)
+    .join(", ");
+  const amoLeadId = stringValue(item.amoLeadId);
+  const amoDealId = stringValue(item.amoDealId);
+  const amoLeadHref = safeAmoLeadUrl(amoLeadId);
+  const amoDealHref = safeAmoLeadUrl(amoDealId);
   // 2026-09-07: встреча PENDING с меткой backfill-а «нет ответа из amo» —
   // карточка показывает оранжевый бейдж. Бэкенд шлёт готовый код
   // (amoStatusMark, без сырого comment); parsing comment — запасной путь.
@@ -1495,16 +1555,32 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
     clientName && { label: "Клиент", value: clientName },
     projectLabel && { label: "Проект", value: projectLabel },
     meetingTypeLabel && { label: "Формат встречи", value: meetingTypeLabel },
-    amount && { label: "Сумма", value: `${amount} ₽` },
-    stringValue(item.amoLeadId) && {
+    isDeal &&
+      contractNumber && { label: "Номер договора", value: contractNumber },
+    isDeal &&
+      evidenceDateLabel(occurredAtRaw) && {
+        label: "Дата ДДУ",
+        value: evidenceDateLabel(occurredAtRaw),
+      },
+    amount && {
+      label: "Сумма",
+      value: `${evidenceNumberLabel(amount) || amount} ₽`,
+    },
+    sqm && { label: "Площадь", value: `${evidenceNumberLabel(sqm) || sqm} м²` },
+    floor && { label: "Этаж", value: floor },
+    buildingLabel && { label: "Корпус", value: buildingLabel },
+    apartmentNumber && { label: "Квартира", value: apartmentNumber },
+    amoLeadId && {
       label: "Лид amoCRM",
-      value: stringValue(item.amoLeadId),
+      value: amoLeadId,
+      ...(amoLeadHref ? { href: amoLeadHref } : {}),
     },
-    stringValue(item.amoDealId) && {
+    amoDealId && {
       label: "Сделка amoCRM",
-      value: stringValue(item.amoDealId),
+      value: amoDealId,
+      ...(amoDealHref ? { href: amoDealHref } : {}),
     },
-  ].filter(Boolean) as Array<{ label: string; value: string }>;
+  ].filter(Boolean) as Array<{ label: string; value: string; href?: string }>;
   return {
     id: stringValue(pick(item, "id", "externalId")),
     type: rawType,

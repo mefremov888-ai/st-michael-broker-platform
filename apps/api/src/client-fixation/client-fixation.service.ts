@@ -25,6 +25,10 @@ import * as XLSX from "xlsx";
 import { getSystemSetting } from "../common/system-setting";
 import { buildPhoneSearchConditions } from "../admin/brokers-import.helper";
 import {
+  agencyCreateDataFromRegistry,
+  lookupAgencyRegistryByInn,
+} from "../agencies/agency-registry";
+import {
   OpsAlertService,
   opsAlertCategoryLabel,
   opsAlertScenarioLabel,
@@ -381,8 +385,16 @@ export class ClientFixationService {
               "[fixClient] amo agency lookup failed, продолжаем без amo",
             );
           }
+          // 2026-09-07: юрназвание/юрадрес из госреестра (DaData) по ИНН;
+          // ошибки реестра не блокируют — вернётся null, создаём как раньше.
+          const registry = await lookupAgencyRegistryByInn(cleanAgencyInn);
           agency = await this.prisma.agency.create({
-            data: { name: agencyName, inn: cleanAgencyInn },
+            data: agencyCreateDataFromRegistry(
+              cleanAgencyInn,
+              agencyName,
+              registry,
+              `Агентство ${cleanAgencyInn}`,
+            ),
           });
         }
       } catch (e: any) {

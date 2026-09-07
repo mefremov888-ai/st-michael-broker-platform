@@ -22,6 +22,10 @@ import {
 } from "@st-michael/integrations";
 import { CatalogService } from "../catalog/catalog.service";
 import {
+  agencyCreateDataFromRegistry,
+  lookupAgencyRegistryByInn,
+} from "../agencies/agency-registry";
+import {
   levelForSqm,
   rateFor,
   rateForWithPolicy,
@@ -262,8 +266,17 @@ export class AuthService {
         where: { inn: data.inn },
       });
       if (!agency) {
+        // 2026-09-07: юрназвание и юрадрес — из госреестра (DaData) по ИНН.
+        // Имя, которое ввёл брокер, остаётся основным; реестр только
+        // дополняет пустые реквизиты. Без ключа/ответа — как раньше.
+        const registry = await lookupAgencyRegistryByInn(data.inn);
         agency = await this.prisma.agency.create({
-          data: { name: agencyName, inn: data.inn },
+          data: agencyCreateDataFromRegistry(
+            data.inn,
+            data.agencyName || null,
+            registry,
+            agencyName,
+          ),
         });
       } else if (data.agencyName && agency.name !== data.agencyName) {
         agency = await this.prisma.agency.update({
@@ -1320,8 +1333,17 @@ export class AuthService {
         // amoCRM может быть недоступен — создаём только локально.
         amoName = `Агентство ${cleanInn}`;
       }
+      // 2026-09-07: реквизиты из госреестра (DaData) — юрназвание, юрадрес;
+      // если amo не знает компанию, короткое имя тоже берём из реестра
+      // вместо плейсхолдера «Агентство <ИНН>».
+      const registry = await lookupAgencyRegistryByInn(cleanInn);
       agency = await this.prisma.agency.create({
-        data: { name: amoName!, inn: cleanInn },
+        data: agencyCreateDataFromRegistry(
+          cleanInn,
+          amoName,
+          registry,
+          `Агентство ${cleanInn}`,
+        ),
       });
     }
 
@@ -1388,8 +1410,15 @@ export class AuthService {
       } catch {
         amoName = `Агентство ${cleanInn}`;
       }
+      // 2026-09-07: реквизиты из госреестра (DaData), см. attachAgencyByInn.
+      const registry = await lookupAgencyRegistryByInn(cleanInn);
       agency = await this.prisma.agency.create({
-        data: { name: amoName!, inn: cleanInn },
+        data: agencyCreateDataFromRegistry(
+          cleanInn,
+          amoName,
+          registry,
+          `Агентство ${cleanInn}`,
+        ),
       });
     }
 

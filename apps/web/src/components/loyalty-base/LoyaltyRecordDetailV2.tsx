@@ -452,7 +452,21 @@ function Timeline({
                         <dt className="inline text-text-muted">
                           {detail.label}:{" "}
                         </dt>
-                        <dd className="inline">{detail.value}</dd>
+                        <dd className="inline">
+                          {/* 2026-09-07: лид/сделка amoCRM — внешняя ссылка */}
+                          {detail.href ? (
+                            <a
+                              href={detail.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="underline decoration-dotted underline-offset-2 hover:text-accent"
+                            >
+                              {detail.value} ↗
+                            </a>
+                          ) : (
+                            detail.value
+                          )}
+                        </dd>
                       </div>
                     ))}
                   </dl>
