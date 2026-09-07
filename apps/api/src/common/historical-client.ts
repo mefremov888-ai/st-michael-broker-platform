@@ -10,9 +10,18 @@
  */
 export const HISTORICAL_CLIENT_COMMENT_PREFIX = "[old-cabinet:";
 
-export const notHistoricalClientWhere = {
-  NOT: { comment: { startsWith: HISTORICAL_CLIENT_COMMENT_PREFIX } },
-} as const;
+// ВАЖНО (hotfix 07.09, ночь): `NOT { comment startsWith }` в Prisma/SQL
+// отбрасывает строки с comment IS NULL (NOT NULL = NULL → false) — а у
+// большинства записей нового кабинета комментария нет. Поэтому «не
+// исторический» = комментарий пуст ИЛИ не начинается с маркера.
+export const notHistoricalClientWhere: {
+  OR: Array<Record<string, unknown>>;
+} = {
+  OR: [
+    { comment: null },
+    { NOT: { comment: { startsWith: HISTORICAL_CLIENT_COMMENT_PREFIX } } },
+  ],
+};
 
 export function isHistoricalClient(client: { comment?: string | null }): boolean {
   return String(client?.comment || "").startsWith(HISTORICAL_CLIENT_COMMENT_PREFIX);

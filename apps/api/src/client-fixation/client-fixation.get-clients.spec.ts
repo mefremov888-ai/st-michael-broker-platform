@@ -21,7 +21,14 @@ describe("ClientFixationService.getClients", () => {
         where: {
           OR: [{ brokerId: "broker-1" }, { responsibleBrokerId: "broker-1" }],
           // 2026-09-07: исторические записи старого кабинета брокеру не видны.
-          AND: [{ NOT: { comment: { startsWith: "[old-cabinet:" } } }],
+          AND: [
+            {
+              OR: [
+                { comment: null },
+                { NOT: { comment: { startsWith: "[old-cabinet:" } } },
+              ],
+            },
+          ],
         },
       }),
     );
