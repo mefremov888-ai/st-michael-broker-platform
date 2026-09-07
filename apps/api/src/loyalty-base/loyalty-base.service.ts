@@ -4070,7 +4070,7 @@ export class LoyaltyBaseService {
       }),
       this.prisma.meeting.count({ where: acceptedMeetings }),
       this.prisma.deal.count({ where: confirmedDeals }),
-      // «Реестр сделок» — период по дате подписания договора.
+      // «Реестр сделок» — период по «Дате оплаты ДДУ» (paidAt).
       this.registryDealModel
         ? this.registryDealModel.count({ where: registryAttributedWhere })
         : Promise.resolve(0),
@@ -4438,14 +4438,14 @@ export class LoyaltyBaseService {
           },
           _count: { _all: true },
           _sum: { amount: true },
-          _max: { signedAt: true },
+          _max: { paidAt: true },
         });
         for (const group of registryGroups as any[]) {
           add(
             group.brokerId,
             Number(group._count?._all || 0),
             group._sum?.amount,
-            group._max?.signedAt,
+            group._max?.paidAt,
           );
         }
       }
@@ -4490,7 +4490,7 @@ export class LoyaltyBaseService {
               broker: { is: { role: "BROKER", mergedIntoId: null } },
               ...this.registrySignedAtWhere(period),
             },
-            select: { id: true, brokerId: true, amount: true, signedAt: true },
+            select: { id: true, brokerId: true, amount: true, paidAt: true },
           })
         : [];
       const registryNamedRows = this.registryDealModel
@@ -4507,7 +4507,7 @@ export class LoyaltyBaseService {
               agencyCanonical: true,
               agencyNameRaw: true,
               amount: true,
-              signedAt: true,
+              paidAt: true,
             },
           })
         : [];
@@ -4638,9 +4638,15 @@ export class LoyaltyBaseService {
     return (this.prisma as any).registryDeal ?? null;
   }
 
-  /** Период по дате подписания; без периода — все строки реестра. */
+  /**
+   * Правило владельца (07.09.2026): сделка засчитывается только по факту
+   * оплаты ДДУ — «Дата оплаты ДДУ» (paidAt, столбец H реестра; при рассрочке
+   * первая оплата). Строки без paidAt (договор не оплачен, план) не считаются
+   * ни за период, ни «за всё время». «Дата ДДУ» (signedAt) — справочная.
+   */
   private registrySignedAtWhere(period?: { from: Date; to: Date }): any {
-    return period ? { signedAt: { gte: period.from, lte: period.to } } : {};
+    if (!period) return { paidAt: { not: null } };
+    return { paidAt: { gte: period.from, lte: period.to } };
   }
 
   /**
@@ -4663,9 +4669,9 @@ export class LoyaltyBaseService {
       const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
       const groups = await this.registryDealModel.groupBy({
         by: ["brokerId"],
-        where: { brokerId: { in: batch } },
+        where: { brokerId: { in: batch }, ...this.registrySignedAtWhere() },
         _count: { _all: true },
-        _max: { signedAt: true },
+        _max: { paidAt: true },
       });
       for (const group of groups as any[]) {
         const record = byId.get(String(group.brokerId));
@@ -4676,7 +4682,7 @@ export class LoyaltyBaseService {
           ...(record._count || {}),
           deals: Number(record._count?.deals || 0) + count,
         };
-        const registryLast = group._max?.signedAt || null;
+        const registryLast = group._max?.paidAt || null;
         const currentLast = record.deals?.[0]?.signedAt || null;
         if (
           registryLast &&
@@ -4721,6 +4727,8 @@ export class LoyaltyBaseService {
       contractNumber: true,
       project: true,
       amoLeadId: true,
+      // 2026-09-07: дата оплаты ДДУ — основная дата сделки в карточке.
+      paidAt: true,
       // 2026-09-07: объект сделки (заполняется из лида amo, поезд №18).
       sqm: true,
       floor: true,
@@ -4741,6 +4749,7 @@ export class LoyaltyBaseService {
       record.__registryDeals.push({
         id: `REGISTRY:${rowId}`,
         signedAt: row.signedAt || null,
+        paidAt: row.paidAt || null,
         // Неизвестная сумма считается нулём: сумма остаётся нижней
         // границей вместо схлопывания всей агрегатной суммы в null.
         amount:
@@ -4795,7 +4804,7 @@ export class LoyaltyBaseService {
     ) {
       const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
       const rows = await this.registryDealModel.findMany({
-        where: { brokerId: { in: batch } },
+        where: { brokerId: { in: batch }, ...this.registrySignedAtWhere() },
         select: { ...registrySelect, brokerId: true },
       });
       for (const row of rows as any[]) {
@@ -4809,6 +4818,7 @@ export class LoyaltyBaseService {
     // выполняется в памяти — canonical в БД мог быть нормализован иначе.
     const namedRows = await this.registryDealModel.findMany({
       where: {
+        ...this.registrySignedAtWhere(),
         OR: [
           { agencyCanonical: { not: null } },
           { agencyNameRaw: { not: null } },
@@ -7611,7 +7621,7 @@ export class LoyaltyBaseService {
     // legacy call logs have been combined into one call read model.
     if (filter.dealsInPeriod !== undefined) {
       // Сделка за период — из любого источника: локальная Deal-таблица или
-      // «Реестр сделок» (registry_deals, период по signedAt).
+      // «Реестр сделок» (registry_deals, только оплаченные, период по paidAt).
       const dealWhere = this.ourConfirmedDealWhere(filter.activityPeriod);
       const registryWhere = this.registrySignedAtWhere(filter.activityPeriod);
       and.push(
@@ -7871,7 +7881,7 @@ export class LoyaltyBaseService {
               },
               _count: { _all: true },
               _sum: { amount: true },
-              _max: { signedAt: true },
+              _max: { paidAt: true },
             })
           : Promise.resolve([]),
       ]);
@@ -7918,7 +7928,7 @@ export class LoyaltyBaseService {
               moneyToCents(String(group._sum.amount)),
           );
         }
-        const registryLast = dateOnly(group._max?.signedAt);
+        const registryLast = dateOnly(group._max?.paidAt);
         if (
           registryLast &&
           (!target.lastDealAt || target.lastDealAt < registryLast)
@@ -8211,7 +8221,7 @@ export class LoyaltyBaseService {
     if (groupField === "brokerId" && this.registryDealModel) {
       const registryGroups = await this.registryDealModel.groupBy({
         by: ["brokerId"],
-        where: { brokerId: { in: ids } },
+        where: { brokerId: { in: ids }, ...this.registrySignedAtWhere() },
         _sum: { amount: true },
       });
       for (const group of registryGroups as any[]) {
@@ -8836,8 +8846,11 @@ export class LoyaltyBaseService {
         id: `LOCAL_DEAL:${String(row.id)}`,
         sourceId: String(row.id),
         type: "DEAL",
-        date: this.isoDateTime(row.signedAt),
-        occurredAt: this.isoDateTime(row.signedAt),
+        // Дата сделки: оплата ДДУ (реестр), иначе подписание.
+        date: this.isoDateTime(row.paidAt || row.signedAt),
+        occurredAt: this.isoDateTime(row.paidAt || row.signedAt),
+        paidAt: row.paidAt ? this.isoDateTime(row.paidAt) : null,
+        signedAt: row.signedAt ? this.isoDateTime(row.signedAt) : null,
         status: row.status ? String(row.status) : null,
         clientName: str(row.client?.fullName),
         project: str(row.project) ?? str(row.client?.project),
@@ -10553,7 +10566,7 @@ export class LoyaltyBaseService {
       let registryAmountCents = 0n;
       if (this.registryDealModel) {
         const registry = await this.registryDealModel.aggregate({
-          where: { brokerId: id },
+          where: { brokerId: id, ...this.registrySignedAtWhere() },
           _count: { _all: true },
           _sum: { amount: true },
         });

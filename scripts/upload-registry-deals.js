@@ -18,6 +18,8 @@
  */
 
 const fs = require('fs');
+// 2026-09-07: ONLY_FIELDS=1 — дозаполнить paidAt/dvou*/sqm/building у существующих строк.
+const ONLY_FIELDS = process.env.ONLY_FIELDS === '1';
 
 const BATCH_SIZE = 200;
 const VALID_SOURCES = new Set(['REGISTRY', 'BOTH', 'AMO_ONLY']);
@@ -83,9 +85,28 @@ const toBigIntOrNull = (v) => {
         brokerId = null;
       }
 
+      // 2026-09-07: поля из листа — дата оплаты ДДУ (H), ДВОУ (D/E/AA),
+      // площадь и корпус из листа (используются только если в БД пусто).
+      const toDate = (v) => (v ? new Date(String(v).slice(0, 10)) : null);
+      const extra = {
+        paidAt: toDate(row.paidAt),
+        dvouDate: toDate(row.dvouDate),
+        dvouPaidAt: toDate(row.dvouPaidAt),
+        dvouAmount: row.dvouAmount ?? null,
+        sqmSheet: row.sqmSheet ?? null,
+        buildingSheet: row.buildingSheet ?? null,
+      };
+      if (ONLY_FIELDS) {
+        prepared.push({ rowKey: String(row.rowKey), ...extra });
+        continue;
+      }
       prepared.push({
         rowKey: String(row.rowKey),
         source: row.source,
+        paidAt: extra.paidAt,
+        dvouDate: extra.dvouDate,
+        dvouPaidAt: extra.dvouPaidAt,
+        dvouAmount: extra.dvouAmount,
         contractNumber: String(row.contractNumber),
         project: VALID_PROJECTS.has(row.project) ? row.project : null,
         signedAt: row.signedAt ? new Date(row.signedAt) : null, // YYYY-MM-DD
@@ -96,6 +117,40 @@ const toBigIntOrNull = (v) => {
         brokerId,
         brokerAmoContactId: toBigIntOrNull(row.brokerAmoContactId),
       });
+    }
+
+    // ─── Режим ONLY_FIELDS: только дозаполнение новых полей у СУЩЕСТВУЮЩИХ строк ───
+    // Ничего не создаёт, не трогает source/amoLeadId/brokerId/signedAt/amount и
+    // объект из amo; sqm/building из листа — только если в БД пусто.
+    if (ONLY_FIELDS) {
+      let touched = 0, skippedMissing = 0, filled = { paidAt: 0, dvouDate: 0, dvouPaidAt: 0, dvouAmount: 0, sqm: 0, building: 0 };
+      for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
+        const batch = prepared.slice(i, i + BATCH_SIZE);
+        const existing = await prisma.registryDeal.findMany({
+          where: { rowKey: { in: batch.map((r) => r.rowKey) } },
+          select: { id: true, rowKey: true, sqm: true, building: true },
+        });
+        const byKey = new Map(existing.map((r) => [r.rowKey, r]));
+        const ops = [];
+        for (const r of batch) {
+          const ex = byKey.get(r.rowKey);
+          if (!ex) { skippedMissing++; continue; }
+          const data = {};
+          if (r.paidAt) { data.paidAt = r.paidAt; filled.paidAt++; }
+          if (r.dvouDate) { data.dvouDate = r.dvouDate; filled.dvouDate++; }
+          if (r.dvouPaidAt) { data.dvouPaidAt = r.dvouPaidAt; filled.dvouPaidAt++; }
+          if (r.dvouAmount !== null && r.dvouAmount !== undefined) { data.dvouAmount = r.dvouAmount; filled.dvouAmount++; }
+          if (ex.sqm === null && r.sqmSheet) { data.sqm = r.sqmSheet; filled.sqm++; }
+          if (!ex.building && r.buildingSheet) { data.building = String(r.buildingSheet); filled.building++; }
+          if (!Object.keys(data).length) continue;
+          touched++;
+          if (!dryRun) ops.push(prisma.registryDeal.update({ where: { id: ex.id }, data }));
+        }
+        if (ops.length) await prisma.$transaction(ops);
+        console.log(`— батч ${Math.floor(i / BATCH_SIZE) + 1}: ${Math.min(i + BATCH_SIZE, prepared.length)}/${prepared.length} —`);
+      }
+      console.log('RESULT:', JSON.stringify({ mode: 'ONLY_FIELDS', touched, skippedMissing, filled, dryRun }));
+      return;
     }
 
     // ─── Upsert по rowKey батчами ───
@@ -114,7 +169,7 @@ const toBigIntOrNull = (v) => {
 
       if (!dryRun) {
         await prisma.$transaction(
-          batch.map((data) =>
+          batch.map(({ sqmSheet, buildingSheet, ...data }) =>
             prisma.registryDeal.upsert({
               where: { rowKey: data.rowKey },
               create: data,

@@ -2006,11 +2006,20 @@ model RegistryDeal {
   building           String?
   apartmentNumber    String?   @map("apartment_number")
   objectSource       String?   @map("object_source")
+  // 2026-09-07 (правила владельца): дата сделки = «Дата оплаты ДДУ» (столбец H
+  // реестра, при рассрочке — первая оплата); «платная бронь» = ДВОУ: дата (D),
+  // дата оплаты (E), сумма (AA). amount по-прежнему = «Стоимость по ДДУ» (AB).
+  paidAt             DateTime? @map("paid_at") @db.Date
+  dvouDate           DateTime? @map("dvou_date") @db.Date
+  dvouPaidAt         DateTime? @map("dvou_paid_at") @db.Date
+  dvouAmount         Decimal?  @map("dvou_amount") @db.Decimal(14, 2)
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
   @@index([agencyCanonical])
   @@index([brokerId])
   @@index([project, signedAt])
+  @@index([paidAt])
+  @@index([dvouPaidAt])
   @@map("registry_deals")
 }
