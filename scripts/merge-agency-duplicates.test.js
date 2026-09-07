@@ -1,6 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { planRequisites, loserNameKeys } = require("./merge-agency-duplicates");
+const { planRequisites, loserNameKeys, looseNameKey } = require("./merge-agency-duplicates");
+
+test("мягкий ключ имени: регистр, пробелы, кавычки, дефисы, латинские двойники", () => {
+  assert.equal(looseNameKey("КАЛИНКА-РИЭЛТИ"), looseNameKey("Калинка - Риэлти"));
+  assert.equal(looseNameKey('ооо "Бюро-Эстейт'), looseNameKey("ООО Бюро Эстейт"));
+  assert.equal(looseNameKey("Vesta-Dom"), looseNameKey("Vesta Dom"));
+  assert.equal(looseNameKey("ЗГ2-16-1-173a"), looseNameKey("ЗГ2-16-1-173а"));
+  assert.notEqual(looseNameKey("Invest 7"), looseNameKey("Инвест7"));
+});
 
 test("реквизиты: заполняются только пустые поля выжившей, ИНН-плейсхолдер заменяется настоящим", () => {
   const survivor = { name: "Kalinka", legalName: null, inn: "NOINN-abc", phone: "+79160000000", email: null, address: null, legalAddress: null };

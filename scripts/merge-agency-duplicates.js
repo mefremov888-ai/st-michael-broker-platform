@@ -62,17 +62,44 @@ function loserNameKeys(losers) {
   return keys;
 }
 
+/**
+ * Мягкий ключ имени для поиска карточки: регистр, лишние пробелы, кавычки,
+ * дефисы и латинские двойники кириллицы (a/а, c/с, e/е, o/о, p/р, x/х, y/у)
+ * не различаются. Точность не теряется: кандидат всё равно должен быть ровно один.
+ */
+function looseNameKey(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[«»"'`“”„]/g, "")
+    .replace(/[-–—_]+/g, " ")
+    .replace(/[abcekmhopxyt]/g, (ch) => ({ a: "а", b: "в", c: "с", e: "е", k: "к", m: "м", h: "н", o: "о", p: "р", x: "х", y: "у", t: "т" })[ch] || ch)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function resolveCluster(prisma, cluster) {
   const names = [cluster.survivorName, ...(cluster.mergeNames || [])].map((n) => String(n).trim());
-  const found = await prisma.agency.findMany({
+  const exact = await prisma.agency.findMany({
     where: { name: { in: names } },
     select: { id: true, name: true, legalName: true, inn: true, phone: true, email: true, address: true, legalAddress: true },
   });
   const byName = new Map();
-  for (const a of found) {
+  for (const a of exact) {
     const k = a.name.trim();
     if (!byName.has(k)) byName.set(k, []);
     byName.get(k).push(a);
+  }
+  // Имена без точного совпадения ищем мягким ключом среди всех карточек.
+  const missing = names.filter((n) => !(byName.get(n) || []).length);
+  if (missing.length) {
+    const all = await prisma.agency.findMany({
+      select: { id: true, name: true, legalName: true, inn: true, phone: true, email: true, address: true, legalAddress: true },
+    });
+    for (const n of missing) {
+      const key = looseNameKey(n);
+      const hits = all.filter((a) => looseNameKey(a.name) === key);
+      if (hits.length) byName.set(n, hits);
+    }
   }
   const problems = [];
   for (const n of names) {
@@ -83,6 +110,9 @@ async function resolveCluster(prisma, cluster) {
   if (problems.length) return { ok: false, problems };
   const survivor = byName.get(names[0])[0];
   const losers = names.slice(1).map((n) => byName.get(n)[0]);
+  // Одна и та же карточка под двумя написаниями — не склеиваем саму с собой.
+  const ids = new Set([survivor.id, ...losers.map((l) => l.id)]);
+  if (ids.size !== losers.length + 1) return { ok: false, problems: ["одна карточка найдена под двумя именами"] };
   return { ok: true, survivor, losers };
 }
 
@@ -193,4 +223,4 @@ if (require.main === module) {
   main().catch((e) => { console.error("FATAL:", e?.message || e); process.exit(1); });
 }
 
-module.exports = { planRequisites, loserNameKeys };
+module.exports = { planRequisites, loserNameKeys, looseNameKey };
