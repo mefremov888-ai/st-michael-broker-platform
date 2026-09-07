@@ -248,6 +248,11 @@ export class LoyaltyOverviewQueryDto {
   @IsOptional()
   @IsISO8601({ strict: true })
   to?: string;
+
+  // 2026-09-07: источник фиксаций — старый кабинет / новый кабинет / оба.
+  @IsOptional()
+  @IsIn(["old", "new", "all"])
+  cabinetSource?: "old" | "new" | "all";
 }
 
 // 2026-09-07: карточка контакта принимает выбранный «Период встреч и сделок»,
@@ -260,12 +265,22 @@ export class LoyaltyDetailQueryDto {
   @IsOptional()
   @IsISO8601({ strict: true })
   to?: string;
+
+  // 2026-09-07: источник фиксаций — старый кабинет / новый кабинет / оба.
+  @IsOptional()
+  @IsIn(["old", "new", "all"])
+  cabinetSource?: "old" | "new" | "all";
 }
 
 export class LoyaltyListFiltersDto {
   @IsOptional()
   @IsISO8601({ strict: true })
   from?: string;
+
+  // 2026-09-07: источник фиксаций — старый кабинет / новый кабинет / оба.
+  @IsOptional()
+  @IsIn(["old", "new", "all"])
+  cabinetSource?: "old" | "new" | "all";
 
   @IsOptional()
   @IsISO8601({ strict: true })
@@ -516,6 +531,11 @@ export class LoyaltyCanonicalFilterDto {
   @IsOptional()
   @IsBoolean()
   includeLowSignal?: boolean;
+
+  // 2026-09-07: источник фиксаций — старый кабинет / новый кабинет / оба.
+  @IsOptional()
+  @IsIn(["old", "new", "all"])
+  cabinetSource?: "old" | "new" | "all";
 
   @IsOptional()
   @ValidateNested()

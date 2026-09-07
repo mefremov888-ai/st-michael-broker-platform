@@ -509,6 +509,8 @@ export default function ClientsPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
+  // 2026-09-07: источник «старый / новый кабинет» (виден сотрудникам).
+  const [sourceFilter, setSourceFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [selectedClient, setSelectedClient] = useState<any>(null);
 
@@ -519,6 +521,7 @@ export default function ClientsPage() {
       if (search) params.set('search', search);
       if (statusFilter) params.set('status', statusFilter);
       if (projectFilter) params.set('project', projectFilter);
+      if (sourceFilter) params.set('cabinetSource', sourceFilter);
       const data = await apiGet(`/clients?${params}`);
       setClients(data.clients || []);
       setTotal(data.total || 0);
@@ -529,7 +532,7 @@ export default function ClientsPage() {
     setLoading(false);
   };
 
-  useEffect(() => { fetchClients(); }, [page, statusFilter, projectFilter]);
+  useEffect(() => { fetchClients(); }, [page, statusFilter, projectFilter, sourceFilter]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -614,6 +617,18 @@ export default function ClientsPage() {
             <option value="REJECTED">Не уникален</option>
             <option value="EXPIRED">Истёк</option>
           </select>
+          {isStaff && (
+            <select
+              className="input w-auto"
+              value={sourceFilter}
+              onChange={(e) => { setSourceFilter(e.target.value); setPage(1); }}
+              title="Источник записи: новый кабинет или перенос из старого"
+            >
+              <option value="">Оба кабинета</option>
+              <option value="new">Новый кабинет</option>
+              <option value="old">Старый кабинет</option>
+            </select>
+          )}
         </div>
       </div>
 

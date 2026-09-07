@@ -409,6 +409,26 @@ export function LoyaltyFilterPanel({
             </>
           )}
 
+          {capabilities.cabinetSource && (
+            <Field label="Источник фиксаций">
+              <select
+                className="input"
+                value={draft.cabinetSource}
+                onChange={(event) =>
+                  update(
+                    "cabinetSource",
+                    event.target
+                      .value as LoyaltyFilterFormState["cabinetSource"],
+                  )
+                }
+              >
+                <option value="">Оба кабинета</option>
+                <option value="new">Только новый кабинет</option>
+                <option value="old">Только старый кабинет</option>
+              </select>
+            </Field>
+          )}
+
           <Field label={isBroker ? "Статус брокера" : "Уровень партнёрства"}>
             <select
               className="input"

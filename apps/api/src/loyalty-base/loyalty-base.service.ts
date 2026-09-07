@@ -1,4 +1,8 @@
 import {
+  CabinetSource,
+  cabinetSourceWhere,
+} from "../common/historical-client";
+import {
   BadRequestException,
   ConflictException,
   GoneException,
@@ -96,6 +100,7 @@ interface CanonicalLoyaltyFilter {
   rewardPresent?: boolean;
   staleDays?: number;
   doNotCall?: "exclude" | "only";
+  cabinetSource?: CabinetSource;
   columns: {
     contact?: string;
     statusStage?: string;
@@ -729,6 +734,25 @@ export const FIXATION_CLIENT_WHERE = {
   ],
 };
 
+// 2026-09-07 (решение владельца): фильтр источника «старый кабинет / новый
+// кабинет / оба». Все счётчики и списки фиксаций «Нашей базы» идут через эти
+// две функции, чтобы фильтр применялся везде одинаково.
+export function fixationClientWhere(source?: string | null): any {
+  const sourceWhere = cabinetSourceWhere(source);
+  return Object.keys(sourceWhere).length
+    ? { AND: [FIXATION_CLIENT_WHERE, sourceWhere] }
+    : FIXATION_CLIENT_WHERE;
+}
+export function activeFixationClientWhereFor(
+  source?: string | null,
+  now: Date = new Date(),
+): any {
+  const sourceWhere = cabinetSourceWhere(source);
+  return Object.keys(sourceWhere).length
+    ? { AND: [activeFixationClientWhere(now), sourceWhere] }
+    : activeFixationClientWhere(now);
+}
+
 // 2026-09-04 (решение владельца, вариант В): «Действующая фиксация» —
 // отдельный фильтр рядом с «Есть фиксации» (который остаётся lifetime и
 // НЕ меняется). Клиент считается действующей фиксацией, если он проходит
@@ -1005,6 +1029,8 @@ export class LoyaltyBaseService {
       rewardPresent: canonical?.rewardPresent ?? query.rewardPresent,
       staleDays: canonical?.staleDays ?? query.staleDays,
       doNotCall: canonical?.doNotCall ?? query.doNotCall,
+      cabinetSource:
+        canonical?.cabinetSource ?? (query as any).cabinetSource ?? undefined,
       columns: {
         contact: columnInput.contact,
         statusStage: columnInput.statusStage,
@@ -3180,7 +3206,7 @@ export class LoyaltyBaseService {
     const period = this.parsePeriod(query);
     return base === "anna"
       ? this.annaOverview(period)
-      : this.oursOverview(period);
+      : this.oursOverview(period, query.cabinetSource);
   }
 
   private async annaOverview(period: { from: Date; to: Date }) {
@@ -4012,7 +4038,10 @@ export class LoyaltyBaseService {
     };
   }
 
-  private async oursOverview(period: { from: Date; to: Date }) {
+  private async oursOverview(
+    period: { from: Date; to: Date },
+    cabinetSource?: CabinetSource,
+  ) {
     const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
     const periodDto = {
       from: period.from.toISOString(),
@@ -4065,7 +4094,7 @@ export class LoyaltyBaseService {
       this.prisma.agency.count(),
       this.prisma.client.count({
         where: {
-          ...FIXATION_CLIENT_WHERE,
+          ...fixationClientWhere(cabinetSource),
           createdAt: { gte: period.from, lte: period.to },
           broker: brokerOwner,
         },
@@ -4127,7 +4156,7 @@ export class LoyaltyBaseService {
           funnelStage: "NEW_BROKER",
           brokerTourVisited: false,
           brokerTourDate: null,
-          clients: { none: FIXATION_CLIENT_WHERE },
+          clients: { none: fixationClientWhere(cabinetSource) },
           meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
           deals: { none: this.ourConfirmedDealWhere() },
           registryDeals: { none: {} },
@@ -4147,7 +4176,7 @@ export class LoyaltyBaseService {
           role: "BROKER",
           mergedIntoId: null,
           brokerTourVisited: true,
-          clients: { none: FIXATION_CLIENT_WHERE },
+          clients: { none: fixationClientWhere(cabinetSource) },
         },
       }),
       this.prisma.broker.findMany({
@@ -7591,12 +7620,15 @@ export class LoyaltyBaseService {
     // не меняется, действующая проверяет ещё и срок (см. комментарий у
     // activeFixationClientWhere).
     if (filter.columns.activity === "HAS_ACTIVE_FIXATIONS")
-      and.push({ clients: { some: activeFixationClientWhere() } });
+      and.push({
+        clients: { some: activeFixationClientWhereFor(filter.cabinetSource) },
+      });
     if (filter.activityType)
       and.push(
         this.ourBrokerActivityFilter(
           filter.activityType,
           filter.activityPeriod,
+          filter.cabinetSource,
         ),
       );
     if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
@@ -7611,7 +7643,7 @@ export class LoyaltyBaseService {
         funnelStage: "NEW_BROKER",
         brokerTourVisited: false,
         brokerTourDate: null,
-        clients: { none: FIXATION_CLIENT_WHERE },
+        clients: { none: fixationClientWhere(filter.cabinetSource) },
         meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
         deals: { none: this.ourConfirmedDealWhere() },
         registryDeals: { none: {} },
@@ -7622,7 +7654,7 @@ export class LoyaltyBaseService {
     } else if (filter.segment === "BT_WITHOUT_FIXATION") {
       and.push({
         brokerTourVisited: true,
-        clients: { none: FIXATION_CLIENT_WHERE },
+        clients: { none: fixationClientWhere(filter.cabinetSource) },
       });
     } else if (filter.segment === "BIRTHDAY_TODAY") {
       and.push({ id: { in: await this.ourBirthdayBrokerIds() } });
@@ -7729,7 +7761,7 @@ export class LoyaltyBaseService {
           },
         },
         clients: {
-          where: FIXATION_CLIENT_WHERE,
+          where: fixationClientWhere(filter.cabinetSource),
           orderBy: { createdAt: "desc" },
           take: 1,
           select: { createdAt: true },
@@ -7748,7 +7780,7 @@ export class LoyaltyBaseService {
         },
         _count: {
           select: {
-            clients: { where: FIXATION_CLIENT_WHERE },
+            clients: { where: fixationClientWhere(filter.cabinetSource) },
             deals: { where: this.ourConfirmedDealWhere() },
             meetings: {
               where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
@@ -7789,6 +7821,7 @@ export class LoyaltyBaseService {
     const periodMetrics = await this.ourBrokerPeriodMetrics(
       (records as any[]).map((record) => String(record.id)),
       filter.activityPeriod,
+      filter.cabinetSource,
     );
     const candidates = (records as any[])
       .map((record) => {
@@ -7842,6 +7875,7 @@ export class LoyaltyBaseService {
   private async ourBrokerPeriodMetrics(
     brokerIds: string[],
     period?: LoyaltyFilterPeriod,
+    cabinetSource?: CabinetSource,
   ): Promise<Map<string, any>> {
     const ids = uniqueSorted(brokerIds);
     const result = new Map<string, any>();
@@ -7879,7 +7913,7 @@ export class LoyaltyBaseService {
           by: ["brokerId"],
           where: {
             brokerId: { in: batch },
-            ...FIXATION_CLIENT_WHERE,
+            ...fixationClientWhere(cabinetSource),
             createdAt: { gte: period.from, lte: period.to },
           },
           _count: { _all: true },
@@ -8038,7 +8072,7 @@ export class LoyaltyBaseService {
     if (and.length) where.AND = and;
     const records = await this.prisma.agency.findMany({
       where,
-      include: this.ourAgencyReadInclude(),
+      include: this.ourAgencyReadInclude(filter.cabinetSource),
     });
     await this.attachOurAgencyRegistryDeals(records as any[]);
     const workflowCalls = await this.workflowCallReadModels(
@@ -8138,7 +8172,7 @@ export class LoyaltyBaseService {
     }
   }
 
-  private ourAgencyReadInclude(): any {
+  private ourAgencyReadInclude(cabinetSource?: CabinetSource): any {
     const confirmedDeals = this.ourConfirmedDealWhere();
     // 2026-09-07: у сделки агентства в карточке нужны те же поля, что у
     // брокера (клиент, проект, лид amo) плюс объект: площадь, этаж, корпус,
@@ -8177,7 +8211,7 @@ export class LoyaltyBaseService {
               brokerTourVisited: true,
               brokerTourDate: true,
               clients: {
-                where: FIXATION_CLIENT_WHERE,
+                where: fixationClientWhere(cabinetSource),
                 select: {
                   id: true,
                   createdAt: true,
@@ -9651,13 +9685,14 @@ export class LoyaltyBaseService {
   private ourBrokerActivityFilter(
     type: string,
     period?: { from: Date; to: Date },
+    cabinetSource?: CabinetSource,
   ): any {
     const dateRange = period ? { gte: period.from, lte: period.to } : undefined;
     if (type === "FIXATION")
       return {
         clients: {
           some: {
-            ...FIXATION_CLIENT_WHERE,
+            ...fixationClientWhere(cabinetSource),
             ...(dateRange ? { createdAt: dateRange } : {}),
           },
         },
@@ -10389,13 +10424,14 @@ export class LoyaltyBaseService {
     id: string,
     // 2026-09-07: выбранный в списке «Период встреч и сделок» теперь
     // применяется и к карточке — фронт передаёт его как ?from=&to=.
-    periodDto?: { from?: string; to?: string },
+    periodDto?: { from?: string; to?: string; cabinetSource?: CabinetSource },
   ) {
     const base = this.parseBase(baseInput);
     const activityPeriod = this.parseOptionalFilterPeriod(
       periodDto,
       "activityPeriod",
     );
+    const cabinetSource = periodDto?.cabinetSource;
     if (base === "anna") {
       const active = await this.activeAnnaSnapshot();
       if (!active)
@@ -10523,7 +10559,7 @@ export class LoyaltyBaseService {
             },
           },
           clients: {
-            where: FIXATION_CLIENT_WHERE,
+            where: fixationClientWhere(cabinetSource),
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             take: OUR_ACTIVITY_EVIDENCE_LIMIT,
             select: {
@@ -10580,7 +10616,7 @@ export class LoyaltyBaseService {
           },
           _count: {
             select: {
-              clients: { where: FIXATION_CLIENT_WHERE },
+              clients: { where: fixationClientWhere(cabinetSource) },
               deals: { where: this.ourConfirmedDealWhere() },
               meetings: {
                 where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
@@ -10654,6 +10690,7 @@ export class LoyaltyBaseService {
         const periodMetrics = await this.ourBrokerPeriodMetrics(
           [String(broker.id)],
           activityPeriod,
+          cabinetSource,
         );
         item.periodMetrics =
           periodMetrics.get(String(broker.id)) ||
@@ -10664,7 +10701,7 @@ export class LoyaltyBaseService {
     }
     const agency = await this.prisma.agency.findUnique({
       where: { id },
-      include: this.ourAgencyReadInclude(),
+      include: this.ourAgencyReadInclude(cabinetSource),
     });
     if (!agency) throw new NotFoundException("Agency not found");
     await this.attachOurAgencyRegistryDeals([agency as any]);

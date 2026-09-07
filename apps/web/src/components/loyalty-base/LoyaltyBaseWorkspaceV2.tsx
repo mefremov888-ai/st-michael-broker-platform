@@ -938,7 +938,10 @@ export function LoyaltyBaseWorkspaceV2() {
     setOverviewLoading(true);
     setOverviewError("");
     try {
-      const next = await getLoyaltyOverview(base, ratingRange);
+      // 2026-09-07: обзор следует за фильтром источника «старый / новый кабинет».
+      const next = await getLoyaltyOverview(base, ratingRange, {
+        cabinetSource: filters.cabinetSource || undefined,
+      });
       if (request === overviewRequest.current) setOverview(next);
     } catch (reason) {
       if (request === overviewRequest.current) {
@@ -950,7 +953,7 @@ export function LoyaltyBaseWorkspaceV2() {
     } finally {
       if (request === overviewRequest.current) setOverviewLoading(false);
     }
-  }, [base, canReadAll, ratingRange]);
+  }, [base, canReadAll, ratingRange, filters.cabinetSource]);
   const loadList = useCallback(async () => {
     if (!canReadAll) {
       setListLoading(false);
@@ -1054,6 +1057,7 @@ export function LoyaltyBaseWorkspaceV2() {
     getLoyaltyDetail(base, entityType, detailId, {
       activityPeriod: toCanonicalFilter(filters, entityType, base)
         .activityPeriod,
+      cabinetSource: filters.cabinetSource || undefined,
     })
       .then((record) => {
         const row = list?.items.find((item) => item.id === detailId);

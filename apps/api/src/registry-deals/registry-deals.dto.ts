@@ -19,4 +19,9 @@ export class RegistrySeriesQueryDto {
   @IsOptional()
   @IsIn(SERIES_PROJECTS as unknown as string[])
   project?: 'ZORGE9' | 'SILVER_BOR' | 'TOLBUKHINA';
+
+  // 2026-09-07: источник фиксаций — старый кабинет / новый кабинет / оба.
+  @IsOptional()
+  @IsIn(['old', 'new', 'all'])
+  cabinetSource?: 'old' | 'new' | 'all';
 }

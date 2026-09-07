@@ -104,6 +104,7 @@ export default function RegistrySeriesPanel({
   const [from, setFrom] = useState(initialFrom || monthStartMonthsAgo(today, 11));
   const [to, setTo] = useState(initialTo || today);
   const [project, setProject] = useState<ProjectFilter>('');
+  const [cabinetSource, setCabinetSource] = useState<'' | 'old' | 'new'>('');
   const [byProject, setByProject] = useState(false);
   const [collapsed, setCollapsed] = useState(compact);
   const [data, setData] = useState<SeriesResponse | null>(null);
@@ -121,6 +122,7 @@ export default function RegistrySeriesPanel({
         granularity,
       });
       if (project) params.set('project', project);
+      if (cabinetSource) params.set('cabinetSource', cabinetSource);
       const next = await apiGet<SeriesResponse>(`/admin/registry-deals/series?${params.toString()}`);
       setData(next && Array.isArray(next.buckets) ? next : null);
     } catch (e: any) {
@@ -129,7 +131,7 @@ export default function RegistrySeriesPanel({
     } finally {
       setLoading(false);
     }
-  }, [from, to, granularity, project]);
+  }, [from, to, granularity, project, cabinetSource]);
 
   useEffect(() => {
     if (collapsed) return;
@@ -245,6 +247,18 @@ export default function RegistrySeriesPanel({
                 <option value="ZORGE9">Зорге 9</option>
                 <option value="SILVER_BOR">Серебряный Бор</option>
                 <option value="TOLBUKHINA">Толбухина</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-text-muted">Фиксации: источник</span>
+              <select
+                className="input !py-1.5"
+                value={cabinetSource}
+                onChange={(e) => setCabinetSource(e.target.value as '' | 'old' | 'new')}
+              >
+                <option value="">Оба кабинета</option>
+                <option value="new">Новый кабинет</option>
+                <option value="old">Старый кабинет</option>
               </select>
             </label>
             <div className="flex gap-1">
