@@ -1,0 +1,46 @@
+name: Sample unmatched meeting contacts (one-off, read-only)
+
+# Разовая read-only выборка 07.09.2026: первые N контактов успешных КЦ-встреч,
+# чьих телефонов нет в кабинете (брокеры+клиенты) — имя/теги/дата, без телефонов.
+# Определяем: прямые покупатели / брокеры вне базы / ТГ-импорт.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_limit:
+        description: Сколько несовпавших контактов собрать
+        required: false
+        default: "40"
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  sample:
+    name: Collect sample over SSH (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and run sampler
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        env:
+          SAMPLE_LIMIT_INPUT: ${{ inputs.sample_limit }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          envs: SAMPLE_LIMIT_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/sample-unmatched-meeting-contacts.js > /tmp/sample-unmatched.js
+            docker cp /tmp/sample-unmatched.js st-michael-api:/tmp/sample-unmatched.js
+            docker compose exec -T -e SAMPLE_LIMIT="$SAMPLE_LIMIT_INPUT" api node /tmp/sample-unmatched.js
+            echo "=== Готово (только чтение) ==="
