@@ -1,0 +1,108 @@
+name: Retire old rollback image pairs (keep newest N)
+
+# 2026-09-07: диск прода — 96 ГБ, из них 48 ГБ занимают 74 docker-образа:
+# каждый деплой оставляет пару st-michael-rollback-api/web:<YYYYMMDD-HHMMSS>
+# для отката, и старые пары никто не убирал. Этот воркфлоу удаляет ТОЛЬКО
+# теги rollback-пар старше самых новых keep_pairs (по умолчанию 3), и только
+# если тег не используется ни одним контейнером. Никогда не трогает: текущие
+# образы приложения, volumes/БД/uploads, build-кэш, бэкапы, файлы
+# rollback-записей. Не перезапускает сервисы.
+#
+# operation=inspect (по умолчанию) — только список пар и что было бы удалено.
+# operation=retire + confirm_retire=true — удаление.
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: inspect — только показать; retire — удалить старые пары
+        required: true
+        default: inspect
+        type: choice
+        options:
+          - inspect
+          - retire
+      keep_pairs:
+        description: Сколько самых новых rollback-пар оставить
+        required: true
+        default: '3'
+        type: string
+      confirm_retire:
+        description: Подтверждаю удаление тегов старых rollback-пар
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    name: Inspect or retire old rollback pairs on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: SSH and process rollback pairs
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          OPERATION: ${{ inputs.operation }}
+          KEEP_PAIRS: ${{ inputs.keep_pairs }}
+          CONFIRM_RETIRE: ${{ inputs.confirm_retire }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          command_timeout: 15m
+          envs: OPERATION,KEEP_PAIRS,CONFIRM_RETIRE
+          script: |
+            set -eu
+            case "$KEEP_PAIRS" in ''|*[!0-9]*) echo "keep_pairs должен быть числом"; exit 1;; esac
+            [ "$KEEP_PAIRS" -ge 1 ] || { echo "keep_pairs должен быть >= 1"; exit 1; }
+            echo "=== ДО ==="; df -h / | tail -1
+            docker system df | head -3
+            echo ""
+            echo "=== Образы, которые используют контейнеры (не трогаем) ==="
+            in_use=$(docker ps -a --format '{{.Image}}' | sort -u)
+            printf '%s\n' "$in_use"
+            echo ""
+            echo "=== Rollback-пары (по метке времени) ==="
+            stamps=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^st-michael-rollback-(api|web):[0-9]{8}-[0-9]{6}$' | sed -E 's/^st-michael-rollback-(api|web)://' | sort -u)
+            total=$(printf '%s\n' "$stamps" | grep -c . || true)
+            echo "пар всего: $total; оставить новейших: $KEEP_PAIRS"
+            keep=$(printf '%s\n' "$stamps" | sort -r | head -n "$KEEP_PAIRS")
+            old=$(printf '%s\n' "$stamps" | sort -r | tail -n +"$((KEEP_PAIRS + 1))")
+            echo "--- оставляем:"; printf '  %s\n' $keep
+            echo "--- кандидаты на удаление:"
+            [ -n "$old" ] && printf '  %s\n' $old || echo "  (нет)"
+            echo ""
+            removed=0; skipped=0
+            for stamp in $old; do
+              for kind in api web; do
+                tag="st-michael-rollback-$kind:$stamp"
+                if printf '%s\n' "$in_use" | grep -qxF "$tag"; then
+                  echo "ПРОПУСК $tag — используется контейнером"; skipped=$((skipped+1)); continue
+                fi
+                if ! docker image inspect "$tag" >/dev/null 2>&1; then continue; fi
+                size=$(docker image inspect --format '{{.Size}}' "$tag" 2>/dev/null || echo 0)
+                if [ "$OPERATION" = "retire" ] && [ "$CONFIRM_RETIRE" = "true" ]; then
+                  case "$tag" in
+                    st-michael-rollback-api:[0-9]*-[0-9]*|st-michael-rollback-web:[0-9]*-[0-9]*)
+                      docker image rm "$tag" >/dev/null 2>&1 && { echo "УДАЛЁН $tag ($((size/1048576)) МБ)"; removed=$((removed+1)); } || { echo "НЕ УДАЛЁН $tag"; skipped=$((skipped+1)); } ;;
+                    *) echo "Отказ: неожиданный тег $tag"; skipped=$((skipped+1)) ;;
+                  esac
+                else
+                  echo "БЫЛ БЫ УДАЛЁН $tag ($((size/1048576)) МБ)"
+                fi
+              done
+            done
+            echo ""
+            if [ "$OPERATION" = "retire" ] && [ "$CONFIRM_RETIRE" = "true" ]; then
+              echo "=== dangling-слои после удаления тегов ==="
+              docker image prune -f | tail -1 || true
+              echo "удалено тегов: $removed, пропущено: $skipped"
+            else
+              echo "INSPECT: ничего не удалено. Для удаления operation=retire + confirm_retire=true."
+            fi
+            echo "=== ПОСЛЕ ==="; df -h / | tail -1
