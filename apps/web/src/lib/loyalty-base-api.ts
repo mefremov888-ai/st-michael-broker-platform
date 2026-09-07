@@ -1566,8 +1566,16 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
       contractNumber && { label: "Номер договора", value: contractNumber },
     isDeal &&
       evidenceDateLabel(occurredAtRaw) && {
-        label: "Дата ДДУ",
+        // 2026-09-07 (правило владельца): дата сделки = оплата ДДУ.
+        label: stringValue(item.paidAt) ? "Дата оплаты ДДУ" : "Дата ДДУ",
         value: evidenceDateLabel(occurredAtRaw),
+      },
+    isDeal &&
+      stringValue(item.paidAt) &&
+      stringValue(item.signedAt) &&
+      evidenceDateLabel(item.signedAt) !== evidenceDateLabel(item.paidAt) && {
+        label: "Дата ДДУ (подписание)",
+        value: evidenceDateLabel(item.signedAt),
       },
     amount && {
       label: "Сумма",

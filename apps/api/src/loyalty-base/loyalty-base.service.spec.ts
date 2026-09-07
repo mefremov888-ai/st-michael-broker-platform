@@ -5269,7 +5269,7 @@ describe("LoyaltyBaseService", () => {
         brokerId: "registry-only",
         _count: { _all: 2 },
         _sum: { amount: "500000.00" },
-        _max: { signedAt: new Date("2026-07-10T00:00:00.000Z") },
+        _max: { paidAt: new Date("2026-07-10T00:00:00.000Z") },
       },
     ]);
 
@@ -5289,7 +5289,7 @@ describe("LoyaltyBaseService", () => {
     expect(result.items[0].computedStatuses).toContain("SELLER");
   });
 
-  it("applies the selected period to registry deals by signedAt", async () => {
+  it("applies the selected period to registry deals by paidAt (paid DDU only)", async () => {
     const prisma = prismaMock();
     const service = new LoyaltyBaseService(prisma);
     const broker = (id: string, phoneSuffix: string) => ({
@@ -5330,28 +5330,30 @@ describe("LoyaltyBaseService", () => {
     prisma.meeting.groupBy.mockResolvedValue([]);
     prisma.deal.groupBy.mockResolvedValue([]);
     prisma.registryDeal.groupBy.mockImplementation((args: any) => {
-      if (args?.where?.signedAt) {
-        // Периодный агрегат: только сделка, подписанная в августе.
+      // Любой запрос к реестру обязан отсекать неоплаченные строки.
+      expect(args?.where?.paidAt).toBeDefined();
+      if (args?.where?.paidAt?.gte) {
+        // Периодный агрегат: только сделка, оплаченная в августе.
         return Promise.resolve([
           {
             brokerId: "in-period",
             _count: { _all: 1 },
             _sum: { amount: "100.00" },
-            _max: { signedAt: new Date("2026-08-15T00:00:00.000Z") },
+            _max: { paidAt: new Date("2026-08-15T00:00:00.000Z") },
           },
         ]);
       }
-      // Lifetime: у обоих брокеров есть по одной строке реестра.
+      // Lifetime (paidAt not null): у обоих брокеров по одной оплаченной строке.
       return Promise.resolve([
         {
           brokerId: "in-period",
           _count: { _all: 1 },
-          _max: { signedAt: new Date("2026-08-15T00:00:00.000Z") },
+          _max: { paidAt: new Date("2026-08-15T00:00:00.000Z") },
         },
         {
           brokerId: "out-of-period",
           _count: { _all: 1 },
-          _max: { signedAt: new Date("2026-01-15T00:00:00.000Z") },
+          _max: { paidAt: new Date("2026-01-15T00:00:00.000Z") },
         },
       ]);
     });
@@ -5462,7 +5464,7 @@ describe("LoyaltyBaseService", () => {
         brokerId: "broker-1",
         _count: { _all: 2 },
         _sum: { amount: "300000.00" },
-        _max: { signedAt: new Date("2026-08-20T00:00:00.000Z") },
+        _max: { paidAt: new Date("2026-08-20T00:00:00.000Z") },
       },
     ]);
     // Топ-агентство берёт строки реестра через findMany (правило карточки):

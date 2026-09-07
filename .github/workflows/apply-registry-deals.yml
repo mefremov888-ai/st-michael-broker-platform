@@ -26,6 +26,11 @@ on:
         required: true
         default: false
         type: boolean
+      only_fields:
+        description: 'Только дозаполнить paidAt/ДВОУ/площадь/корпус у существующих строк (ничего не создавать и не перезаписывать)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: apply-registry-deals
@@ -42,6 +47,7 @@ jobs:
         env:
           DATA_BRANCH: ${{ inputs.data_branch }}
           APPLY: ${{ inputs.apply }}
+          ONLY_FIELDS_INPUT: ${{ inputs.only_fields }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -49,7 +55,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 25m
-          envs: DATA_BRANCH,APPLY
+          envs: DATA_BRANCH,APPLY,ONLY_FIELDS_INPUT
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
@@ -61,5 +67,6 @@ jobs:
             docker cp /tmp/up.js st-michael-api:/app/scripts/upload-registry-deals.js
             FLAG="--dry-run"
             if [ "$APPLY" = "true" ]; then FLAG=""; fi
-            docker compose exec -T api node /app/scripts/upload-registry-deals.js /app/rd.json $FLAG
+            OF=0; if [ "$ONLY_FIELDS_INPUT" = "true" ]; then OF=1; fi
+            docker compose exec -T -e ONLY_FIELDS=$OF api node /app/scripts/upload-registry-deals.js /app/rd.json $FLAG
             echo "=== Готово (apply=$APPLY) ==="
