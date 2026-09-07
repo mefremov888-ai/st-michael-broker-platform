@@ -1,0 +1,37 @@
+name: Inspect broker-amo contact mismatches (one-off, read-only)
+
+# Разовая развёртка 07.09.2026: «тихие» коллизии класса Татьяны — у каких
+# ACTIVE-брокеров amo по телефону возвращает не тот контакт, что в БД;
+# плюс дубли основного телефона среди брокеров. Только чтение.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Sweep over SSH (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: SSH and run sweep
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 40m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/inspect-broker-amo-mismatch.js > /tmp/amo-mismatch.js
+            docker cp /tmp/amo-mismatch.js st-michael-api:/tmp/amo-mismatch.js
+            docker compose exec -T api node /tmp/amo-mismatch.js
+            echo "=== Готово (только чтение) ==="
