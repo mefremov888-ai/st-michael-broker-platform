@@ -38,9 +38,23 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MARK = (id) => `[old-cabinet:${id}]`;
 const MARK_RE = /\[old-cabinet:(\d+)\]/;
 
+// Числа под колонки Client.amount Decimal(14,2) и Client.sqm Decimal(10,2):
+// значение вне диапазона (в старом кабинете встречается «бюджет» с лишними
+// нулями) не пишется в колонку, а остаётся текстом в комментарии.
+const MAX_AMOUNT = 1e12; // |x| < 10^12
+const MAX_SQM = 1e8; // |x| < 10^8
+function fitDecimal(value, max) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || Math.abs(n) >= max) return null;
+  return value;
+}
+
 function buildComment(row) {
   const parts = ["Импорт из старого кабинета"];
   if (row.projectRaw && !row.project) parts.push(`проект: ${row.projectRaw}`);
+  if (row.budget !== null && row.budget !== undefined && fitDecimal(row.budget, MAX_AMOUNT) === null) parts.push(`бюджет в источнике: ${row.budget}`);
+  if (row.sqm !== null && row.sqm !== undefined && fitDecimal(row.sqm, MAX_SQM) === null) parts.push(`метраж в источнике: ${row.sqm}`);
   if (row.status === 2) parts.push("статус в старом кабинете: отклонена");
   if (row.info) parts.push(row.info);
   return `${MARK(row.oldId)} ${parts.join(" · ")}`.slice(0, 1000);
@@ -66,8 +80,8 @@ function buildClientData(row, brokerId, now = new Date()) {
     amoSyncStatus: "SYNCED",
     propertyType: row.propertyType || null,
     roomsCount: row.rooms ? String(row.rooms) : null,
-    amount: row.budget ?? null,
-    sqm: row.sqm ?? null,
+    amount: fitDecimal(row.budget, MAX_AMOUNT),
+    sqm: fitDecimal(row.sqm, MAX_SQM),
     createdAt,
   };
 }
