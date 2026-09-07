@@ -50,7 +50,7 @@ async function main() {
     };
     const search = async (entity, filter = {}, columns = {}, extra = {}) => {
       const r = await http("POST", `/loyalty-base/ours/${entity}/search`, { page: 1, pageSize: 50, archived: "exclude", sortBy: "name", sortOrder: "asc", filter, columns, ...extra });
-      if (r.status !== 200) throw new Error(`${entity} search HTTP ${r.status}: ${r.text.slice(0, 200)}`);
+      if (r.status !== 200 && r.status !== 201) throw new Error(`${entity} search HTTP ${r.status}: ${r.text.slice(0, 200)}`); // Nest: POST → 201
       return r.body;
     };
     const brokerOwner = { is: { role: "BROKER", mergedIntoId: null } };
@@ -103,10 +103,10 @@ async function main() {
     // ── Обзор: activities.fixations = БД за период ──
     const ov = await http("GET", `/loyalty-base/ours/overview?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`);
     const dbOvFix = await prisma.client.count({ where: { ...FIX, createdAt: { gte: from, lte: to }, broker: brokerOwner } });
-    check("обзор: activities.fixations за 30 дней = БД", ov.status === 200 && Number(ov.body?.activities?.fixations) === dbOvFix, `API ${ov.body?.activities?.fixations} vs БД ${dbOvFix}`);
+    check("обзор: activities.fixations за 30 дней = БД", (ov.status === 200 || ov.status === 201) && Number(ov.body?.activities?.fixations) === dbOvFix, `API ${ov.body?.activities?.fixations} vs БД ${dbOvFix}`);
     const ovOld = await http("GET", `/loyalty-base/ours/overview?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}&cabinetSource=old`);
     const dbOvOld = await prisma.client.count({ where: { ...FIX, comment: { startsWith: HIST }, createdAt: { gte: from, lte: to }, broker: brokerOwner } });
-    check("обзор: фиксации старого кабинета за 30 дней = БД", ovOld.status === 200 && Number(ovOld.body?.activities?.fixations) === dbOvOld, `API ${ovOld.body?.activities?.fixations} vs БД ${dbOvOld}`);
+    check("обзор: фиксации старого кабинета за 30 дней = БД", (ovOld.status === 200 || ovOld.status === 201) && Number(ovOld.body?.activities?.fixations) === dbOvOld, `API ${ovOld.body?.activities?.fixations} vs БД ${dbOvOld}`);
     const dbPaid = await prisma.registryDeal.count({ where: { paidAt: { gte: from, lte: to }, brokerId: { not: null }, broker: brokerOwner } });
     check("обзор: сделки реестра (paidAt, с брокером) за 30 дней ≤ activities.deals", Number(ov.body?.activities?.deals) >= dbPaid, `API ${ov.body?.activities?.deals} vs реестр ${dbPaid}`);
 
