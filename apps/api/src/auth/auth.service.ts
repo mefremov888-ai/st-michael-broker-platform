@@ -1291,8 +1291,11 @@ export class AuthService {
    */
   async attachAgencyByInn(brokerId: string, inn: string) {
     const cleanInn = String(inn || "").replace(/\D/g, "");
-    if (cleanInn.length < 10 || cleanInn.length > 12) {
-      throw new BadRequestException("ИНН должен быть 10 или 12 цифр");
+    // 2026-09-07: раньше проверялась только длина 10–12, и 11-значный ИНН
+    // проходил — брокер получал агентство, с которым потом не мог нормально
+    // фиксировать. Теперь строго: ровно 10 (юрлицо) или 12 (физлицо/ИП).
+    if (cleanInn.length !== 10 && cleanInn.length !== 12) {
+      throw new BadRequestException("ИНН должен содержать 10 или 12 цифр");
     }
 
     // Найти/создать локальное Agency.
@@ -1360,8 +1363,11 @@ export class AuthService {
    */
   async replacePrimaryAgencyByInn(brokerId: string, inn: string) {
     const cleanInn = String(inn || "").replace(/\D/g, "");
-    if (cleanInn.length < 10 || cleanInn.length > 12) {
-      throw new BadRequestException("ИНН должен быть 10 или 12 цифр");
+    // 2026-09-07: раньше проверялась только длина 10–12, и 11-значный ИНН
+    // проходил — брокер получал агентство, с которым потом не мог нормально
+    // фиксировать. Теперь строго: ровно 10 (юрлицо) или 12 (физлицо/ИП).
+    if (cleanInn.length !== 10 && cleanInn.length !== 12) {
+      throw new BadRequestException("ИНН должен содержать 10 или 12 цифр");
     }
 
     let agency = await this.prisma.agency.findUnique({

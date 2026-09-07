@@ -113,4 +113,56 @@ describe("ClientFixationController idempotency", () => {
       assertOwned,
     );
   });
+
+  // 2026-09-07: схема стала мягкой (4-20 цифр) — 11-значный ИНН больше не
+  // валит запрос 400-кой. Строгая проверка 10/12 живёт в сервисе фиксации,
+  // который оформляет фиксацию без агентства и возвращает agencyWarning.
+  it("accepts an 11-digit agency INN and lets the service decide (soft schema)", async () => {
+    const clientFixationService = {
+      fixClient: jest.fn().mockResolvedValue({
+        client: { id: "client-1" },
+        agencyWarning: "warning",
+      }),
+    };
+    const assertOwned = jest.fn().mockResolvedValue(undefined);
+    const fixationSafety = {
+      execute: jest.fn((_request, action) => action({ assertOwned })),
+    };
+    const controller = new ClientFixationController(
+      clientFixationService as any,
+      fixationSafety as any,
+    );
+
+    await expect(
+      controller.fixClient({ id: "broker-1" } as any, {
+        ...validBody,
+        agencyInn: "12345678901",
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ agencyWarning: "warning" }),
+    );
+
+    expect(clientFixationService.fixClient).toHaveBeenCalledWith(
+      "broker-1",
+      expect.objectContaining({ agencyInn: "12345678901" }),
+      assertOwned,
+    );
+  });
+
+  it("still rejects a non-numeric agency INN by schema", async () => {
+    const clientFixationService = { fixClient: jest.fn() };
+    const fixationSafety = { execute: jest.fn() };
+    const controller = new ClientFixationController(
+      clientFixationService as any,
+      fixationSafety as any,
+    );
+
+    await expect(
+      controller.fixClient({ id: "broker-1" } as any, {
+        ...validBody,
+        agencyInn: "abc",
+      }),
+    ).rejects.toMatchObject({ name: "ZodError" });
+    expect(fixationSafety.execute).not.toHaveBeenCalled();
+  });
 });

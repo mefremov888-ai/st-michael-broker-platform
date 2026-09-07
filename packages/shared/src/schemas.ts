@@ -71,9 +71,14 @@ export const fixClientDtoSchema = z.object({
   // 10 цифр — юрлицо, 12 — физлицо/ИП. Раньше только 10, из‑за этого
   // фиксация с профильным ИНН 12 цифр падала «INN must be 10 digits»,
   // хотя поле на форме уже не показывают и ИНН берётся с агентства брокера.
+  //
+  // 2026-09-07: строгая проверка 10/12 перенесена в client-fixation.service.
+  // Требование владельца: проблемы агентства НЕ блокируют фиксацию клиента.
+  // Схема принимает 4–20 цифр (мягкая защита от мусора); при не-10/12 сервис
+  // оформляет фиксацию БЕЗ привязки агентства и возвращает agencyWarning.
   agencyInn: z.preprocess(
     (v) => (typeof v === 'string' ? v.replace(/\D/g, '') : v),
-    z.string().regex(/^\d{10}$|^\d{12}$/, 'INN must be 10 or 12 digits'),
+    z.string().regex(/^\d{4,20}$/, 'INN must contain 4-20 digits'),
   ),
   // Auto-fill amo lead/contact fields (правка 2026-05-22)
   propertyType: z.string().optional(),

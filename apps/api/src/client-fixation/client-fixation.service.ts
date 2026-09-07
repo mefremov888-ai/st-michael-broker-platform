@@ -57,6 +57,16 @@ import {
 const UNIQUENESS_DAYS = 30;
 const msInDays = (days: number) => days * 24 * 60 * 60 * 1000;
 
+// 2026-09-07: требование владельца — проблемы с агентством НЕ имеют права
+// блокировать фиксацию клиента. При невалидном ИНН (не 10 и не 12 цифр) или
+// любой ошибке агентской ветки фиксация оформляется БЕЗ привязки агентства,
+// а брокер видит предупреждение (agencyWarning в ответе fixClient).
+export const AGENCY_INN_INVALID_WARNING =
+  "ИНН агентства должен содержать 10 или 12 цифр — агентство не привязано, фиксация оформлена";
+export const AGENCY_ATTACH_FAILED_WARNING =
+  "Не удалось привязать агентство — фиксация оформлена без агентства";
+const isStrictInn = (inn: string) => /^\d{10}$|^\d{12}$/.test(inn);
+
 // 2026-09-04: секундные отказы amo (rate limit в пиках) дважды заблокировали
 // живому брокеру фиксацию через ServiceUnavailableException. Проверка
 // уникальности — читающий GET (findContactByPhone/getLeadsByContact/
@@ -329,36 +339,60 @@ export class ClientFixationService {
       readinessLevel: data.readinessLevel || null,
     } as any;
 
-    // Find or create agency
-    let agency = await this.prisma.agency.findUnique({
-      where: { inn: data.agencyInn },
-    });
-
-    if (!agency) {
-      // Bug fix 2026-05-25: если amo лежит/токен истёк — НЕ валим фиксацию.
-      // Создаём агентство в нашей БД с минимальными данными, amo-sync
-      // подберёт позже через scheduler/manual sync.
-      let agencyName = `Агентство ${data.agencyInn}`;
+    // Find or create agency.
+    // 2026-09-07: агентская ветка НЕ блокирует фиксацию. Невалидный ИНН
+    // (не 10/12 цифр) или ошибка создания агентства → agency = null,
+    // фиксация продолжается без привязки, в ответ добавляется agencyWarning.
+    // Ошибки самой фиксации (уникальность, создание Client) НЕ глотаем —
+    // try/catch закрывает только агентскую часть.
+    let agency: { id: string; name: string; inn: string } | null = null;
+    let agencyWarning: string | undefined;
+    const cleanAgencyInn = String(data.agencyInn || "").replace(/\D/g, "");
+    if (!isStrictInn(cleanAgencyInn)) {
+      agencyWarning = AGENCY_INN_INVALID_WARNING;
+      console.error(
+        `[fixClient] agencyInn невалиден (длина ${cleanAgencyInn.length}) — фиксация продолжается без агентства`,
+      );
+    } else {
       try {
-        const amoCompany = await this.amoCrmAdapter.findCompanyByInn(
-          data.agencyInn,
-        );
-        if (amoCompany) {
-          agencyName = amoCompany.name;
-        } else {
-          const newAmoCompany = await this.amoCrmAdapter.createCompany({
-            name: agencyName,
+        agency = await this.prisma.agency.findUnique({
+          where: { inn: cleanAgencyInn },
+        });
+
+        if (!agency) {
+          // Bug fix 2026-05-25: если amo лежит/токен истёк — НЕ валим фиксацию.
+          // Создаём агентство в нашей БД с минимальными данными, amo-sync
+          // подберёт позже через scheduler/manual sync.
+          let agencyName = `Агентство ${cleanAgencyInn}`;
+          try {
+            const amoCompany = await this.amoCrmAdapter.findCompanyByInn(
+              cleanAgencyInn,
+            );
+            if (amoCompany) {
+              agencyName = amoCompany.name;
+            } else {
+              const newAmoCompany = await this.amoCrmAdapter.createCompany({
+                name: agencyName,
+              });
+              if (newAmoCompany?.name) agencyName = newAmoCompany.name;
+            }
+          } catch {
+            console.error(
+              "[fixClient] amo agency lookup failed, продолжаем без amo",
+            );
+          }
+          agency = await this.prisma.agency.create({
+            data: { name: agencyName, inn: cleanAgencyInn },
           });
-          if (newAmoCompany?.name) agencyName = newAmoCompany.name;
         }
-      } catch {
+      } catch (e: any) {
+        agency = null;
+        agencyWarning = AGENCY_ATTACH_FAILED_WARNING;
         console.error(
-          "[fixClient] amo agency lookup failed, продолжаем без amo",
+          "[fixClient] агентская ветка упала, фиксация продолжается без агентства:",
+          e?.message || e,
         );
       }
-      agency = await this.prisma.agency.create({
-        data: { name: agencyName, inn: data.agencyInn },
-      });
     }
 
     // 2026-06-11: ПРОВЕРКА УНИКАЛЬНОСТИ В amoCRM ВСЕГДА И ПЕРВОЙ.
@@ -440,7 +474,7 @@ export class ClientFixationService {
       amoVerdict &&
       (amoVerdict.rule === "RULE_1" || amoVerdict.rule === "RULE_2")
     ) {
-      return await this.handleRule1Or2Alarm({
+      const alarmResult = await this.handleRule1Or2Alarm({
         amoVerdict,
         data,
         broker,
@@ -450,6 +484,9 @@ export class ClientFixationService {
         existingClient,
         fixationFormFields,
       });
+      return agencyWarning
+        ? { ...alarmResult, agencyWarning }
+        : alarmResult;
     }
 
     // 2026-06-16: RULE_REJECT_SALES_DEAL — клиент уже в стадии сделки
@@ -495,6 +532,7 @@ export class ClientFixationService {
         status: "REJECTED",
         message:
           "Клиент уже на стадии сделки у другого брокера. Уникальность невозможна.",
+        ...(agencyWarning ? { agencyWarning } : {}),
       };
     }
 
@@ -535,7 +573,7 @@ export class ClientFixationService {
             email: data.email || null,
             comment: data.comment,
             project: data.project as any,
-            fixationAgencyId: agency.id,
+            fixationAgencyId: agency?.id ?? null,
             uniquenessStatus: UniquenessStatus.UNDER_REVIEW,
             uniquenessReason: `Конфликт: клиент уже на уникальности у брокера ${conflictingClient.broker.fullName} (${conflictingClient.broker.phone}). Менеджер проверит.`,
             ...fixationFormFields,
@@ -586,6 +624,7 @@ export class ClientFixationService {
           client,
           status: "UNDER_REVIEW",
           message: `Клиент уже на уникальности у брокера ${conflictingClient.broker.fullName}. Менеджер уведомлён и проверит фиксацию.`,
+          ...(agencyWarning ? { agencyWarning } : {}),
         };
       }
 
@@ -608,7 +647,7 @@ export class ClientFixationService {
           email: data.email || null,
           comment: data.comment,
           project: data.project as any,
-          fixationAgencyId: agency.id,
+          fixationAgencyId: agency?.id ?? null,
           uniquenessStatus: isExceptionAfterSalesMeeting
             ? UniquenessStatus.UNDER_REVIEW
             : UniquenessStatus.CONDITIONALLY_UNIQUE,
@@ -674,8 +713,8 @@ export class ClientFixationService {
           presentationSent: data.presentationSent,
           brokerPhone: responsibleBroker.phone,
           brokerAmoContactId,
-          agencyName: agency.name,
-          agencyInn: agency.inn,
+          agencyName: agency?.name ?? "не привязано",
+          agencyInn: agency?.inn ?? cleanAgencyInn,
           comment: fullComment,
           project: data.project as Project,
           propertyType: data.propertyType,
@@ -716,7 +755,7 @@ export class ClientFixationService {
             .notifyFixation(
               {
                 id: String(createdAmoLeadId),
-                agency: agency.name,
+                agency: agency?.name ?? "",
                 broker_id: responsibleBroker.amoContactId
                   ? String(responsibleBroker.amoContactId)
                   : "",
@@ -891,6 +930,7 @@ export class ClientFixationService {
             ? "Клиент зафиксирован в кабинете, но результат передачи в amoCRM не подтверждён. Автоповтор заблокирован до ручной сверки; менеджеры уведомлены."
             : "Клиент зафиксирован в кабинете, но не передан в amoCRM из-за технической ошибки. Менеджеры уведомлены. При срочности — свяжитесь напрямую.",
         managerContacts,
+        ...(agencyWarning ? { agencyWarning } : {}),
       };
     }
 
@@ -939,7 +979,7 @@ export class ClientFixationService {
         email: data.email || null,
         comment: data.comment,
         project: data.project as any,
-        fixationAgencyId: agency.id,
+        fixationAgencyId: agency?.id ?? null,
         uniquenessStatus: isExceptionAfterSalesMeeting
           ? UniquenessStatus.UNDER_REVIEW
           : UniquenessStatus.CONDITIONALLY_UNIQUE,
@@ -993,8 +1033,8 @@ export class ClientFixationService {
         presentationSent: data.presentationSent,
         brokerPhone: responsibleBroker.phone,
         brokerAmoContactId,
-        agencyName: agency.name,
-        agencyInn: agency.inn,
+        agencyName: agency?.name ?? "не привязано",
+        agencyInn: agency?.inn ?? cleanAgencyInn,
         comment: refixFullComment,
         project: data.project as Project,
         propertyType: data.propertyType,
@@ -1056,7 +1096,7 @@ export class ClientFixationService {
           .notifyFixation(
             {
               id: String(createdAmoLeadId),
-              agency: agency.name,
+              agency: agency?.name ?? "",
               broker_id: responsibleBroker.amoContactId
                 ? String(responsibleBroker.amoContactId)
                 : "",
@@ -1193,6 +1233,7 @@ export class ClientFixationService {
           ? "Новая фиксация сохранена, но результат передачи в amoCRM не подтверждён. Автоповтор заблокирован до ручной сверки; менеджеры уведомлены."
           : "Создана новая фиксация, но не передана в amoCRM. Менеджеры уведомлены.",
       managerContacts,
+      ...(agencyWarning ? { agencyWarning } : {}),
     };
   }
 
@@ -1446,7 +1487,11 @@ export class ClientFixationService {
       if (broker.id !== responsibleBroker.id) {
         lines.push(`Подал координатор: ${broker.fullName} (${broker.phone})`);
       }
-      lines.push(`Агентство: ${agency.name} (ИНН ${agency.inn})`);
+      if (agency) {
+        lines.push(`Агентство: ${agency.name} (ИНН ${agency.inn})`);
+      } else {
+        lines.push("Агентство: не привязано");
+      }
       if (data.comment) {
         lines.push(``);
         lines.push(`Комментарий брокера: ${data.comment}`);
