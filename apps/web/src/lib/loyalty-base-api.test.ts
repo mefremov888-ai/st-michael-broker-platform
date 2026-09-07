@@ -918,6 +918,61 @@ test("normalizes ANNA list/detail fields returned by the service", () => {
   assert.equal(detail.history.length, 1);
 });
 
+// 2026-09-07: «имя для работы» брокера «Нашей базы»: name — рабочее имя,
+// cabinetFullName — самоназвание из кабинета (серым «в кабинете: …»);
+// пустое/совпадающее самоназвание схлопывается в "".
+test("exposes the cabinet self-name only when it differs from the working name", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      base: "ours",
+      entityType: "BROKER",
+      item: {
+        id: "broker-1",
+        entityType: "BROKER",
+        displayName: "Иванов Иван",
+        cabinetFullName: "Вася 89261234567",
+        displayNameSource: "manual",
+        contactPoints: [],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(detail.name, "Иванов Иван");
+  assert.equal(detail.cabinetFullName, "Вася 89261234567");
+
+  const same = normalizeLoyaltyDetail(
+    {
+      base: "ours",
+      entityType: "BROKER",
+      item: {
+        id: "broker-2",
+        entityType: "BROKER",
+        displayName: "Иванов Иван",
+        cabinetFullName: "Иванов Иван",
+        contactPoints: [],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(same.name, "Иванов Иван");
+  assert.equal(same.cabinetFullName, "");
+
+  const absent = normalizeLoyaltyDetail(
+    {
+      base: "anna",
+      entityType: "BROKER",
+      item: {
+        id: "person-1",
+        entityType: "BROKER",
+        displayName: "Брокер Анны",
+        contactPoints: [],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(absent.cabinetFullName, "");
+});
+
 test("preserves activity evidence completeness metadata from raw activity rows", () => {
   const complete = normalizeLoyaltyDetail(
     {

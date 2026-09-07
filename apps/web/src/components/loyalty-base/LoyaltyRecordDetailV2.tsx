@@ -33,6 +33,7 @@ import {
   loyaltyExactnessLabelRu,
   loyaltyMetricSourceLabelRu,
   updateAnnaLoyaltyRecord,
+  updateOurBrokerDisplayName,
   type LoyaltyBaseKey,
   type LoyaltyCallResult,
   type LoyaltyChangeEntry,
@@ -1494,6 +1495,13 @@ function DetailBody({
   const [name, setName] = useState(record.name);
   const [city, setCity] = useState(record.city);
   const [editBusy, setEditBusy] = useState(false);
+  // 2026-09-07: «Исправить имя» брокера «Нашей базы» — правит только
+  // «имя для работы» (displayName); самоназвание в кабинете брокера
+  // не меняется.
+  const [displayNameOpen, setDisplayNameOpen] = useState(false);
+  const [displayNameValue, setDisplayNameValue] = useState(record.name);
+  const [displayNameBusy, setDisplayNameBusy] = useState(false);
+  const [displayNameError, setDisplayNameError] = useState("");
   const [eventAction, setEventAction] = useState("");
   const [contactAction, setContactAction] = useState("");
   const [actionError, setActionError] = useState("");
@@ -1684,6 +1692,21 @@ function DetailBody({
       );
     } finally {
       setEditBusy(false);
+    }
+  };
+  const saveDisplayName = async () => {
+    setDisplayNameBusy(true);
+    setDisplayNameError("");
+    try {
+      await updateOurBrokerDisplayName(record.id, displayNameValue);
+      setDisplayNameOpen(false);
+      window.location.reload();
+    } catch (reason) {
+      setDisplayNameError(
+        reason instanceof Error ? reason.message : "Не удалось сохранить имя",
+      );
+    } finally {
+      setDisplayNameBusy(false);
     }
   };
   const toggleRecordArchive = async () => {
@@ -1883,6 +1906,13 @@ function DetailBody({
             {record.entityType === "brokers" ? "Брокер" : "Агентство"}
           </span>
           <h1 className="mt-1 text-2xl font-bold">{record.name}</h1>
+          {/* Самоназвание брокера из кабинета — серым, когда КЦ/бэкфилл
+              исправили «имя для работы». */}
+          {record.cabinetFullName && (
+            <p className="text-sm text-text-muted">
+              в кабинете: {record.cabinetFullName}
+            </p>
+          )}
           <p className="text-sm text-text-muted">
             {record.company ||
               record.city ||
@@ -1890,6 +1920,18 @@ function DetailBody({
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {base === "ours" && record.entityType === "brokers" && (
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                setDisplayNameValue(record.name);
+                setDisplayNameError("");
+                setDisplayNameOpen(true);
+              }}
+            >
+              <Pencil className="h-4 w-4" /> Исправить имя
+            </button>
+          )}
           {base === "anna" && canEdit && (
             <>
               <button
@@ -2856,6 +2898,41 @@ function DetailBody({
           onClose={() => setEditCall(null)}
           onDone={() => window.location.reload()}
         />
+      )}
+      {displayNameOpen && (
+        <Modal title="Исправить имя" onClose={() => setDisplayNameOpen(false)}>
+          <label className="block text-sm">
+            Имя для работы
+            <input
+              className="input mt-1"
+              value={displayNameValue}
+              onChange={(event) => setDisplayNameValue(event.target.value)}
+            />
+          </label>
+          <p className="text-xs text-text-muted">
+            Имя видит только колл-центр в «Нашей базе». Брокер в своём
+            кабинете продолжит видеть своё имя
+            {record.cabinetFullName ? ` («${record.cabinetFullName}»)` : ""}.
+            Пустое поле — вернуть имя из кабинета.
+          </p>
+          {displayNameError && (
+            <p className="rounded-lg bg-error/10 p-2 text-sm text-error">
+              {displayNameError}
+            </p>
+          )}
+          <button
+            className="btn btn-primary w-full"
+            disabled={displayNameBusy}
+            onClick={() => void saveDisplayName()}
+          >
+            {displayNameBusy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Сохранить
+          </button>
+        </Modal>
       )}
       {editOpen && (
         <Modal title="Изменить имя и город" onClose={() => setEditOpen(false)}>

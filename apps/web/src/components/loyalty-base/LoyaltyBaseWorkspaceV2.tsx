@@ -635,6 +635,15 @@ function LoyaltyTable({
                     onClick={() => onOpen(item.id)}
                   >
                     <b className="block truncate">{item.name}</b>
+                    {/* 2026-09-07: у брокера «Нашей базы» с исправленным
+                        «именем для работы» серым показываем самоназвание
+                        из кабинета — КЦ видит, что брокер называет себя
+                        иначе. */}
+                    {item.cabinetFullName && (
+                      <span className="block truncate text-xs text-text-muted">
+                        в кабинете: {item.cabinetFullName}
+                      </span>
+                    )}
                     {item.doNotCall === true && (
                       <span className="mt-0.5 inline-block rounded bg-error/10 px-1.5 py-0.5 text-[11px] font-semibold text-error">
                         не звонить

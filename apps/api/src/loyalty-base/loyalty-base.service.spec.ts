@@ -6253,3 +6253,181 @@ describe("LoyaltyBaseService", () => {
     });
   });
 });
+
+// 2026-09-07: «имя для работы» (Broker.displayName) в «Нашей базе».
+// КЦ видит displayName как основное имя, самоназвание брокера из
+// кабинета — отдельным полем cabinetFullName; правка из карточки
+// пишет source='manual' и аудит DISPLAY_NAME_EDIT.
+describe("our broker display name («имя для работы»)", () => {
+  it("selects displayName for the OUR broker list and searches by it", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findMany.mockResolvedValue([]);
+
+    await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      "Иванов",
+    );
+
+    const call = prisma.broker.findMany.mock.calls[0][0];
+    expect(call.select.displayName).toBe(true);
+    expect(call.select.displayNameSource).toBe(true);
+    // Поисковый предикат собирается в where.AND[…].OR.
+    const searchOr = (call.where.AND || []).flatMap(
+      (clause: any) => clause.OR || [],
+    );
+    expect(searchOr).toEqual(
+      expect.arrayContaining([
+        { displayName: { contains: "Иванов", mode: "insensitive" } },
+        { fullName: { contains: "Иванов", mode: "insensitive" } },
+      ]),
+    );
+  });
+
+  it("prefers displayName over the broker self-name and exposes cabinetFullName", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Вася 89261234567",
+      displayName: "Иванов Иван",
+      displayNameSource: "manual",
+      phone: "+79990000001",
+      phones: [],
+      brokerAgencies: [],
+      mergedIntoId: null,
+      clients: [],
+      meetings: [],
+      deals: [],
+      callLogs: [],
+      _count: { clients: 0, deals: 0, meetings: 0, callLogs: 0 },
+    });
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+
+    const result: any = await service.detail("ours", "BROKER", "broker-1");
+
+    expect(result.item.displayName).toBe("Иванов Иван");
+    expect(result.item.cabinetFullName).toBe("Вася 89261234567");
+    expect(result.item.displayNameSource).toBe("manual");
+  });
+
+  it("falls back to the self-name when no working name is set", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-2",
+      fullName: "Иванов Иван",
+      displayName: null,
+      displayNameSource: null,
+      phone: "+79990000002",
+      phones: [],
+      brokerAgencies: [],
+      mergedIntoId: null,
+      clients: [],
+      meetings: [],
+      deals: [],
+      callLogs: [],
+      _count: { clients: 0, deals: 0, meetings: 0, callLogs: 0 },
+    });
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+
+    const result: any = await service.detail("ours", "BROKER", "broker-2");
+
+    expect(result.item.displayName).toBe("Иванов Иван");
+    expect(result.item.cabinetFullName).toBe("Иванов Иван");
+    expect(result.item.displayNameSource).toBeNull();
+  });
+
+  it("updates the working name with source=manual and writes a DISPLAY_NAME_EDIT audit entry", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Вася 89261234567",
+      displayName: null,
+      displayNameSource: null,
+    });
+    prisma.broker.update.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Вася 89261234567",
+      displayName: "Иванов Иван",
+      displayNameSource: "manual",
+    });
+
+    const result = await service.updateOurBrokerDisplayName(
+      "broker-1",
+      "  Иванов   Иван  ",
+      "admin-1",
+    );
+
+    expect(prisma.broker.update).toHaveBeenCalledWith({
+      where: { id: "broker-1" },
+      data: { displayName: "Иванов Иван", displayNameSource: "manual" },
+      select: expect.objectContaining({ displayName: true }),
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: "admin-1",
+        action: "DISPLAY_NAME_EDIT",
+        entity: "Broker",
+        entityId: "broker-1",
+        payload: expect.objectContaining({
+          before: null,
+          after: "Иванов Иван",
+          afterSource: "manual",
+        }),
+      }),
+    });
+    expect(result).toMatchObject({
+      id: "broker-1",
+      displayName: "Иванов Иван",
+      cabinetFullName: "Вася 89261234567",
+      displayNameSource: "manual",
+    });
+  });
+
+  it("clears the working name on an empty value (falls back to the self-name)", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findUnique.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Вася 89261234567",
+      displayName: "Иванов Иван",
+      displayNameSource: "manual",
+    });
+    prisma.broker.update.mockResolvedValue({
+      id: "broker-1",
+      fullName: "Вася 89261234567",
+      displayName: null,
+      displayNameSource: null,
+    });
+
+    const result = await service.updateOurBrokerDisplayName(
+      "broker-1",
+      "   ",
+      "admin-1",
+    );
+
+    expect(prisma.broker.update).toHaveBeenCalledWith({
+      where: { id: "broker-1" },
+      data: { displayName: null, displayNameSource: null },
+      select: expect.objectContaining({ displayName: true }),
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "DISPLAY_NAME_EDIT",
+        payload: expect.objectContaining({
+          before: "Иванов Иван",
+          after: null,
+        }),
+      }),
+    });
+    expect(result).toMatchObject({
+      displayName: "Вася 89261234567",
+      cabinetFullName: "Вася 89261234567",
+      displayNameSource: null,
+    });
+  });
+});
