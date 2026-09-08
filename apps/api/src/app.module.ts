@@ -28,6 +28,7 @@ import { AgenciesModule } from "./agencies/agencies.module";
 import { AmoTokenBootstrapService } from "./common/amo-token-bootstrap.service";
 import { MangoBootstrapService } from "./common/mango-bootstrap.service";
 import { OpsAlertModule } from "./ops-alert/ops-alert.module";
+import { OpsInboxModule } from "./ops-inbox/ops-inbox.module";
 import { LoyaltyBaseModule } from "./loyalty-base/loyalty-base.module";
 import { LoyaltyWorkflowModule } from "./loyalty-workflow/loyalty-workflow.module";
 import { LoyaltySyncModule } from "./loyalty-sync/loyalty-sync.module";
@@ -57,6 +58,7 @@ import { RegistryDealsModule } from "./registry-deals/registry-deals.module";
     DatabaseModule,
     HealthModule,
     OpsAlertModule,
+    OpsInboxModule,
     AuditModule,
     AuthModule,
     ClientFixationModule,

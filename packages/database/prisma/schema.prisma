@@ -1812,6 +1812,30 @@ model SiteContent {
 // менять из UI без релиза/SSH. Например MOREKIT_WEBHOOK_URL — Анна из
 // Morekit'а периодически даёт новый URL («копия предыдущего процесса»).
 // Читается с env-fallback: если в БД нет ключа — берём process.env[KEY].
+// 2026-09-08: входящие ops-бота техподдержки (ответы владельца/Анны, файлы с
+// решениями) для рабочей сессии ассистента. Заполняется OpsInboxService.
+model OpsInboxMessage {
+  id           String    @id @default(uuid())
+  updateId     BigInt    @unique @map("update_id")
+  chatId       String    @map("chat_id")
+  chatTitle    String?   @map("chat_title")
+  fromName     String?   @map("from_name")
+  fromUsername String?   @map("from_username")
+  messageId    BigInt    @map("message_id")
+  text         String?   @db.Text
+  fileId       String?   @map("file_id")
+  fileName     String?   @map("file_name")
+  fileSize     Int?      @map("file_size")
+  mimeType     String?   @map("mime_type")
+  replyToText  String?   @map("reply_to_text") @db.Text
+  sentAt       DateTime  @map("sent_at")
+  handledAt    DateTime? @map("handled_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("ops_inbox_messages")
+}
+
 model SystemSetting {
   key       String   @id
   value     String   @db.Text
