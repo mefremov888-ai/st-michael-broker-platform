@@ -1,0 +1,49 @@
+name: Inspect api ERROR lines (read-only)
+
+# 2026-09-08: дайджест ошибок показал строки ERROR без контекста «[Имя]».
+# Смотрим сами строки за N часов с 2 строками контекста после каждой;
+# длинные числа (телефоны, id) маскируем. Только чтение логов.
+
+on:
+  workflow_dispatch:
+    inputs:
+      since_hours:
+        description: за сколько часов смотреть логи
+        required: false
+        default: "48"
+        type: string
+
+concurrency:
+  group: inspect-api-error-lines
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and grep ERROR lines
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SINCE_H: ${{ inputs.since_hours }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          envs: SINCE_H
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            TMP_LOG=$(mktemp /tmp/stmichael-errlines.XXXXXX)
+            trap 'rm -f -- "$TMP_LOG"' EXIT
+            docker logs st-michael-api --since "${SINCE_H:-48}h" > "$TMP_LOG" 2>&1 || true
+            echo "=== ERROR-строк всего: $(grep -c 'ERROR' "$TMP_LOG" || true) ==="
+            echo "=== из них без [Имя]: $(grep 'ERROR' "$TMP_LOG" | grep -vc 'ERROR \[' || true) ==="
+            echo "=== строки ERROR без [Имя] (+2 строки контекста), числа маскированы ==="
+            grep -n -A2 'ERROR' "$TMP_LOG" | grep -v 'ERROR \[' | sed 's/[0-9]\{7,\}/#######/g' | cut -c1-400 | head -120
+            echo "=== все ERROR с [Имя] (уникальные, первые 160 симв.) ==="
+            grep -o 'ERROR \[[^]]*\].*' "$TMP_LOG" | sed 's/[0-9a-f-]\{8,\}/#/g' | cut -c1-160 | sort | uniq -c | sort -rn | head -20
+            echo "=== Готово (только чтение) ==="
