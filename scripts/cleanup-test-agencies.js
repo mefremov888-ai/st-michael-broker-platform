@@ -30,6 +30,8 @@ const APPLY = process.argv.includes("--apply");
 // 2026-09-07: ONLY_INNS="1,2" — ограничить прогон перечисленными ИНН из списка
 // (например, удалить только карточку ИНН Сбербанка, не трогая остальные).
 const ONLY_INNS = String(process.env.ONLY_INNS || "").split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+// 2026-09-08 (владелец): мусорные агентства без ИНН — по точному названию (ONLY_NAMES="не работаем;ИП").
+const ONLY_NAMES = String(process.env.ONLY_NAMES || "").split(/[;]+/).map((s) => s.trim()).filter(Boolean);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ИНН тестовых агентств, подтверждённых к удалению (2026-09-03).
@@ -67,12 +69,14 @@ const TEST_INNS = [
 
     // ─── 1. Агентства по ИНН ───
     const agencies = await prisma.agency.findMany({
-      where: { inn: { in: ONLY_INNS.length ? TEST_INNS.filter((i) => ONLY_INNS.includes(i)) : TEST_INNS } },
+      where: ONLY_NAMES.length
+        ? { name: { in: ONLY_NAMES } }
+        : { inn: { in: ONLY_INNS.length ? TEST_INNS.filter((i) => ONLY_INNS.includes(i)) : TEST_INNS } },
       select: { id: true, name: true, legalName: true, inn: true },
       orderBy: { name: "asc" },
     });
     const foundInns = new Set(agencies.map((a) => a.inn));
-    const missing = TEST_INNS.filter((inn) => !foundInns.has(inn));
+    const missing = ONLY_NAMES.length ? [] : TEST_INNS.filter((inn) => !foundInns.has(inn));
 
     console.log(`Найдено агентств: ${agencies.length} из ${TEST_INNS.length}`);
     for (const a of agencies) {
