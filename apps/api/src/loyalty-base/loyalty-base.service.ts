@@ -18,6 +18,7 @@ import {
   LoyaltyChangesQueryDto,
   LoyaltyEntityUpdateDto,
   LoyaltyExportDto,
+  LoyaltyFunnelQueryDto,
   LoyaltyActivitySummaryDto,
   LoyaltyImportDto,
   LoyaltyImportRecordDto,
@@ -5184,6 +5185,270 @@ export class LoyaltyBaseService {
         entityType === "AGENCY"
           ? "Считается по брокерам, привязанным к агентствам из текущего списка, и по строкам реестра с названием этих агентств; период — по дате события (фиксация — подача заявки, встреча — дата встречи, бронь — оплата ДВОУ, сделка — оплата ДДУ)."
           : "Считается только по брокерам, попавшим под текущие фильтры списка; период — по дате события (фиксация — подача заявки, встреча — дата встречи, бронь — оплата ДВОУ, сделка — оплата ДДУ).",
+    };
+  }
+
+  /**
+   * 2026-09-08 (владелец): воронка брокера «Был на брокер-туре → сделал
+   * фиксацию → провёл встречу → платная бронь → сделка». Считаем УНИКАЛЬНЫХ
+   * брокеров, а не события, по тем же правилам, что KPI «Нашей базы»:
+   * фиксация — по правилам фиксации кабинета (источник old/new/оба), встреча —
+   * подтверждённая/состоявшаяся с клиентом (брокер-тур не встреча), бронь —
+   * оплаченный ДВОУ, сделка — оплаченный ДДУ реестра или подтверждённая
+   * сделка кабинета. Режимы: strict — событие только не раньше даты тура
+   * (брокеры без даты тура выносятся отдельно), all — за всё время.
+   * Период — по дате тура (когорта). Данные о турах: отметка/дата из amo,
+   * даты есть только с 2026 г. (ограничение источника, а не расчёта).
+   */
+  async brokerFunnel(baseInput: string, query: LoyaltyFunnelQueryDto) {
+    const base = this.parseBase(baseInput);
+    if (base !== "ours") {
+      throw new BadRequestException(
+        "Воронка по событиям доступна только для «Нашей базы»",
+      );
+    }
+    const mode: "strict" | "all" = query.mode === "all" ? "all" : "strict";
+    const cabinetSource = query.cabinetSource as CabinetSource | undefined;
+    const from = query.from ? parseMoscowBoundary(query.from, false) : null;
+    const to = query.to ? parseMoscowBoundary(query.to, true) : null;
+    if ((from && !Number.isFinite(from.getTime())) || (to && !Number.isFinite(to.getTime())) || (from && to && from > to)) {
+      throw new BadRequestException("Invalid funnel period");
+    }
+    const brokers = await this.prisma.broker.findMany({
+      where: { role: "BROKER", mergedIntoId: null },
+      select: {
+        id: true,
+        brokerTourVisited: true,
+        brokerTourDate: true,
+        brokerAgencies: {
+          where: { isPrimary: true },
+          take: 1,
+          select: { agency: { select: { id: true, name: true } } },
+        },
+      },
+    });
+    const ids = brokers.map((b) => b.id);
+    const firstFix = new Map<string, Date>();
+    const firstMeet = new Map<string, Date>();
+    const firstBooking = new Map<string, Date>();
+    const firstDeal = new Map<string, Date>();
+    const keepMin = (map: Map<string, Date>, id: unknown, value: unknown) => {
+      if (!id || !value) return;
+      const date = new Date(value as any);
+      if (!Number.isFinite(date.getTime())) return;
+      const current = map.get(String(id));
+      if (!current || date < current) map.set(String(id), date);
+    };
+    for (let offset = 0; offset < ids.length; offset += CANDIDATE_QUERY_BATCH_SIZE) {
+      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const [fixations, meetings, deals, registry] = await Promise.all([
+        (this.prisma.client as any).groupBy({
+          by: ["brokerId"],
+          where: { brokerId: { in: batch }, ...fixationClientWhere(cabinetSource) },
+          _min: { createdAt: true },
+        }),
+        (this.prisma.meeting as any).groupBy({
+          by: ["brokerId"],
+          where: {
+            brokerId: { in: batch },
+            status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
+          },
+          _min: { date: true },
+        }),
+        (this.prisma.deal as any).groupBy({
+          by: ["brokerId"],
+          where: { brokerId: { in: batch }, ...this.ourConfirmedDealWhere() },
+          _min: { signedAt: true },
+        }),
+        this.registryDealModel
+          ? this.registryDealModel.findMany({
+              where: { brokerId: { in: batch }, OR: [{ paidAt: { not: null } }, { dvouPaidAt: { not: null } }] },
+              select: { brokerId: true, paidAt: true, dvouPaidAt: true },
+            })
+          : Promise.resolve([]),
+      ]);
+      for (const g of (Array.isArray(fixations) ? fixations : []) as any[]) keepMin(firstFix, g.brokerId, g._min?.createdAt);
+      for (const g of (Array.isArray(meetings) ? meetings : []) as any[]) keepMin(firstMeet, g.brokerId, g._min?.date);
+      for (const g of (Array.isArray(deals) ? deals : []) as any[]) keepMin(firstDeal, g.brokerId, g._min?.signedAt);
+      for (const r of (Array.isArray(registry) ? registry : []) as any[]) {
+        keepMin(firstDeal, r.brokerId, r.paidAt);
+        keepMin(firstBooking, r.brokerId, r.dvouPaidAt);
+      }
+    }
+    const inPeriod = (date: Date | null) =>
+      !date ? false : (!from || date >= from) && (!to || date <= to);
+    const tourBrokers = brokers.filter((b) => b.brokerTourVisited);
+    const dated = tourBrokers.filter((b) => b.brokerTourDate && Number.isFinite(new Date(b.brokerTourDate).getTime()));
+    const undated = tourBrokers.filter((b) => !dated.includes(b));
+    // Когорта: с периодом — только брокеры с датой тура в периоде; без периода —
+    // strict: все с датой; all: все с отметкой (в т.ч. без даты).
+    const cohort =
+      from || to
+        ? dated.filter((b) => inPeriod(new Date(b.brokerTourDate as Date)))
+        : mode === "strict"
+          ? dated
+          : tourBrokers;
+    const reached = (map: Map<string, Date>, b: any) => {
+      const date = map.get(b.id);
+      if (!date) return false;
+      if (mode !== "strict") return true;
+      if (!b.brokerTourDate) return false;
+      return date >= new Date(b.brokerTourDate);
+    };
+    const median = (values: number[]) => {
+      if (!values.length) return null;
+      const sorted = [...values].sort((a, c) => a - c);
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    };
+    const daysBetween = (a: Date, b: Date) => Math.round((b.getTime() - a.getTime()) / 86400000);
+    const buildFunnel = (group: any[]) => {
+      const withFixation = group.filter((b) => reached(firstFix, b));
+      const withMeeting = group.filter((b) => reached(firstMeet, b));
+      const withBooking = group.filter((b) => reached(firstBooking, b));
+      const withDeal = group.filter((b) => reached(firstDeal, b));
+      const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 1000) / 10 : null);
+      const steps = [
+        { key: "brokerTour", label: "Был на брокер-туре", count: group.length },
+        { key: "fixation", label: "Сделал фиксацию", count: withFixation.length },
+        { key: "meeting", label: "Провёл встречу с клиентом", count: withMeeting.length },
+        { key: "paidBooking", label: "Платная бронь (ДВОУ)", count: withBooking.length },
+        { key: "deal", label: "Сделка (оплачен ДДУ)", count: withDeal.length },
+      ].map((step, index, all) => ({
+        ...step,
+        fromStart: pct(step.count, all[0].count),
+        fromPrevious: index === 0 ? null : pct(step.count, all[index - 1].count),
+      }));
+      const btToFix = group
+        .filter((b) => b.brokerTourDate && firstFix.get(b.id) && (firstFix.get(b.id) as Date) >= new Date(b.brokerTourDate))
+        .map((b) => daysBetween(new Date(b.brokerTourDate), firstFix.get(b.id) as Date));
+      const fixToMeet = group
+        .filter((b) => firstFix.get(b.id) && firstMeet.get(b.id) && (firstMeet.get(b.id) as Date) >= (firstFix.get(b.id) as Date))
+        .map((b) => daysBetween(firstFix.get(b.id) as Date, firstMeet.get(b.id) as Date));
+      const fixToDeal = group
+        .filter((b) => firstFix.get(b.id) && firstDeal.get(b.id) && (firstDeal.get(b.id) as Date) >= (firstFix.get(b.id) as Date))
+        .map((b) => daysBetween(firstFix.get(b.id) as Date, firstDeal.get(b.id) as Date));
+      return {
+        steps,
+        medianDays: {
+          tourToFixation: median(btToFix),
+          fixationToMeeting: median(fixToMeet),
+          fixationToDeal: median(fixToDeal),
+        },
+      };
+    };
+    const main = buildFunnel(cohort);
+    // Когорты по месяцу тура (только с датой): доля с фиксацией за 30/90 дней и со сделкой.
+    const byMonthMap = new Map<string, any[]>();
+    for (const b of cohort) {
+      if (!b.brokerTourDate) continue;
+      const parts = moscowDateParts(new Date(b.brokerTourDate));
+      const key = `${parts.year}-${String(parts.month).padStart(2, "0")}`;
+      const list = byMonthMap.get(key) || [];
+      list.push(b);
+      byMonthMap.set(key, list);
+    }
+    const within = (b: any, map: Map<string, Date>, days: number) => {
+      const date = map.get(b.id);
+      if (!date || !b.brokerTourDate) return false;
+      const diff = daysBetween(new Date(b.brokerTourDate), date);
+      return diff >= 0 && diff <= days;
+    };
+    const byMonth = [...byMonthMap.entries()]
+      .sort(([a], [c]) => a.localeCompare(c))
+      .map(([month, group]) => ({
+        month,
+        brokers: group.length,
+        fixation30: group.filter((b) => within(b, firstFix, 30)).length,
+        fixation90: group.filter((b) => within(b, firstFix, 90)).length,
+        fixationAny: group.filter((b) => reached(firstFix, b)).length,
+        meetingAny: group.filter((b) => reached(firstMeet, b)).length,
+        dealAny: group.filter((b) => reached(firstDeal, b)).length,
+      }));
+    // Разрез по агентствам (основное агентство брокера): топ по когорте.
+    const byAgencyMap = new Map<string, { id: string; name: string; group: any[] }>();
+    for (const b of cohort) {
+      const agency = b.brokerAgencies?.[0]?.agency;
+      const id = agency?.id || "__none__";
+      const entry = byAgencyMap.get(id) || { id, name: agency?.name || "Без агентства", group: [] };
+      entry.group.push(b);
+      byAgencyMap.set(id, entry);
+    }
+    const byAgency = [...byAgencyMap.values()]
+      .map((entry) => ({
+        agencyId: entry.id === "__none__" ? null : entry.id,
+        name: entry.name,
+        brokers: entry.group.length,
+        withFixation: entry.group.filter((b) => reached(firstFix, b)).length,
+        withMeeting: entry.group.filter((b) => reached(firstMeet, b)).length,
+        withDeal: entry.group.filter((b) => reached(firstDeal, b)).length,
+      }))
+      .sort((a, c) => c.brokers - a.brokers || c.withDeal - a.withDeal)
+      .slice(0, 15);
+    // Обратная воронка: активность брокеров БЕЗ отметки тура.
+    const noTour = brokers.filter((b) => !b.brokerTourVisited);
+    const noTourFunnel = {
+      brokers: noTour.length,
+      withFixation: noTour.filter((b) => firstFix.has(b.id)).length,
+      withMeeting: noTour.filter((b) => firstMeet.has(b.id)).length,
+      withPaidBooking: noTour.filter((b) => firstBooking.has(b.id)).length,
+      withDeal: noTour.filter((b) => firstDeal.has(b.id)).length,
+    };
+    // Отметки тура из среза Анны у наших сцепленных брокеров без нашей отметки — справочно.
+    let annaTourUnconfirmed = 0;
+    try {
+      const annaRecords = await this.prisma.loyaltySourceAggregate.findMany({
+        where: { brokerTourVisited: true },
+        select: { sourceRecord: { select: { personId: true } } },
+      });
+      const personIds = uniqueSorted(annaRecords.map((r: any) => r.sourceRecord?.personId));
+      if (personIds.length) {
+        const links = await this.prisma.loyaltyEntityLink.findMany({
+          where: { status: "CONFIRMED", revokedAt: null, targetType: "BROKER", personId: { in: personIds } },
+          select: { targetId: true },
+        });
+        const ourNoTour = new Set(noTour.map((b) => b.id));
+        annaTourUnconfirmed = new Set(links.map((l) => l.targetId).filter((id) => ourNoTour.has(String(id)))).size;
+      }
+    } catch {
+      annaTourUnconfirmed = 0;
+    }
+    const tourYears: Record<string, number> = {};
+    for (const b of dated) {
+      const year = String(moscowDateParts(new Date(b.brokerTourDate as Date)).year);
+      tourYears[year] = (tourYears[year] || 0) + 1;
+    }
+    return {
+      base,
+      mode,
+      period: { from: from ? from.toISOString() : null, to: to ? to.toISOString() : null },
+      cabinetSource: cabinetSource || "all",
+      totals: {
+        brokers: brokers.length,
+        withTourMark: tourBrokers.length,
+        withTourDate: dated.length,
+        withoutTourDate: undated.length,
+        cohort: cohort.length,
+        tourYears,
+        annaTourUnconfirmed,
+      },
+      funnel: main,
+      byMonth,
+      byAgency,
+      noTourFunnel,
+      methodology: {
+        cohort:
+          "Когорта — брокеры с отметкой «Был на брокер-туре» из amoCRM; период отбирает по дате тура. Даты туров в amo есть только с 2026 года, поэтому для более ранних туров доступен только режим «за всё время».",
+        strict:
+          "«Строго после тура»: ступень засчитывается, только если первое событие брокера не раньше даты тура. Брокеры без даты тура в этот режим не входят (показаны отдельно).",
+        all: "«За всё время»: ступень засчитывается, если событие есть у брокера когда-либо (в том числе до тура — история старого кабинета).",
+        steps:
+          "Считаются уникальные брокеры. Фиксация — по правилам фиксации кабинета и выбранному источнику (старый/новый/оба); встреча — подтверждённая или состоявшаяся встреча с клиентом (брокер-тур встречей не считается); платная бронь — оплаченный ДВОУ из реестра; сделка — оплаченный ДДУ из реестра или подтверждённая сделка кабинета.",
+        medians:
+          "Медиана дней считается по брокерам, у которых оба события есть и второе не раньше первого.",
+        noTour:
+          "Обратная воронка — активность брокеров без отметки тура: показывает, какая часть фиксаций и сделок идёт не через брокер-туры.",
+      },
     };
   }
 

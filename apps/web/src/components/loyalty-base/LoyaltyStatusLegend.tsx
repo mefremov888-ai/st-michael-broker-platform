@@ -88,12 +88,15 @@ export function LoyaltyStatusLegend({
   active,
   sourceStatusesUnconfirmed = false,
   onSelect,
+  onOpenFunnel,
 }: {
   entityType: "brokers" | "agencies";
   facets: LoyaltyFacets | null;
   active: string;
   sourceStatusesUnconfirmed?: boolean;
   onSelect?: (status: LoyaltyBrokerStatus | LoyaltyAgencyStatus) => void;
+  // 2026-09-08: кнопка «Воронка» (только «Наша база» / брокеры).
+  onOpenFunnel?: () => void;
 }) {
   const entries = entityType === "brokers" ? brokerLegend : agencyLegend;
   const filterable = entityType === "brokers" && Boolean(onSelect);
@@ -108,7 +111,8 @@ export function LoyaltyStatusLegend({
           : "Уровни партнёрства агентств"
       }
     >
-      <div>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
         <h2 className="font-semibold">
           {entityType === "brokers"
             ? "Статусы брокеров"
@@ -121,6 +125,12 @@ export function LoyaltyStatusLegend({
               ? "Статусы по срезу источника. Нажмите карточку, чтобы открыть список."
               : "Нажмите карточку, чтобы открыть список."}
         </p>
+        </div>
+        {onOpenFunnel && entityType === "brokers" && (
+          <button type="button" className="btn btn-secondary" onClick={onOpenFunnel}>
+            Воронка: тур → фиксация → встреча → сделка
+          </button>
+        )}
       </div>
       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         {entries.map((item) => {
