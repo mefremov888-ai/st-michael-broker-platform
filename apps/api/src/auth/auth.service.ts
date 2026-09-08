@@ -138,6 +138,22 @@ function renderEmailLayout(opts: {
 </html>`;
 }
 
+/** «Кравченко Наталья Владимировна» → «Кравченко Н. В.» (без полного ПД в ответе). */
+export function maskPersonName(fullName?: string | null): string {
+  const parts = String(fullName || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "без имени";
+  return [parts[0], ...parts.slice(1).map((p) => p.slice(0, 1).toUpperCase() + ".")].join(" ");
+}
+/** «kravchenko@mail.ru» → «k***o@mail.ru». */
+export function maskEmail(email?: string | null): string | null {
+  const value = String(email || "").trim();
+  const at = value.indexOf("@");
+  if (at <= 0) return null;
+  const local = value.slice(0, at);
+  const masked = local.length <= 2 ? `${local[0]}***` : `${local[0]}***${local[local.length - 1]}`;
+  return `${masked}${value.slice(at)}`;
+}
+
 @Injectable()
 export class AuthService {
   private amo = new AmoCrmAdapter();
@@ -201,11 +217,41 @@ export class AuthService {
       existingByPhone.role === "BROKER",
     );
 
+    // 2026-09-08 (решение владельца): номер занят — говорим, чьей карточкой
+    // (маскированно) и как восстановить доступ: по email самостоятельно
+    // (приоритет), иначе — в поддержку с номером телефона.
+    let phoneTaken: null | {
+      code: "PHONE_TAKEN";
+      recovery: "forgot_password" | "await_admin" | "support";
+      existingName: string;
+      emailHint: string | null;
+    } = null;
     if (existingByPhone && !isActivation) {
+      const existingName = maskPersonName(existingByPhone.fullName);
+      const emailHint = maskEmail(existingByPhone.email);
+      const canSelfRecover =
+        existingByPhone.role === "BROKER" &&
+        existingByPhone.status === UserStatus.ACTIVE &&
+        Boolean(existingByPhone.passwordHash) &&
+        Boolean(existingByPhone.email);
+      const awaitsAdmin =
+        existingByPhone.role === "BROKER" &&
+        existingByPhone.status === UserStatus.PENDING &&
+        Boolean(existingByPhone.passwordHash);
+      const recovery = canSelfRecover
+        ? "forgot_password"
+        : awaitsAdmin
+          ? "await_admin"
+          : "support";
+      phoneTaken = { code: "PHONE_TAKEN", recovery, existingName, emailHint };
       errors.push({
         field: "phone",
         message:
-          "Аккаунт с этим номером уже существует. Обратитесь к администратору",
+          recovery === "forgot_password"
+            ? `Этот номер уже зарегистрирован на «${existingName}». Если это вы — восстановите доступ по email (${emailHint}). Если номер занят другим человеком — напишите в поддержку, указав ваш номер телефона.`
+            : recovery === "await_admin"
+              ? `Аккаунт с этим номером («${existingName}») уже создан и ожидает активации администратором. Если это не вы — напишите в поддержку, указав ваш номер телефона.`
+              : `Этот номер уже закреплён за карточкой «${existingName}». Напишите в поддержку, указав ваш номер телефона — мы восстановим доступ или освободим номер.`,
       });
     }
     // 2026-07-02: email-конфликт больше не блокирует регистрацию.
@@ -219,6 +265,7 @@ export class AuthService {
         message: errors[0].message,
         field: errors[0].field,
         errors,
+        ...(phoneTaken || {}),
       });
     }
 

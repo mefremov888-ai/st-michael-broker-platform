@@ -34,6 +34,8 @@ function RegisterForm() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  // 2026-09-08: номер занят другой карточкой — показываем путь восстановления.
+  const [recovery, setRecovery] = useState<null | { kind: 'forgot_password' | 'await_admin' | 'support'; name: string; emailHint: string | null }>(null);
   const [submitted, setSubmitted] = useState(false);
   const router = useRouter();
 
@@ -87,6 +89,11 @@ function RegisterForm() {
         // Раскидываем ВСЕ ошибки по полям сразу — пользователь видит каждое
         // невалидное поле подсвеченным с пояснением, не по одной.
         const raw = await res.json().catch(() => null);
+        setRecovery(
+          raw?.code === 'PHONE_TAKEN'
+            ? { kind: raw.recovery || 'support', name: raw.existingName || '', emailHint: raw.emailHint || null }
+            : null,
+        );
         const valid: Array<keyof FieldErrors> = ['fullName','phone','email','inn','password','passwordConfirm','offer','privacy'];
         const list: Array<{ field?: string; message: string }> = Array.isArray(raw?.errors)
           ? raw.errors
@@ -144,6 +151,28 @@ function RegisterForm() {
         {error && (
           <div className="mb-4 p-3 bg-error/20 text-error rounded-lg text-sm">
             {error}
+          </div>
+        )}
+        {recovery && (
+          <div className="mb-4 p-3 rounded-lg border border-border bg-surface-secondary text-sm" data-testid="phone-taken-recovery">
+            <div className="font-medium mb-2">Номер уже закреплён за карточкой «{recovery.name}»</div>
+            {recovery.kind === 'forgot_password' && (
+              <>
+                <p className="text-text-muted mb-2">
+                  Если это вы — восстановите доступ: ссылка для нового пароля придёт на {recovery.emailHint || 'ваш email'}.
+                </p>
+                <a href="/forgot-password" className="btn btn-primary inline-block">Восстановить доступ по email</a>
+              </>
+            )}
+            {recovery.kind === 'await_admin' && (
+              <p className="text-text-muted">Аккаунт уже создан и ожидает активации администратором. Мы напишем, когда доступ откроют.</p>
+            )}
+            {recovery.kind === 'support' && (
+              <p className="text-text-muted">
+                Напишите в поддержку и укажите ваш номер телефона — мы восстановим доступ или освободим номер, если он занят другим человеком.
+              </p>
+            )}
+            <p className="text-xs text-text-muted mt-2">Если номер занят другим человеком — сообщите об этом в поддержку с вашим номером.</p>
           </div>
         )}
 
