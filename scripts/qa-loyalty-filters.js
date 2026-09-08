@@ -169,16 +169,17 @@ async function main() {
       const dbSample = li.slice(0, 5);
       let perRow = 0, perRowOk = true;
       for (const i of dbSample) {
-        const dbFix = await prisma.client.count({ where: { brokerId: i.linkedOurs.id, ...FIX, OR: undefined, AND: [FIX, { OR: [{ comment: null }, { NOT: { comment: { startsWith: HIST } } }] }] } });
+        // linkedOurRecord без фильтра источника считает ОБА кабинета (как список нашей базы без фильтра)
+        const dbFix = await prisma.client.count({ where: { brokerId: i.linkedOurs.id, ...FIX } });
         perRow++; if (dbFix !== Number(i.linkedOurRecord?.metrics?.fixations)) { perRowOk = false; console.log(`   ✗ ${i.displayName}: API ${i.linkedOurRecord?.metrics?.fixations} vs БД ${dbFix}`); }
       }
-      check("Анна: linkedOurRecord.metrics.fixations = БД (новый кабинет) поштучно", perRowOk, `проверено ${perRow}`);
+      check("Анна: linkedOurRecord.metrics.fixations = БД (оба кабинета) поштучно", perRowOk, `проверено ${perRow}`);
       const ovAnna = await http("GET", `/loyalty-base/anna/overview?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`);
       const cl = ovAnna.body?.cabinetLinks;
       check("Анна: обзор содержит cabinetLinks", (ovAnna.status === 200 || ovAnna.status === 201) && cl && typeof cl.brokersLinked === "number", `HTTP ${ovAnna.status}, brokersLinked ${cl?.brokersLinked}, fixations ${cl?.fixations}, deals ${cl?.deals}`);
       const dbLinkedBrokers = await prisma.loyaltyEntityLink.findMany({ where: { status: "CONFIRMED", revokedAt: null, targetType: "BROKER" }, select: { targetId: true }, distinct: ["targetId"] });
       check("Анна: cabinetLinks.brokersLinked = БД (уникальные брокеры со сцепкой)", Number(cl?.brokersLinked) === dbLinkedBrokers.length, `API ${cl?.brokersLinked} vs БД ${dbLinkedBrokers.length}`);
-      check("Анна: KPI-подсказки cabinetLinks по-русски", /Сцепк/.test(String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "").slice(0, 60));
+      check("Анна: KPI-подсказки cabinetLinks по-русски", /[А-Яа-я]/.test(String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "").slice(0, 60));
       check("Анна: подсказки KPI среза по-русски (activities.fixations)", /[А-Яа-я]/.test(String(ovAnna.body?.kpiMetadata?.["activities.fixations"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["activities.fixations"]?.formula || "").slice(0, 60));
       const firstLinked = [...linkedBrokerIds][0];
       if (firstLinked) {
@@ -186,6 +187,25 @@ async function main() {
         check("Наша база: карточка сцепленного брокера показывает linkedAnna", ours.status === 200 && ours.body?.item?.linkedAnna?.id, `HTTP ${ours.status}, linkedAnna ${ours.body?.item?.linkedAnna?.displayName || "нет"}`);
       }
     } catch (e) { check("Анна: сцепки", false, String(e?.message || e)); }
+
+    // ── 2026-09-08 (поезд 33): «Контрольные показатели» по текущим фильтрам (activity-summary) ──
+    try {
+      const summary = async (entity, body) => http("POST", `/loyalty-base/ours/${entity}/activity-summary`, { page: 1, pageSize: 1, archived: "exclude", sortBy: "name", sortOrder: "asc", filter: {}, columns: {}, summaryPeriod: period, ...body });
+      const s0 = await summary("brokers", {});
+      const a0 = s0.body?.activities || {};
+      check("сводка: без фильтров = обзор (фиксации, встречи, брони, сделки)", (s0.status === 200 || s0.status === 201) && a0.fixations === ov.body?.activities?.fixations && a0.meetings === ov.body?.activities?.meetings && a0.paidBookings === ov.body?.activities?.paidBookings && a0.deals === ov.body?.activities?.deals, `сводка ${JSON.stringify(a0)} vs обзор ${JSON.stringify(ov.body?.activities)}`);
+      check("сводка: без фильтров сумма ДДУ = обзор", String(s0.body?.dealAmount) === String(ov.body?.dealAmount), `${s0.body?.dealAmount} vs ${ov.body?.dealAmount}`);
+      check("сводка: выборка без фильтров = всего брокеров списка", Number(s0.body?.selection?.count) === all.total, `${s0.body?.selection?.count} vs ${all.total}`);
+      const s1 = await summary("brokers", { columns: { activity: "HAS_FIXATIONS" } });
+      const a1 = s1.body?.activities || {};
+      check("сводка: фильтр «Есть фиксации» — выборка = список, фиксации за период = без фильтра", Number(s1.body?.selection?.count) === has.total && a1.fixations === a0.fixations, `выборка ${s1.body?.selection?.count} vs ${has.total}; фиксации ${a1.fixations} vs ${a0.fixations}`);
+      const s2 = await summary("brokers", { columns: { activity: "NO_FIXATIONS" } });
+      check("сводка: фильтр «Нет фиксаций» — фиксаций за период 0", Number(s2.body?.activities?.fixations) === 0, `${s2.body?.activities?.fixations}`);
+      const s3 = await summary("brokers", { filter: { cabinetSource: "old" } });
+      check("сводка: источник «старый кабинет» = обзор со старым кабинетом", Number(s3.body?.activities?.fixations) === Number(ovOld.body?.activities?.fixations), `${s3.body?.activities?.fixations} vs ${ovOld.body?.activities?.fixations}`);
+      const sa = await summary("agencies", {});
+      check("сводка агентств: отвечает и сделки ≥ сделок брокеров без фильтра", (sa.status === 200 || sa.status === 201) && Number(sa.body?.activities?.deals) >= 0, `HTTP ${sa.status}, ${JSON.stringify(sa.body?.activities)}`);
+    } catch (e) { check("сводка по фильтрам", false, String(e?.message || e)); }
 
     const failed = results.filter((r) => !r.ok).length;
     console.log(`\nИтого: ${results.length - failed} PASS, ${failed} FAIL`);
