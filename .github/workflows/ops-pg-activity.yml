@@ -1,0 +1,53 @@
+name: Ops pg activity (read-only, optional terminate)
+
+# 2026-09-08: диагностика зависания БД во время миграции (CREATE UNIQUE INDEX
+# ждёт блокировку → пул соединений api исчерпан). Показывает активные сессии и
+# ожидающие блокировки. С terminate_pids можно завершить конкретные backend'ы.
+
+on:
+  workflow_dispatch:
+    inputs:
+      terminate_pids:
+        description: 'PID сессий Postgres для pg_terminate_backend через запятую (пусто = только смотреть)'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: ops-pg-activity
+  cancel-in-progress: false
+
+jobs:
+  pg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          PIDS: ${{ inputs.terminate_pids }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          envs: PIDS
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            echo "=== контейнеры ==="
+            docker compose ps --format 'table {{.Name}}\t{{.Status}}' || docker ps --format 'table {{.Names}}\t{{.Status}}'
+            echo "=== активные сессии (не idle) ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT pid, usename, state, coalesce(wait_event_type,'-')||'/'||coalesce(wait_event,'-') AS wait, to_char(now()-xact_start,'HH24:MI:SS') AS xact_age, regexp_replace(left(query,110), E'[\n\r]+', ' ', 'g') FROM pg_stat_activity WHERE datname='broker_platform' AND state IS NOT NULL AND state<>'idle' AND pid<>pg_backend_pid() ORDER BY xact_start NULLS LAST" || true
+            echo "=== idle in transaction старше 30 с ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT pid, to_char(now()-xact_start,'HH24:MI:SS'), regexp_replace(left(query,100), E'[\n\r]+', ' ', 'g') FROM pg_stat_activity WHERE datname='broker_platform' AND state='idle in transaction' AND now()-xact_start > interval '30 seconds'" || true
+            echo "=== ожидающие блокировки ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT l.pid, l.locktype, l.mode, c.relname, l.granted FROM pg_locks l LEFT JOIN pg_class c ON c.oid=l.relation WHERE NOT l.granted" || true
+            echo "=== соединений всего ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT count(*), state FROM pg_stat_activity WHERE datname='broker_platform' GROUP BY state" || true
+            if [ -n "$PIDS" ]; then
+              echo "=== terminate: $PIDS ==="
+              for p in $(printf '%s' "$PIDS" | tr ',;' ' '); do docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT pg_terminate_backend($p)" || true; done
+            fi
