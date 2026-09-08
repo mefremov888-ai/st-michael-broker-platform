@@ -30,7 +30,13 @@ async function main() {
     const firstBy = async (rows, key, dateKey) => { const m = new Map(); for (const r of rows) { const id = r[key]; if (!id) continue; const d = r[dateKey]; if (!d) continue; const cur = m.get(id); if (!cur || new Date(d) < new Date(cur)) m.set(id, d); } return m; };
     const B = 500; const collect = async (fn) => { const out = []; for (let i = 0; i < ids.length; i += B) out.push(...(await fn(ids.slice(i, i + B)))); return out; };
     const fixRows = await collect((batch) => prisma.client.findMany({ where: { brokerId: { in: batch }, ...FIX }, select: { brokerId: true, createdAt: true, comment: true } }));
-    const meetRows = await collect((batch) => prisma.meeting.findMany({ where: { brokerId: { in: batch }, status: { in: ["CONFIRMED", "COMPLETED"] } }, select: { brokerId: true, date: true } }));
+    // Встречи: тип BROKER_TOUR — это сам брокер-тур (запись на тур / поле «Встреча»=«тур» в лиде), не встреча с клиентом.
+    const meetAll = await collect((batch) => prisma.meeting.findMany({ where: { brokerId: { in: batch } }, select: { brokerId: true, date: true, type: true, status: true, clientId: true, eventId: true } }));
+    const mstats = {}; for (const m of meetAll) { const k = `${m.type}/${m.status}/${m.clientId ? "с клиентом" : "без клиента"}${m.eventId ? "/событие" : ""}`; mstats[k] = (mstats[k] || 0) + 1; }
+    console.log(`Встречи по типу/статусу: ${JSON.stringify(mstats)}`);
+    const meetRows = meetAll.filter((m) => ["CONFIRMED", "COMPLETED"].includes(m.status) && m.type !== "BROKER_TOUR");
+    const meetRowsWithBt = meetAll.filter((m) => ["CONFIRMED", "COMPLETED"].includes(m.status));
+    console.log(`Подтверждённых встреч всего: ${meetRowsWithBt.length}, из них тип BROKER_TOUR: ${meetRowsWithBt.length - meetRows.length} (в KPI «Встречи» сейчас входят все)`);
     const dealRows = await collect((batch) => prisma.deal.findMany({ where: { brokerId: { in: batch }, ...DEAL_WHERE }, select: { brokerId: true, signedAt: true, createdAt: true } }));
     const regRows = await collect((batch) => prisma.registryDeal.findMany({ where: { brokerId: { in: batch } }, select: { brokerId: true, paidAt: true, dvouPaidAt: true } }));
     const firstFix = await firstBy(fixRows, "brokerId", "createdAt");
@@ -38,7 +44,7 @@ async function main() {
     const firstMeet = await firstBy(meetRows, "brokerId", "date");
     const firstDvou = await firstBy(regRows.filter((r) => r.dvouPaidAt), "brokerId", "dvouPaidAt");
     const firstDeal = await firstBy([...dealRows.map((r) => ({ brokerId: r.brokerId, d: r.signedAt || r.createdAt })), ...regRows.filter((r) => r.paidAt).map((r) => ({ brokerId: r.brokerId, d: r.paidAt }))], "brokerId", "d");
-    console.log(`Брокеров с фиксациями: ${firstFix.size} (только новый кабинет: ${firstFixNew.size}); со встречами: ${firstMeet.size}; с платной бронью (ДВОУ): ${firstDvou.size}; со сделками (реестр+кабинет): ${firstDeal.size}`);
+    console.log(`Брокеров с фиксациями: ${firstFix.size} (только новый кабинет: ${firstFixNew.size}); со встречами (без брокер-туров): ${firstMeet.size}; с платной бронью (ДВОУ): ${firstDvou.size}; со сделками (реестр+кабинет): ${firstDeal.size}`);
 
     const funnel = (cohort, strict) => {
       const after = (m, b) => { const d = m.get(b.id); if (!d) return false; if (!strict) return true; return b.brokerTourDate ? new Date(d) >= new Date(b.brokerTourDate) : false; };
