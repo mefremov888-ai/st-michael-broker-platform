@@ -31,8 +31,8 @@ async function main() {
     const B = 500; const collect = async (fn) => { const out = []; for (let i = 0; i < ids.length; i += B) out.push(...(await fn(ids.slice(i, i + B)))); return out; };
     const fixRows = await collect((batch) => prisma.client.findMany({ where: { brokerId: { in: batch }, ...FIX }, select: { brokerId: true, createdAt: true, comment: true } }));
     // Встречи: тип BROKER_TOUR — это сам брокер-тур (запись на тур / поле «Встреча»=«тур» в лиде), не встреча с клиентом.
-    const meetAll = await collect((batch) => prisma.meeting.findMany({ where: { brokerId: { in: batch } }, select: { brokerId: true, date: true, type: true, status: true, clientId: true, eventId: true } }));
-    const mstats = {}; for (const m of meetAll) { const k = `${m.type}/${m.status}/${m.clientId ? "с клиентом" : "без клиента"}${m.eventId ? "/событие" : ""}`; mstats[k] = (mstats[k] || 0) + 1; }
+    const meetAll = await collect((batch) => prisma.meeting.findMany({ where: { brokerId: { in: batch } }, select: { brokerId: true, date: true, type: true, status: true, clientId: true } }));
+    const mstats = {}; for (const m of meetAll) { const k = `${m.type}/${m.status}/${m.clientId ? "с клиентом" : "без клиента"}`; mstats[k] = (mstats[k] || 0) + 1; }
     console.log(`Встречи по типу/статусу: ${JSON.stringify(mstats)}`);
     const meetRows = meetAll.filter((m) => ["CONFIRMED", "COMPLETED"].includes(m.status) && m.type !== "BROKER_TOUR");
     const meetRowsWithBt = meetAll.filter((m) => ["CONFIRMED", "COMPLETED"].includes(m.status));
