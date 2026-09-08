@@ -44,7 +44,8 @@ async function main() {
         { uniquenessStatus: "CONDITIONALLY_UNIQUE", OR: [{ uniquenessExpiresAt: null }, { uniquenessExpiresAt: { gt: now } }] },
       ],
     };
-    const notHist = { NOT: { comment: { startsWith: HIST } } };
+    // NULL-safe (hotfix 07.09): пустой комментарий = запись нового кабинета.
+    const notHist = { OR: [{ comment: null }, { NOT: { comment: { startsWith: HIST } } }] };
 
     const [
       brokers, brokersLinked, brokersNoAmo, brokersNew,
