@@ -1,0 +1,38 @@
+name: Inspect filter case (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases_json:
+        description: JSON-массив кейсов [{name, filter, columns, segment}]
+        required: true
+        type: string
+
+concurrency:
+  group: inspect-filter-case
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          CASES_JSON: ${{ inputs.cases_json }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          envs: CASES_JSON
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/inspect-filter-case.js > /tmp/inspect-filter-case.js
+            docker cp /tmp/inspect-filter-case.js st-michael-api:/app/scripts/inspect-filter-case.js
+            docker compose exec -T -e CASES_JSON="$CASES_JSON" api node /app/scripts/inspect-filter-case.js
