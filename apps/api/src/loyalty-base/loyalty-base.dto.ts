@@ -743,6 +743,15 @@ export class LoyaltySearchDto extends LoyaltyListQueryDto {
   columns?: LoyaltyColumnFiltersDto;
 }
 
+// 2026-09-08: «Контрольные показатели активности» по текущей выборке
+// списка: тело — как у search, плюс период рейтинга (summaryPeriod).
+export class LoyaltyActivitySummaryDto extends LoyaltySearchDto {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  summaryPeriod?: LoyaltyFilterPeriodDto;
+}
+
 export class LoyaltyExportDto extends LoyaltyListFiltersDto {
   @IsOptional()
   @IsString()

@@ -18,6 +18,7 @@ import {
   LoyaltyChangesQueryDto,
   LoyaltyEntityUpdateDto,
   LoyaltyExportDto,
+  LoyaltyActivitySummaryDto,
   LoyaltyImportDto,
   LoyaltyImportRecordDto,
   LoyaltyLinkUnlinkDto,
@@ -4997,6 +4998,189 @@ export class LoyaltyBaseService {
       dto.search.trim(),
       dto.filter,
     );
+  }
+
+  /**
+   * 2026-09-08 (владелец): «Контрольные показатели активности» должны
+   * считаться по текущим фильтрам списка. Берём ровно ту же выборку, что и
+   * список (resolveSelection → ids), и считаем по ней фиксации, встречи,
+   * платные брони, сделки и сумму ДДУ за период рейтинга теми же правилами,
+   * что oursOverview (фиксации по правилам фиксации и источнику кабинета,
+   * встречи подтверждённые/состоявшиеся, сделки = оплаченные ДДУ реестра +
+   * подтверждённые сделки кабинета, брони = оплаченные ДВОУ). Для агентств
+   * выборка — брокеры, привязанные к выбранным агентствам, плюс строки
+   * реестра по названию агентства (как в карточке агентства).
+   * Без фильтров результат совпадает с обзором (проверяется QA).
+   */
+  async activitySummary(
+    baseInput: string,
+    entityType: EntityType,
+    dto: LoyaltyActivitySummaryDto,
+  ) {
+    const base = this.parseBase(baseInput);
+    const period = this.parsePeriod({
+      from: dto.summaryPeriod?.from,
+      to: dto.summaryPeriod?.to,
+    } as LoyaltyOverviewQueryDto);
+    const periodDto = {
+      from: period.from.toISOString(),
+      to: period.to.toISOString(),
+    };
+    if (base !== "ours") {
+      return {
+        base,
+        entityType,
+        supported: false,
+        period: periodDto,
+        selection: null,
+        activities: null,
+        dealAmount: null,
+      };
+    }
+    const selection = await this.resolveSelection(base, entityType, dto);
+    const cabinetSource = dto.filter?.cabinetSource as CabinetSource | undefined;
+    let brokerIds = uniqueSorted(selection.ids);
+    const agencyKeys = new Set<string>();
+    if (entityType === "AGENCY") {
+      const agencyIds = uniqueSorted(selection.ids);
+      const relatedBrokerIds: string[] = [];
+      for (
+        let offset = 0;
+        offset < agencyIds.length;
+        offset += CANDIDATE_QUERY_BATCH_SIZE
+      ) {
+        const batch = agencyIds.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+        const [relations, agencies] = await Promise.all([
+          this.prisma.brokerAgency.findMany({
+            where: {
+              agencyId: { in: batch },
+              broker: { is: { role: "BROKER", mergedIntoId: null } },
+            },
+            select: { brokerId: true },
+          }),
+          this.prisma.agency.findMany({
+            where: { id: { in: batch } },
+            select: { name: true, legalName: true },
+          }),
+        ]);
+        for (const relation of relations as any[])
+          relatedBrokerIds.push(String(relation.brokerId));
+        for (const agency of agencies as any[]) {
+          for (const value of [agency.name, agency.legalName]) {
+            const key = canonicalAgencyMatchKey(value);
+            if (key) agencyKeys.add(key);
+          }
+        }
+      }
+      brokerIds = uniqueSorted(relatedBrokerIds);
+    }
+    const brokerSet = new Set(brokerIds);
+    const periodWhere = { gte: period.from, lte: period.to };
+    let fixations = 0;
+    let meetings = 0;
+    let deals = 0;
+    let dealCents = 0n;
+    for (
+      let offset = 0;
+      offset < brokerIds.length;
+      offset += CANDIDATE_QUERY_BATCH_SIZE
+    ) {
+      const batch = brokerIds.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const [fixationCount, meetingCount, dealAgg] = await Promise.all([
+        this.prisma.client.count({
+          where: {
+            brokerId: { in: batch },
+            ...fixationClientWhere(cabinetSource),
+            createdAt: periodWhere,
+          },
+        }),
+        this.prisma.meeting.count({
+          where: {
+            brokerId: { in: batch },
+            status: { in: ["CONFIRMED", "COMPLETED"] },
+            date: periodWhere,
+          },
+        }),
+        this.prisma.deal.aggregate({
+          where: {
+            brokerId: { in: batch },
+            ...this.ourConfirmedDealWhere({ from: period.from, to: period.to }),
+          },
+          _count: { _all: true },
+          _sum: { amount: true },
+        }),
+      ]);
+      fixations += Number(fixationCount || 0);
+      meetings += Number(meetingCount || 0);
+      deals += Number((dealAgg as any)?._count?._all || 0);
+      dealCents += moneyToCents(String((dealAgg as any)?._sum?.amount || "0"));
+    }
+    let paidBookings = 0;
+    let registryDeals = 0;
+    let registryCents = 0n;
+    if (this.registryDealModel && (brokerIds.length || agencyKeys.size)) {
+      const rows = await this.registryDealModel.findMany({
+        where: {
+          OR: [
+            this.registrySignedAtWhere({ from: period.from, to: period.to }),
+            { dvouPaidAt: periodWhere },
+          ],
+        },
+        select: {
+          brokerId: true,
+          agencyCanonical: true,
+          agencyNameRaw: true,
+          amount: true,
+          paidAt: true,
+          dvouPaidAt: true,
+        },
+      });
+      const inPeriod = (value: unknown) => {
+        if (!value) return false;
+        const time = new Date(value as any).getTime();
+        return time >= period.from.getTime() && time <= period.to.getTime();
+      };
+      const attributed = (row: any) =>
+        (row.brokerId && brokerSet.has(String(row.brokerId))) ||
+        (entityType === "AGENCY" &&
+          agencyKeys.has(
+            canonicalAgencyMatchKey(
+              row.agencyCanonical || row.agencyNameRaw || "",
+            ) || "",
+          ));
+      for (const row of (Array.isArray(rows) ? rows : []) as any[]) {
+        if (!attributed(row)) continue;
+        if (inPeriod(row.paidAt)) {
+          registryDeals += 1;
+          registryCents += moneyToCents(String(row.amount || "0"));
+        }
+        if (inPeriod(row.dvouPaidAt)) paidBookings += 1;
+      }
+    }
+    return {
+      base,
+      entityType,
+      supported: true,
+      period: periodDto,
+      cabinetSource: cabinetSource || "all",
+      selection: {
+        count: selection.total,
+        brokers: brokerIds.length,
+        filterHash: selection.filterHash,
+      },
+      activities: {
+        fixations,
+        meetings,
+        paidBookings,
+        deals: deals + registryDeals,
+      },
+      dealAmount: centsToMoney(dealCents + registryCents),
+      exactness: "VERIFIED",
+      methodology:
+        entityType === "AGENCY"
+          ? "Считается по брокерам, привязанным к агентствам из текущего списка, и по строкам реестра с названием этих агентств; период — по дате события (фиксация — подача заявки, встреча — дата встречи, бронь — оплата ДВОУ, сделка — оплата ДДУ)."
+          : "Считается только по брокерам, попавшим под текущие фильтры списка; период — по дате события (фиксация — подача заявки, встреча — дата встречи, бронь — оплата ДВОУ, сделка — оплата ДДУ).",
+    };
   }
 
   /**
