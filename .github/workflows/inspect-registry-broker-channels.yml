@@ -1,0 +1,36 @@
+name: Inspect registry broker channels (read-only)
+
+# 2026-09-08: поиск брокера для оплаченных строк реестра без брокера по всем
+# каналам amo (поля лида, примечания, теги, поля контакта) и кабинета (ФИО
+# клиента в фиксациях, единственный брокер агентства). Только чтение.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: inspect-registry-broker-channels
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 28m
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            for f in inspect-registry-broker-channels.js enrich-agencies-from-amo.js; do
+              git show origin/master:scripts/$f > /tmp/$f
+              docker cp /tmp/$f st-michael-api:/app/scripts/$f
+            done
+            docker compose exec -T api node /app/scripts/inspect-registry-broker-channels.js
