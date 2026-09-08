@@ -1,0 +1,44 @@
+name: Ops Telegram chats info (read-only)
+
+# 2026-09-08: показать, кому принадлежат chat id из GH-секрета и серверного .env
+# (имя/username через getChat) — чтобы подтвердить, что второй чат бота — Анна.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ops-telegram-chats-info
+  cancel-in-progress: false
+
+jobs:
+  info:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and getChat
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+          GH_CHAT: ${{ secrets.OPS_ALERT_CHAT_ID }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 3m
+          envs: BOT,GH_CHAT
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            server_ids=$(grep -hE 'OPS_ALERT_CHAT_IDS?=' .env 2>/dev/null | sed -e 's/^[^=]*=//' -e "s/[\"']//g" -e 's/\r//g' | tr ',;' '\n' | tr -d ' \t' | grep -E '^-?[0-9]+$' || true)
+            all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
+            for chat in $all; do
+              tail4=$(printf '%s' "$chat" | tail -c 4)
+              info=$(curl -sS --max-time 20 "https://api.telegram.org/bot${BOT}/getChat?chat_id=${chat}" | head -c 400)
+              name=$(printf '%s' "$info" | sed -n 's/.*"first_name":"\([^"]*\)".*/\1/p')
+              last=$(printf '%s' "$info" | sed -n 's/.*"last_name":"\([^"]*\)".*/\1/p')
+              user=$(printf '%s' "$info" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
+              typ=$(printf '%s' "$info" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+              echo "chat ...$tail4: type=$typ name=$name $last username=$user"
+            done

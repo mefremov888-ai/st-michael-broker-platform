@@ -302,6 +302,11 @@ async function main() {
     }
 
     if (process.env.FULL_LISTS === "1") {
+      // Оплаченные договоры без брокера — для сверки с Google (агентство/комиссия/источник).
+      emitSection("paid_without_broker", rows.filter((r) => r.paidAt && !r.brokerId).map((r) => ({
+        contractNumber: r.contractNumber, project: r.project, amoLeadId: r.amoLeadId ? String(r.amoLeadId) : null,
+        paidAt: new Date(r.paidAt).toISOString().slice(0, 10), amount: r.amount === null ? null : Number(r.amount), source: r.source,
+      })));
       for (const [issue, rows] of Object.entries(full)) emitSection(issue, rows);
       emitSection("deal_leads_missing_in_registry", missing.map((l) => ({
         amoLeadId: String(l.id), pipeline: PIPELINES[Number(l.pipeline_id)] || String(l.pipeline_id), stage: stageGroup(l),
