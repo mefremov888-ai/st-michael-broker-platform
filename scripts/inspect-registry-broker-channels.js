@@ -42,6 +42,13 @@ async function main() {
 
     // Брокеры кабинета: по телефону и по ФИО.
     const brokers = await prisma.broker.findMany({ where: { role: "BROKER", mergedIntoId: null }, select: { id: true, fullName: true, phone: true, amoContactId: true, phones: { select: { phone: true } }, brokerAgencies: { select: { agencyId: true } } } });
+    // 2026-09-08: телефоны базы Анны (для строк, где контакт-брокер есть в amo, но карточки у нас нет)
+    const annaByPhone = new Map();
+    try {
+      const cps = await prisma.loyaltyContactPoint.findMany({ where: { type: "PHONE" }, select: { normalizedValue: true, sourceRecord: { select: { displayName: true, entityType: true, personId: true, organizationId: true } } } });
+      for (const c of cps) { const d = last10(c.normalizedValue); if (d.length === 10) { if (!annaByPhone.has(d)) annaByPhone.set(d, new Set()); annaByPhone.get(d).add(`${c.sourceRecord.displayName} (${c.sourceRecord.entityType === "AGENCY" ? "агентство" : "брокер"} Анны)`); } }
+      console.log(`Телефонов базы Анны: ${annaByPhone.size}`);
+    } catch (e) { console.error(`anna phones: ${e?.message || e}`); }
     const byPhone = new Map(); const byNameWords = [];
     for (const b of brokers) {
       for (const p of [b.phone, ...b.phones.map((x) => x.phone)]) { const d = last10(p); if (d.length === 10) { if (!byPhone.has(d)) byPhone.set(d, new Set()); byPhone.get(d).add(b.id); } }
@@ -102,7 +109,7 @@ async function main() {
     console.log(`Лидов: ${leads.size}; контактов: ${contacts.size}; лидов с примечаниями: ${notesByLead.size}`);
 
     const cf = (e, id) => (e?.custom_fields_values || []).find((f) => Number(f.field_id) === Number(id))?.values?.map((v) => v.value).filter(Boolean).join(" ") || "";
-    const found = []; const allRows = []; const stats = { A: 0, B_phone: 0, B_name: 0, C: 0, D: 0, D2: 0, E: 0, F: 0, none: 0, multi: 0 };
+    const found = []; const allRows = []; const deep = []; const stats = { A: 0, B_phone: 0, B_name: 0, C: 0, D: 0, D2: 0, E: 0, F: 0, none: 0, multi: 0 };
     const clientNameIdx = new Map(); // для E — по ФИО клиента среди наших фиксаций
     for (const r of rows) {
       const lead = leads.get(Number(r.amoLeadId));
@@ -150,6 +157,23 @@ async function main() {
         const ag = brokers.filter((b) => b.brokerAgencies.some((x) => x.agencyId === agencyId));
         if (ag.length === 1) add([ag[0].id], "F");
       }
+      if (!cands.size && lead && (evidence.brokerContacts || evidence.notesWithBrokerWord)) {
+        const mask = (t) => String(t || "").replace(/(\+?\d[\d\s()-]{6,}\d)/g, (m) => { const d = m.replace(/\D/g, ""); return d.length >= 7 ? `…${d.slice(-4)}` : m; });
+        const bc = [];
+        for (const c of lead._embedded?.contacts || []) {
+          const ct = contacts.get(Number(c.id)); if (!ct) continue;
+          const flag = String(cf(ct, 835415) || "").toLowerCase();
+          const comps = (ct._embedded?.companies || []).map((x) => x.name || x.id).filter(Boolean);
+          const isBrokerContact = ["true", "1", "да", "yes"].includes(flag) || comps.length > 0;
+          if (!isBrokerContact) continue;
+          const phones = (ct.custom_fields_values || []).filter((f) => f.field_code === "PHONE").flatMap((f) => (f.values || []).map((v) => v.value));
+          const anna = new Set(); for (const ph of phones) for (const a of annaByPhone.get(last10(ph)) || []) anna.add(a);
+          bc.push({ contactId: String(ct.id), name: ct.name, isMain: Boolean(c.is_main), flag: flag || null, companies: comps.join("; "), phoneTails: phones.map((x) => `…${last10(x).slice(-4)}`).join(", "), anna: [...anna].join("; ") });
+        }
+        const excerpts = [];
+        for (const t of notesByLead.get(Number(lead.id)) || []) { const re = /брокер|агент|риелт|партн/gi; let m; while ((m = re.exec(t)) && excerpts.length < 6) { excerpts.push(mask(t.slice(Math.max(0, m.index - 70), m.index + 90)).replace(/\s+/g, " ")); } }
+        deep.push({ contractNumber: r.contractNumber, project: r.project, paidAt: r.paidAt.toISOString().slice(0, 10), amoLeadId: String(lead.id), leadName: lead.name, agencyInRegistry: r.agencyNameRaw || r.agencyCanonical || null, brokerContacts: bc, noteExcerpts: excerpts });
+      }
       allRows.push({ id: r.id, contractNumber: r.contractNumber, project: r.project, paidAt: r.paidAt.toISOString().slice(0, 10), amoLeadId: r.amoLeadId ? String(r.amoLeadId) : null, agencyInRegistry: r.agencyNameRaw || r.agencyCanonical || null, ...evidence, candidates: cands.size, channels: [...new Set(cands.values())].join("+") });
       if (!cands.size) { stats.none++; continue; }
       if (cands.size > 1) { stats.multi++; }
@@ -163,6 +187,8 @@ async function main() {
     console.log("RESULT: " + JSON.stringify({ rows: rows.length, ...stats, found: found.length }));
     emit("broker_channel_matches", found);
     emit("broker_channel_evidence", allRows);
+    console.log(`Строк без кандидата, но с контактом-брокером или словом «брокер» в примечаниях: ${deep.length}; из них с контактом-брокером: ${deep.filter((d) => d.brokerContacts.length).length}; с совпадением в базе Анны: ${deep.filter((d) => d.brokerContacts.some((b) => b.anna)).length}`);
+    emit("broker_channel_deep", deep);
   } finally { await prisma.$disconnect(); }
 }
 
