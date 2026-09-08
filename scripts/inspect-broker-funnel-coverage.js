@@ -72,7 +72,16 @@ async function main() {
       const links = await prisma.loyaltyEntityLink.findMany({ where: { status: "CONFIRMED", revokedAt: null, targetType: "BROKER" }, select: { targetId: true }, distinct: ["targetId"] });
       const linkedIds = new Set(links.map((l) => l.targetId));
       const linkedBt = bt.filter((b) => linkedIds.has(b.id)).length;
-      anna = { sourceBtVisited: agg, sourceBtDated: aggDated, linkedBrokers: linkedIds.size, linkedWithOurBt: linkedBt };
+      // Даты БТ Анны по годам и сколько наших «туристов без даты» получат дату из её файла (через сцепку)
+      const annaAgg = await prisma.loyaltySourceAggregate.findMany({ where: { brokerTourVisited: true }, select: { brokerTourAt: true, sourceRecord: { select: { personId: true } } } });
+      const annaYears = {}; const annaDateByPerson = new Map();
+      for (const a of annaAgg) { if (!a.brokerTourAt) continue; const y = new Date(a.brokerTourAt).getFullYear(); annaYears[y] = (annaYears[y] || 0) + 1; if (a.sourceRecord?.personId) annaDateByPerson.set(a.sourceRecord.personId, a.brokerTourAt); }
+      const linkRows = await prisma.loyaltyEntityLink.findMany({ where: { status: "CONFIRMED", revokedAt: null, targetType: "BROKER", personId: { in: [...annaDateByPerson.keys()] } }, select: { personId: true, targetId: true } });
+      const ourBtNoDate = new Set(bt.filter((b) => !b.brokerTourDate).map((b) => b.id));
+      const ourNoBt = new Set(brokers.filter((b) => !b.brokerTourVisited).map((b) => b.id));
+      let fillDate = 0, newBt = 0, sameBroker = 0;
+      for (const l of linkRows) { if (ourBtNoDate.has(l.targetId)) fillDate++; else if (ourNoBt.has(l.targetId)) newBt++; else sameBroker++; }
+      anna = { sourceBtVisited: agg, sourceBtDated: aggDated, annaBtYears: annaYears, linkedBrokers: linkedIds.size, linkedWithOurBt: linkedBt, annaDatedLinkedToOurs: linkRows.length, fillsOurMissingDate: fillDate, annaBtButOursNoBt: newBt, bothHaveDate: sameBroker };
     } catch (e) { anna = { error: String(e?.message || e) }; }
     console.log(`База Анны: ${JSON.stringify(anna)}`);
     console.log("RESULT: " + JSON.stringify({ brokers: brokers.length, bt: bt.length, btDated: btDated.length, btYears, stages, all, strict, noBt: noBtFunnel, byYear, anna }));
