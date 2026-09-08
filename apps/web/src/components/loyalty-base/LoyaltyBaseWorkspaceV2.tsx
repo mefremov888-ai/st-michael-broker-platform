@@ -1937,7 +1937,7 @@ export function LoyaltyBaseWorkspaceV2() {
                 onClick={() => openActivityDrilldown("meetings")}
                 explanation={metricExplanation(
                   "activities.meetings",
-                  withSelectionNote("Количество подтверждённых встреч за выбранный период"),
+                  withSelectionNote("Количество подтверждённых встреч с клиентами за выбранный период (брокер-туры не считаются)"),
                 )}
               >
                 {number(kpiActivities?.meetings ?? null)}

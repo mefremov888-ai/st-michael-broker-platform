@@ -4083,8 +4083,12 @@ export class LoyaltyBaseService {
       ...this.ourConfirmedDealWhere(period),
       broker: brokerOwner,
     };
+    // 2026-09-08: встреча = встреча с клиентом. Брокер-тур хранится в той же
+    // таблице (Meeting.type=BROKER_TOUR, без клиента) и раньше считался
+    // встречей: из 1 406 подтверждённых встреч 1 002 были турами. Теперь туры
+    // исключены из всех метрик/фильтров встреч (везде одно и то же правило).
     const acceptedMeetings: any = {
-      status: { in: ["CONFIRMED", "COMPLETED"] },
+      status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
       date: { gte: period.from, lte: period.to },
       broker: brokerOwner,
     };
@@ -4185,7 +4189,7 @@ export class LoyaltyBaseService {
           brokerTourVisited: false,
           brokerTourDate: null,
           clients: { none: fixationClientWhere(cabinetSource) },
-          meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
+          meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } } },
           deals: { none: this.ourConfirmedDealWhere() },
           registryDeals: { none: {} },
           callLogs: { none: {} },
@@ -4370,7 +4374,7 @@ export class LoyaltyBaseService {
       "activities.meetings": {
         ...shared,
         formula:
-          "Считаем встречи за выбранный период со статусом «подтверждена» или «проведена» у действующих брокеров.",
+          "Считаем встречи с клиентами за выбранный период со статусом «подтверждена» или «проведена» у действующих брокеров. Брокер-туры встречами не считаются (у них свой статус «Был на брокер-туре»).",
         provenance: "Встречи (дата, статус) · карточки брокеров",
       },
       "activities.deals": {
@@ -5097,7 +5101,7 @@ export class LoyaltyBaseService {
         this.prisma.meeting.count({
           where: {
             brokerId: { in: batch },
-            status: { in: ["CONFIRMED", "COMPLETED"] },
+            status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
             date: periodWhere,
           },
         }),
@@ -7883,7 +7887,7 @@ export class LoyaltyBaseService {
         brokerTourVisited: false,
         brokerTourDate: null,
         clients: { none: fixationClientWhere(filter.cabinetSource) },
-        meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] } } },
+        meetings: { none: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } } },
         deals: { none: this.ourConfirmedDealWhere() },
         registryDeals: { none: {} },
         callLogs: { none: {} },
@@ -8006,7 +8010,7 @@ export class LoyaltyBaseService {
           select: { createdAt: true },
         },
         meetings: {
-          where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+          where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
           orderBy: { date: "desc" },
           take: 1,
           select: { date: true },
@@ -8022,7 +8026,7 @@ export class LoyaltyBaseService {
             clients: { where: fixationClientWhere(filter.cabinetSource) },
             deals: { where: this.ourConfirmedDealWhere() },
             meetings: {
-              where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+              where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
             },
             callLogs: true,
           },
@@ -8167,7 +8171,7 @@ export class LoyaltyBaseService {
           by: ["brokerId"],
           where: {
             brokerId: { in: batch },
-            status: { in: ["CONFIRMED", "COMPLETED"] },
+            status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
             date: { gte: period.from, lte: period.to },
           },
           _count: { _all: true },
@@ -8475,7 +8479,7 @@ export class LoyaltyBaseService {
                 },
               },
               meetings: {
-                where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+                where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
                 select: {
                   id: true,
                   date: true,
@@ -9949,7 +9953,7 @@ export class LoyaltyBaseService {
       return {
         meetings: {
           some: {
-            status: { in: ["CONFIRMED", "COMPLETED"] },
+            status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
             ...(dateRange ? { date: dateRange } : {}),
           },
         },
@@ -10730,7 +10734,7 @@ export class LoyaltyBaseService {
             select: { createdAt: true },
           },
           meetings: {
-            where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+            where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
             orderBy: { date: "desc" },
             take: 1,
             select: { date: true },
@@ -10746,7 +10750,7 @@ export class LoyaltyBaseService {
               clients: { where: fixationClientWhere(cabinetSource) },
               deals: { where: this.ourConfirmedDealWhere() },
               meetings: {
-                where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+                where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
               },
               callLogs: true,
             },
@@ -11011,7 +11015,7 @@ export class LoyaltyBaseService {
         ? this.prisma.meeting.count({
             where: {
               brokerId: { in: brokerIds },
-              status: { in: ["CONFIRMED", "COMPLETED"] },
+              status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
               date: periodWhere,
             },
           })
@@ -11296,7 +11300,7 @@ export class LoyaltyBaseService {
             // в карточке (оранжевый бейдж), а не пропадать из истории.
             where: {
               OR: [
-                { status: { in: ["CONFIRMED", "COMPLETED"] } },
+                { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
                 { status: "PENDING", comment: { contains: "[amo:" } },
               ],
             },
@@ -11335,7 +11339,7 @@ export class LoyaltyBaseService {
               clients: { where: fixationClientWhere(cabinetSource) },
               deals: { where: this.ourConfirmedDealWhere() },
               meetings: {
-                where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+                where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
               },
               // Задача E: карточка считает звонки как список — легаси
               // CallLog (+ workflow в mapOurBroker), а не телефонию (calls).
