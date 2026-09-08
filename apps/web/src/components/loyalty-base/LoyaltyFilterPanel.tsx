@@ -117,6 +117,8 @@ export function LoyaltyFilterPanel({
   draft,
   onChange,
   onApply,
+  onApplyDraft,
+  dirty = false,
   onReset,
   campaigns,
   operators,
@@ -128,28 +130,56 @@ export function LoyaltyFilterPanel({
   draft: LoyaltyFilterFormState;
   onChange: (next: LoyaltyFilterFormState) => void;
   onApply: () => void;
+  // 2026-09-08 (владелец): выбор в списках применяется сразу, без кнопки.
+  // Кнопка остаётся для поиска, дат и числовых полей (их вводят по частям).
+  onApplyDraft?: (next: LoyaltyFilterFormState) => void;
+  // Есть введённые, но не применённые изменения (поиск/даты/числа).
+  dirty?: boolean;
   onReset: () => void;
   campaigns: LoyaltyCampaign[];
   operators: LoyaltyOperator[];
   facets: LoyaltyFacets | null;
   loading: boolean;
 }) {
+  // Поля, которые вводят по частям — применяются только кнопкой.
+  const TYPED_KEYS: ReadonlyArray<keyof LoyaltyFilterFormState> = [
+    "search",
+    "callFrom",
+    "callTo",
+    "activityFrom",
+    "activityTo",
+    "dealsMin",
+    "dealsMax",
+    "meetingsMin",
+    "meetingsMax",
+    "staleDays",
+  ];
+  const commit = (
+    next: LoyaltyFilterFormState,
+    keys: ReadonlyArray<keyof LoyaltyFilterFormState>,
+  ) => {
+    onChange(next);
+    if (onApplyDraft && !keys.some((key) => TYPED_KEYS.includes(key)))
+      onApplyDraft(next);
+  };
   const update = <K extends keyof LoyaltyFilterFormState>(
     key: K,
     value: LoyaltyFilterFormState[K],
   ) =>
-    onChange(
+    commit(
       sanitizeLoyaltyFilterState(base, entityType, {
         ...draft,
         [key]: value,
       }),
+      [key],
     );
   const patch = (next: Partial<LoyaltyFilterFormState>) =>
-    onChange(
+    commit(
       sanitizeLoyaltyFilterState(base, entityType, {
         ...draft,
         ...next,
       }),
+      Object.keys(next) as Array<keyof LoyaltyFilterFormState>,
     );
   const isBroker = entityType === "brokers";
   const callResults = getLoyaltyCallResultOptions(entityType);
@@ -503,6 +533,16 @@ export function LoyaltyFilterPanel({
           <button className="btn btn-primary" type="submit" disabled={loading}>
             <Filter className="h-4 w-4" /> {ANNA_APPLY_FILTERS_LABEL}
           </button>
+          {dirty && (
+            <span className="rounded-full bg-warning/15 px-3 py-1 text-xs text-warning">
+              Есть неприменённые изменения — нажмите «Применить фильтры»
+            </span>
+          )}
+          {onApplyDraft && !dirty && (
+            <span className="text-xs text-text-muted">
+              Выбор в списках применяется сразу; кнопка нужна для поиска, дат и чисел.
+            </span>
+          )}
           <button
             className="btn btn-secondary"
             type="button"

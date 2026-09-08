@@ -1212,8 +1212,11 @@ export function LoyaltyBaseWorkspaceV2() {
           ?.scrollIntoView({ behavior: "smooth", block: "start" }),
       0,
     );
-  const applyFilters = () => {
-    const next = sanitizeLoyaltyFilterState(base, entityType, draft);
+  const applyFilters = (
+    explicit?: LoyaltyFilterFormState,
+    options?: { scroll?: boolean },
+  ) => {
+    const next = sanitizeLoyaltyFilterState(base, entityType, explicit ?? draft);
     setDrafts((current) => ({ ...current, [key]: next }));
     setApplied((current) => ({ ...current, [key]: next }));
     setSegmentState((current) => ({ ...current, [key]: "" }));
@@ -1222,8 +1225,10 @@ export function LoyaltyBaseWorkspaceV2() {
     setSelected(new Set());
     setAllFilterSelected(false);
     setExcluded(new Set());
-    scrollToList();
+    if (options?.scroll !== false) scrollToList();
   };
+  // 2026-09-08: есть ли в панели введённые, но не применённые изменения.
+  const filtersDirty = JSON.stringify(draft) !== JSON.stringify(filters);
   const applyBrokerPatch = (
     patch: Partial<LoyaltyFilterFormState>,
     nextSegment: LoyaltySegment | "" = "",
@@ -2274,7 +2279,9 @@ export function LoyaltyBaseWorkspaceV2() {
             entityType={entityType}
             draft={draft}
             onChange={setDraft}
-            onApply={applyFilters}
+            onApply={() => applyFilters()}
+            onApplyDraft={(next) => applyFilters(next, { scroll: false })}
+            dirty={filtersDirty}
             onReset={() => resetContext(base, entityType)}
             campaigns={campaigns}
             operators={operators}
