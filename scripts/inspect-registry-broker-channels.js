@@ -94,6 +94,14 @@ async function main() {
       await sleep(AMO_PAGE_PAUSE_MS);
     }
     // B. Примечания лидов.
+    // 2026-09-08: названия компаний контактов (with=companies даёт только id)
+    const companyIds = new Set(); for (const c of contacts.values()) for (const x of c._embedded?.companies || []) companyIds.add(Number(x.id));
+    const companies = new Map(); const compIds = [...companyIds];
+    for (let i = 0; i < compIds.length; i += BATCH) {
+      const q = compIds.slice(i, i + BATCH).map((id) => `filter[id][]=${id}`).join("&");
+      try { const res = await amo["request"](`/companies?${q}&limit=${BATCH}`); for (const c of res?._embedded?.companies || []) companies.set(Number(c.id), c); } catch (e) { console.error(`companies page ${i}: ${e?.message || e}`); }
+    }
+    console.log(`Компаний контактов: ${companies.size} из ${companyIds.size}`);
     const notesByLead = new Map();
     for (let i = 0; i < leadIds.length; i += 50) {
       const q = leadIds.slice(i, i + 50).map((id) => `filter[entity_id][]=${id}`).join("&");
@@ -163,12 +171,13 @@ async function main() {
         for (const c of lead._embedded?.contacts || []) {
           const ct = contacts.get(Number(c.id)); if (!ct) continue;
           const flag = String(cf(ct, 835415) || "").toLowerCase();
-          const comps = (ct._embedded?.companies || []).map((x) => x.name || x.id).filter(Boolean);
+          const comps = (ct._embedded?.companies || []).map((x) => companies.get(Number(x.id))?.name || `#${x.id}`);
+          const compAgency = (ct._embedded?.companies || []).map((x) => agencyByKey.get(canonicalAgencyMatchKey(companies.get(Number(x.id))?.name || ""))).filter(Boolean);
           const isBrokerContact = ["true", "1", "да", "yes"].includes(flag) || comps.length > 0;
           if (!isBrokerContact) continue;
           const phones = (ct.custom_fields_values || []).filter((f) => f.field_code === "PHONE").flatMap((f) => (f.values || []).map((v) => v.value));
           const anna = new Set(); for (const ph of phones) for (const a of annaByPhone.get(last10(ph)) || []) anna.add(a);
-          bc.push({ contactId: String(ct.id), name: ct.name, isMain: Boolean(c.is_main), flag: flag || null, companies: comps.join("; "), phoneTails: phones.map((x) => `…${last10(x).slice(-4)}`).join(", "), anna: [...anna].join("; ") });
+          bc.push({ contactId: String(ct.id), name: ct.name, isMain: Boolean(c.is_main), flag: flag || null, companies: comps.join("; "), companyIsOurAgency: compAgency.length > 0, phoneTails: phones.map((x) => `…${last10(x).slice(-4)}`).join(", "), anna: [...anna].join("; ") });
         }
         const excerpts = [];
         for (const t of notesByLead.get(Number(lead.id)) || []) { const re = /брокер|агент|риелт|партн/gi; let m; while ((m = re.exec(t)) && excerpts.length < 6) { excerpts.push(mask(t.slice(Math.max(0, m.index - 70), m.index + 90)).replace(/\s+/g, " ")); } }
