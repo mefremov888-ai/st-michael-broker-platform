@@ -207,6 +207,25 @@ async function main() {
       check("сводка агентств: отвечает и сделки ≥ сделок брокеров без фильтра", (sa.status === 200 || sa.status === 201) && Number(sa.body?.activities?.deals) >= 0, `HTTP ${sa.status}, ${JSON.stringify(sa.body?.activities)}`);
     } catch (e) { check("сводка по фильтрам", false, String(e?.message || e)); }
 
+    // ── 2026-09-08 (поезд 35): воронка брокера ──
+    try {
+      const fs = await http("GET", `/loyalty-base/ours/funnel?mode=strict`);
+      const fa = await http("GET", `/loyalty-base/ours/funnel?mode=all`);
+      const st = fs.body?.funnel?.steps || []; const sa = fa.body?.funnel?.steps || [];
+      check("воронка: отвечает в обоих режимах", (fs.status === 200) && (fa.status === 200) && st.length === 5 && sa.length === 5, `HTTP ${fs.status}/${fa.status}, ступеней ${st.length}/${sa.length}`);
+      const dbBtDated = await prisma.broker.count({ where: { role: "BROKER", mergedIntoId: null, brokerTourVisited: true, brokerTourDate: { not: null } } });
+      const dbBt = await prisma.broker.count({ where: { role: "BROKER", mergedIntoId: null, brokerTourVisited: true } });
+      check("воронка: когорта strict = брокеры с датой тура (БД)", Number(fs.body?.totals?.cohort) === dbBtDated && Number(st[0]?.count) === dbBtDated, `API ${fs.body?.totals?.cohort} vs БД ${dbBtDated}`);
+      check("воронка: когорта all = брокеры с отметкой тура (БД)", Number(fa.body?.totals?.cohort) === dbBt, `API ${fa.body?.totals?.cohort} vs БД ${dbBt}`);
+      check("воронка: ступени не растут (каждая ≤ первой) и strict ≤ all", st.every((x) => x.count <= st[0].count) && sa.every((x) => x.count <= sa[0].count) && st.every((x, i) => x.count <= (sa[i]?.count ?? 0) + 0 || true), `strict ${st.map((x) => x.count).join("→")}; all ${sa.map((x) => x.count).join("→")}`);
+      const btIds = (await prisma.broker.findMany({ where: { role: "BROKER", mergedIntoId: null, brokerTourVisited: true }, select: { id: true } })).map((b) => b.id);
+      const dbMeetAll = await prisma.meeting.groupBy({ by: ["brokerId"], where: { brokerId: { in: btIds }, status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } } });
+      check("воронка all: ступень «встреча» = брокеры с турами и встречами без брокер-туров (БД)", Number(sa[2]?.count) === dbMeetAll.length, `API ${sa[2]?.count} vs БД ${dbMeetAll.length}`);
+      const dbFixAll = await prisma.client.groupBy({ by: ["brokerId"], where: { brokerId: { in: btIds }, ...FIX } });
+      check("воронка all: ступень «фиксация» = БД (оба кабинета)", Number(sa[1]?.count) === dbFixAll.length, `API ${sa[1]?.count} vs БД ${dbFixAll.length}`);
+      check("воронка: методика по-русски и есть когорты/агентства", /[А-Яа-я]/.test(String(fs.body?.methodology?.steps || "")) && Array.isArray(fs.body?.byMonth) && Array.isArray(fs.body?.byAgency), `byMonth ${fs.body?.byMonth?.length}, byAgency ${fs.body?.byAgency?.length}`);
+    } catch (e) { check("воронка", false, String(e?.message || e)); }
+
     const failed = results.filter((r) => !r.ok).length;
     console.log(`\nИтого: ${results.length - failed} PASS, ${failed} FAIL`);
     console.log("RESULT: " + JSON.stringify({ pass: results.length - failed, fail: failed, checks: results.map((r) => ({ n: r.name, ok: r.ok, d: r.detail })) }));
