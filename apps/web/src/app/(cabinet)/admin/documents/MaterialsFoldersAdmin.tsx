@@ -1,8 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { materialsThumbUrl } from '@/lib/materials-thumb';
 import { apiGet, apiPatch } from '@/lib/api';
 import {
+  setMaterialsCover,
+  withDisplaySubcategory,
   DEFAULT_MATERIALS_LAYOUT,
   parseMaterialsLayout,
   type MaterialsFolderKind,
@@ -28,6 +31,26 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [isDefault, setIsDefault] = useState(true);
+  // 2026-09-08: обложки папок — фото из материалов для выпадающего списка.
+  const [docs, setDocs] = useState<Array<{ name: string; subcategory: string | null; fileUrl: string; type: string }>>([]);
+  const [coverPath, setCoverPath] = useState('');
+  const [coverUrl, setCoverUrl] = useState('');
+  const photoOptions = useMemo(
+    () =>
+      docs
+        .filter((doc) => /\.(jpe?g|png|webp)(\?|#|$)/i.test(doc.fileUrl || '') || doc.type === 'JPG' || doc.type === 'PNG')
+        .map((doc) => ({ label: `${(doc.subcategory || '').split('/').slice(-1)[0] || '—'} / ${doc.name}`, value: doc.fileUrl })),
+    [docs],
+  );
+  const displayFolders = useMemo(() => {
+    const mapped = withDisplaySubcategory(docs, layout, 'cabinet');
+    const set = new Set<string>();
+    for (const doc of mapped) {
+      const parts = String(doc.subcategory || '').split('/').filter(Boolean);
+      for (let depth = 1; depth <= parts.length; depth += 1) set.add(parts.slice(0, depth).join('/'));
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, 'ru'));
+  }, [docs, layout]);
 
   const load = () => {
     setLoading(true);
@@ -39,6 +62,9 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
       })
       .catch(() => onMessage('Не удалось загрузить папки материалов'))
       .finally(() => setLoading(false));
+    apiGet('/documents?category=materials&limit=2000')
+      .then((data) => setDocs(Array.isArray(data?.documents) ? data.documents : []))
+      .catch(() => setDocs([]));
   };
 
   useEffect(load, []);
@@ -290,6 +316,77 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
             ))}
           </tbody>
         </table>
+      </div>
+      {/* 2026-09-08 (владелец): обложки папок — красивое фото на карточке
+          вместо первого попавшегося. Без обложки: первое фото папки, а для
+          папок без фото — обложка родительской папки. */}
+      <div className="mt-6 rounded-xl border border-border p-3">
+        <h3 className="font-medium">Обложки папок</h3>
+        <p className="text-xs text-text-muted">
+          Путь папки как на сайте («Зорге 9», «Зорге 9/Видео», «Презентации») и фото из материалов.
+          Не забудьте нажать «Сохранить раскладку».
+        </p>
+        {Object.keys(layout.covers || {}).length > 0 && (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {Object.entries(layout.covers || {}).map(([path, url]) => (
+              <div key={path} className="flex gap-3 rounded-lg border border-border p-2">
+                <div className="h-14 w-20 shrink-0 overflow-hidden rounded bg-surface-secondary">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={materialsThumbUrl(url)} alt={path} className="h-full w-full object-cover" />
+                </div>
+                <div className="min-w-0 flex-1 text-sm">
+                  <div className="truncate font-medium" title={path}>{path}</div>
+                  <div className="truncate text-xs text-text-muted" title={url}>{decodeURIComponent(url.split('/').pop() || url)}</div>
+                  {isAdmin && (
+                    <button type="button" className="mt-1 text-xs text-error" onClick={() => setLayout(setMaterialsCover(layout, path, null))}>
+                      Убрать обложку
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {isAdmin && (
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="block text-sm">
+              <span className="text-xs text-text-muted">Папка</span>
+              <input className="input text-sm min-w-[220px]" list="display-folder-paths" value={coverPath} onChange={(e) => setCoverPath(e.target.value)} placeholder="Зорге 9" />
+            </label>
+            <label className="block text-sm">
+              <span className="text-xs text-text-muted">Фото (выберите из списка или вставьте адрес)</span>
+              <input className="input text-sm min-w-[320px]" list="materials-photo-urls" value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="/files/yandex/…" />
+            </label>
+            <button
+              type="button"
+              className="btn btn-secondary text-sm"
+              disabled={!coverPath.trim() || !coverUrl.trim()}
+              onClick={() => {
+                setLayout(setMaterialsCover(layout, coverPath, coverUrl));
+                setCoverPath('');
+                setCoverUrl('');
+              }}
+            >
+              <Plus className="w-4 h-4" /> Назначить обложку
+            </button>
+            {coverUrl && (
+              <div className="h-14 w-20 overflow-hidden rounded bg-surface-secondary">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={materialsThumbUrl(coverUrl)} alt="" className="h-full w-full object-cover" />
+              </div>
+            )}
+          </div>
+        )}
+        <datalist id="display-folder-paths">
+          {displayFolders.map((folder) => (
+            <option key={folder} value={folder} />
+          ))}
+        </datalist>
+        <datalist id="materials-photo-urls">
+          {photoOptions.slice(0, 1500).map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </datalist>
       </div>
       <datalist id="disk-folder-prefixes">
         {diskFolders.map((folder) => (

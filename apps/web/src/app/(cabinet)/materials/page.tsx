@@ -5,11 +5,13 @@ import { useRouter } from 'next/navigation';
 import { apiGet } from '@/lib/api';
 import { Building2, Folder } from 'lucide-react';
 import { foldersAndFilesAt, materialHref } from '@/lib/materials-folder-tree';
+import { materialsThumbUrl } from '@/lib/materials-thumb';
 import {
   DEFAULT_MATERIALS_LAYOUT,
   parseMaterialsLayout,
   sortMaterialsRootFolders,
   withDisplaySubcategory,
+  resolveMaterialsCover,
   type MaterialsFolderLayout,
 } from '@shared/materials-folder-layout';
 
@@ -75,7 +77,10 @@ export default function MaterialsPage() {
         <div className="card text-center py-8 text-text-muted">Материалы ещё не загружены</div>
       ) : (
         <div data-tour="materials-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12 }}>
-          {roots.map((folder) => (
+          {roots.map((folder) => {
+            const coverUrl = resolveMaterialsCover(layout, mapped, [folder]);
+            const cover = coverUrl ? materialsThumbUrl(coverUrl) : null;
+            return (
             <button
               key={folder}
               onClick={() => router.push(materialHref([folder]))}
@@ -85,7 +90,7 @@ export default function MaterialsPage() {
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: 12,
-                padding: '36px 16px 28px',
+                padding: '16px 14px 20px',
                 background: '#f5efe8',
                 border: '1px solid rgba(180,147,111,0.25)',
                 borderRadius: 16,
@@ -96,17 +101,26 @@ export default function MaterialsPage() {
               onMouseEnter={(e) => (e.currentTarget.style.background = '#ede2d4')}
               onMouseLeave={(e) => (e.currentTarget.style.background = '#f5efe8')}
             >
-              <div style={{ color: '#B4936F' }}>
-                {groupTitles.includes(folder)
-                  ? <Building2 size={40} strokeWidth={1.2} />
-                  : <Folder size={40} strokeWidth={1.2} />}
-              </div>
+              {cover ? (
+                <div style={{ width: '100%', aspectRatio: '16/10', borderRadius: 10, overflow: 'hidden', background: '#efe7db' }}>
+                  {/* 2026-09-08: обложка папки (раскладка → первое фото → родитель) */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={cover} alt={folder} loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                </div>
+              ) : (
+                <div style={{ color: '#B4936F' }}>
+                  {groupTitles.includes(folder)
+                    ? <Building2 size={40} strokeWidth={1.2} />
+                    : <Folder size={40} strokeWidth={1.2} />}
+                </div>
+              )}
               <div style={{ fontSize: 14, fontWeight: 600, textAlign: 'center' }}>{folder}</div>
               {counts[folder] > 0 && (
                 <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.4)' }}>{counts[folder]} файлов</div>
               )}
             </button>
-          ))}
+            );
+          })}
         </div>
       )}
 
