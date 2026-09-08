@@ -260,6 +260,28 @@ export class LoyaltyOverviewQueryDto {
   linkedOurs?: "linked" | "unlinked";
 }
 
+// 2026-09-08: воронка брокера (БТ → фиксация → встреча → бронь → сделка).
+export class LoyaltyFunnelQueryDto {
+  // Период по дате брокер-тура (когорта). Пусто — за всё время.
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  from?: string;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  to?: string;
+
+  // strict — событие засчитывается, только если оно не раньше даты тура;
+  // all — за всё время (брокеры без даты тура тоже входят).
+  @IsOptional()
+  @IsIn(["strict", "all"])
+  mode?: "strict" | "all";
+
+  @IsOptional()
+  @IsIn(["old", "new", "all"])
+  cabinetSource?: "old" | "new" | "all";
+}
+
 // 2026-09-07: карточка контакта принимает выбранный «Период встреч и сделок»,
 // чтобы применить его к периодным метрикам карточки (как в списке).
 export class LoyaltyDetailQueryDto {

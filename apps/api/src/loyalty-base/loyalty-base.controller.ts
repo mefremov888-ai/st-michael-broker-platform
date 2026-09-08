@@ -40,6 +40,7 @@ import {
   LoyaltyEntityUpdateDto,
   LoyaltyDetailQueryDto,
   LoyaltyExportDto,
+  LoyaltyFunnelQueryDto,
   LoyaltyActivitySummaryDto,
   LoyaltyImportDto,
   LoyaltyListQueryDto,
@@ -84,6 +85,21 @@ export class LoyaltyBaseController {
   ) {
     await this.permissions.require(user, "READ_ALL");
     return this.loyalty.overview(base, query);
+  }
+
+  // 2026-09-08: воронка брокера по событиям кабинета (только «Наша база»).
+  @Get(":base/funnel")
+  @ApiOperation({
+    summary:
+      "Broker funnel: broker tour → fixation → client meeting → paid booking → deal (unique brokers)",
+  })
+  async funnel(
+    @Param("base") base: string,
+    @Query() query: LoyaltyFunnelQueryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
+    return this.loyalty.brokerFunnel(base, query);
   }
 
   @Get(":base/brokers")

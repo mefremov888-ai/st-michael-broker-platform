@@ -2876,6 +2876,84 @@ export async function getLoyaltyActivitySummary(
   };
 }
 
+// 2026-09-08: воронка брокера (только «Наша база»).
+export interface LoyaltyFunnelStep {
+  key: "brokerTour" | "fixation" | "meeting" | "paidBooking" | "deal";
+  label: string;
+  count: number;
+  fromStart: number | null;
+  fromPrevious: number | null;
+}
+
+export interface LoyaltyFunnelResponse {
+  mode: "strict" | "all";
+  period: { from: string | null; to: string | null };
+  cabinetSource: string;
+  totals: {
+    brokers: number;
+    withTourMark: number;
+    withTourDate: number;
+    withoutTourDate: number;
+    cohort: number;
+    tourYears: Record<string, number>;
+    annaTourUnconfirmed: number;
+  };
+  funnel: {
+    steps: LoyaltyFunnelStep[];
+    medianDays: {
+      tourToFixation: number | null;
+      fixationToMeeting: number | null;
+      fixationToDeal: number | null;
+    };
+  };
+  byMonth: Array<{
+    month: string;
+    brokers: number;
+    fixation30: number;
+    fixation90: number;
+    fixationAny: number;
+    meetingAny: number;
+    dealAny: number;
+  }>;
+  byAgency: Array<{
+    agencyId: string | null;
+    name: string;
+    brokers: number;
+    withFixation: number;
+    withMeeting: number;
+    withDeal: number;
+  }>;
+  noTourFunnel: {
+    brokers: number;
+    withFixation: number;
+    withMeeting: number;
+    withPaidBooking: number;
+    withDeal: number;
+  };
+  methodology: Record<string, string>;
+}
+
+export async function getLoyaltyFunnel(
+  base: LoyaltyBaseKey,
+  options: {
+    from?: string;
+    to?: string;
+    mode: "strict" | "all";
+    cabinetSource?: "old" | "new" | "all";
+  },
+): Promise<LoyaltyFunnelResponse> {
+  const value = await apiGet<unknown>(
+    `/loyalty-base/${base}/funnel${queryString({
+      from: options.from,
+      to: options.to,
+      mode: options.mode,
+      cabinetSource: options.cabinetSource,
+    })}`,
+  );
+  const root = responseRoot(value) as unknown as LoyaltyFunnelResponse;
+  return root;
+}
+
 export async function getLoyaltyOverview(
   base: LoyaltyBaseKey,
   range?: { from: string; to: string },
