@@ -7,7 +7,7 @@
 // Графики — чистый CSS/SVG, без библиотек. Данные — GET /loyalty-base/ours/funnel.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertCircle, Loader2, RefreshCcw, X } from "lucide-react";
+import { AlertCircle, Download, Loader2, RefreshCcw, X } from "lucide-react";
 import {
   getLoyaltyFunnel,
   type LoyaltyFunnelResponse,
@@ -49,6 +49,57 @@ function presetRange(preset: PeriodPreset): { from: string; to: string } | null 
 }
 
 export type FunnelDrillStep = LoyaltyFunnelStep["key"];
+
+// 2026-09-08: выгрузка воронки в CSV для Excel (UTF-8 с BOM, разделитель «;»).
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  return /[;"\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export function funnelToCsv(data: LoyaltyFunnelResponse): string {
+  const rows: Array<Array<unknown>> = [];
+  const push = (...cells: unknown[]) => rows.push(cells);
+  push("Воронка брокера", data.mode === "strict" ? "строго после тура" : "за всё время");
+  push("Период по дате тура", data.period.from ? `${data.period.from.slice(0, 10)} — ${data.period.to?.slice(0, 10) || ""}` : "за всё время");
+  push("Источник фиксаций", data.cabinetSource === "old" ? "старый кабинет" : data.cabinetSource === "new" ? "новый кабинет" : "оба");
+  push("Брокеров всего", data.totals.brokers);
+  push("С отметкой тура", data.totals.withTourMark);
+  push("С датой тура", data.totals.withTourDate);
+  push("В когорте", data.totals.cohort);
+  push();
+  push("Ступень", "Брокеров", "% от предыдущей", "% от тура");
+  for (const step of data.funnel.steps) push(step.label, step.count, step.fromPrevious ?? "", step.fromStart ?? "");
+  push();
+  push("Медиана дней: тур → фиксация", data.funnel.medianDays.tourToFixation ?? "");
+  push("Медиана дней: фиксация → встреча", data.funnel.medianDays.fixationToMeeting ?? "");
+  push("Медиана дней: фиксация → сделка", data.funnel.medianDays.fixationToDeal ?? "");
+  push();
+  push("Месяц тура", "Брокеров", "Фиксация за 30 дн.", "Фиксация за 90 дн.", "Фиксация всего", "Встреча", "Сделка");
+  for (const row of data.byMonth) push(row.month, row.brokers, row.fixation30, row.fixation90, row.fixationAny, row.meetingAny, row.dealAny);
+  push();
+  push("Агентство", "На туре", "Фиксации", "Встречи", "Сделки");
+  for (const row of data.byAgency) push(row.name, row.brokers, row.withFixation, row.withMeeting, row.withDeal);
+  push();
+  push("Без брокер-тура: брокеров", data.noTourFunnel.brokers);
+  push("Без брокер-тура: с фиксациями", data.noTourFunnel.withFixation);
+  push("Без брокер-тура: со встречами", data.noTourFunnel.withMeeting);
+  push("Без брокер-тура: с платной бронью", data.noTourFunnel.withPaidBooking);
+  push("Без брокер-тура: со сделками", data.noTourFunnel.withDeal);
+  return "\ufeff" + rows.map((row) => row.map(csvCell).join(";")).join("\r\n");
+}
+
+function downloadFunnelCsv(data: LoyaltyFunnelResponse) {
+  const blob = new Blob([funnelToCsv(data)], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 10);
+  link.href = url;
+  link.download = `voronka-brokera-${data.mode}-${stamp}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 function FunnelBars({
   steps,
@@ -236,9 +287,16 @@ export function BrokerFunnelModal({
               Был на брокер-туре → сделал фиксацию → провёл встречу с клиентом → платная бронь → сделка. Уникальные брокеры, правила те же, что в KPI «Нашей базы».
             </p>
           </div>
-          <button type="button" className="btn btn-secondary" onClick={onClose} aria-label="Закрыть">
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {data && (
+              <button type="button" className="btn btn-secondary" onClick={() => downloadFunnelCsv(data)} title="Скачать таблицу для Excel">
+                <Download className="h-4 w-4" /> Скачать CSV
+              </button>
+            )}
+            <button type="button" className="btn btn-secondary" onClick={onClose} aria-label="Закрыть">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
