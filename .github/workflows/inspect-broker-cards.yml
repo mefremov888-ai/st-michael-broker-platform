@@ -1,0 +1,38 @@
+name: Inspect broker cards by ids (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      broker_ids:
+        description: id брокеров через запятую
+        required: true
+        type: string
+
+concurrency:
+  group: inspect-broker-cards
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          IDS_INPUT: ${{ inputs.broker_ids }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          envs: IDS_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/inspect-broker-cards.js > /tmp/inspect-broker-cards.js
+            docker cp /tmp/inspect-broker-cards.js st-michael-api:/app/scripts/inspect-broker-cards.js
+            docker compose exec -T -e BROKER_IDS="$IDS_INPUT" api node /app/scripts/inspect-broker-cards.js
