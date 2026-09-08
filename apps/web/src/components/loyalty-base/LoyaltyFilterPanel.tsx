@@ -429,6 +429,25 @@ export function LoyaltyFilterPanel({
             </Field>
           )}
 
+          {capabilities.linkedOurs && (
+            <Field label="Сцепка с кабинетом">
+              <select
+                className="input"
+                value={draft.linkedOurs}
+                onChange={(event) =>
+                  update(
+                    "linkedOurs",
+                    event.target.value as LoyaltyFilterFormState["linkedOurs"],
+                  )
+                }
+              >
+                <option value="">Все записи</option>
+                <option value="linked">Есть карточка в кабинете</option>
+                <option value="unlinked">Нет карточки в кабинете</option>
+              </select>
+            </Field>
+          )}
+
           <Field label={isBroker ? "Статус брокера" : "Уровень партнёрства"}>
             <select
               className="input"

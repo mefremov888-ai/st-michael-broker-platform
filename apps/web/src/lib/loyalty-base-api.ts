@@ -307,6 +307,8 @@ export interface LoyaltyCanonicalFilter {
   doNotCall?: "exclude" | "only";
   // Источник фиксаций «старый / новый кабинет / оба» — только «Наша база».
   cabinetSource?: "old" | "new" | "all";
+  // 2026-09-08: база Анны — сцепка с кабинетом: linked / unlinked.
+  linkedOurs?: "linked" | "unlinked";
 }
 
 export interface LoyaltyColumnFilters {
@@ -569,6 +571,23 @@ export interface LoyaltyOverview {
   metricSource: LoyaltyMetricSource | null;
   kpiMetadata: Record<string, LoyaltyKpiMethodology>;
   sourceReportedSummary: LoyaltySourceReportedSummary | null;
+  /** 2026-09-08: база Анны — что сцепленные записи сделали в кабинете. */
+  cabinetLinks: LoyaltyCabinetLinks | null;
+}
+
+export interface LoyaltyCabinetLinks {
+  period: { from: string; to: string } | null;
+  brokersLinked: number;
+  brokersRegistered: number;
+  brokersActive: number;
+  brokersWithFixations: number;
+  brokersWithDeals: number;
+  agenciesLinked: number;
+  fixations: number;
+  meetings: number;
+  paidBookings: number;
+  deals: number;
+  dealAmount: string | null;
 }
 
 export interface LoyaltyRecord {
@@ -602,6 +621,14 @@ export interface LoyaltyRecord {
    */
   linkedOurs: { type: LoyaltyEntityType; id: string; linkId: string } | null;
   linkedOurRecord: LoyaltyRecord | null;
+  /** 2026-09-08: обратная сцепка «наша карточка → запись базы Анны». */
+  linkedAnna: {
+    entityType: LoyaltyEntityType;
+    id: string;
+    linkId: string;
+    name: string;
+    city: string;
+  } | null;
   archived: boolean;
   updatedAt: string;
   fixations: number | null;
@@ -1336,6 +1363,29 @@ export function normalizeLoyaltyOverview(
     sourceReportedSummary: normalizeSourceReportedSummary(
       pick(overview, "sourceReportedSummary", "sourceRollups"),
     ),
+    cabinetLinks: normalizeCabinetLinks(pick(overview, "cabinetLinks")),
+  };
+}
+
+function normalizeCabinetLinks(value: unknown): LoyaltyCabinetLinks | null {
+  const raw = nonEmptyRecord(value);
+  if (!raw) return null;
+  const period = nonEmptyRecord(raw.period);
+  return {
+    period: period
+      ? { from: stringValue(period.from), to: stringValue(period.to) }
+      : null,
+    brokersLinked: numberValue(raw.brokersLinked),
+    brokersRegistered: numberValue(raw.brokersRegistered),
+    brokersActive: numberValue(raw.brokersActive),
+    brokersWithFixations: numberValue(raw.brokersWithFixations),
+    brokersWithDeals: numberValue(raw.brokersWithDeals),
+    agenciesLinked: numberValue(raw.agenciesLinked),
+    fixations: numberValue(raw.fixations),
+    meetings: numberValue(raw.meetings),
+    paidBookings: numberValue(raw.paidBookings),
+    deals: numberValue(raw.deals),
+    dealAmount: nullableDecimalValue(raw.dealAmount),
   };
 }
 
@@ -1793,6 +1843,27 @@ function normalizeLinkedOurs(
   return { type, id, linkId: stringValue(link.linkId) };
 }
 
+function normalizeLinkedAnna(value: unknown): LoyaltyRecord["linkedAnna"] {
+  const link = nonEmptyRecord(value);
+  if (!link) return null;
+  const rawType = stringValue(pick(link, "entityType", "type")).toUpperCase();
+  const entityType: LoyaltyEntityType | null =
+    rawType === "BROKER" || rawType === "BROKERS"
+      ? "brokers"
+      : rawType === "AGENCY" || rawType === "AGENCIES"
+        ? "agencies"
+        : null;
+  const id = stringValue(link.id);
+  if (!entityType || !id) return null;
+  return {
+    entityType,
+    id,
+    linkId: stringValue(link.linkId),
+    name: stringValue(pick(link, "displayName", "name")),
+    city: stringValue(link.city),
+  };
+}
+
 export function normalizeLoyaltyRecord(
   value: unknown,
   entityType: LoyaltyEntityType,
@@ -2091,6 +2162,7 @@ export function normalizeLoyaltyRecord(
     doNotCall: booleanValue(pick(item, "doNotCall")),
     amoContactUrl: safeAmoContactUrl(externalIdentities),
     linkedOurs,
+    linkedAnna: normalizeLinkedAnna(item.linkedAnna),
     linkedOurRecord:
       linkedOurs && nonEmptyRecord(item.linkedOurRecord)
         ? normalizeLoyaltyRecord(item.linkedOurRecord, linkedOurs.type)

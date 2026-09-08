@@ -2543,7 +2543,7 @@ describe("LoyaltyBaseService", () => {
     ).toMatchObject({
       source: "SOURCE_AGGREGATE",
       periodFilterApplied: false,
-      formula: expect.stringContaining("brokerTourCount"),
+      formula: expect.stringContaining("посещений БТ"),
     });
     expect(
       result.kpiMetadata["sourceReportedSummary.brokers.calls"],
@@ -2557,7 +2557,7 @@ describe("LoyaltyBaseService", () => {
     ).toMatchObject({
       source: "SOURCE_AGGREGATE",
       periodFilterApplied: false,
-      formula: expect.stringContaining("brokerTourCount"),
+      formula: expect.stringContaining("посещений БТ"),
     });
     expect(
       result.kpiMetadata["sourceReportedSummary.agencies.calls"],

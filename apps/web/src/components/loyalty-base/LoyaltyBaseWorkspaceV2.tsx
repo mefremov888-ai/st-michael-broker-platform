@@ -623,6 +623,9 @@ function LoyaltyTable({
         <tbody>
           {data.items.map((item) => {
             const displayedMetrics = loyaltyMetricsForDisplay(item);
+            const linkedMetrics = item.linkedOurRecord
+              ? loyaltyMetricsForDisplay(item.linkedOurRecord)
+              : null;
             const sourceMetrics = item.sourceReportedMetrics;
             const hasSourceMetrics = Boolean(
               sourceMetrics &&
@@ -672,6 +675,22 @@ function LoyaltyTable({
                     onClick={() => onOpen(item.id)}
                   >
                     <b className="block truncate">{item.name}</b>
+                    {/* 2026-09-08: сцепка база Анны ↔ кабинет в обе стороны. */}
+                    {data.base === "anna" &&
+                      (item.linkedOurs ? (
+                        <span className="mt-0.5 inline-block rounded bg-accent/10 px-1.5 py-0.5 text-[11px] font-semibold text-accent">
+                          в кабинете
+                        </span>
+                      ) : (
+                        <span className="mt-0.5 inline-block rounded bg-surface-secondary px-1.5 py-0.5 text-[11px] text-text-muted">
+                          нет в кабинете
+                        </span>
+                      ))}
+                    {data.base === "ours" && item.linkedAnna && (
+                      <span className="mt-0.5 inline-block rounded bg-warning/15 px-1.5 py-0.5 text-[11px] font-semibold text-warning">
+                        в базе Анны
+                      </span>
+                    )}
                     {/* 2026-09-07: у брокера «Нашей базы» с исправленным
                         «именем для работы» серым показываем самоназвание
                         из кабинета — КЦ видит, что брокер называет себя
@@ -712,6 +731,12 @@ function LoyaltyTable({
                       {number(sourceMetrics.meetings)} встр.
                     </small>
                   )}
+                  {data.base === "anna" && linkedMetrics && (
+                    <small className="mt-1 block text-accent">
+                      Кабинет: {number(linkedMetrics.fixations)} фикс. ·{" "}
+                      {number(linkedMetrics.meetings)} встр.
+                    </small>
+                  )}
                 </td>
                 <td className="py-3 pr-3">
                   {date(item.lastCallAt)}
@@ -734,6 +759,12 @@ function LoyaltyTable({
                     <small className="mt-1 block whitespace-nowrap text-warning">
                       Срез · не подтверждено: {number(sourceMetrics.deals)} ·{" "}
                       {money(sourceMetrics.dealAmount)}
+                    </small>
+                  )}
+                  {data.base === "anna" && linkedMetrics && (
+                    <small className="mt-1 block whitespace-nowrap text-accent">
+                      Кабинет: {number(linkedMetrics.deals)} ·{" "}
+                      {money(linkedMetrics.dealAmount)}
                     </small>
                   )}
                 </td>
@@ -1889,6 +1920,115 @@ export function LoyaltyBaseWorkspaceV2() {
               </Metric>
             </dl>
           </section>
+          )}
+          {base === "anna" && overview?.cabinetLinks && (
+            <section className="card">
+              <div className="flex flex-wrap justify-between gap-3">
+                <div>
+                  <h2 className="font-semibold">Сцепка с кабинетом</h2>
+                  <p className="text-xs text-text-muted">
+                    Записи базы Анны, подтверждённо сцепленные с нашими
+                    карточками, и что эти карточки сделали в кабинете за
+                    выбранный период. Цифры среза Анны сюда не добавляются.
+                  </p>
+                </div>
+                <span className="rounded-full bg-accent/10 px-3 py-1 text-xs text-accent">
+                  Данные кабинета · проверено
+                </span>
+              </div>
+              <dl className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+                <Metric
+                  label="Брокеров сцеплено"
+                  explanation={metricExplanation(
+                    "cabinetLinks.brokersLinked",
+                    "Брокеры базы Анны, у которых есть подтверждённая сцепка с нашей карточкой",
+                  )}
+                >
+                  {number(overview.cabinetLinks.brokersLinked)}
+                </Metric>
+                <Metric
+                  label="Из них активны в кабинете"
+                  explanation={metricExplanation(
+                    "cabinetLinks.brokersActive",
+                    "Сцепленные брокеры со статусом «Активен» в кабинете",
+                  )}
+                >
+                  {number(overview.cabinetLinks.brokersActive)}
+                </Metric>
+                <Metric
+                  label="С фиксациями"
+                  explanation={metricExplanation(
+                    "cabinetLinks.brokersWithFixations",
+                    "Сцепленные брокеры, у которых в кабинете есть хотя бы одна фиксация (за всё время)",
+                  )}
+                >
+                  {number(overview.cabinetLinks.brokersWithFixations)}
+                </Metric>
+                <Metric
+                  label="Со сделками"
+                  explanation={metricExplanation(
+                    "cabinetLinks.brokersWithDeals",
+                    "Сцепленные брокеры с хотя бы одной оплаченной сделкой (за всё время)",
+                  )}
+                >
+                  {number(overview.cabinetLinks.brokersWithDeals)}
+                </Metric>
+                <Metric
+                  label="Агентств сцеплено"
+                  explanation={metricExplanation(
+                    "cabinetLinks.agenciesLinked",
+                    "Агентства базы Анны, сцепленные с нашим агентством",
+                  )}
+                >
+                  {number(overview.cabinetLinks.agenciesLinked)}
+                </Metric>
+                <Metric
+                  label="Фиксации за период"
+                  explanation={metricExplanation(
+                    "cabinetLinks.fixations",
+                    "Фиксации клиентов сцепленных брокеров за выбранный период",
+                  )}
+                >
+                  {number(overview.cabinetLinks.fixations)}
+                </Metric>
+                <Metric
+                  label="Встречи за период"
+                  explanation={metricExplanation(
+                    "cabinetLinks.meetings",
+                    "Подтверждённые и состоявшиеся встречи сцепленных брокеров за период",
+                  )}
+                >
+                  {number(overview.cabinetLinks.meetings)}
+                </Metric>
+                <Metric
+                  label="Платные брони"
+                  explanation={metricExplanation(
+                    "cabinetLinks.paidBookings",
+                    "Оплаченные ДВОУ из реестра у сцепленных брокеров за период",
+                  )}
+                >
+                  {number(overview.cabinetLinks.paidBookings)}
+                </Metric>
+                <Metric
+                  label="Сделки за период"
+                  explanation={metricExplanation(
+                    "cabinetLinks.deals",
+                    "Оплаченные ДДУ реестра и подтверждённые сделки кабинета у сцепленных брокеров за период",
+                  )}
+                >
+                  {number(overview.cabinetLinks.deals)}
+                </Metric>
+                <Metric
+                  label="Сумма ДДУ за период"
+                  explanation={metricExplanation(
+                    "cabinetLinks.dealAmount",
+                    "Сумма по тем же сделкам (стоимость по ДДУ)",
+                  )}
+                >
+                  {money(overview.cabinetLinks.dealAmount)}
+                </Metric>
+              </dl>
+            </section>
           )}
           {base === "ours" && canReadAll && (
             <RegistrySeriesPanel

@@ -101,6 +101,9 @@ interface CanonicalLoyaltyFilter {
   staleDays?: number;
   doNotCall?: "exclude" | "only";
   cabinetSource?: CabinetSource;
+  // 2026-09-08: база Анны — «сцепка с кабинетом»: linked — только записи,
+  // подтверждённо сцепленные с нашей карточкой; unlinked — только без сцепки.
+  linkedOurs?: "linked" | "unlinked";
   columns: {
     contact?: string;
     statusStage?: string;
@@ -1031,6 +1034,8 @@ export class LoyaltyBaseService {
       doNotCall: canonical?.doNotCall ?? query.doNotCall,
       cabinetSource:
         canonical?.cabinetSource ?? (query as any).cabinetSource ?? undefined,
+      linkedOurs:
+        canonical?.linkedOurs ?? (query as any).linkedOurs ?? undefined,
       columns: {
         contact: columnInput.contact,
         statusStage: columnInput.statusStage,
@@ -3210,6 +3215,28 @@ export class LoyaltyBaseService {
   }
 
   private async annaOverview(period: { from: Date; to: Date }) {
+    const view: any = await this.annaOverviewCore(period);
+    // 2026-09-08: блок «Сцепка с кабинетом» — что сцепленные записи Анны
+    // сделали в кабинете; добавляется к любому варианту обзора (точный /
+    // по итогам файла), не смешиваясь с цифрами среза.
+    const active = view?.snapshot ? await this.activeAnnaSnapshot() : null;
+    const cabinetLinks = active
+      ? await this.annaCabinetLinksOverview(active, period)
+      : null;
+    return {
+      ...view,
+      cabinetLinks,
+      kpiMetadata: {
+        ...(view?.kpiMetadata || {}),
+        ...this.annaCabinetLinksKpiMetadata({
+          from: period.from.toISOString(),
+          to: period.to.toISOString(),
+        }),
+      },
+    };
+  }
+
+  private async annaOverviewCore(period: { from: Date; to: Date }) {
     const active = await this.activeAnnaSnapshot();
     const periodDto = {
       from: period.from.toISOString(),
@@ -3724,7 +3751,7 @@ export class LoyaltyBaseService {
       dealAmount: null,
       metricSource: {
         kind: "UNAVAILABLE",
-        label: "Exact event-level KPI is unavailable for this snapshot",
+        label: "Точные показатели по событиям для этого среза недоступны",
         exactness: "UNKNOWN",
         ruleVersion: active.snapshot.ruleVersion,
         periodFilterApplied: false,
@@ -3775,11 +3802,11 @@ export class LoyaltyBaseService {
       requestedPeriod: period,
       periodFilterApplied: exact,
       includedSemantics: exact
-        ? "Only event rows with verdict=INCLUDED and archivedAt=null"
-        : "No event-level evidence is available",
+        ? "Только подтверждённые события среза (не исключённые, не архивные)"
+        : "Событий по записям в срезе нет — точный показатель недоступен",
       excludedSemantics: exact
-        ? "EXCLUDED/UNKNOWN and archived event rows are excluded"
-        : "Source rollups are not promoted to confirmed activity KPIs",
+        ? "Исключённые, неопределённые и архивные события не считаются"
+        : "Итоги из файла Анны не выдаются за подтверждённые показатели",
     };
     const sourceShared = {
       source: "SOURCE_AGGREGATE",
@@ -3789,52 +3816,52 @@ export class LoyaltyBaseService {
       requestedPeriod: period,
       periodFilterApplied: false,
       includedSemantics:
-        "Only quality=SOURCE_REPORTED and contributesToSourceSummary=true, grouped by entity type",
+        "Только строки файла Анны с заявленными итогами, отдельно по брокерам и агентствам",
       excludedSemantics:
-        "PARTIAL/UNVERIFIED and non-included rollups are excluded; broker and agency groups are never added together",
+        "Частичные и непроверенные итоги не считаются; брокеры и агентства никогда не складываются вместе",
     };
     return {
       "activities.fixations": {
         ...shared,
         formula: exact
-          ? "COUNT(included FIXATION events in requested period)"
-          : "Unavailable without identified FIXATION events",
+          ? "Число событий «фиксация» в срезе за выбранный период"
+          : "Недоступно: в срезе нет событий «фиксация»",
       },
       "activities.meetings": {
         ...shared,
         formula: exact
-          ? "COUNT(included MEETING events in requested period)"
-          : "Unavailable without identified MEETING events",
+          ? "Число событий «встреча» в срезе за выбранный период"
+          : "Недоступно: в срезе нет событий «встреча»",
       },
       "activities.deals": {
         ...shared,
         formula: exact
-          ? "COUNT(included DEAL events in requested period)"
-          : "Unavailable without identified DEAL events",
+          ? "Число событий «сделка» в срезе за выбранный период"
+          : "Недоступно: в срезе нет событий «сделка»",
       },
       dealAmount: {
         ...shared,
         formula: exact
-          ? "SUM(amount) for included RUB DDU DEAL events in requested period"
-          : "Unavailable without identified included RUB DDU DEAL events",
+          ? "Сумма ДДУ (₽) по событиям «сделка» в срезе за выбранный период"
+          : "Недоступно: в срезе нет событий «сделка» с суммой",
       },
       "brokers.notCalledCurrentMonth": {
         ...shared,
         formula: exact
-          ? "No included CALL event in current Moscow month"
-          : "Unavailable as a confirmed KPI without identified CALL events",
+          ? "Нет ни одного звонка в текущем месяце (по Москве)"
+          : "Недоступно как подтверждённый показатель: в срезе нет событий «звонок»",
       },
       "brokers.newCount": {
         ...shared,
         formula: exact
-          ? "Relationship stage is NEW/NEW_BROKER and no included BT, fixation, meeting or deal event exists"
-          : "Unavailable as a confirmed KPI without identified events",
+          ? "Стадия «Новый» и нет ни БТ, ни фиксаций, ни встреч, ни сделок"
+          : "Недоступно как подтверждённый показатель: в срезе нет событий",
       },
       "brokers.btWithoutFixation": {
         ...shared,
         formula: exact
-          ? "Included BROKER_TOUR exists and no included FIXATION exists"
-          : "Unavailable as a confirmed KPI without identified events",
+          ? "Есть событие «брокер-тур» и нет ни одной фиксации"
+          : "Недоступно как подтверждённый показатель: в срезе нет событий",
       },
       "brokers.birthdaysToday": {
         source: "ANNA_SOURCE_ATTRIBUTES",
@@ -3842,129 +3869,129 @@ export class LoyaltyBaseService {
         exactness: "SOURCE_DECLARED",
         requestedPeriod: period,
         periodFilterApplied: false,
-        formula: "Exact DD.MM comparison in Europe/Moscow",
-        includedSemantics: "Only syntactically valid known birthdays",
+        formula: "Совпадение дня и месяца рождения с сегодняшней датой (по Москве)",
+        includedSemantics: "Только корректно заполненные даты рождения",
         excludedSemantics:
-          "Missing or malformed birthdays are unknown, not zero",
+          "Пустая или некорректная дата — неизвестно, а не ноль",
       },
       "brokers.top": {
         ...shared,
         formula: exact
-          ? "Top five by included DDU deals in requested period, then included amount; no aggregate/event mixing"
-          : "Unavailable without identified included DDU deal events",
+          ? "Пять лучших по числу сделок ДДУ за период, затем по сумме; итоги файла и события не смешиваются"
+          : "Недоступно: в срезе нет событий «сделка» с ДДУ",
       },
       "agencies.top": {
         ...shared,
         formula: exact
-          ? "Top five agencies by included DDU deals in requested period, then included amount"
-          : "Unavailable without identified included DDU deal events",
+          ? "Пять лучших агентств по числу сделок ДДУ за период, затем по сумме"
+          : "Недоступно: в срезе нет событий «сделка» с ДДУ",
       },
       "sourceReportedSummary.brokers": {
         ...sourceShared,
         formula:
-          "Per-field sums over BROKER source rows only; null remains unknown and is not coerced to zero",
+          "Суммы по строкам брокеров из файла Анны; пустое значение остаётся неизвестным, а не нулём",
       },
       "sourceReportedSummary.brokers.fixations": {
         ...sourceShared,
         formula:
-          "SUM(source-reported fixationCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+          "Сумма заявленных фиксаций по брокерам, у которых значение известно; за всё время, период не применяется",
       },
       "sourceReportedSummary.brokers.meetings": {
         ...sourceShared,
         formula:
-          "SUM(source-reported meetingCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+          "Сумма заявленных встреч по брокерам, у которых значение известно; за всё время, период не применяется",
       },
       "sourceReportedSummary.brokers.deals": {
         ...sourceShared,
         formula:
-          "SUM(source-reported dealCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+          "Сумма заявленных сделок по брокерам, у которых значение известно; за всё время, период не применяется",
       },
       "sourceReportedSummary.brokers.brokerTours": {
         ...sourceShared,
         formula:
-          "SUM(source-reported brokerTourCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+          "Сумма заявленных посещений БТ по брокерам, у которых значение известно; за всё время, период не применяется",
       },
       "sourceReportedSummary.brokers.calls": {
         ...sourceShared,
         formula:
-          "SUM(source-reported callCount) for BROKER rows with known values; snapshot/lifetime, requested period not applied",
+          "Сумма заявленных звонков по брокерам, у которых значение известно; за всё время, период не применяется",
       },
       "sourceReportedSummary.brokers.dealAmount": {
         ...sourceShared,
         formula:
-          "Exact decimal sum in kopecks over source-reported BROKER dealAmount values; lifetime amount, requested period not applied",
+          "Точная сумма заявленных ДДУ по брокерам (в копейках); за всё время, период не применяется",
       },
       "sourceReportedSummary.brokers.notCalledCurrentMonth": {
         ...sourceShared,
         formula:
-          "COUNT(BROKER rows with a known lastCallAt before the current Moscow month); null when no lastCallAt is known",
+          "Число брокеров, у которых последний звонок в файле раньше текущего месяца; если дат звонков нет — неизвестно",
         includedSemantics:
-          "Only an explicit source lastCallAt is evidence for this derived source-snapshot segment",
+          "Учитывается только явная дата последнего звонка из файла",
         excludedSemantics:
-          "callCount=0 or an empty callsMayAugust breakdown is not evidence that no call occurred",
+          "Ноль звонков или пустая разбивка по месяцам не доказывают, что звонков не было",
       },
       "sourceReportedSummary.brokers.newCount": {
         ...sourceShared,
         formula:
-          "COUNT(BROKER rows at explicit Новый/NEW stage with explicit zero BT, fixation, meeting and deal rollups)",
+          "Число брокеров со стадией «Новый» и явными нулями по БТ, фиксациям, встречам и сделкам",
         includedSemantics:
-          "Stage and every later-stage source count must be present and explicit",
+          "Стадия и все последующие счётчики должны быть заполнены явно",
         excludedSemantics:
-          "Unknown counts are not coerced to zero and no stage is inferred from missing data",
+          "Неизвестные значения не считаются нулём, стадия по пустым данным не угадывается",
       },
       "sourceReportedSummary.brokers.btWithoutFixation": {
         ...sourceShared,
         formula:
-          "COUNT(BROKER rows with explicit brokerTourVisited=true and explicit fixationCount=0)",
+          "Число брокеров с отметкой «был на БТ» и явным нулём фиксаций",
         includedSemantics:
-          "BT is accepted only from the source BT flag/date, never inferred from another rollup",
+          "БТ берётся только из отметки/даты БТ в файле, не выводится из других итогов",
         excludedSemantics:
-          "Unknown BT or fixation values are excluded rather than treated as false/zero",
+          "Неизвестные БТ или фиксации не считаются, а не приравниваются к нулю",
       },
       "sourceReportedSummary.agencies": {
         ...sourceShared,
         formula:
-          "Per-field sums over AGENCY source rows only; never added to broker rollups because source scopes may overlap",
+          "Суммы по строкам агентств из файла Анны; к брокерам не прибавляются, так как охваты могут пересекаться",
       },
       "sourceReportedSummary.agencies.fixations": {
         ...sourceShared,
         formula:
-          "SUM(source-reported fixationCount) for AGENCY rows with known values; kept separate from broker rollups",
+          "Сумма заявленных фиксаций по агентствам, у которых значение известно; отдельно от брокеров",
       },
       "sourceReportedSummary.agencies.meetings": {
         ...sourceShared,
         formula:
-          "SUM(source-reported meetingCount) for AGENCY rows with known values; kept separate from broker rollups",
+          "Сумма заявленных встреч по агентствам, у которых значение известно; отдельно от брокеров",
       },
       "sourceReportedSummary.agencies.deals": {
         ...sourceShared,
         formula:
-          "SUM(source-reported dealCount) for AGENCY rows with known values; snapshot/lifetime, requested period not applied",
+          "Сумма заявленных сделок по агентствам, у которых значение известно; за всё время, период не применяется",
       },
       "sourceReportedSummary.agencies.brokerTours": {
         ...sourceShared,
         formula:
-          "SUM(source-reported brokerTourCount) for AGENCY rows with known values; kept separate from broker rollups",
+          "Сумма заявленных посещений БТ по агентствам, у которых значение известно; отдельно от брокеров",
       },
       "sourceReportedSummary.agencies.calls": {
         ...sourceShared,
         formula:
-          "SUM(source-reported callCount) for AGENCY rows with known values; kept separate from broker rollups",
+          "Сумма заявленных звонков по агентствам, у которых значение известно; отдельно от брокеров",
       },
       "sourceReportedSummary.agencies.dealAmount": {
         ...sourceShared,
         formula:
-          "Exact decimal sum in kopecks over source-reported AGENCY dealAmount values; never added to broker amounts",
+          "Точная сумма заявленных ДДУ по агентствам (в копейках); к суммам брокеров не прибавляется",
       },
       "sourceReportedSummary.brokers.top": {
         ...sourceShared,
         formula:
-          "Source-snapshot/lifetime top five broker rows by reported deal count then reported amount; requested period is not applied",
+          "Пять лучших брокеров по заявленным сделкам, затем по сумме; за всё время, период не применяется",
       },
       "sourceReportedSummary.agencies.top": {
         ...sourceShared,
         formula:
-          "Source-snapshot/lifetime top five agency rows by reported deal count then reported amount; requested period is not applied",
+          "Пять лучших агентств по заявленным сделкам, затем по сумме; за всё время, период не применяется",
       },
     };
   }
@@ -5293,21 +5320,33 @@ export class LoyaltyBaseService {
       allRecords.map((record) => this.workflowTargetId(record, entityType)),
     );
     this.attachEngagementReadModels(allRecords, entityType, engagementEvents);
-    const candidates = allRecords
-      .map((record) => ({
-        record,
-        item: record.__manualOverlay
-          ? this.mapAnnaManualRecord(record, false)
-          : this.mapAnnaRecord(record, false, activityObservedThrough),
-      }))
-      .filter(({ record, item }) =>
-        this.matchesAnnaRecord(record, item, entityType, filter, search),
-      );
+    const mapped = allRecords.map((record) => ({
+      record,
+      item: record.__manualOverlay
+        ? this.mapAnnaManualRecord(record, false)
+        : this.mapAnnaRecord(record, false, activityObservedThrough),
+    }));
+    // 2026-09-08: сцепка с кабинетом — наши цифры (фиксации, встречи, сделки,
+    // сумма ДДУ, период) подтягиваются ко всем сцепленным брокерам ДО фильтра
+    // и сортировки, чтобы «Сцепка с кабинетом» и сортировка по сделкам
+    // работали по всему списку, а не только по странице.
+    await this.attachAnnaLinkedOurBrokers(
+      mapped.map(({ item }) => item),
+      filter,
+    );
+    const candidates = mapped.filter(({ record, item }) =>
+      this.matchesAnnaRecord(record, item, entityType, filter, search),
+    );
     this.sortLoyaltyCandidates(candidates, filter);
     const total = candidates.length;
     const pageCandidates = candidates.slice(
       (page - 1) * pageSize,
       page * pageSize,
+    );
+    // Агентства кабинета тяжелее (граф брокеров) — только для страницы.
+    await this.attachAnnaLinkedOurAgencies(
+      pageCandidates.map(({ item }) => item),
+      filter,
     );
     const fullActivityCoverage = Boolean(trustedActivityCoverage);
     const exactThrough = (period?: LoyaltyFilterPeriod) =>
@@ -6470,6 +6509,9 @@ export class LoyaltyBaseService {
     search?: string,
   ): boolean {
     const attributes = item.attributes || {};
+    // 2026-09-08: фильтр «Сцепка с кабинетом» (только база Анны).
+    if (filter.linkedOurs === "linked" && !item.linkedOurs) return false;
+    if (filter.linkedOurs === "unlinked" && item.linkedOurs) return false;
     const calls = this.annaCalls(item, record);
     const callCount = this.annaMetricValue(item, "calls");
     const exactCallCount =
@@ -6962,11 +7004,18 @@ export class LoyaltyBaseService {
     candidates: any[],
     filter: CanonicalLoyaltyFilter,
   ) {
+    // 2026-09-08: у записи базы Анны свои цифры обычно null; если есть
+    // подтверждённая сцепка с нашей карточкой — сортируем по цифрам кабинета.
     const activityMetric = (item: any, field: string) =>
       filter.activityPeriod
-        ? finiteNumber(item.periodMetrics?.[field])
+        ? finiteNumber(
+            item.periodMetrics?.[field] ??
+              item.linkedOurRecord?.periodMetrics?.[field],
+          )
         : finiteNumber(
-            item.metrics?.[field] ?? item.sourceReportedMetrics?.[field],
+            item.metrics?.[field] ??
+              item.linkedOurRecord?.metrics?.[field] ??
+              item.sourceReportedMetrics?.[field],
           );
     const value = (item: any): string | number | null => {
       if (filter.sortBy === "name") return item.displayName || null;
@@ -7854,6 +7903,11 @@ export class LoyaltyBaseService {
     if (filter.sortBy !== "dealAmount" || Boolean(filter.activityPeriod)) {
       await this.attachOurDealAmounts(pageCandidates, "brokerId", true);
     }
+    // 2026-09-08: бейдж «в базе Анны» — сцепка в обратную сторону (страница).
+    await this.attachOurLinkedAnna(
+      pageCandidates.map(({ item }) => item),
+      "BROKER",
+    );
     return this.oursListEnvelope(
       "BROKER",
       query,
@@ -8128,6 +8182,10 @@ export class LoyaltyBaseService {
     const pageCandidates = candidates.slice(
       (page - 1) * pageSize,
       page * pageSize,
+    );
+    await this.attachOurLinkedAnna(
+      pageCandidates.map(({ item }) => item),
+      "AGENCY",
     );
     return this.oursListEnvelope(
       "AGENCY",
@@ -10424,6 +10482,474 @@ export class LoyaltyBaseService {
     }
   }
 
+  /**
+   * 2026-09-08 (просьба владельца: «дополнить базу Анны аналитикой и
+   * связями»). Для записей Анны с подтверждённой сцепкой (LoyaltyEntityLink
+   * CONFIRMED) подтягиваем нашу карточку брокера тем же маппером, что и
+   * список «Нашей базы» (mapOurBroker + реестр сделок + суммы + период).
+   * Батчами по CANDIDATE_QUERY_BATCH_SIZE, без N+1.
+   */
+  private async attachAnnaLinkedOurBrokers(
+    items: any[],
+    filter: CanonicalLoyaltyFilter,
+  ) {
+    const byBrokerId = new Map<string, any[]>();
+    for (const item of items) {
+      item.linkedOurRecord = item.linkedOurRecord ?? null;
+      const link = item?.linkedOurs;
+      if (!link || link.type !== "BROKER" || !link.id) continue;
+      const list = byBrokerId.get(String(link.id)) || [];
+      list.push(item);
+      byBrokerId.set(String(link.id), list);
+    }
+    const ids = uniqueSorted([...byBrokerId.keys()]);
+    if (!ids.length) return;
+    const cabinetSource = filter.cabinetSource;
+    const records: any[] = [];
+    for (
+      let offset = 0;
+      offset < ids.length;
+      offset += CANDIDATE_QUERY_BATCH_SIZE
+    ) {
+      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+      const rows = await this.prisma.broker.findMany({
+        where: { id: { in: batch } },
+        select: {
+          id: true,
+          fullName: true,
+          displayName: true,
+          displayNameSource: true,
+          phone: true,
+          email: true,
+          status: true,
+          funnelStage: true,
+          region: true,
+          isRegional: true,
+          isCoordinator: true,
+          specialization: true,
+          category: true,
+          amoContactId: true,
+          mergedIntoId: true,
+          doNotCall: true,
+          brokerTourVisited: true,
+          brokerTourDate: true,
+          lastCallAt: true,
+          updatedAt: true,
+          assignedManagerId: true,
+          assignedManager: { select: { id: true, fullName: true } },
+          phones: true,
+          brokerAgencies: { include: { agency: true } },
+          clients: {
+            where: fixationClientWhere(cabinetSource),
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { createdAt: true },
+          },
+          meetings: {
+            where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+            orderBy: { date: "desc" },
+            take: 1,
+            select: { date: true },
+          },
+          deals: {
+            where: this.ourConfirmedDealWhere(),
+            orderBy: { signedAt: "desc" },
+            take: 1,
+            select: { signedAt: true },
+          },
+          _count: {
+            select: {
+              clients: { where: fixationClientWhere(cabinetSource) },
+              deals: { where: this.ourConfirmedDealWhere() },
+              meetings: {
+                where: { status: { in: ["CONFIRMED", "COMPLETED"] } },
+              },
+              callLogs: true,
+            },
+          },
+        },
+      });
+      records.push(...((Array.isArray(rows) ? rows : []) as any[]));
+    }
+    if (!records.length) return;
+    await this.attachOurBrokerRegistryDeals(records);
+    const candidates = records.map((record) => ({
+      record,
+      item: this.mapOurBroker(record, null),
+    }));
+    await this.attachOurDealAmounts(candidates, "brokerId", true);
+    const periodMetrics = await this.ourBrokerPeriodMetrics(
+      records.map((record) => String(record.id)),
+      filter.activityPeriod,
+      cabinetSource,
+    );
+    for (const { record, item } of candidates) {
+      item.periodMetrics =
+        periodMetrics.get(String(record.id)) ||
+        this.unavailablePeriodMetrics(filter.activityPeriod);
+      if (filter.activityPeriod) item.metricSource.periodFilterApplied = true;
+      for (const target of byBrokerId.get(String(record.id)) || []) {
+        target.linkedOurRecord = item;
+      }
+    }
+  }
+
+  /** Сцепленные агентства кабинета — полная карточка тем же detail("ours"). */
+  private async attachAnnaLinkedOurAgencies(
+    items: any[],
+    filter: CanonicalLoyaltyFilter,
+  ) {
+    const periodDto = filter.activityPeriod
+      ? {
+          from: filter.activityPeriod.fromIso,
+          to: filter.activityPeriod.toIso,
+          cabinetSource: filter.cabinetSource,
+        }
+      : { cabinetSource: filter.cabinetSource };
+    const cache = new Map<string, any>();
+    for (const item of items) {
+      const link = item?.linkedOurs;
+      if (!link || link.type !== "AGENCY" || !link.id) continue;
+      if (item.linkedOurRecord) continue;
+      const key = String(link.id);
+      if (!cache.has(key)) {
+        try {
+          const ours: any = await this.detail("ours", "AGENCY", key, periodDto);
+          cache.set(key, ours?.item ?? null);
+        } catch {
+          cache.set(key, null);
+        }
+      }
+      item.linkedOurRecord = cache.get(key) ?? null;
+    }
+  }
+
+  /**
+   * Обратная связь «наша карточка → запись Анны»: подтверждённая сцепка
+   * плюс имя/город из активного среза Анны, чтобы в карточке кабинета была
+   * ссылка на карточку Анны.
+   */
+  private async attachLinkedAnna(item: any, type: EntityType) {
+    item.linkedAnna = null;
+    if (!item?.id) return;
+    await this.attachOurLinkedAnna([item], type);
+  }
+
+  private async attachOurLinkedAnna(items: any[], type: EntityType) {
+    const ids = uniqueSorted(items.map((item) => String(item?.id || "")));
+    for (const item of items) item.linkedAnna = item.linkedAnna ?? null;
+    if (!ids.length) return;
+    let links: any[] = [];
+    try {
+      links = await this.prisma.loyaltyEntityLink.findMany({
+        where: {
+          targetType: type,
+          targetId: { in: ids },
+          status: "CONFIRMED",
+          revokedAt: null,
+        },
+        select: {
+          id: true,
+          targetId: true,
+          personId: true,
+          organizationId: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: "desc" },
+      });
+    } catch {
+      return;
+    }
+    links = Array.isArray(links) ? links : [];
+    if (!links.length) return;
+    const active = await this.activeAnnaSnapshot();
+    const personIds = uniqueSorted(links.map((link) => link.personId));
+    const organizationIds = uniqueSorted(
+      links.map((link) => link.organizationId),
+    );
+    const names = new Map<string, { name: string; city: string | null }>();
+    if (active && (personIds.length || organizationIds.length)) {
+      const rows = await this.prisma.loyaltySourceRecord.findMany({
+        where: {
+          snapshotId: active.snapshot.id,
+          OR: [
+            ...(personIds.length ? [{ personId: { in: personIds } }] : []),
+            ...(organizationIds.length
+              ? [{ organizationId: { in: organizationIds } }]
+              : []),
+          ],
+        },
+        select: {
+          personId: true,
+          organizationId: true,
+          displayName: true,
+          city: true,
+          person: { select: { manualDisplayName: true, manualCity: true } },
+          organization: {
+            select: { manualDisplayName: true, manualCity: true },
+          },
+        },
+      });
+      for (const row of (Array.isArray(rows) ? rows : []) as any[]) {
+        const key = String(row.personId || row.organizationId || "");
+        if (!key || names.has(key)) continue;
+        names.set(key, {
+          name:
+            row.person?.manualDisplayName ||
+            row.organization?.manualDisplayName ||
+            row.displayName,
+          city: row.person?.manualCity || row.organization?.manualCity || row.city || null,
+        });
+      }
+    }
+    const byTarget = new Map<string, any>();
+    for (const link of links) {
+      if (byTarget.has(String(link.targetId))) continue;
+      byTarget.set(String(link.targetId), link);
+    }
+    for (const item of items) {
+      const link = byTarget.get(String(item.id));
+      if (!link) continue;
+      const entityId = String(link.personId || link.organizationId || "");
+      if (!entityId) continue;
+      const known = names.get(entityId);
+      item.linkedAnna = {
+        entityType: link.personId ? "BROKER" : "AGENCY",
+        id: entityId,
+        linkId: link.id,
+        displayName: known?.name || null,
+        city: known?.city || null,
+      };
+    }
+  }
+
+  /**
+   * KPI «Сцепка с кабинетом» для обзора базы Анны: сколько записей Анны
+   * подтверждённо сцеплены с нашими карточками и что эти карточки сделали
+   * в кабинете за выбранный период (по тем же правилам, что KPI «Нашей базы»:
+   * фиксации по правилам фиксации, подтверждённые встречи, оплаченные ДДУ
+   * реестра + подтверждённые сделки кабинета, оплаченные ДВОУ).
+   */
+  private async annaCabinetLinksOverview(
+    active: any,
+    period: { from: Date; to: Date },
+  ) {
+    const datasetId = active?.dataset?.id;
+    if (!datasetId) return null;
+    let links: any[] = [];
+    try {
+      links = await this.prisma.loyaltyEntityLink.findMany({
+        where: {
+          status: "CONFIRMED",
+          revokedAt: null,
+          OR: [
+            { person: { is: { datasetId, archivedAt: null } } },
+            { organization: { is: { datasetId, archivedAt: null } } },
+          ],
+        },
+        select: { targetType: true, targetId: true },
+      });
+    } catch {
+      return null;
+    }
+    links = Array.isArray(links) ? links : [];
+    const brokerIds = uniqueSorted(
+      links
+        .filter((link) => link.targetType === "BROKER")
+        .map((link) => String(link.targetId)),
+    );
+    const agencyIds = uniqueSorted(
+      links
+        .filter((link) => link.targetType === "AGENCY")
+        .map((link) => String(link.targetId)),
+    );
+    const periodWhere = { gte: period.from, lte: period.to };
+    const dealWhere = this.ourConfirmedDealWhere({
+      from: period.from,
+      to: period.to,
+    });
+    const registryWhere = this.registrySignedAtWhere({
+      from: period.from,
+      to: period.to,
+    });
+    const [
+      brokersRegistered,
+      brokersActive,
+      fixationGroups,
+      dealGroups,
+      registryGroups,
+      fixations,
+      meetings,
+      deals,
+      dealAmount,
+      registryDeals,
+      registryAmount,
+      paidBookings,
+    ] = await Promise.all([
+      brokerIds.length
+        ? this.prisma.broker.count({
+            where: { id: { in: brokerIds }, mergedIntoId: null },
+          })
+        : 0,
+      brokerIds.length
+        ? this.prisma.broker.count({
+            where: { id: { in: brokerIds }, mergedIntoId: null, status: "ACTIVE" },
+          })
+        : 0,
+      brokerIds.length
+        ? (this.prisma.client as any).groupBy({
+            by: ["brokerId"],
+            where: { brokerId: { in: brokerIds }, ...fixationClientWhere() },
+          })
+        : [],
+      brokerIds.length
+        ? (this.prisma.deal as any).groupBy({
+            by: ["brokerId"],
+            where: { brokerId: { in: brokerIds }, ...this.ourConfirmedDealWhere() },
+          })
+        : [],
+      brokerIds.length && this.registryDealModel
+        ? this.registryDealModel.groupBy({
+            by: ["brokerId"],
+            where: { brokerId: { in: brokerIds }, ...this.registrySignedAtWhere() },
+          })
+        : [],
+      brokerIds.length
+        ? this.prisma.client.count({
+            where: {
+              brokerId: { in: brokerIds },
+              ...fixationClientWhere(),
+              createdAt: periodWhere,
+            },
+          })
+        : 0,
+      brokerIds.length
+        ? this.prisma.meeting.count({
+            where: {
+              brokerId: { in: brokerIds },
+              status: { in: ["CONFIRMED", "COMPLETED"] },
+              date: periodWhere,
+            },
+          })
+        : 0,
+      brokerIds.length
+        ? this.prisma.deal.count({
+            where: { brokerId: { in: brokerIds }, ...dealWhere },
+          })
+        : 0,
+      brokerIds.length
+        ? this.prisma.deal.aggregate({
+            where: { brokerId: { in: brokerIds }, ...dealWhere },
+            _sum: { amount: true },
+          })
+        : { _sum: { amount: null } },
+      brokerIds.length && this.registryDealModel
+        ? this.registryDealModel.count({
+            where: { brokerId: { in: brokerIds }, ...registryWhere },
+          })
+        : 0,
+      brokerIds.length && this.registryDealModel
+        ? this.registryDealModel.aggregate({
+            where: { brokerId: { in: brokerIds }, ...registryWhere },
+            _sum: { amount: true },
+          })
+        : { _sum: { amount: null } },
+      brokerIds.length && this.registryDealModel
+        ? this.registryDealModel.count({
+            where: { brokerId: { in: brokerIds }, dvouPaidAt: periodWhere },
+          })
+        : 0,
+    ]);
+    const asRows = (value: unknown): any[] => (Array.isArray(value) ? value : []);
+    const withDeals = new Set<string>([
+      ...asRows(dealGroups).map((group) => String(group.brokerId)),
+      ...asRows(registryGroups).map((group) => String(group.brokerId)),
+    ]);
+    return {
+      period: { from: period.from.toISOString(), to: period.to.toISOString() },
+      brokersLinked: brokerIds.length,
+      brokersRegistered: Number(brokersRegistered || 0),
+      brokersActive: Number(brokersActive || 0),
+      brokersWithFixations: asRows(fixationGroups).length,
+      brokersWithDeals: withDeals.size,
+      agenciesLinked: agencyIds.length,
+      fixations: Number(fixations || 0),
+      meetings: Number(meetings || 0),
+      paidBookings: Number(paidBookings || 0),
+      deals: Number(deals || 0) + Number(registryDeals || 0),
+      dealAmount: centsToMoney(
+        moneyToCents(String((dealAmount as any)?._sum?.amount || "0")) +
+          moneyToCents(String((registryAmount as any)?._sum?.amount || "0")),
+      ),
+    };
+  }
+
+  private annaCabinetLinksKpiMetadata(period: { from: string; to: string }) {
+    const shared = {
+      source: "LOCAL_OPERATIONAL_ROWS",
+      ruleVersion: "anna-cabinet-links-v1",
+      exactness: "VERIFIED",
+      requestedPeriod: period,
+      periodFilterApplied: true,
+      provenance:
+        "Сцепки «база Анны ↔ наша карточка» (подтверждённые) · таблицы кабинета",
+      includedSemantics:
+        "Только записи Анны с подтверждённой сцепкой; активность считается по нашим карточкам по тем же правилам, что KPI «Нашей базы»",
+      excludedSemantics:
+        "Записи Анны без сцепки и отозванные сцепки не учитываются; цифры из файла Анны сюда не добавляются",
+    };
+    const lifetime = { ...shared, periodFilterApplied: false };
+    return {
+      "cabinetLinks.brokersLinked": {
+        ...lifetime,
+        formula: "Число брокеров базы Анны, сцепленных с нашей карточкой",
+      },
+      "cabinetLinks.brokersRegistered": {
+        ...lifetime,
+        formula:
+          "Из сцепленных брокеров — сколько карточек существует в кабинете (не объединены)",
+      },
+      "cabinetLinks.brokersActive": {
+        ...lifetime,
+        formula: "Из сцепленных брокеров — сколько со статусом «Активен» в кабинете",
+      },
+      "cabinetLinks.brokersWithFixations": {
+        ...lifetime,
+        formula: "Сцепленные брокеры, у которых в кабинете есть хотя бы одна фиксация (за всё время)",
+      },
+      "cabinetLinks.brokersWithDeals": {
+        ...lifetime,
+        formula:
+          "Сцепленные брокеры, у которых есть хотя бы одна оплаченная сделка (реестр или кабинет, за всё время)",
+      },
+      "cabinetLinks.agenciesLinked": {
+        ...lifetime,
+        formula: "Число агентств базы Анны, сцепленных с нашим агентством",
+      },
+      "cabinetLinks.fixations": {
+        ...shared,
+        formula: "Фиксации клиентов сцепленных брокеров за выбранный период (по правилам фиксации кабинета)",
+      },
+      "cabinetLinks.meetings": {
+        ...shared,
+        formula: "Подтверждённые и состоявшиеся встречи сцепленных брокеров за период",
+      },
+      "cabinetLinks.paidBookings": {
+        ...shared,
+        formula: "Оплаченные ДВОУ из реестра сделок у сцепленных брокеров за период (по дате оплаты ДВОУ)",
+      },
+      "cabinetLinks.deals": {
+        ...shared,
+        formula:
+          "Оплаченные ДДУ реестра (по дате оплаты ДДУ) + подтверждённые сделки кабинета у сцепленных брокеров за период",
+      },
+      "cabinetLinks.dealAmount": {
+        ...shared,
+        formula: "Сумма по тем же сделкам (стоимость по ДДУ), рубли",
+      },
+    };
+  }
+
   async detail(
     baseInput: string,
     entityType: EntityType,
@@ -10703,6 +11229,8 @@ export class LoyaltyBaseService {
           this.unavailablePeriodMetrics(activityPeriod);
         item.metricSource.periodFilterApplied = true;
       }
+      // 2026-09-08: обратная ссылка на запись базы Анны (если сцеплена).
+      await this.attachLinkedAnna(item, "BROKER");
       return { base: "ours", entityType, item };
     }
     const agency = await this.prisma.agency.findUnique({
@@ -10748,6 +11276,7 @@ export class LoyaltyBaseService {
       );
       agencyItem.metricSource.periodFilterApplied = true;
     }
+    await this.attachLinkedAnna(agencyItem, "AGENCY");
     return {
       base: "ours",
       entityType,

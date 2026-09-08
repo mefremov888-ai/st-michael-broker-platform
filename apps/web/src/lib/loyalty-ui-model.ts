@@ -111,6 +111,9 @@ export interface LoyaltyFilterFormState {
   // Источник фиксаций: "" — оба кабинета, old — только старый кабинет,
   // new — только новый. Только «Наша база».
   cabinetSource: "" | "old" | "new";
+  // Сцепка с кабинетом (только база Анны): "" — все, linked — только
+  // сцепленные с нашей карточкой, unlinked — только без сцепки.
+  linkedOurs: "" | "linked" | "unlinked";
   sortBy: LoyaltySortField;
   sortOrder: "asc" | "desc";
 }
@@ -177,6 +180,7 @@ export function emptyLoyaltyFilters(): LoyaltyFilterFormState {
     rewardPresent: "",
     doNotCall: "",
     cabinetSource: "",
+    linkedOurs: "",
     sortBy: "name",
     sortOrder: "asc",
   };
@@ -234,6 +238,7 @@ export function toCanonicalFilter(
     bt: boolean(state.bt),
     staleDays: number(state.staleDays),
     cabinetSource: state.cabinetSource || undefined,
+    linkedOurs: state.linkedOurs || undefined,
   };
 
   if (state.meetingsMin || state.meetingsMax) {
@@ -333,6 +338,8 @@ export interface LoyaltyFilterCapabilities {
   activeFixation: boolean;
   // Источник «старый / новый кабинет»: только «Наша база» (брокеры и агентства).
   cabinetSource: boolean;
+  // Сцепка с кабинетом: только база Анны.
+  linkedOurs: boolean;
   archivedModes: ReadonlyArray<LoyaltyArchiveMode>;
   scenarios: ReadonlyArray<readonly [LoyaltyCallScenario, string]>;
   segments: ReadonlyArray<LoyaltySegment>;
@@ -456,6 +463,7 @@ export function loyaltyFilterCapabilities(
     doNotCall: ourBroker,
     activeFixation: ourBroker,
     cabinetSource: base === "ours",
+    linkedOurs: base === "anna",
     archivedModes: ourAgency ? OUR_AGENCY_ARCHIVE_MODES : ALL_ARCHIVE_MODES,
     scenarios:
       entityType === "brokers"
@@ -573,6 +581,12 @@ export function sanitizeLoyaltyFilterState(
     !["", "old", "new"].includes(state.cabinetSource)
   ) {
     patch.cabinetSource = "";
+  }
+  if (
+    (!capabilities.linkedOurs && state.linkedOurs !== "") ||
+    !["", "linked", "unlinked"].includes(state.linkedOurs)
+  ) {
+    patch.linkedOurs = "";
   }
 
   return Object.keys(patch).length ? { ...state, ...patch } : state;

@@ -2094,6 +2094,31 @@ function DetailBody({
           {record.linkedOurRecord && (
             <LinkedOurRecordSummary linked={record.linkedOurRecord} />
           )}
+          {/* 2026-09-08: обратная сцепка — у нашей карточки ссылка на запись
+              базы Анны, чтобы связь была видна в обе стороны. */}
+          {base === "ours" && record.linkedAnna && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-warning/40 bg-warning/5 p-3">
+              <div>
+                <span className="text-xs uppercase tracking-wide text-text-muted">
+                  База Анны · сцепка подтверждена
+                </span>
+                <p className="font-semibold">
+                  {record.linkedAnna.name || "Запись базы Анны"}
+                  {record.linkedAnna.city ? (
+                    <span className="ml-2 text-xs font-normal text-text-muted">
+                      {record.linkedAnna.city}
+                    </span>
+                  ) : null}
+                </p>
+              </div>
+              <Link
+                href={`/admin/loyalty-base/anna/${record.linkedAnna.entityType}/${encodeURIComponent(record.linkedAnna.id)}`}
+                className="btn btn-secondary inline-flex"
+              >
+                <ExternalLink className="h-4 w-4" /> Открыть в базе Анны
+              </Link>
+            </div>
+          )}
           {record.metricSource && (
             <div className="rounded-xl border border-accent/25 bg-accent/5 p-3 text-sm">
               {/* 2026-09-07: источник и точность — по-русски; пустое

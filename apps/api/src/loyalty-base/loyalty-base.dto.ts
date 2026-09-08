@@ -253,6 +253,11 @@ export class LoyaltyOverviewQueryDto {
   @IsOptional()
   @IsIn(["old", "new", "all"])
   cabinetSource?: "old" | "new" | "all";
+
+  // 2026-09-08: база Анны — сцепка с кабинетом: linked / unlinked.
+  @IsOptional()
+  @IsIn(["linked", "unlinked"])
+  linkedOurs?: "linked" | "unlinked";
 }
 
 // 2026-09-07: карточка контакта принимает выбранный «Период встреч и сделок»,
@@ -281,6 +286,11 @@ export class LoyaltyListFiltersDto {
   @IsOptional()
   @IsIn(["old", "new", "all"])
   cabinetSource?: "old" | "new" | "all";
+
+  // 2026-09-08: база Анны — сцепка с кабинетом: linked / unlinked.
+  @IsOptional()
+  @IsIn(["linked", "unlinked"])
+  linkedOurs?: "linked" | "unlinked";
 
   @IsOptional()
   @IsISO8601({ strict: true })
@@ -536,6 +546,11 @@ export class LoyaltyCanonicalFilterDto {
   @IsOptional()
   @IsIn(["old", "new", "all"])
   cabinetSource?: "old" | "new" | "all";
+
+  // 2026-09-08: база Анны — сцепка с кабинетом: linked / unlinked.
+  @IsOptional()
+  @IsIn(["linked", "unlinked"])
+  linkedOurs?: "linked" | "unlinked";
 
   @IsOptional()
   @ValidateNested()
