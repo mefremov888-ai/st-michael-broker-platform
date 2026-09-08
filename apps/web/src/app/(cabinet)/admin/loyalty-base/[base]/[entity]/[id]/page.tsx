@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, ArrowLeft, Loader2, RefreshCcw } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -28,6 +28,16 @@ export default function LoyaltyBaseDetailRoute() {
     id: string;
   }>();
   const { broker } = useAuth();
+  // 2026-09-08: карточка по прямой ссылке принимает ?from=&to= (период) и
+  // ?cabinetSource= — как карточка, открытая из списка.
+  const searchParams = useSearchParams();
+  const from = searchParams.get("from") || "";
+  const to = searchParams.get("to") || "";
+  const cabinetSourceParam = searchParams.get("cabinetSource");
+  const cabinetSource =
+    cabinetSourceParam === "old" || cabinetSourceParam === "new" || cabinetSourceParam === "all"
+      ? cabinetSourceParam
+      : undefined;
   const [record, setRecord] = useState<LoyaltyRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -47,6 +57,10 @@ export default function LoyaltyBaseDetailRoute() {
           base as LoyaltyBaseKey,
           entity as LoyaltyEntityType,
           id,
+          {
+            activityPeriod: from && to ? { from, to } : undefined,
+            cabinetSource,
+          },
         ),
       );
     } catch (reason) {
@@ -59,7 +73,7 @@ export default function LoyaltyBaseDetailRoute() {
     } finally {
       setLoading(false);
     }
-  }, [base, entity, id, routeIsValid]);
+  }, [base, entity, id, routeIsValid, from, to, cabinetSource]);
 
   useEffect(() => {
     void load();
