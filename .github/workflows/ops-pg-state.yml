@@ -1,0 +1,40 @@
+name: Ops pg state (migrations, indexes, memory; read-only)
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ops-pg-state
+  cancel-in-progress: false
+
+jobs:
+  state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            echo "=== последние миграции ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT migration_name, started_at, finished_at, rolled_back_at, applied_steps_count FROM _prisma_migrations ORDER BY started_at DESC LIMIT 4" || true
+            echo "=== индексы clients по amo_lead ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT indexname, indexdef FROM pg_indexes WHERE tablename='clients' AND indexdef ILIKE '%amo_lead_id%'" || true
+            echo "=== дубли (broker_id, amo_lead_id) ==="
+            docker compose exec -T postgres psql -U postgres -d broker_platform -Atc "SELECT count(*) FROM (SELECT 1 FROM clients WHERE amo_lead_id IS NOT NULL GROUP BY broker_id, amo_lead_id HAVING count(*)>1) d" || true
+            echo "=== память / swap / диск ==="
+            free -m; swapon --show || echo "(swap нет)"; df -h / | tail -1
+            echo "=== контейнеры и потребление ==="
+            docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}' || true
+            echo "=== OOM в dmesg (последние) ==="
+            (dmesg 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -8) || echo "(dmesg недоступен)"
+            echo "=== api: рестарты и здоровье ==="
+            docker inspect st-michael-api --format 'restarts={{.RestartCount}} health={{.State.Health.Status}} started={{.State.StartedAt}}' || true
