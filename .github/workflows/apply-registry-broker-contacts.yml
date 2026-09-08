@@ -51,12 +51,12 @@ jobs:
             git fetch origin "$DATA_BRANCH"
             git fetch origin master
             git show "origin/$DATA_BRANCH:data/registry-broker-contacts.json" > /tmp/registry-broker-contacts.json
-            git show origin/master:scripts/apply-registry-broker-contacts.js > /tmp/apply-registry-broker-contacts.js
+            git show origin/master:scripts/set-registry-broker-contacts.js > /tmp/set-registry-broker-contacts.js
             docker cp /tmp/registry-broker-contacts.json st-michael-api:/app/registry-broker-contacts.json
-            docker cp /tmp/apply-registry-broker-contacts.js st-michael-api:/app/scripts/apply-registry-broker-contacts.js
+            docker cp /tmp/set-registry-broker-contacts.js st-michael-api:/app/scripts/set-registry-broker-contacts.js
             DRY=1
             if [ "$DRY_INPUT" = "false" ]; then
               if [ "$CONFIRM_INPUT" != "true" ]; then echo "dry_run=false требует confirm_apply=true"; exit 1; fi
               DRY=0
             fi
-            docker compose exec -T -e DRY_RUN=$DRY api node /app/scripts/apply-registry-broker-contacts.js /app/registry-broker-contacts.json
+            docker compose exec -T -e DRY_RUN=$DRY api node /app/scripts/set-registry-broker-contacts.js /app/registry-broker-contacts.json
