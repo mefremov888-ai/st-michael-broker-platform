@@ -22,19 +22,36 @@ export interface LoyaltyMetricExplanation {
   excludedSemantics?: string;
 }
 
+// 2026-09-08 (просьба владельца): подсказка к показателю — простым языком,
+// коды источника/точности переводятся на русский.
+const SOURCE_RU: Record<string, string> = {
+  LOCAL_PRELIMINARY: "наша база (данные кабинета)",
+  SOURCE_AGGREGATE: "сводка базы Анны",
+  EXACT: "точные события",
+  UNAVAILABLE: "недоступно",
+};
+const EXACTNESS_RU: Record<string, string> = {
+  APPROXIMATE: "предварительная (по данным кабинета)",
+  VERIFIED: "проверенная",
+  EXACT: "точная",
+  SOURCE_DECLARED: "как указано в источнике",
+  UNKNOWN: "нет данных",
+};
 export function formatLoyaltyMetricExplanation(
   explanation: LoyaltyMetricExplanation,
 ) {
+  const source = SOURCE_RU[explanation.source] || explanation.source;
+  const exactness = EXACTNESS_RU[explanation.exactness] || explanation.exactness;
   return [
-    `Формула: ${explanation.formula}`,
+    `Как считаем: ${explanation.formula}`,
     `Период: ${explanation.period}`,
-    `Источник: ${explanation.source}`,
-    `Точность: ${explanation.exactness}`,
+    `Откуда данные: ${source}`,
+    `Точность: ${exactness}`,
     explanation.includedSemantics
-      ? `Включено: ${explanation.includedSemantics}`
+      ? `Что учитываем: ${explanation.includedSemantics}`
       : "",
     explanation.excludedSemantics
-      ? `Не включено: ${explanation.excludedSemantics}`
+      ? `Что не учитываем: ${explanation.excludedSemantics}`
       : "",
   ]
     .filter(Boolean)

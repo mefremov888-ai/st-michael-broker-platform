@@ -5058,10 +5058,13 @@ describe("LoyaltyBaseService", () => {
     expect(result.kpiMetadata["activities.deals"]).toMatchObject({
       source: "LOCAL_PRELIMINARY",
       exactness: "APPROXIMATE",
-      provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.paidAt / RegistryDeal.brokerId",
+      provenance: "Реестр сделок (дата оплаты ДДУ, брокер) · сделки кабинета",
     });
     expect(result.kpiMetadata["agencies.top"].formula).toContain(
       "explicit Deal.agencyId",
+    );
+    expect(result.kpiMetadata["activities.fixations"].formula).toContain(
+      "Считаем заявки клиентов",
     );
     expect(result.activities).toEqual({
       fixations: 3,
@@ -5816,7 +5819,7 @@ describe("LoyaltyBaseService", () => {
       unattributedRegistryDeals: 2,
     });
     expect(result.kpiMetadata["activities.deals"].formula).toContain(
-      "excludes 2 registry deal(s)",
+      "Ещё 2 договор(ов) из реестра не привязаны к брокеру",
     );
     expect(result.kpiMetadata.dealAmount).toMatchObject({
       unattributedRegistryDeals: 2,
