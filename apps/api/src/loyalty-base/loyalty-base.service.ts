@@ -4313,6 +4313,8 @@ export class LoyaltyBaseService {
       unattributedPaidBookings?: number;
     } = { unattributedRegistryDeals: 0, unattributedRegistryAmount: null },
   ) {
+    // 2026-09-08 (просьба владельца): подсказки к KPI написаны простым языком —
+    // чтобы читатель без знания формул понял, что и как посчитано.
     const shared = {
       source: "LOCAL_PRELIMINARY",
       ruleVersion: "ours-local-preliminary-v1",
@@ -4320,39 +4322,45 @@ export class LoyaltyBaseService {
       requestedPeriod: period,
       periodFilterApplied: true,
       includedSemantics:
-        "Qualifying rows in current local operational tables only",
+        "Только записи нашей базы (кабинет, синк amo, перенос старого кабинета, реестр сделок)",
       excludedSemantics:
-        "Anna source rollups, unconfirmed statuses and missing values are excluded; missing evidence is never promoted to exactness",
+        "Данные базы Анны, неподтверждённые статусы и пустые значения не учитываются; «нет данных» не превращается в ноль",
     };
+    const gapDeals = registryGap.unattributedRegistryDeals
+      ? ` Ещё ${registryGap.unattributedRegistryDeals} договор(ов) из реестра не привязаны к брокеру и в это число не входят${registryGap.unattributedRegistryAmount ? ` (на сумму ${registryGap.unattributedRegistryAmount} ₽)` : ""}.`
+      : "";
+    const gapBookings = registryGap.unattributedPaidBookings
+      ? ` Ещё ${registryGap.unattributedPaidBookings} брон(ей) без привязки к брокеру не входят.`
+      : "";
     return {
       "activities.fixations": {
         ...shared,
         formula:
-          "COUNT(Client rows fixed for an active broker (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED, owner role=BROKER without merge) with createdAt in requested period)",
-        provenance: "Client.id / Client.createdAt / Broker.role",
+          "Считаем заявки клиентов, поданные за выбранный период, у которых есть фиксация: статус «условно уникален» или «истёк», либо «зафиксирован» вручную. Отклонённые и находящиеся на рассмотрении не считаем. Учитываются только действующие брокеры (объединённые дубли карточек не считаются).",
+        provenance: "Заявки клиентов (дата подачи) · карточки брокеров",
       },
       "activities.meetings": {
         ...shared,
         formula:
-          "COUNT(Meeting rows with status CONFIRMED or COMPLETED, date in requested period and owner role=BROKER without merge)",
-        provenance: "Meeting.id / Meeting.date / Meeting.status / Broker.role",
+          "Считаем встречи за выбранный период со статусом «подтверждена» или «проведена» у действующих брокеров.",
+        provenance: "Встречи (дата, статус) · карточки брокеров",
       },
       "activities.deals": {
         ...shared,
-        formula: `COUNT(positive DDU Deal rows with status SIGNED, PAID or COMMISSION_PAID, signedAt in requested period and owner role=BROKER without merge) + COUNT(RegistryDeal rows with «Дата оплаты ДДУ» (paidAt) in requested period linked to such a broker; rows without paidAt are not deals)${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker (не видны в списке брокеров)` : ""}`,
-        provenance: "Deal.id / Deal.signedAt / Deal.status / RegistryDeal.paidAt / RegistryDeal.brokerId",
+        formula: `Считаем договоры с оплатой: строки реестра сделок с «Датой оплаты ДДУ» в выбранном периоде, привязанные к действующему брокеру, плюс сделки кабинета со статусом «подписана», «оплачена» или «комиссия выплачена». Договор без даты оплаты сделкой не считается.${gapDeals}`,
+        provenance: "Реестр сделок (дата оплаты ДДУ, брокер) · сделки кабинета",
         unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
       },
       "activities.paidBookings": {
         ...shared,
-        formula: `COUNT(RegistryDeal rows with «Дата оплаты ДВОУ» (dvouPaidAt) in requested period linked to an active unmerged BROKER)${registryGap.unattributedPaidBookings ? `; excludes ${registryGap.unattributedPaidBookings} paid booking(s) without an attributable broker` : ""}`,
-        provenance: "RegistryDeal.dvouPaidAt / RegistryDeal.brokerId",
+        formula: `Считаем платные брони: строки реестра с «Датой оплаты ДВОУ» в выбранном периоде, привязанные к действующему брокеру.${gapBookings}`,
+        provenance: "Реестр сделок (дата оплаты ДВОУ, брокер)",
         unattributedPaidBookings: registryGap.unattributedPaidBookings || 0,
       },
       dealAmount: {
         ...shared,
-        formula: `Exact-decimal SUM(Deal.amount) over the same local qualifying DDU deal rows plus SUM(RegistryDeal.amount) over broker-attributed registry rows with «Дата оплаты ДДУ» in the requested period${registryGap.unattributedRegistryDeals ? `; excludes ${registryGap.unattributedRegistryDeals} registry deal(s) without an attributable broker${registryGap.unattributedRegistryAmount ? ` totalling ${registryGap.unattributedRegistryAmount}` : ""}` : ""}`,
-        provenance: "Deal.id / Deal.amount / RegistryDeal.brokerId",
+        formula: `Складываем «Стоимость по ДДУ» тех же договоров, что и в показателе «Сделки» (реестр с датой оплаты в периоде, привязанный к брокеру, плюс сделки кабинета). Считаем в копейках, без округлений.${gapDeals}`,
+        provenance: "Реестр сделок (стоимость по ДДУ) · сделки кабинета (сумма)",
         unattributedRegistryDeals: registryGap.unattributedRegistryDeals,
         unattributedRegistryAmount: registryGap.unattributedRegistryAmount,
       },
@@ -4360,28 +4368,26 @@ export class LoyaltyBaseService {
         ...shared,
         periodFilterApplied: false,
         formula:
-          "COUNT(active, unmerged BROKER rows with no legacy CallLog.createdAt in the current Europe/Moscow month)",
+          "Считаем активных брокеров, которым в текущем календарном месяце (по Москве) не звонили ни разу: в журнале звонков нет записи за этот месяц. Выбранный период здесь не применяется — всегда текущий месяц.",
         includedSemantics:
-          "Legacy CallLog rows only; the current Moscow month is used instead of the requested rating period",
+          "Только записи журнала звонков; месяц — текущий, по московскому времени",
         excludedSemantics:
-          "Workflow attempts are not part of this overview query, so this is preliminary rather than an exact no-call fact",
-        provenance: "Broker.id / CallLog.createdAt",
+          "Попытки дозвона внутри кампаний обзвона сюда не входят, поэтому число предварительное",
+        provenance: "Карточки брокеров · журнал звонков",
       },
       "brokers.newCount": {
         ...shared,
         periodFilterApplied: false,
         formula:
-          "COUNT(active, unmerged BROKER rows at NEW_BROKER with no BT flag/date and no qualifying local fixation, meeting or deal row)",
-        provenance:
-          "Broker.funnelStage / Broker.brokerTourVisited / Client / Meeting / Deal",
+          "Считаем активных брокеров на стадии «Новый брокер», у которых ещё нет ничего: не был на брокер-туре, нет ни одной фиксации, встречи, сделки и звонка.",
+        provenance: "Карточки брокеров (стадия, брокер-тур) · заявки · встречи · сделки · звонки",
       },
       "brokers.btWithoutFixation": {
         ...shared,
         periodFilterApplied: false,
         formula:
-          "COUNT(active, unmerged BROKER rows with brokerTourVisited=true and no fixed Client row (uniquenessStatus=CONDITIONALLY_UNIQUE or fixationStatus=FIXED))",
-        provenance:
-          "Broker.brokerTourVisited / Client.uniquenessStatus / Client.fixationStatus",
+          "Считаем активных брокеров с отметкой «был на брокер-туре», у которых нет ни одной заявки с фиксацией («условно уникален», «истёк» или «зафиксирован»).",
+        provenance: "Карточки брокеров (брокер-тур) · заявки клиентов (статус фиксации)",
       },
       "brokers.birthdaysToday": {
         source: "LOCAL_PRELIMINARY",
@@ -4390,36 +4396,36 @@ export class LoyaltyBaseService {
         requestedPeriod: period,
         periodFilterApplied: false,
         formula:
-          "COUNT(known Broker.birthDate values whose UTC day/month equals today's Europe/Moscow day/month)",
-        includedSemantics: "Only known local birthDate values",
+          "Считаем брокеров, у которых день и месяц рождения совпадают с сегодняшней датой по Москве. Учитываются только карточки, где дата рождения заполнена.",
+        includedSemantics: "Только известные даты рождения",
         excludedSemantics:
-          "Missing birthdays remain unknown; birthdaysToday is null when none are known",
-        provenance: "Broker.birthDate",
+          "Если дата рождения не заполнена — брокер не учитывается; если известных дат нет вовсе, показатель пустой, а не ноль",
+        provenance: "Карточки брокеров (дата рождения)",
       },
       "brokers.top": {
         ...shared,
         formula:
-          "Top five by combined qualifying local DDU deal count plus RegistryDeal rows signed in the period, then amount, latest signedAt and stable broker ID",
-        provenance: "Deal.brokerId / Deal.id / Deal.amount / Deal.signedAt",
+          "Пять брокеров с наибольшим числом сделок за период (сделки кабинета плюс договоры реестра с датой оплаты). При равенстве — по сумме, затем по дате последней сделки.",
+        provenance: "Сделки кабинета · реестр сделок (брокер)",
       },
       "agencies.top": {
         ...shared,
         formula:
-          "Top five by the agency-card rule: union of qualifying local DDU deals with an explicit Deal.agencyId, deals owned by current BrokerAgency brokers, and RegistryDeal rows attributed via those brokers or via a normalized agency-name match, deduplicated by row ID",
+          "Пять агентств с наибольшим числом сделок за период. Сделка относится к агентству, если она прямо привязана к агентству (explicit Deal.agencyId), либо её брокер сейчас состоит в этом агентстве, либо в реестре указано название этого агентства. Повторы одной сделки не считаются дважды.",
         provenance:
-          "Deal.agencyId / Deal.brokerId / Deal.id / RegistryDeal.brokerId / RegistryDeal.agencyCanonical",
+          "Сделки кабинета (агентство, брокер) · связи брокер–агентство · реестр сделок (брокер, название агентства)",
       },
       "brokers.total": {
         ...shared,
         periodFilterApplied: false,
-        formula: "COUNT(Broker where role=BROKER and mergedIntoId is null)",
-        provenance: "Broker.id / Broker.role / Broker.mergedIntoId",
+        formula: "Все карточки брокеров, кроме объединённых дублей.",
+        provenance: "Карточки брокеров",
       },
       "agencies.total": {
         ...shared,
         periodFilterApplied: false,
-        formula: "COUNT(current Agency rows)",
-        provenance: "Agency.id",
+        formula: "Все карточки агентств.",
+        provenance: "Карточки агентств",
       },
     };
   }

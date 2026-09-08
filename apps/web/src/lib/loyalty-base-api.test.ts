@@ -270,12 +270,12 @@ test("formats a complete hover explanation without hiding inclusion rules", () =
       excludedSemantics: "null не превращается в ноль",
     }),
     [
-      "Формула: COUNT(included DEAL events)",
+      "Как считаем: COUNT(included DEAL events)",
       "Период: август 2026",
-      "Источник: SOURCE_AGGREGATE",
-      "Точность: SOURCE_DECLARED",
-      "Включено: только известные значения",
-      "Не включено: null не превращается в ноль",
+      "Откуда данные: сводка базы Анны",
+      "Точность: как указано в источнике",
+      "Что учитываем: только известные значения",
+      "Что не учитываем: null не превращается в ноль",
     ].join("\n"),
   );
 });
