@@ -746,12 +746,25 @@ export class SchedulerService {
         });
         const amoContactId = Number(broker.amoContactId);
         // Re-check for correct broker contact (with Брокер=true flag)
-        const brokerContact = await this.amo.findBrokerContactByPhone(broker.phone);
+        let brokerContact = await this.amo.findBrokerContactByPhone(broker.phone);
         if (brokerContact && brokerContact.id !== amoContactId) {
-          await this.prisma.broker.update({
-            where: { id: broker.id },
-            data: { amoContactId: BigInt(brokerContact.id) },
+          // 2026-09-08: если этот amo-контакт уже закреплён за другой карточкой
+          // (две карточки с одним телефоном, напр. «Татьяна брокер» и активная
+          // Татьяна), не перепривязываем — иначе каждые 30 минут падаем на
+          // уникальности amo_contact_id. Работаем с текущей привязкой.
+          const holder = await this.prisma.broker.findUnique({
+            where: { amoContactId: BigInt(brokerContact.id) },
+            select: { id: true, fullName: true },
           });
+          if (holder && holder.id !== broker.id) {
+            this.logger.warn(`amo contact ${brokerContact.id} для ${broker.fullName} уже закреплён за карточкой ${holder.fullName} (${holder.id}); оставляем текущую привязку ${amoContactId}`);
+            brokerContact = null;
+          } else {
+            await this.prisma.broker.update({
+              where: { id: broker.id },
+              data: { amoContactId: BigInt(brokerContact.id) },
+            });
+          }
         }
         const contactId = brokerContact?.id || amoContactId;
         const fullContact = await this.amo.getContact(contactId);
