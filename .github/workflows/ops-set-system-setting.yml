@@ -1,0 +1,46 @@
+name: Ops set system setting (key/value)
+
+# 2026-09-08: записать одну настройку SystemSetting в проде (например,
+# OPS_INBOX_TOKEN). Значение не печатается в лог.
+
+on:
+  workflow_dispatch:
+    inputs:
+      key:
+        description: Ключ SystemSetting
+        required: true
+        type: string
+      value:
+        description: Значение (не попадает в лог)
+        required: true
+        type: string
+
+concurrency:
+  group: ops-set-system-setting
+  cancel-in-progress: false
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and set
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SETTING_KEY: ${{ inputs.key }}
+          SETTING_VALUE: ${{ inputs.value }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          envs: SETTING_KEY,SETTING_VALUE
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/set-system-setting.js > /tmp/set-system-setting.js
+            docker cp /tmp/set-system-setting.js st-michael-api:/app/scripts/set-system-setting.js
+            docker compose exec -T -e SETTING_KEY="$SETTING_KEY" -e SETTING_VALUE="$SETTING_VALUE" api node /app/scripts/set-system-setting.js
