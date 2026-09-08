@@ -46,7 +46,6 @@ import {
   hasLoyaltyActivityEvidence,
   loyaltyLeaderMode,
   loyaltyMetricsForDisplay,
-  getLoyaltyActivitySummary,
   type LoyaltyActivitySummary,
   type LoyaltyBaseKey,
   type LoyaltyColumnFilters,
@@ -903,7 +902,6 @@ export function LoyaltyBaseWorkspaceV2() {
   // 2026-09-08: «Контрольные показатели активности» по текущим фильтрам списка.
   const [activitySummary, setActivitySummary] =
     useState<LoyaltyActivitySummary | null>(null);
-  const summaryRequest = useRef(0);
   const [overviewLoading, setOverviewLoading] = useState(true);
   const [overviewError, setOverviewError] = useState("");
   const [list, setList] = useState<LoyaltyListResponse | null>(null);
@@ -1035,37 +1033,6 @@ export function LoyaltyBaseWorkspaceV2() {
       if (request === overviewRequest.current) setOverviewLoading(false);
     }
   }, [base, canReadAll, ratingRange, filters.cabinetSource]);
-  const loadActivitySummary = useCallback(async () => {
-    if (!canReadAll || base !== "ours") {
-      setActivitySummary(null);
-      return;
-    }
-    const request = ++summaryRequest.current;
-    try {
-      const next = await getLoyaltyActivitySummary(
-        base,
-        entityType,
-        {
-          page: 1,
-          pageSize: 1,
-          search: filters.search,
-          city: filters.city || undefined,
-          hasAmo: filters.hasAmo,
-          archived: filters.archived,
-          segment,
-          sortBy: filters.sortBy,
-          sortOrder: filters.sortOrder,
-          filter: toCanonicalFilter(filters, entityType, base),
-          columns,
-        },
-        ratingRange,
-      );
-      if (request === summaryRequest.current) setActivitySummary(next);
-    } catch {
-      // Блок покажет общие цифры обзора; ошибку списка пользователь уже видит.
-      if (request === summaryRequest.current) setActivitySummary(null);
-    }
-  }, [base, canReadAll, columns, entityType, filters, segment, ratingRange]);
   const loadList = useCallback(async () => {
     if (!canReadAll) {
       setListLoading(false);
@@ -1087,8 +1054,15 @@ export function LoyaltyBaseWorkspaceV2() {
         sortOrder: filters.sortOrder,
         filter: toCanonicalFilter(filters, entityType, base),
         columns,
+        // 2026-09-08: «Контрольные показатели» приходят вместе со списком
+        // (одним проходом по базе) — отдельный запрос убран.
+        withActivitySummary: base === "ours",
+        summaryPeriod: ratingRange,
       });
-      if (request === listRequest.current) setList(next);
+      if (request === listRequest.current) {
+        setList(next);
+        setActivitySummary(next.activitySummary ?? null);
+      }
     } catch (reason) {
       if (request === listRequest.current) {
         setList(null);
@@ -1101,16 +1075,13 @@ export function LoyaltyBaseWorkspaceV2() {
     } finally {
       if (request === listRequest.current) setListLoading(false);
     }
-  }, [base, canReadAll, columns, entityType, filters, page, segment]);
+  }, [base, canReadAll, columns, entityType, filters, page, segment, ratingRange]);
   useEffect(() => {
     if (mode === "base") void loadOverview();
   }, [loadOverview, mode]);
   useEffect(() => {
     if (mode === "base") void loadList();
   }, [loadList, mode]);
-  useEffect(() => {
-    if (mode === "base") void loadActivitySummary();
-  }, [loadActivitySummary, mode]);
   useEffect(() => {
     setSelected(new Set());
     setAllFilterSelected(false);

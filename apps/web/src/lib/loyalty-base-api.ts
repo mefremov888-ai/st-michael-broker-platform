@@ -843,6 +843,8 @@ export interface LoyaltyListResponse {
   snapshotId: string | null;
   facets: LoyaltyFacets;
   dataAvailability: Record<string, unknown>;
+  // 2026-09-08: «Контрольные показатели» по этой же выборке (если запрошены).
+  activitySummary: LoyaltyActivitySummary | null;
 }
 
 export interface LoyaltyListFilters {
@@ -857,6 +859,9 @@ export interface LoyaltyListFilters {
   sortOrder?: "asc" | "desc";
   filter?: LoyaltyCanonicalFilter;
   columns?: LoyaltyColumnFilters;
+  // 2026-09-08: сводка активности внутри ответа списка (одним проходом).
+  withActivitySummary?: boolean;
+  summaryPeriod?: { from: string; to: string };
 }
 
 export type ReconciliationDecision =
@@ -2413,6 +2418,7 @@ export function normalizeLoyaltyList(
       })
       .filter((item) => item.value);
   return {
+    activitySummary: normalizeActivitySummary(root.activitySummary),
     base:
       stringValue(root.base) === "ours"
         ? "ours"
@@ -2854,7 +2860,12 @@ export async function getLoyaltyActivitySummary(
         summaryPeriod?.from && summaryPeriod?.to ? summaryPeriod : undefined,
     },
   );
-  const root = responseRoot(value);
+  return normalizeActivitySummary(responseRoot(value)) as LoyaltyActivitySummary;
+}
+
+export function normalizeActivitySummary(value: unknown): LoyaltyActivitySummary | null {
+  const root = nonEmptyRecord(value);
+  if (!root) return null;
   const activities = nonEmptyRecord(root.activities) || {};
   const selection = nonEmptyRecord(root.selection) || {};
   const period = nonEmptyRecord(root.period);
@@ -3016,6 +3027,11 @@ export async function getLoyaltyList(
       segment: filters.segment || undefined,
       filter: filters.filter || {},
       columns: filters.columns,
+      withActivitySummary: filters.withActivitySummary || undefined,
+      summaryPeriod:
+        filters.withActivitySummary && filters.summaryPeriod?.from && filters.summaryPeriod?.to
+          ? filters.summaryPeriod
+          : undefined,
     },
   );
   return normalizeLoyaltyList(

@@ -355,6 +355,21 @@ export class LoyaltyListFiltersDto {
   @IsBoolean()
   hasAmo?: boolean;
 
+  // 2026-09-08: «Контрольные показатели» внутри ответа списка (одним проходом).
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === "true" ? true : value === "false" ? false : value,
+  )
+  @IsBoolean()
+  withActivitySummary?: boolean;
+
+  // Тип аннотации — объект: класс LoyaltyFilterPeriodDto объявлен ниже, и
+  // метаданные декоратора на класс до его инициализации ломают загрузку модуля.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  summaryPeriod?: { from?: string; to?: string };
+
   @IsOptional()
   @IsIn(ACTIVITY_TYPES)
   activityType?: (typeof ACTIVITY_TYPES)[number];
@@ -767,12 +782,8 @@ export class LoyaltySearchDto extends LoyaltyListQueryDto {
 
 // 2026-09-08: «Контрольные показатели активности» по текущей выборке
 // списка: тело — как у search, плюс период рейтинга (summaryPeriod).
-export class LoyaltyActivitySummaryDto extends LoyaltySearchDto {
-  @IsOptional()
-  @ValidateNested()
-  @Type(() => LoyaltyFilterPeriodDto)
-  summaryPeriod?: LoyaltyFilterPeriodDto;
-}
+// summaryPeriod и withActivitySummary объявлены в LoyaltyListQueryDto (2026-09-08).
+export class LoyaltyActivitySummaryDto extends LoyaltySearchDto {}
 
 export class LoyaltyExportDto extends LoyaltyListFiltersDto {
   @IsOptional()

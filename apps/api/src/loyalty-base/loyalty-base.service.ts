@@ -47,6 +47,48 @@ const MAX_ISSUES_RETURNED = 200;
 const MAX_POSTGRES_BIGINT = 9223372036854775807n;
 const MAX_DECIMAL_18_2_CENTS = 999999999999999999n;
 const CANDIDATE_QUERY_BATCH_SIZE = 500;
+
+// 2026-09-08 (инцидент «Bad Gateway при смене фильтров»): список «Нашей базы»
+// строится полным чтением всех карточек (19 тыс. брокеров ≈ 25 с), а страница
+// при каждом действии делала это дважды. Результат тяжёлого чтения держим в
+// памяти FULL_SCAN_TTL_MS, ключ — все параметры, влияющие на SQL (where,
+// источник кабинета, период звонков/кампания). Фильтры, сортировка и страница
+// применяются поверх кэша. Максимум FULL_SCAN_MAX_ENTRIES записей — сервер с
+// 2 ГБ памяти.
+const FULL_SCAN_TTL_MS = Number(process.env.LOYALTY_FULL_SCAN_TTL_MS || 45_000);
+const FULL_SCAN_MAX_ENTRIES = 4;
+const FULL_SCAN_CACHE = new Map<string, { at: number; value: unknown }>();
+
+function fullScanCacheKey(prefix: string, parts: unknown): string {
+  return `${prefix}:${JSON.stringify(parts, (_key, value) =>
+    typeof value === "bigint" ? value.toString() : value instanceof Date ? value.toISOString() : value,
+  )}`;
+}
+
+function fullScanCacheEnabled(): boolean {
+  // В jest каждый тест подменяет данные — кэш между тестами недопустим.
+  if (process.env.JEST_WORKER_ID || process.env.NODE_ENV === "test") return false;
+  return FULL_SCAN_TTL_MS > 0;
+}
+
+async function cachedFullScan<T>(key: string, loader: () => Promise<T>): Promise<T> {
+  if (!fullScanCacheEnabled()) return loader();
+  const now = Date.now();
+  const hit = FULL_SCAN_CACHE.get(key);
+  if (hit && now - hit.at < FULL_SCAN_TTL_MS) return hit.value as T;
+  const value = await loader();
+  if (FULL_SCAN_CACHE.size >= FULL_SCAN_MAX_ENTRIES) {
+    const oldest = [...FULL_SCAN_CACHE.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) FULL_SCAN_CACHE.delete(oldest[0]);
+  }
+  FULL_SCAN_CACHE.set(key, { at: now, value });
+  return value;
+}
+
+/** Сброс кэша полного чтения (после массовых правок данных). */
+export function clearLoyaltyFullScanCache(): void {
+  FULL_SCAN_CACHE.clear();
+}
 export const MAX_LOYALTY_EXPORT_ROWS = 50000;
 const OUR_ACTIVITY_EVIDENCE_LIMIT = 200;
 
@@ -5044,10 +5086,21 @@ export class LoyaltyBaseService {
     }
     const selection = await this.resolveSelection(base, entityType, dto);
     const cabinetSource = dto.filter?.cabinetSource as CabinetSource | undefined;
-    let brokerIds = uniqueSorted(selection.ids);
+    const agg = await this.ourActivityAggregates(entityType, selection.ids, period, cabinetSource);
+    return this.activitySummaryPayload(base, entityType, periodDto, cabinetSource, selection.total, selection.filterHash, agg);
+  }
+
+  /** Агрегаты активности по набору id (брокеров или агентств) за период. */
+  private async ourActivityAggregates(
+    entityType: EntityType,
+    selectionIds: string[],
+    period: { from: Date; to: Date },
+    cabinetSource: CabinetSource | undefined,
+  ) {
+    let brokerIds = uniqueSorted(selectionIds);
     const agencyKeys = new Set<string>();
     if (entityType === "AGENCY") {
-      const agencyIds = uniqueSorted(selection.ids);
+      const agencyIds = uniqueSorted(selectionIds);
       const relatedBrokerIds: string[] = [];
       for (
         let offset = 0;
@@ -5162,6 +5215,19 @@ export class LoyaltyBaseService {
         if (inPeriod(row.dvouPaidAt)) paidBookings += 1;
       }
     }
+    return { brokerIds, fixations, meetings, deals, dealCents, paidBookings, registryDeals, registryCents };
+  }
+
+  private activitySummaryPayload(
+    base: BaseSlug,
+    entityType: EntityType,
+    periodDto: { from: string; to: string },
+    cabinetSource: CabinetSource | undefined,
+    selectionCount: number,
+    filterHash: string | null,
+    agg: Awaited<ReturnType<LoyaltyBaseService["ourActivityAggregates"]>>,
+  ) {
+    const { brokerIds, fixations, meetings, deals, dealCents, paidBookings, registryDeals, registryCents } = agg;
     return {
       base,
       entityType,
@@ -5169,9 +5235,9 @@ export class LoyaltyBaseService {
       period: periodDto,
       cabinetSource: cabinetSource || "all",
       selection: {
-        count: selection.total,
+        count: selectionCount,
         brokers: brokerIds.length,
-        filterHash: selection.filterHash,
+        filterHash,
       },
       activities: {
         fixations,
@@ -5186,6 +5252,22 @@ export class LoyaltyBaseService {
           ? "Считается по брокерам, привязанным к агентствам из текущего списка, и по строкам реестра с названием этих агентств; период — по дате события (фиксация — подача заявки, встреча — дата встречи, бронь — оплата ДВОУ, сделка — оплата ДДУ)."
           : "Считается только по брокерам, попавшим под текущие фильтры списка; период — по дате события (фиксация — подача заявки, встреча — дата встречи, бронь — оплата ДВОУ, сделка — оплата ДДУ).",
     };
+  }
+
+  /** Сводка активности для уже посчитанной выборки списка (withActivitySummary). */
+  private async listActivitySummary(
+    entityType: EntityType,
+    query: LoyaltyListQueryDto,
+    filter: CanonicalLoyaltyFilter,
+    candidateIds: string[],
+    filterHash: string,
+  ) {
+    if (!(query as any).withActivitySummary) return null;
+    const sp = (query as any).summaryPeriod as { from?: string; to?: string } | undefined;
+    const period = this.parsePeriod({ from: sp?.from, to: sp?.to } as LoyaltyOverviewQueryDto);
+    const periodDto = { from: period.from.toISOString(), to: period.to.toISOString() };
+    const agg = await this.ourActivityAggregates(entityType, candidateIds, period, filter.cabinetSource);
+    return this.activitySummaryPayload("ours", entityType, periodDto, filter.cabinetSource, candidateIds.length, filterHash, agg);
   }
 
   /**
@@ -5745,10 +5827,10 @@ export class LoyaltyBaseService {
         },
       };
     }
-    const records = await this.prisma.loyaltySourceRecord.findMany({
-      where,
-      include,
-    });
+    const records = await cachedFullScan(
+      fullScanCacheKey("anna-records", { where, includeActivities: Boolean(include.activities) }),
+      () => this.prisma.loyaltySourceRecord.findMany({ where, include }),
+    );
     const manualRecords = await this.annaManualRecords(
       active.dataset.id,
       active.snapshot.id,
@@ -8228,104 +8310,114 @@ export class LoyaltyBaseService {
         ? { campaign: { in: this.campaignAliases(filter.campaignIds) } }
         : {}),
     };
-    const records = await this.prisma.broker.findMany({
+    // 2026-09-08: тяжёлое чтение — через кэш полного чтения (см. cachedFullScan).
+    const scanKey = fullScanCacheKey("ours-brokers", {
       where,
-      select: {
-        id: true,
-        fullName: true,
-        displayName: true,
-        displayNameSource: true,
-        phone: true,
-        email: true,
-        status: true,
-        funnelStage: true,
-        region: true,
-        isRegional: true,
-        isCoordinator: true,
-        specialization: true,
-        category: true,
-        amoContactId: true,
-        mergedIntoId: true,
-        doNotCall: true,
-        brokerTourVisited: true,
-        brokerTourDate: true,
-        lastCallAt: true,
-        updatedAt: true,
-        assignedManagerId: true,
-        assignedManager: { select: { id: true, fullName: true } },
-        phones: true,
-        brokerAgencies: { include: { agency: true } },
-        callLogs: {
-          where: callLogWhere,
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: {
-            createdAt: true,
-            campaign: true,
-            result: true,
-            operatorId: true,
-            comment: true,
-            nextCallAt: true,
-          },
-        },
-        clients: {
-          where: fixationClientWhere(filter.cabinetSource),
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { createdAt: true },
-        },
-        meetings: {
-          where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
-          orderBy: { date: "desc" },
-          take: 1,
-          select: { date: true },
-        },
-        deals: {
-          where: this.ourConfirmedDealWhere(),
-          orderBy: { signedAt: "desc" },
-          take: 1,
-          select: { signedAt: true },
-        },
-        _count: {
-          select: {
-            clients: { where: fixationClientWhere(filter.cabinetSource) },
-            deals: { where: this.ourConfirmedDealWhere() },
-            meetings: {
-              where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
-            },
-            callLogs: true,
-          },
-        },
-      },
+      callLogWhere,
+      cabinetSource: filter.cabinetSource || null,
+      lifetimeLastCall: Boolean(filter.callPeriod || filter.campaignIds.length),
     });
-    await this.attachOurBrokerRegistryDeals(records as any[]);
-    // 2026-09-04 (задача D): callLogWhere сузил загруженные callLogs под
-    // «период звонков»/кампанию, но статус DORMANT, lastActivity и staleDays
-    // считаются по последнему звонку ЗА ВСЁ ВРЕМЯ — подгружаем его отдельно.
-    await this.attachOurBrokerLifetimeLastCall(
-      records as any[],
-      Boolean(filter.callPeriod || filter.campaignIds.length),
-    );
-    const workflowCalls = await this.workflowCallReadModels(
-      "ours",
-      "BROKER",
-      (records as any[]).map((record) => String(record.id)),
-    );
-    this.attachWorkflowCallReadModels(
-      records as any[],
-      "BROKER",
-      workflowCalls,
-    );
-    const engagementEvents = await this.engagementReadModels(
-      "ours",
-      "BROKER",
-      (records as any[]).map((record) => String(record.id)),
-    );
-    this.attachEngagementReadModels(
-      records as any[],
-      "BROKER",
-      engagementEvents,
-    );
+    const records = await cachedFullScan(scanKey, async () => {
+      const loaded = await this.prisma.broker.findMany({
+        where,
+        select: {
+          id: true,
+          fullName: true,
+          displayName: true,
+          displayNameSource: true,
+          phone: true,
+          email: true,
+          status: true,
+          funnelStage: true,
+          region: true,
+          isRegional: true,
+          isCoordinator: true,
+          specialization: true,
+          category: true,
+          amoContactId: true,
+          mergedIntoId: true,
+          doNotCall: true,
+          brokerTourVisited: true,
+          brokerTourDate: true,
+          lastCallAt: true,
+          updatedAt: true,
+          assignedManagerId: true,
+          assignedManager: { select: { id: true, fullName: true } },
+          phones: true,
+          brokerAgencies: { include: { agency: true } },
+          callLogs: {
+            where: callLogWhere,
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: {
+              createdAt: true,
+              campaign: true,
+              result: true,
+              operatorId: true,
+              comment: true,
+              nextCallAt: true,
+            },
+          },
+          clients: {
+            where: fixationClientWhere(filter.cabinetSource),
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { createdAt: true },
+          },
+          meetings: {
+            where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
+            orderBy: { date: "desc" },
+            take: 1,
+            select: { date: true },
+          },
+          deals: {
+            where: this.ourConfirmedDealWhere(),
+            orderBy: { signedAt: "desc" },
+            take: 1,
+            select: { signedAt: true },
+          },
+          _count: {
+            select: {
+              clients: { where: fixationClientWhere(filter.cabinetSource) },
+              deals: { where: this.ourConfirmedDealWhere() },
+              meetings: {
+                where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
+              },
+              callLogs: true,
+            },
+          },
+        },
+      });
+      await this.attachOurBrokerRegistryDeals(loaded as any[]);
+      // 2026-09-04 (задача D): callLogWhere сузил загруженные callLogs под
+      // «период звонков»/кампанию, но статус DORMANT, lastActivity и staleDays
+      // считаются по последнему звонку ЗА ВСЁ ВРЕМЯ — подгружаем его отдельно.
+      await this.attachOurBrokerLifetimeLastCall(
+        loaded as any[],
+        Boolean(filter.callPeriod || filter.campaignIds.length),
+      );
+      const workflowCalls = await this.workflowCallReadModels(
+        "ours",
+        "BROKER",
+        (loaded as any[]).map((record) => String(record.id)),
+      );
+      this.attachWorkflowCallReadModels(
+        loaded as any[],
+        "BROKER",
+        workflowCalls,
+      );
+      const engagementEvents = await this.engagementReadModels(
+        "ours",
+        "BROKER",
+        (loaded as any[]).map((record) => String(record.id)),
+      );
+      this.attachEngagementReadModels(
+        loaded as any[],
+        "BROKER",
+        engagementEvents,
+      );
+      return loaded as any[];
+    });
     const periodMetrics = await this.ourBrokerPeriodMetrics(
       (records as any[]).map((record) => String(record.id)),
       filter.activityPeriod,
@@ -8361,7 +8453,7 @@ export class LoyaltyBaseService {
       pageCandidates.map(({ item }) => item),
       "BROKER",
     );
-    return this.oursListEnvelope(
+    const envelope: any = this.oursListEnvelope(
       "BROKER",
       query,
       filter,
@@ -8377,6 +8469,15 @@ export class LoyaltyBaseService {
       },
       includeSelectionIds,
     );
+    const summary = await this.listActivitySummary(
+      "BROKER",
+      query,
+      filter,
+      candidates.map(({ item }) => String(item.id)),
+      envelope.filterHash,
+    );
+    if (summary) envelope.activitySummary = summary;
+    return envelope;
   }
 
   /**
@@ -8583,48 +8684,55 @@ export class LoyaltyBaseService {
       });
     }
     if (and.length) where.AND = and;
-    const records = await this.prisma.agency.findMany({
+    const scanKey = fullScanCacheKey("ours-agencies", {
       where,
-      include: this.ourAgencyReadInclude(filter.cabinetSource),
+      cabinetSource: filter.cabinetSource || null,
     });
-    await this.attachOurAgencyRegistryDeals(records as any[]);
-    const workflowCalls = await this.workflowCallReadModels(
-      "ours",
-      "AGENCY",
-      (records as any[]).map((record) => String(record.id)),
-    );
-    this.attachWorkflowCallReadModels(
-      records as any[],
-      "AGENCY",
-      workflowCalls,
-    );
-    const relatedBrokers = (records as any[]).flatMap((record) =>
-      Array.isArray(record?.brokerAgencies)
-        ? record.brokerAgencies
-            .map((relation: any) => relation?.broker)
-            .filter(Boolean)
-        : [],
-    );
-    const relatedBrokerCalls = await this.workflowCallReadModels(
-      "ours",
-      "BROKER",
-      relatedBrokers.map((broker: any) => String(broker.id)),
-    );
-    this.attachWorkflowCallReadModels(
-      relatedBrokers,
-      "BROKER",
-      relatedBrokerCalls,
-    );
-    const engagementEvents = await this.engagementReadModels(
-      "ours",
-      "AGENCY",
-      (records as any[]).map((record) => String(record.id)),
-    );
-    this.attachEngagementReadModels(
-      records as any[],
-      "AGENCY",
-      engagementEvents,
-    );
+    const records = await cachedFullScan(scanKey, async () => {
+      const loaded = await this.prisma.agency.findMany({
+        where,
+        include: this.ourAgencyReadInclude(filter.cabinetSource),
+      });
+      await this.attachOurAgencyRegistryDeals(loaded as any[]);
+      const workflowCalls = await this.workflowCallReadModels(
+        "ours",
+        "AGENCY",
+        (loaded as any[]).map((record) => String(record.id)),
+      );
+      this.attachWorkflowCallReadModels(
+        loaded as any[],
+        "AGENCY",
+        workflowCalls,
+      );
+      const relatedBrokers = (loaded as any[]).flatMap((record) =>
+        Array.isArray(record?.brokerAgencies)
+          ? record.brokerAgencies
+              .map((relation: any) => relation?.broker)
+              .filter(Boolean)
+          : [],
+      );
+      const relatedBrokerCalls = await this.workflowCallReadModels(
+        "ours",
+        "BROKER",
+        relatedBrokers.map((broker: any) => String(broker.id)),
+      );
+      this.attachWorkflowCallReadModels(
+        relatedBrokers,
+        "BROKER",
+        relatedBrokerCalls,
+      );
+      const engagementEvents = await this.engagementReadModels(
+        "ours",
+        "AGENCY",
+        (loaded as any[]).map((record) => String(record.id)),
+      );
+      this.attachEngagementReadModels(
+        loaded as any[],
+        "AGENCY",
+        engagementEvents,
+      );
+      return loaded as any[];
+    });
     const candidates = (records as any[])
       .map((record) => ({ record, item: this.mapOurAgency(record, null) }))
       .filter(({ record, item }) =>
@@ -8640,7 +8748,7 @@ export class LoyaltyBaseService {
       pageCandidates.map(({ item }) => item),
       "AGENCY",
     );
-    return this.oursListEnvelope(
+    const envelope: any = this.oursListEnvelope(
       "AGENCY",
       query,
       filter,
@@ -8654,6 +8762,15 @@ export class LoyaltyBaseService {
       },
       includeSelectionIds,
     );
+    const summary = await this.listActivitySummary(
+      "AGENCY",
+      query,
+      filter,
+      candidates.map(({ item }) => String(item.id)),
+      envelope.filterHash,
+    );
+    if (summary) envelope.activitySummary = summary;
+    return envelope;
   }
 
   /**
@@ -10958,74 +11075,82 @@ export class LoyaltyBaseService {
     const ids = uniqueSorted([...byBrokerId.keys()]);
     if (!ids.length) return;
     const cabinetSource = filter.cabinetSource;
-    const records: any[] = [];
-    for (
-      let offset = 0;
-      offset < ids.length;
-      offset += CANDIDATE_QUERY_BATCH_SIZE
-    ) {
-      const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
-      const rows = await this.prisma.broker.findMany({
-        where: { id: { in: batch } },
-        select: {
-          id: true,
-          fullName: true,
-          displayName: true,
-          displayNameSource: true,
-          phone: true,
-          email: true,
-          status: true,
-          funnelStage: true,
-          region: true,
-          isRegional: true,
-          isCoordinator: true,
-          specialization: true,
-          category: true,
-          amoContactId: true,
-          mergedIntoId: true,
-          doNotCall: true,
-          brokerTourVisited: true,
-          brokerTourDate: true,
-          lastCallAt: true,
-          updatedAt: true,
-          assignedManagerId: true,
-          assignedManager: { select: { id: true, fullName: true } },
-          phones: true,
-          brokerAgencies: { include: { agency: true } },
-          clients: {
-            where: fixationClientWhere(cabinetSource),
-            orderBy: { createdAt: "desc" },
-            take: 1,
-            select: { createdAt: true },
-          },
-          meetings: {
-            where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
-            orderBy: { date: "desc" },
-            take: 1,
-            select: { date: true },
-          },
-          deals: {
-            where: this.ourConfirmedDealWhere(),
-            orderBy: { signedAt: "desc" },
-            take: 1,
-            select: { signedAt: true },
-          },
-          _count: {
-            select: {
-              clients: { where: fixationClientWhere(cabinetSource) },
-              deals: { where: this.ourConfirmedDealWhere() },
-              meetings: {
-                where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
+    const idsDigest = `${ids.length}:${ids[0] || ""}:${ids[ids.length - 1] || ""}`;
+    const records: any[] = await cachedFullScan(
+      fullScanCacheKey("anna-linked-brokers", { idsDigest, cabinetSource: cabinetSource || null }),
+      async () => {
+      const loaded: any[] = [];
+      for (
+        let offset = 0;
+        offset < ids.length;
+        offset += CANDIDATE_QUERY_BATCH_SIZE
+      ) {
+        const batch = ids.slice(offset, offset + CANDIDATE_QUERY_BATCH_SIZE);
+        const rows = await this.prisma.broker.findMany({
+          where: { id: { in: batch } },
+          select: {
+            id: true,
+            fullName: true,
+            displayName: true,
+            displayNameSource: true,
+            phone: true,
+            email: true,
+            status: true,
+            funnelStage: true,
+            region: true,
+            isRegional: true,
+            isCoordinator: true,
+            specialization: true,
+            category: true,
+            amoContactId: true,
+            mergedIntoId: true,
+            doNotCall: true,
+            brokerTourVisited: true,
+            brokerTourDate: true,
+            lastCallAt: true,
+            updatedAt: true,
+            assignedManagerId: true,
+            assignedManager: { select: { id: true, fullName: true } },
+            phones: true,
+            brokerAgencies: { include: { agency: true } },
+            clients: {
+              where: fixationClientWhere(cabinetSource),
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: { createdAt: true },
+            },
+            meetings: {
+              where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
+              orderBy: { date: "desc" },
+              take: 1,
+              select: { date: true },
+            },
+            deals: {
+              where: this.ourConfirmedDealWhere(),
+              orderBy: { signedAt: "desc" },
+              take: 1,
+              select: { signedAt: true },
+            },
+            _count: {
+              select: {
+                clients: { where: fixationClientWhere(cabinetSource) },
+                deals: { where: this.ourConfirmedDealWhere() },
+                meetings: {
+                  where: { status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" } },
+                },
+                callLogs: true,
               },
-              callLogs: true,
             },
           },
-        },
-      });
-      records.push(...((Array.isArray(rows) ? rows : []) as any[]));
-    }
+        });
+        loaded.push(...((Array.isArray(rows) ? rows : []) as any[]));
+      }
+      if (!loaded.length) return loaded;
+      await this.attachOurBrokerRegistryDeals(loaded);
+        return loaded;
+      },
+    );
     if (!records.length) return;
-    await this.attachOurBrokerRegistryDeals(records);
     const candidates = records.map((record) => ({
       record,
       item: this.mapOurBroker(record, null),
