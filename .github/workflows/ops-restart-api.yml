@@ -1,0 +1,38 @@
+name: Ops restart api container
+
+# 2026-09-08: api зависает (health отвечает, запросы к БД висят, контейнер
+# unhealthy) после тяжёлого билда на сервере. Перезапуск контейнера api и
+# проверка здоровья/доступности БД-запроса. Ничего не мигрирует и не билдит.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ops-restart-api
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: SSH and restart api
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 5m
+          script: |
+            set -eu
+            cd "${{ secrets.DEPLOY_PATH }}"
+            echo "=== до: ==="; docker compose ps --format 'table {{.Name}}\t{{.Status}}'
+            echo "=== память/диск ==="; free -m | head -2; df -h / | tail -1
+            echo "=== последние строки логов api ==="; docker logs --tail 25 st-michael-api 2>&1 | cut -c1-200 || true
+            docker compose restart api
+            sleep 25
+            echo "=== после: ==="; docker compose ps --format 'table {{.Name}}\t{{.Status}}'
+            echo "health: $(curl -s --max-time 10 http://localhost:4000/api/health || true)"
+            echo "layout(DB): HTTP $(curl -s -o /dev/null -w '%{http_code}' --max-time 20 http://localhost:4000/api/public/documents/layout || true)"
