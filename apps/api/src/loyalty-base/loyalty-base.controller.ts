@@ -40,6 +40,7 @@ import {
   LoyaltyEntityUpdateDto,
   LoyaltyDetailQueryDto,
   LoyaltyExportDto,
+  LoyaltyActivitySummaryDto,
   LoyaltyImportDto,
   LoyaltyListQueryDto,
   LoyaltyLinkUnlinkDto,
@@ -106,6 +107,21 @@ export class LoyaltyBaseController {
   ) {
     await this.permissions.require(user, "READ_ALL");
     return this.loyalty.search(base, "BROKER", body);
+  }
+
+  // 2026-09-08: «Контрольные показатели активности» по текущим фильтрам.
+  @Post(":base/brokers/activity-summary")
+  @ApiOperation({
+    summary:
+      "Activity KPI (fixations, meetings, paid bookings, deals) over the current filtered broker selection",
+  })
+  async brokerActivitySummary(
+    @Param("base") base: string,
+    @Body() body: LoyaltyActivitySummaryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
+    return this.loyalty.activitySummary(base, "BROKER", body);
   }
 
   @Post(":base/brokers/export")
@@ -181,6 +197,20 @@ export class LoyaltyBaseController {
   ) {
     await this.permissions.require(user, "READ_ALL");
     return this.loyalty.search(base, "AGENCY", body);
+  }
+
+  @Post(":base/agencies/activity-summary")
+  @ApiOperation({
+    summary:
+      "Activity KPI over the current filtered agency selection (brokers of the agencies + registry rows by agency name)",
+  })
+  async agencyActivitySummary(
+    @Param("base") base: string,
+    @Body() body: LoyaltyActivitySummaryDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
+    return this.loyalty.activitySummary(base, "AGENCY", body);
   }
 
   @Post(":base/agencies/export")

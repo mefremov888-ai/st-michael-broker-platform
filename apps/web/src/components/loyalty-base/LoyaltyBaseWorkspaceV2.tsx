@@ -46,6 +46,8 @@ import {
   hasLoyaltyActivityEvidence,
   loyaltyLeaderMode,
   loyaltyMetricsForDisplay,
+  getLoyaltyActivitySummary,
+  type LoyaltyActivitySummary,
   type LoyaltyBaseKey,
   type LoyaltyColumnFilters,
   type LoyaltyEntityType,
@@ -891,6 +893,10 @@ export function LoyaltyBaseWorkspaceV2() {
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>("month");
   const [ratingRange, setRatingRange] = useState(periodRange("month"));
   const [overview, setOverview] = useState<LoyaltyOverview | null>(null);
+  // 2026-09-08: «Контрольные показатели активности» по текущим фильтрам списка.
+  const [activitySummary, setActivitySummary] =
+    useState<LoyaltyActivitySummary | null>(null);
+  const summaryRequest = useRef(0);
   const [overviewLoading, setOverviewLoading] = useState(true);
   const [overviewError, setOverviewError] = useState("");
   const [list, setList] = useState<LoyaltyListResponse | null>(null);
@@ -1022,6 +1028,37 @@ export function LoyaltyBaseWorkspaceV2() {
       if (request === overviewRequest.current) setOverviewLoading(false);
     }
   }, [base, canReadAll, ratingRange, filters.cabinetSource]);
+  const loadActivitySummary = useCallback(async () => {
+    if (!canReadAll || base !== "ours") {
+      setActivitySummary(null);
+      return;
+    }
+    const request = ++summaryRequest.current;
+    try {
+      const next = await getLoyaltyActivitySummary(
+        base,
+        entityType,
+        {
+          page: 1,
+          pageSize: 1,
+          search: filters.search,
+          city: filters.city || undefined,
+          hasAmo: filters.hasAmo,
+          archived: filters.archived,
+          segment,
+          sortBy: filters.sortBy,
+          sortOrder: filters.sortOrder,
+          filter: toCanonicalFilter(filters, entityType, base),
+          columns,
+        },
+        ratingRange,
+      );
+      if (request === summaryRequest.current) setActivitySummary(next);
+    } catch {
+      // Блок покажет общие цифры обзора; ошибку списка пользователь уже видит.
+      if (request === summaryRequest.current) setActivitySummary(null);
+    }
+  }, [base, canReadAll, columns, entityType, filters, segment, ratingRange]);
   const loadList = useCallback(async () => {
     if (!canReadAll) {
       setListLoading(false);
@@ -1064,6 +1101,9 @@ export function LoyaltyBaseWorkspaceV2() {
   useEffect(() => {
     if (mode === "base") void loadList();
   }, [loadList, mode]);
+  useEffect(() => {
+    if (mode === "base") void loadActivitySummary();
+  }, [loadActivitySummary, mode]);
   useEffect(() => {
     setSelected(new Set());
     setAllFilterSelected(false);
@@ -1367,6 +1407,18 @@ export function LoyaltyBaseWorkspaceV2() {
       },
     },
   ];
+  // 2026-09-08: блок «Контрольные показатели» берёт цифры по текущей выборке
+  // списка (activitySummary); если её нет (база Анны, ошибка) — цифры обзора.
+  const kpiActivities = activitySummary?.supported
+    ? activitySummary.activities
+    : (overview?.activities ?? null);
+  const kpiDealAmount = activitySummary?.supported
+    ? activitySummary.dealAmount
+    : (overview?.dealAmount ?? null);
+  const withSelectionNote = (text: string) =>
+    activitySummary?.supported
+      ? `${text}. Считаем только по ${entityType === "brokers" ? "брокерам" : "агентствам (их брокерам и строкам реестра с их названием)"}, попавшим под текущие фильтры списка`
+      : text;
   const metricExplanation = (
     key: string,
     fallbackFormula: string,
@@ -1860,8 +1912,9 @@ export function LoyaltyBaseWorkspaceV2() {
                   Контрольные показатели активности
                 </h2>
                 <p className="text-xs text-text-muted">
-                  Не входят в шесть KPI. Нажмите число для детализации в
-                  карточках-основаниях.
+                  {activitySummary?.supported
+                    ? `По текущим фильтрам списка: ${entityType === "brokers" ? "брокеров" : "агентств"} ${activitySummary.selectionCount.toLocaleString("ru-RU")}${entityType === "agencies" ? `, их брокеров ${activitySummary.brokers.toLocaleString("ru-RU")}` : ""} · период: ${ratingLabel}. Нажмите число, чтобы открыть карточки-основания.`
+                    : "Не входят в шесть KPI. Нажмите число для детализации в карточках-основаниях."}
                 </p>
               </div>
               <span className="rounded-full bg-accent/10 px-3 py-1 text-xs text-accent">
@@ -1874,49 +1927,49 @@ export function LoyaltyBaseWorkspaceV2() {
                 onClick={() => openActivityDrilldown("fixations")}
                 explanation={metricExplanation(
                   "activities.fixations",
-                  "Количество подтверждённых фиксаций за выбранный период",
+                  withSelectionNote("Количество подтверждённых фиксаций за выбранный период"),
                 )}
               >
-                {number(overview?.activities.fixations ?? null)}
+                {number(kpiActivities?.fixations ?? null)}
               </Metric>
               <Metric
                 label="Встречи"
                 onClick={() => openActivityDrilldown("meetings")}
                 explanation={metricExplanation(
                   "activities.meetings",
-                  "Количество подтверждённых встреч за выбранный период",
+                  withSelectionNote("Количество подтверждённых встреч за выбранный период"),
                 )}
               >
-                {number(overview?.activities.meetings ?? null)}
+                {number(kpiActivities?.meetings ?? null)}
               </Metric>
               <Metric
                 label="Платные брони"
                 explanation={metricExplanation(
                   "activities.paidBookings",
-                  "Оплаченные ДВОУ из «Реестра сделок» за выбранный период (по дате оплаты ДВОУ)",
+                  withSelectionNote("Оплаченные ДВОУ из «Реестра сделок» за выбранный период (по дате оплаты ДВОУ)"),
                 )}
               >
-                {number(overview?.activities.paidBookings ?? null)}
+                {number(kpiActivities?.paidBookings ?? null)}
               </Metric>
               <Metric
                 label="Сделки"
                 onClick={() => openActivityDrilldown("deals")}
                 explanation={metricExplanation(
                   "activities.deals",
-                  "Оплаченные ДДУ за выбранный период (по «Дате оплаты ДДУ»)",
+                  withSelectionNote("Оплаченные ДДУ за выбранный период (по «Дате оплаты ДДУ»)"),
                 )}
               >
-                {number(overview?.activities.deals ?? null)}
+                {number(kpiActivities?.deals ?? null)}
               </Metric>
               <Metric
                 label="Сумма ДДУ"
                 onClick={() => openActivityDrilldown("dealAmount")}
                 explanation={metricExplanation(
                   "dealAmount",
-                  "Сумма подтверждённых ДДУ за выбранный период",
+                  withSelectionNote("Сумма подтверждённых ДДУ за выбранный период"),
                 )}
               >
-                {money(overview?.dealAmount ?? null)}
+                {money(kpiDealAmount)}
               </Metric>
             </dl>
           </section>

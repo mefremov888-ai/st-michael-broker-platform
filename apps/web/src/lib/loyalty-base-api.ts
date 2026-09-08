@@ -2809,6 +2809,73 @@ const queryString = (entries: object) => {
   return query ? `?${query}` : "";
 };
 
+// 2026-09-08: «Контрольные показатели активности» по текущим фильтрам списка.
+export interface LoyaltyActivitySummary {
+  supported: boolean;
+  period: { from: string; to: string } | null;
+  selectionCount: number;
+  brokers: number;
+  activities: {
+    fixations: number | null;
+    meetings: number | null;
+    paidBookings: number | null;
+    deals: number | null;
+  };
+  dealAmount: string | null;
+  methodology: string;
+}
+
+export async function getLoyaltyActivitySummary(
+  base: LoyaltyBaseKey,
+  entityType: LoyaltyEntityType,
+  filters: LoyaltyListFilters,
+  summaryPeriod?: { from: string; to: string },
+): Promise<LoyaltyActivitySummary> {
+  const search = filters.search?.trim() || "";
+  const hasAmoValue =
+    filters.hasAmo === "" || filters.hasAmo === undefined
+      ? undefined
+      : filters.hasAmo === "true";
+  const value = await postWithScanRetry<unknown>(
+    `/loyalty-base/${base}/${entityType}/activity-summary`,
+    {
+      search,
+      page: 1,
+      pageSize: 1,
+      archived: filters.archived,
+      sortBy: filters.sortBy,
+      sortOrder: filters.sortOrder,
+      city: filters.city || undefined,
+      hasAmo: hasAmoValue,
+      segment: filters.segment || undefined,
+      filter: filters.filter || {},
+      columns: filters.columns,
+      summaryPeriod:
+        summaryPeriod?.from && summaryPeriod?.to ? summaryPeriod : undefined,
+    },
+  );
+  const root = responseRoot(value);
+  const activities = nonEmptyRecord(root.activities) || {};
+  const selection = nonEmptyRecord(root.selection) || {};
+  const period = nonEmptyRecord(root.period);
+  return {
+    supported: booleanValue(root.supported) === true,
+    period: period
+      ? { from: stringValue(period.from), to: stringValue(period.to) }
+      : null,
+    selectionCount: numberValue(selection.count),
+    brokers: numberValue(selection.brokers),
+    activities: {
+      fixations: nullableNumberValue(activities.fixations),
+      meetings: nullableNumberValue(activities.meetings),
+      paidBookings: nullableNumberValue(activities.paidBookings),
+      deals: nullableNumberValue(activities.deals),
+    },
+    dealAmount: nullableDecimalValue(root.dealAmount),
+    methodology: stringValue(root.methodology),
+  };
+}
+
 export async function getLoyaltyOverview(
   base: LoyaltyBaseKey,
   range?: { from: string; to: string },
