@@ -1,0 +1,66 @@
+name: Ops install api autoheal (cron on server)
+
+# 2026-09-08 (инцидент 17:25 UTC): api может зависнуть (health отвечает, а
+# запросы к БД висят; контейнер unhealthy). Ставим в crontab пользователя
+# деплоя проверку раз в 2 минуты: если st-michael-api unhealthy — restart api,
+# запись в лог /tmp/st-michael-autoheal.log. Идемпотентно (маркер в crontab).
+
+on:
+  workflow_dispatch:
+    inputs:
+      remove:
+        description: 'Убрать автоперезапуск (true) вместо установки'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ops-install-autoheal
+  cancel-in-progress: false
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: SSH and install cron
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          REMOVE: ${{ inputs.remove }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 4m
+          envs: REMOVE
+          script: |
+            set -eu
+            DP="${{ secrets.DEPLOY_PATH }}"
+            cat > "$DP/ops-autoheal.sh" <<'SH'
+            #!/usr/bin/env bash
+            # st-michael autoheal: если api unhealthy — перезапуск (не чаще раза в 10 минут).
+            cd "$(dirname "$0")"
+            LOG=/tmp/st-michael-autoheal.log; STAMP=/tmp/st-michael-autoheal.last
+            st=$(docker inspect st-michael-api --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
+            if [ "$st" = "unhealthy" ]; then
+              now=$(date +%s); last=$(cat "$STAMP" 2>/dev/null || echo 0)
+              if [ $((now-last)) -gt 600 ]; then
+                echo "$(date -u +%FT%TZ) api unhealthy -> restart" >> "$LOG"
+                docker compose restart api >> "$LOG" 2>&1 || true
+                echo "$now" > "$STAMP"
+              fi
+            fi
+            SH
+            chmod +x "$DP/ops-autoheal.sh"
+            MARK="# st-michael-autoheal"
+            current=$(crontab -l 2>/dev/null | grep -v "$MARK" || true)
+            if [ "${REMOVE:-false}" = "true" ]; then
+              printf '%s\n' "$current" | crontab -
+              echo "autoheal убран"
+            else
+              printf '%s\n%s\n' "$current" "*/2 * * * * $DP/ops-autoheal.sh $MARK" | sed '/^$/d' | crontab -
+              echo "autoheal установлен:"; crontab -l | grep "$MARK"
+            fi
+            echo "текущее здоровье api: $(docker inspect st-michael-api --format '{{.State.Health.Status}}')"
