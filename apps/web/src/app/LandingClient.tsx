@@ -17,6 +17,7 @@ import {
   DEFAULT_MATERIALS_LAYOUT,
   parseMaterialsLayout,
   sortMaterialsRootFolders,
+  resolveMaterialsCover,
   withDisplaySubcategory,
   type MaterialsFolderLayout,
 } from '@shared/materials-folder-layout';
@@ -730,9 +731,10 @@ function folderIcon(name: string, groupTitles: string[]) {
 
 // 2026-09-04: превью-карточки папок в стиле медиатеки (референс пользователя):
 // номер + курсивное название + обложка из первого фото + «N фото · N видео».
-function folderCover(docs: any[], prefix: string[]): string | null {
-  const first = filesUnder(docs, prefix).find(isPhotoDoc);
-  return first ? materialsThumbUrl(first.fileUrl) : null;
+// 2026-09-08: обложка — из раскладки (явная) → первое фото → обложка родителя.
+function folderCover(docs: any[], prefix: string[], layout: MaterialsFolderLayout): string | null {
+  const url = resolveMaterialsCover(layout, docs, prefix);
+  return url ? materialsThumbUrl(url) : null;
 }
 
 function MaterialsSection({ materials, layout }: { materials: any[]; layout: MaterialsFolderLayout }) {
@@ -751,7 +753,7 @@ function MaterialsSection({ materials, layout }: { materials: any[]; layout: Mat
       ) : (
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(230px,1fr))',gap:18}}>
           {roots.map((cat, idx) => {
-            const cover = folderCover(mapped, [cat]);
+            const cover = folderCover(mapped, [cat], layout);
             const counts = mediaCountsUnder(mapped, [cat]);
             return (
               <a

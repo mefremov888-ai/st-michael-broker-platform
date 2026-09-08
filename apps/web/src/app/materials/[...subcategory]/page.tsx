@@ -26,6 +26,7 @@ import {
 } from '@/lib/materials-folder-tree';
 import { materialsThumbUrl } from '@/lib/materials-thumb';
 import {
+  resolveMaterialsCover,
   DEFAULT_MATERIALS_LAYOUT,
   parseMaterialsLayout,
   withDisplaySubcategory,
@@ -234,8 +235,9 @@ export default function MaterialsFolderPage() {
                     // 2026-09-04: превью-карточка в стиле медиатеки — номер,
                     // курсивное название, обложка из первого фото, счётчик.
                     const counts = mediaCountsUnder(countDocs, nested);
-                    const coverDoc = filesUnder(countDocs, nested).find(isPhotoDoc);
-                    const cover = coverDoc ? materialsThumbUrl((coverDoc as any).fileUrl) : null;
+                    // 2026-09-08: явная обложка из раскладки → первое фото → обложка родителя.
+                    const coverUrl = resolveMaterialsCover(layout, countDocs as any[], nested);
+                    const cover = coverUrl ? materialsThumbUrl(coverUrl) : null;
                     return (
                       <a
                         key={folder}

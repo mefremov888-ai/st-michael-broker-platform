@@ -25,6 +25,9 @@ export type MaterialsFolderLayout = {
   version: 1;
   groups: MaterialsFolderGroup[];
   rules: MaterialsFolderRule[];
+  // 2026-09-08 (владелец): обложки папок — путь папки как на сайте
+  // («Зорге 9», «Зорге 9/Видео», «Презентации») → fileUrl фото из материалов.
+  covers?: Record<string, string>;
 };
 
 const VIDEO_RE = /\.(mp4|mov|webm|m4v|avi|mkv)(\?|#|$)/i;
@@ -160,6 +163,15 @@ export function isValidMaterialsFolderLayout(value: unknown): value is Materials
     return false;
   }
   const kinds: MaterialsFolderKind[] = ['as_is', 'photo', 'video', 'split'];
+  if (
+    layout.covers !== undefined &&
+    (layout.covers === null ||
+      typeof layout.covers !== 'object' ||
+      Array.isArray(layout.covers) ||
+      Object.values(layout.covers).some((value) => typeof value !== 'string'))
+  ) {
+    return false;
+  }
   return (
     layout.groups.every(
       (group) =>
@@ -370,6 +382,58 @@ export function withDisplaySubcategory<T extends {
   }
 
   return out;
+}
+
+const COVER_PHOTO_RE = /\.(jpe?g|png|webp)(\?|#|$)/i;
+
+function isCoverPhoto(doc: { fileUrl?: string | null; type?: string | null; name?: string | null }): boolean {
+  return (
+    COVER_PHOTO_RE.test(String(doc.fileUrl || '')) ||
+    COVER_PHOTO_RE.test(String(doc.name || '')) ||
+    doc.type === 'JPG' ||
+    doc.type === 'PNG'
+  );
+}
+
+/**
+ * 2026-09-08: обложка папки материалов (fileUrl оригинала, без превью).
+ * Порядок: явная обложка из раскладки для этого пути → первое фото внутри
+ * папки → обложка родительской папки (так у видеопапок без фото появляется
+ * обложка ЖК) → null (иконка).
+ */
+export function resolveMaterialsCover(
+  layout: MaterialsFolderLayout,
+  docs: Array<{ subcategory?: string | null; fileUrl?: string | null; type?: string | null; name?: string | null }>,
+  pathParts: string[],
+): string | null {
+  const covers = layout.covers || {};
+  for (let depth = pathParts.length; depth >= 1; depth -= 1) {
+    const parts = pathParts.slice(0, depth);
+    const key = parts.join('/');
+    const explicit = covers[key];
+    if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+    const first = docs.find((doc) => {
+      const path = splitMaterialPath(doc.subcategory).join('/');
+      return (path === key || path.startsWith(`${key}/`)) && isCoverPhoto(doc);
+    });
+    if (first?.fileUrl) return String(first.fileUrl);
+  }
+  return null;
+}
+
+export function setMaterialsCover(
+  layout: MaterialsFolderLayout,
+  pathKey: string,
+  fileUrl: string | null,
+): MaterialsFolderLayout {
+  const next = cloneLayout(layout);
+  const covers = { ...(next.covers || {}) };
+  const key = splitMaterialPath(pathKey).join('/');
+  if (!key) return next;
+  if (fileUrl && fileUrl.trim()) covers[key] = fileUrl.trim();
+  else delete covers[key];
+  next.covers = covers;
+  return next;
 }
 
 export function materialsRootSortKey(name: string, layout: MaterialsFolderLayout): number {
