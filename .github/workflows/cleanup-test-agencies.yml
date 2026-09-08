@@ -22,6 +22,11 @@ on:
         required: false
         default: ''
         type: string
+      only_names:
+        description: 'Только эти названия через ; (мусорные агентства без ИНН)'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: cleanup-test-agencies
@@ -37,6 +42,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           ONLY_INNS_INPUT: ${{ inputs.only_inns }}
+          ONLY_NAMES_INPUT: ${{ inputs.only_names }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -44,7 +50,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 10m
-          envs: ONLY_INNS_INPUT
+          envs: ONLY_INNS_INPUT,ONLY_NAMES_INPUT
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
@@ -54,5 +60,5 @@ jobs:
             docker cp /tmp/cleanup-test-agencies.js st-michael-api:/app/scripts/cleanup-test-agencies.js
             ARGS=""
             if [ "${{ inputs.apply }}" = "true" ]; then ARGS="--apply"; fi
-            docker compose exec -T -e ONLY_INNS="$ONLY_INNS_INPUT" api node /app/scripts/cleanup-test-agencies.js $ARGS
+            docker compose exec -T -e ONLY_INNS="$ONLY_INNS_INPUT" -e ONLY_NAMES="$ONLY_NAMES_INPUT" api node /app/scripts/cleanup-test-agencies.js $ARGS
             echo "=== Готово ==="
