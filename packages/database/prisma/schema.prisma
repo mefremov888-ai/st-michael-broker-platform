@@ -609,6 +609,9 @@ model Client {
   @@index([phone])
   @@index([brokerId])
   @@index([amoSyncStatus])
+  // 2026-09-08: один лид amo = одна запись у брокера (корень дублей синка,
+  // PR 493); NULL amo_lead_id (ручные заявки) уникальностью не ограничен.
+  @@unique([brokerId, amoLeadId])
   @@map("clients")
 }
 
