@@ -347,8 +347,15 @@ export class AmocrmService {
         // Upsert client с реальной датой создания/изменения из amoCRM (правка 2026-05-14).
         const leadCreatedAt = lead.created_at ? new Date(lead.created_at * 1000) : null;
         const leadUpdatedAt = lead.updated_at ? new Date(lead.updated_at * 1000) : null;
+        // 2026-09-08 (корень дублей): одна и та же заявка = один лид amo у
+        // одного брокера. Сначала ищем именно её (независимо от телефона в
+        // разных форматах и от ответственного), и только потом — по телефону.
+        let client = await this.prisma.client.findFirst({
+          where: { amoLeadId: BigInt(lead.id), brokerId, ...notHistoricalClientWhere },
+          orderBy: { createdAt: 'asc' },
+        });
         // 2026-09-07: исторические строки старого кабинета не переиспользуем.
-        let client = await this.prisma.client.findFirst({ where: { phone, brokerId, ...notHistoricalClientWhere } });
+        if (!client) client = await this.prisma.client.findFirst({ where: { phone, brokerId, ...notHistoricalClientWhere } });
         // 2026-07-02: если клиент уже есть у ДРУГОГО брокера (напр. фиксация
         // А → на Б создала Client с brokerId=А), синк Б переиспользует
         // существующего вместо создания дубля. Плюс назначаем Б как

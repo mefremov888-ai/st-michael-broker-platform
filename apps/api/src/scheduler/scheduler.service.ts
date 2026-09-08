@@ -811,9 +811,16 @@ export class SchedulerService {
                 { responsibleBrokerId: null, brokerId: broker.id },
               ],
             };
+            // 2026-09-08 (корень дублей): одна заявка = один лид amo у одного
+            // брокера — ищем её первой, без условий по телефону/ответственному
+            // (иначе крон каждые 30 минут заводил новую копию).
+            let client = await this.prisma.client.findFirst({
+              where: { amoLeadId: BigInt(leadRef.id), brokerId: broker.id, ...notHistoricalClientWhere },
+              orderBy: { createdAt: 'asc' },
+            });
             // Не склеиваем заявки разных брокеров по телефону. Синк может
             // переиспользовать только заявку того же фактического брокера.
-            let client = await this.prisma.client.findFirst({
+            if (!client) client = await this.prisma.client.findFirst({
               where: { phone, amoLeadId: BigInt(leadRef.id), ...brokerOwnership, ...notHistoricalClientWhere },
               orderBy: { createdAt: 'desc' },
             });
