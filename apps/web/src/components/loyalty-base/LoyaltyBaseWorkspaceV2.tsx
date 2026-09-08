@@ -54,6 +54,7 @@ import {
   type LoyaltyOverview,
   type LoyaltyRecord,
   type LoyaltySegment,
+  type LoyaltySortField,
 } from "@/lib/loyalty-base-api";
 import {
   emptyLoyaltyFilters,
@@ -387,6 +388,9 @@ function LoyaltyTable({
   operators,
   columnDraft,
   onColumnDraft,
+  sortBy,
+  sortOrder,
+  onSort,
 }: {
   data: LoyaltyListResponse;
   entityType: LoyaltyEntityType;
@@ -399,7 +403,27 @@ function LoyaltyTable({
   operators: LoyaltyOperator[];
   columnDraft: LoyaltyColumnFilters;
   onColumnDraft: (next: LoyaltyColumnFilters) => void;
+  // 2026-09-08 (просьба владельца): сортировка кликом по заголовку столбца.
+  sortBy: LoyaltySortField;
+  sortOrder: "asc" | "desc";
+  onSort: (field: LoyaltySortField) => void;
 }) {
+  // Заголовок-кнопка: клик — сортировать по полю, повторный — сменить направление.
+  const SortHeader = ({ field, children, align = "left" }: { field: LoyaltySortField; children: ReactNode; align?: "left" | "right" }) => {
+    const active = sortBy === field;
+    return (
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        className={`inline-flex items-center gap-1 font-medium hover:text-text ${active ? "text-text" : ""} ${align === "right" ? "justify-end w-full" : ""}`}
+        title={active ? (sortOrder === "asc" ? "По возрастанию · нажмите для убывания" : "По убыванию · нажмите для возрастания") : "Сортировать"}
+        aria-sort={active ? (sortOrder === "asc" ? "ascending" : "descending") : "none"}
+      >
+        {children}
+        <span aria-hidden="true" className={active ? "" : "opacity-30"}>{active && sortOrder === "asc" ? "▲" : "▼"}</span>
+      </button>
+    );
+  };
   // «Не звонить» (задача A): в «Нашей базе» такие брокеры видны в списке,
   // но недоступны для ручного выбора — кампании обзвона их всегда исключают.
   const selectable = (item: LoyaltyRecord) =>
@@ -448,17 +472,29 @@ function LoyaltyTable({
               />
             </th>
             <th className="pb-2 pr-3">
-              {entityType === "brokers" ? "Брокер" : "Агентство"}
+              <SortHeader field="name">{entityType === "brokers" ? "Брокер" : "Агентство"}</SortHeader>
             </th>
             <th className="pb-2 pr-3">
               {entityType === "brokers"
                 ? "Статус и стадия"
                 : "Уровень партнёрства"}
             </th>
-            <th className="pb-2 pr-3">Активность</th>
-            <th className="pb-2 pr-3">Прошлые обзвоны</th>
+            <th className="pb-2 pr-3">
+              <span className="inline-flex items-center gap-2">
+                <SortHeader field="fixations">Активность</SortHeader>
+                <span className="text-xs text-text-muted">·</span>
+                <SortHeader field="meetings"><span className="text-xs">встречи</span></SortHeader>
+              </span>
+            </th>
+            <th className="pb-2 pr-3"><SortHeader field="lastCallAt">Прошлые обзвоны</SortHeader></th>
             <th className="pb-2 pr-3">Ответственный</th>
-            <th className="pb-2 text-right">Сделки</th>
+            <th className="pb-2 text-right">
+              <span className="inline-flex items-center justify-end gap-2">
+                <SortHeader field="deals" align="right">Сделки</SortHeader>
+                <span className="text-xs text-text-muted">·</span>
+                <SortHeader field="dealAmount" align="right"><span className="text-xs">сумма</span></SortHeader>
+              </span>
+            </th>
           </tr>
           <tr className="border-b border-border align-top">
             <th />
@@ -690,9 +726,10 @@ function LoyaltyTable({
                 <td className="py-3 pr-3">{item.assignee || "Не назначен"}</td>
                 <td className="py-3 text-right">
                   <b>{number(displayedMetrics.deals)}</b>
-                  <small className="block whitespace-nowrap text-text-muted">
+                  {/* 2026-09-08 (просьба владельца): сумма тем же размером, что соседние столбцы */}
+                  <span className="block whitespace-nowrap text-sm text-text-muted">
                     {money(displayedMetrics.dealAmount)}
-                  </small>
+                  </span>
                   {hasSourceMetrics && sourceMetrics && (
                     <small className="mt-1 block whitespace-nowrap text-warning">
                       Срез · не подтверждено: {number(sourceMetrics.deals)} ·{" "}
@@ -2152,6 +2189,20 @@ export function LoyaltyBaseWorkspaceV2() {
                 onColumnDraft={(next) => {
                   setColumnDrafts((current) => ({ ...current, [key]: next }));
                   setColumnApplied((current) => ({ ...current, [key]: next }));
+                  setPage(1);
+                }}
+                sortBy={filters.sortBy}
+                sortOrder={filters.sortOrder}
+                onSort={(field) => {
+                  // Повторный клик по активному столбцу меняет направление;
+                  // числовые поля по умолчанию по убыванию, имя — по возрастанию.
+                  const nextOrder =
+                    filters.sortBy === field
+                      ? filters.sortOrder === "asc" ? "desc" : "asc"
+                      : field === "name" || field === "city" ? "asc" : "desc";
+                  const next = { ...filters, sortBy: field, sortOrder: nextOrder as "asc" | "desc" };
+                  setDrafts((current) => ({ ...current, [key]: next }));
+                  setApplied((current) => ({ ...current, [key]: next }));
                   setPage(1);
                 }}
               />
