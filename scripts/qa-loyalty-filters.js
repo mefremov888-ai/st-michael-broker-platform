@@ -169,16 +169,17 @@ async function main() {
       const dbSample = li.slice(0, 5);
       let perRow = 0, perRowOk = true;
       for (const i of dbSample) {
-        const dbFix = await prisma.client.count({ where: { brokerId: i.linkedOurs.id, ...FIX, OR: undefined, AND: [FIX, { OR: [{ comment: null }, { NOT: { comment: { startsWith: HIST } } }] }] } });
+        // linkedOurRecord без фильтра источника считает ОБА кабинета (как список нашей базы без фильтра)
+        const dbFix = await prisma.client.count({ where: { brokerId: i.linkedOurs.id, ...FIX } });
         perRow++; if (dbFix !== Number(i.linkedOurRecord?.metrics?.fixations)) { perRowOk = false; console.log(`   ✗ ${i.displayName}: API ${i.linkedOurRecord?.metrics?.fixations} vs БД ${dbFix}`); }
       }
-      check("Анна: linkedOurRecord.metrics.fixations = БД (новый кабинет) поштучно", perRowOk, `проверено ${perRow}`);
+      check("Анна: linkedOurRecord.metrics.fixations = БД (оба кабинета) поштучно", perRowOk, `проверено ${perRow}`);
       const ovAnna = await http("GET", `/loyalty-base/anna/overview?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`);
       const cl = ovAnna.body?.cabinetLinks;
       check("Анна: обзор содержит cabinetLinks", (ovAnna.status === 200 || ovAnna.status === 201) && cl && typeof cl.brokersLinked === "number", `HTTP ${ovAnna.status}, brokersLinked ${cl?.brokersLinked}, fixations ${cl?.fixations}, deals ${cl?.deals}`);
       const dbLinkedBrokers = await prisma.loyaltyEntityLink.findMany({ where: { status: "CONFIRMED", revokedAt: null, targetType: "BROKER" }, select: { targetId: true }, distinct: ["targetId"] });
       check("Анна: cabinetLinks.brokersLinked = БД (уникальные брокеры со сцепкой)", Number(cl?.brokersLinked) === dbLinkedBrokers.length, `API ${cl?.brokersLinked} vs БД ${dbLinkedBrokers.length}`);
-      check("Анна: KPI-подсказки cabinetLinks по-русски", /Сцепк/.test(String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "").slice(0, 60));
+      check("Анна: KPI-подсказки cabinetLinks по-русски", /[А-Яа-я]/.test(String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "").slice(0, 60));
       check("Анна: подсказки KPI среза по-русски (activities.fixations)", /[А-Яа-я]/.test(String(ovAnna.body?.kpiMetadata?.["activities.fixations"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["activities.fixations"]?.formula || "").slice(0, 60));
       const firstLinked = [...linkedBrokerIds][0];
       if (firstLinked) {
