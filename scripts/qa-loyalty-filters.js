@@ -158,6 +158,33 @@ async function main() {
       }
       const dbLinks = await prisma.loyaltyEntityLink.count({ where: { status: "CONFIRMED", revokedAt: null } });
       check("Анна: подтверждённых сцепок в БД ≥ 6000", dbLinks >= 6000, `${dbLinks}`);
+      // 2026-09-08 (поезд 31): цифры кабинета в списке Анны, фильтр «Сцепка с кабинетом», KPI cabinetLinks, обратная ссылка
+      const annaLinked = await http("POST", `/loyalty-base/anna/brokers/search`, { page: 1, pageSize: 50, archived: "exclude", sortBy: "deals", sortOrder: "desc", filter: { linkedOurs: "linked" }, columns: {} });
+      const annaUnlinked = await http("POST", `/loyalty-base/anna/brokers/search`, { page: 1, pageSize: 1, archived: "exclude", sortBy: "name", sortOrder: "asc", filter: { linkedOurs: "unlinked" }, columns: {} });
+      const li = Array.isArray(annaLinked.body?.items) ? annaLinked.body.items : [];
+      check("Анна: фильтр linked + unlinked = всего", Number(annaLinked.body?.total) + Number(annaUnlinked.body?.total) === Number(anna.body?.total), `${annaLinked.body?.total} + ${annaUnlinked.body?.total} vs ${anna.body?.total}`);
+      check("Анна: у строк «linked» есть linkedOurRecord с цифрами кабинета", li.length > 0 && li.every((i) => i.linkedOurRecord && i.linkedOurRecord.metrics && typeof i.linkedOurRecord.metrics.fixations === "number"), `проверено ${li.length}`);
+      check("Анна: сортировка по сделкам берёт цифры кабинета (первая строка ≥ второй)", li.length < 2 || Number(li[0].linkedOurRecord?.metrics?.deals || 0) >= Number(li[1].linkedOurRecord?.metrics?.deals || 0), `${li[0]?.linkedOurRecord?.metrics?.deals} ≥ ${li[1]?.linkedOurRecord?.metrics?.deals}`);
+      const linkedBrokerIds = new Set(li.map((i) => i.linkedOurs?.id).filter(Boolean));
+      const dbSample = li.slice(0, 5);
+      let perRow = 0, perRowOk = true;
+      for (const i of dbSample) {
+        const dbFix = await prisma.client.count({ where: { brokerId: i.linkedOurs.id, ...FIX, OR: undefined, AND: [FIX, { OR: [{ comment: null }, { NOT: { comment: { startsWith: HIST } } }] }] } });
+        perRow++; if (dbFix !== Number(i.linkedOurRecord?.metrics?.fixations)) { perRowOk = false; console.log(`   ✗ ${i.displayName}: API ${i.linkedOurRecord?.metrics?.fixations} vs БД ${dbFix}`); }
+      }
+      check("Анна: linkedOurRecord.metrics.fixations = БД (новый кабинет) поштучно", perRowOk, `проверено ${perRow}`);
+      const ovAnna = await http("GET", `/loyalty-base/anna/overview?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`);
+      const cl = ovAnna.body?.cabinetLinks;
+      check("Анна: обзор содержит cabinetLinks", (ovAnna.status === 200 || ovAnna.status === 201) && cl && typeof cl.brokersLinked === "number", `HTTP ${ovAnna.status}, brokersLinked ${cl?.brokersLinked}, fixations ${cl?.fixations}, deals ${cl?.deals}`);
+      const dbLinkedBrokers = await prisma.loyaltyEntityLink.findMany({ where: { status: "CONFIRMED", revokedAt: null, targetType: "BROKER" }, select: { targetId: true }, distinct: ["targetId"] });
+      check("Анна: cabinetLinks.brokersLinked = БД (уникальные брокеры со сцепкой)", Number(cl?.brokersLinked) === dbLinkedBrokers.length, `API ${cl?.brokersLinked} vs БД ${dbLinkedBrokers.length}`);
+      check("Анна: KPI-подсказки cabinetLinks по-русски", /Сцепк/.test(String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["cabinetLinks.brokersLinked"]?.formula || "").slice(0, 60));
+      check("Анна: подсказки KPI среза по-русски (activities.fixations)", /[А-Яа-я]/.test(String(ovAnna.body?.kpiMetadata?.["activities.fixations"]?.formula || "")), String(ovAnna.body?.kpiMetadata?.["activities.fixations"]?.formula || "").slice(0, 60));
+      const firstLinked = [...linkedBrokerIds][0];
+      if (firstLinked) {
+        const ours = await http("GET", `/loyalty-base/ours/brokers/${encodeURIComponent(firstLinked)}`);
+        check("Наша база: карточка сцепленного брокера показывает linkedAnna", ours.status === 200 && ours.body?.item?.linkedAnna?.id, `HTTP ${ours.status}, linkedAnna ${ours.body?.item?.linkedAnna?.displayName || "нет"}`);
+      }
     } catch (e) { check("Анна: сцепки", false, String(e?.message || e)); }
 
     const failed = results.filter((r) => !r.ok).length;
