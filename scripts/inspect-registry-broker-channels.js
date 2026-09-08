@@ -83,7 +83,7 @@ async function main() {
     const contacts = new Map(); const cids = [...contactIds];
     for (let i = 0; i < cids.length; i += BATCH) {
       const q = cids.slice(i, i + BATCH).map((id) => `filter[id][]=${id}`).join("&");
-      try { const res = await amo["request"](`/contacts?${q}&limit=${BATCH}`); for (const c of res?._embedded?.contacts || []) contacts.set(Number(c.id), c); } catch (e) { console.error(`contacts page ${i}: ${e?.message || e}`); }
+      try { const res = await amo["request"](`/contacts?${q}&limit=${BATCH}&with=companies`); for (const c of res?._embedded?.contacts || []) contacts.set(Number(c.id), c); } catch (e) { console.error(`contacts page ${i}: ${e?.message || e}`); }
       await sleep(AMO_PAGE_PAUSE_MS);
     }
     // B. Примечания лидов.
@@ -102,18 +102,37 @@ async function main() {
     console.log(`Лидов: ${leads.size}; контактов: ${contacts.size}; лидов с примечаниями: ${notesByLead.size}`);
 
     const cf = (e, id) => (e?.custom_fields_values || []).find((f) => Number(f.field_id) === Number(id))?.values?.map((v) => v.value).filter(Boolean).join(" ") || "";
-    const found = []; const stats = { A: 0, B_phone: 0, B_name: 0, C: 0, D: 0, E: 0, F: 0, none: 0, multi: 0 };
+    const found = []; const allRows = []; const stats = { A: 0, B_phone: 0, B_name: 0, C: 0, D: 0, D2: 0, E: 0, F: 0, none: 0, multi: 0 };
     const clientNameIdx = new Map(); // для E — по ФИО клиента среди наших фиксаций
     for (const r of rows) {
       const lead = leads.get(Number(r.amoLeadId));
       const agencyId = rowAgency(r);
       const cands = new Map(); // brokerId -> channel
       const add = (ids, ch) => { for (const id of ids) if (!cands.has(id)) cands.set(id, ch); };
+      const evidence = { contacts: 0, brokerContacts: 0, notes: 0, notesWithBrokerWord: 0, tags: 0, agencyInRegistry: Boolean(r.agencyCanonical || r.agencyNameRaw) };
       if (lead) {
+        evidence.contacts = (lead._embedded?.contacts || []).length;
+        evidence.tags = (lead._embedded?.tags || []).length;
+        const nts = notesByLead.get(Number(lead.id)) || [];
+        evidence.notes = nts.length;
+        evidence.notesWithBrokerWord = nts.filter((t) => /брокер|агент|риелт|партн/i.test(t)).length;
         for (const f of agentLeadFields) { const v = cf(lead, f.id); if (v) { add(phoneMatch(v), "A"); add(nameMatch(v, agencyId), "A"); } }
         for (const t of notesByLead.get(Number(lead.id)) || []) { const ph = phoneMatch(t); if (ph.length) add(ph, "B_phone"); const m = t.match(/(?:брокер|агент)[^:\n]{0,20}:\s*([^\n,;(]{5,60})/i); if (m) add(nameMatch(m[1], agencyId), "B_name"); }
         for (const tg of lead._embedded?.tags || []) add(nameMatch(tg.name, agencyId), "C");
         for (const c of lead._embedded?.contacts || []) { const ct = contacts.get(Number(c.id)); for (const f of agentContactFields) { const v = cf(ct, f.id); if (v) { add(phoneMatch(v), "D"); add(nameMatch(v, agencyId), "D"); } } }
+        // D2 (2026-09-08): контакт лида с флагом «Брокер» (835415) или привязанный к
+        // компании — это брокер; ищем его карточку по amoContactId и телефонам.
+        for (const c of lead._embedded?.contacts || []) {
+          const ct = contacts.get(Number(c.id)); if (!ct) continue;
+          const flag = String(cf(ct, 835415) || "").toLowerCase();
+          const isBrokerContact = ["true", "1", "да", "yes"].includes(flag) || (ct._embedded?.companies || []).length > 0;
+          if (!isBrokerContact) continue;
+          evidence.brokerContacts++;
+          const byC = brokers.filter((b) => String(b.amoContactId || "") === String(ct.id)).map((b) => b.id);
+          add(byC, "D2");
+          const phones = (ct.custom_fields_values || []).filter((f) => f.field_code === "PHONE").flatMap((f) => (f.values || []).map((v) => v.value));
+          add(phoneMatch(phones.join(" ")), "D2");
+        }
         // E: ФИО клиента → наши фиксации с тем же ФИО до сделки.
         const clientName = (lead._embedded?.contacts || []).map((c) => contacts.get(Number(c.id))?.name).filter(Boolean)[0];
         if (clientName && words(clientName).size >= 2) {
@@ -131,6 +150,7 @@ async function main() {
         const ag = brokers.filter((b) => b.brokerAgencies.some((x) => x.agencyId === agencyId));
         if (ag.length === 1) add([ag[0].id], "F");
       }
+      allRows.push({ id: r.id, contractNumber: r.contractNumber, project: r.project, paidAt: r.paidAt.toISOString().slice(0, 10), amoLeadId: r.amoLeadId ? String(r.amoLeadId) : null, agencyInRegistry: r.agencyNameRaw || r.agencyCanonical || null, ...evidence, candidates: cands.size, channels: [...new Set(cands.values())].join("+") });
       if (!cands.size) { stats.none++; continue; }
       if (cands.size > 1) { stats.multi++; }
       const [brokerId, ch] = [...cands.entries()][0];
@@ -138,10 +158,11 @@ async function main() {
       found.push({ id: r.id, contractNumber: r.contractNumber, project: r.project, amoLeadId: r.amoLeadId ? String(r.amoLeadId) : null, paidAt: r.paidAt.toISOString().slice(0, 10), brokerId, channel: ch, candidates: cands.size });
     }
     console.log("\n=== Найдено по каналам ===");
-    console.log(`A поля лида: ${stats.A} | B примечания (телефон): ${stats.B_phone} | B примечания (ФИО): ${stats.B_name} | C теги: ${stats.C} | D поля контакта клиента: ${stats.D} | E старый/новый кабинет по ФИО клиента: ${stats.E} | F единственный брокер агентства: ${stats.F}`);
+    console.log(`A поля лида: ${stats.A} | B примечания (телефон): ${stats.B_phone} | B примечания (ФИО): ${stats.B_name} | C теги: ${stats.C} | D поля контакта клиента: ${stats.D} | D2 контакт-брокер (флаг/компания): ${stats.D2} | E старый/новый кабинет по ФИО клиента: ${stats.E} | F единственный брокер агентства: ${stats.F}`);
     console.log(`Не найдено: ${stats.none}; строк с несколькими кандидатами: ${stats.multi}`);
     console.log("RESULT: " + JSON.stringify({ rows: rows.length, ...stats, found: found.length }));
     emit("broker_channel_matches", found);
+    emit("broker_channel_evidence", allRows);
   } finally { await prisma.$disconnect(); }
 }
 
