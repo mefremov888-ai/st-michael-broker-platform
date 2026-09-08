@@ -226,6 +226,16 @@ async function main() {
       check("воронка: методика по-русски и есть когорты/агентства", /[А-Яа-я]/.test(String(fs.body?.methodology?.steps || "")) && Array.isArray(fs.body?.byMonth) && Array.isArray(fs.body?.byAgency), `byMonth ${fs.body?.byMonth?.length}, byAgency ${fs.body?.byAgency?.length}`);
     } catch (e) { check("воронка", false, String(e?.message || e)); }
 
+    // ── 2026-09-08 (поезд 41): сводка внутри ответа списка = отдельной сводке; кэш не ломает фильтры ──
+    try {
+      const withSum = await http("POST", `/loyalty-base/ours/brokers/search`, { page: 1, pageSize: 5, archived: "exclude", sortBy: "name", sortOrder: "asc", search: "", filter: {}, columns: { activity: "HAS_FIXATIONS" }, withActivitySummary: true, summaryPeriod: period });
+      const standalone = await http("POST", `/loyalty-base/ours/brokers/activity-summary`, { page: 1, pageSize: 1, archived: "exclude", sortBy: "name", sortOrder: "asc", search: "", filter: {}, columns: { activity: "HAS_FIXATIONS" }, summaryPeriod: period });
+      const a = withSum.body?.activitySummary; const b = standalone.body;
+      check("сводка в списке: присутствует и равна отдельной (фиксации/встречи/брони/сделки/сумма)", a && b && a.activities.fixations === b.activities.fixations && a.activities.meetings === b.activities.meetings && a.activities.paidBookings === b.activities.paidBookings && a.activities.deals === b.activities.deals && String(a.dealAmount) === String(b.dealAmount) && Number(a.selection.count) === Number(b.selection.count), `список ${JSON.stringify(a?.activities)} ${a?.selection?.count} vs отдельно ${JSON.stringify(b?.activities)} ${b?.selection?.count}`);
+      const t0 = Date.now(); const again = await http("POST", `/loyalty-base/ours/brokers/search`, { page: 2, pageSize: 5, archived: "exclude", sortBy: "deals", sortOrder: "desc", search: "", filter: {}, columns: { activity: "HAS_FIXATIONS" }, withActivitySummary: true, summaryPeriod: period }); const ms = Date.now() - t0;
+      check("сводка в списке: повторный запрос (кэш) ≤ 8 с и total совпадает", (again.status === 200 || again.status === 201) && ms <= 8000 && Number(again.body?.total) === Number(withSum.body?.total), `${ms} мс, total ${again.body?.total} vs ${withSum.body?.total}`);
+    } catch (e) { check("сводка в списке", false, String(e?.message || e)); }
+
     const failed = results.filter((r) => !r.ok).length;
     console.log(`\nИтого: ${results.length - failed} PASS, ${failed} FAIL`);
     console.log("RESULT: " + JSON.stringify({ pass: results.length - failed, fail: failed, checks: results.map((r) => ({ n: r.name, ok: r.ok, d: r.detail })) }));
