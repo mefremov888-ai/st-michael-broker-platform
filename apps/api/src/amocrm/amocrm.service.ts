@@ -227,12 +227,19 @@ export class AmocrmService {
     let amoContactId = broker.amoContactId ? Number(broker.amoContactId) : null;
     const brokerContact = await this.amo.findBrokerContactByPhone(broker.phone);
     if (brokerContact && (!amoContactId || brokerContact.id !== amoContactId)) {
-      // Re-link to correct broker contact
-      amoContactId = brokerContact.id;
-      await this.prisma.broker.update({
-        where: { id: brokerId },
-        data: { amoContactId: BigInt(brokerContact.id) },
+      // Re-link to correct broker contact — but never steal a contact already
+      // held by another card (2026-09-08: unique amo_contact_id).
+      const holder = await this.prisma.broker.findUnique({
+        where: { amoContactId: BigInt(brokerContact.id) },
+        select: { id: true },
       });
+      if (!holder || holder.id === brokerId) {
+        amoContactId = brokerContact.id;
+        await this.prisma.broker.update({
+          where: { id: brokerId },
+          data: { amoContactId: BigInt(brokerContact.id) },
+        });
+      }
     }
     // Strategy 1: Get leads linked to broker's contact
     let allLeadIds: number[] = [];
