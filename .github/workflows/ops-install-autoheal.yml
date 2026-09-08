@@ -1,15 +1,15 @@
-name: Ops install api autoheal (cron on server)
+name: Ops install api autoheal (docker autoheal)
 
 # 2026-09-08 (инцидент 17:25 UTC): api может зависнуть (health отвечает, а
-# запросы к БД висят; контейнер unhealthy). Ставим в crontab пользователя
-# деплоя проверку раз в 2 минуты: если st-michael-api unhealthy — restart api,
-# запись в лог /tmp/st-michael-autoheal.log. Идемпотентно (маркер в crontab).
+# запросы к БД висят; контейнер unhealthy). Контейнер willfarrell/autoheal
+# перезапускает unhealthy-контейнеры (все с healthcheck) раз в 60 с.
+# Идемпотентно: старый контейнер autoheal удаляется и ставится заново.
 
 on:
   workflow_dispatch:
     inputs:
       remove:
-        description: 'Убрать автоперезапуск (true) вместо установки'
+        description: 'Убрать autoheal (true) вместо установки'
         required: false
         default: false
         type: boolean
@@ -21,9 +21,9 @@ concurrency:
 jobs:
   install:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
-      - name: SSH and install cron
+      - name: SSH and install
         uses: appleboy/ssh-action@v1.0.3
         env:
           REMOVE: ${{ inputs.remove }}
@@ -33,20 +33,13 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
-          command_timeout: 4m
+          command_timeout: 5m
           envs: REMOVE
           script: |
             set -eu
-            DP="${{ secrets.DEPLOY_PATH }}"
-            echo 'IyEvdXNyL2Jpbi9lbnYgYmFzaAojIHN0LW1pY2hhZWwgYXV0b2hlYWw6INC10YHQu9C4IGFwaSB1bmhlYWx0aHkg4oCUINC/0LXRgNC10LfQsNC/0YPRgdC6ICjQvdC1INGH0LDRidC1INGA0LDQt9CwINCyIDEwINC80LjQvdGD0YIpLgpjZCAiJChkaXJuYW1lICIkMCIpIgpMT0c9L3RtcC9zdC1taWNoYWVsLWF1dG9oZWFsLmxvZzsgU1RBTVA9L3RtcC9zdC1taWNoYWVsLWF1dG9oZWFsLmxhc3QKc3Q9JChkb2NrZXIgaW5zcGVjdCBzdC1taWNoYWVsLWFwaSAtLWZvcm1hdCAne3suU3RhdGUuSGVhbHRoLlN0YXR1c319JyAyPi9kZXYvbnVsbCB8fCBlY2hvIG1pc3NpbmcpCmlmIFsgIiRzdCIgPSAidW5oZWFsdGh5IiBdOyB0aGVuCiAgbm93PSQoZGF0ZSArJXMpOyBsYXN0PSQoY2F0ICIkU1RBTVAiIDI+L2Rldi9udWxsIHx8IGVjaG8gMCkKICBpZiBbICQoKG5vdy1sYXN0KSkgLWd0IDYwMCBdOyB0aGVuCiAgICBlY2hvICIkKGRhdGUgLXUgKyVGVCVUWikgYXBpIHVuaGVhbHRoeSAtPiByZXN0YXJ0IiA+PiAiJExPRyIKICAgIGRvY2tlciBjb21wb3NlIHJlc3RhcnQgYXBpID4+ICIkTE9HIiAyPiYxIHx8IHRydWUKICAgIGVjaG8gIiRub3ciID4gIiRTVEFNUCIKICBmaQpmaQo=' | base64 -d > "$DP/ops-autoheal.sh"
-            chmod +x "$DP/ops-autoheal.sh"
-            MARK="# st-michael-autoheal"
-            current=$(crontab -l 2>/dev/null | grep -v "$MARK" || true)
-            if [ "${REMOVE:-false}" = "true" ]; then
-              printf '%s\n' "$current" | crontab -
-              echo "autoheal убран"
-            else
-              printf '%s\n%s\n' "$current" "*/2 * * * * $DP/ops-autoheal.sh $MARK" | sed '/^$/d' | crontab -
-              echo "autoheal установлен:"; crontab -l | grep "$MARK"
-            fi
-            echo "текущее здоровье api: $(docker inspect st-michael-api --format '{{.State.Health.Status}}')"
+            docker rm -f st-michael-autoheal >/dev/null 2>&1 || true
+            if [ "${REMOVE:-false}" = "true" ]; then echo "autoheal убран"; exit 0; fi
+            docker run -d --name st-michael-autoheal --restart=always -e AUTOHEAL_CONTAINER_LABEL=all -e AUTOHEAL_INTERVAL=60 -e AUTOHEAL_START_PERIOD=120 -e AUTOHEAL_DEFAULT_STOP_TIMEOUT=20 -v /var/run/docker.sock:/var/run/docker.sock willfarrell/autoheal:latest
+            sleep 5
+            docker ps --filter name=st-michael-autoheal --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+            echo "api health: $(docker inspect st-michael-api --format '{{.State.Health.Status}}')"
