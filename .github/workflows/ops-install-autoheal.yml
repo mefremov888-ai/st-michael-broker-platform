@@ -38,21 +38,7 @@ jobs:
           script: |
             set -eu
             DP="${{ secrets.DEPLOY_PATH }}"
-            cat > "$DP/ops-autoheal.sh" <<'SH'
-            #!/usr/bin/env bash
-            # st-michael autoheal: если api unhealthy — перезапуск (не чаще раза в 10 минут).
-            cd "$(dirname "$0")"
-            LOG=/tmp/st-michael-autoheal.log; STAMP=/tmp/st-michael-autoheal.last
-            st=$(docker inspect st-michael-api --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
-            if [ "$st" = "unhealthy" ]; then
-              now=$(date +%s); last=$(cat "$STAMP" 2>/dev/null || echo 0)
-              if [ $((now-last)) -gt 600 ]; then
-                echo "$(date -u +%FT%TZ) api unhealthy -> restart" >> "$LOG"
-                docker compose restart api >> "$LOG" 2>&1 || true
-                echo "$now" > "$STAMP"
-              fi
-            fi
-            SH
+            echo 'IyEvdXNyL2Jpbi9lbnYgYmFzaAojIHN0LW1pY2hhZWwgYXV0b2hlYWw6INC10YHQu9C4IGFwaSB1bmhlYWx0aHkg4oCUINC/0LXRgNC10LfQsNC/0YPRgdC6ICjQvdC1INGH0LDRidC1INGA0LDQt9CwINCyIDEwINC80LjQvdGD0YIpLgpjZCAiJChkaXJuYW1lICIkMCIpIgpMT0c9L3RtcC9zdC1taWNoYWVsLWF1dG9oZWFsLmxvZzsgU1RBTVA9L3RtcC9zdC1taWNoYWVsLWF1dG9oZWFsLmxhc3QKc3Q9JChkb2NrZXIgaW5zcGVjdCBzdC1taWNoYWVsLWFwaSAtLWZvcm1hdCAne3suU3RhdGUuSGVhbHRoLlN0YXR1c319JyAyPi9kZXYvbnVsbCB8fCBlY2hvIG1pc3NpbmcpCmlmIFsgIiRzdCIgPSAidW5oZWFsdGh5IiBdOyB0aGVuCiAgbm93PSQoZGF0ZSArJXMpOyBsYXN0PSQoY2F0ICIkU1RBTVAiIDI+L2Rldi9udWxsIHx8IGVjaG8gMCkKICBpZiBbICQoKG5vdy1sYXN0KSkgLWd0IDYwMCBdOyB0aGVuCiAgICBlY2hvICIkKGRhdGUgLXUgKyVGVCVUWikgYXBpIHVuaGVhbHRoeSAtPiByZXN0YXJ0IiA+PiAiJExPRyIKICAgIGRvY2tlciBjb21wb3NlIHJlc3RhcnQgYXBpID4+ICIkTE9HIiAyPiYxIHx8IHRydWUKICAgIGVjaG8gIiRub3ciID4gIiRTVEFNUCIKICBmaQpmaQo=' | base64 -d > "$DP/ops-autoheal.sh"
             chmod +x "$DP/ops-autoheal.sh"
             MARK="# st-michael-autoheal"
             current=$(crontab -l 2>/dev/null | grep -v "$MARK" || true)
