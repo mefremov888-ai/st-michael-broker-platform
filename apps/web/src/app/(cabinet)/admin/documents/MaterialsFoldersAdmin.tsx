@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { materialsThumbUrl } from '@/lib/materials-thumb';
 import { apiGet, apiPatch } from '@/lib/api';
 import {
+  setMaterialsLooseFolder,
   setMaterialsCover,
   withDisplaySubcategory,
   DEFAULT_MATERIALS_LAYOUT,
@@ -35,6 +36,8 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
   const [docs, setDocs] = useState<Array<{ name: string; subcategory: string | null; fileUrl: string; type: string }>>([]);
   const [coverPath, setCoverPath] = useState('');
   const [coverUrl, setCoverUrl] = useState('');
+  const [loosePath, setLoosePath] = useState('');
+  const [looseName, setLooseName] = useState('');
   const photoOptions = useMemo(
     () =>
       docs
@@ -387,6 +390,54 @@ export function MaterialsFoldersAdmin({ isAdmin, onMessage }: Props) {
             <option key={option.value} value={option.value}>{option.label}</option>
           ))}
         </datalist>
+      </div>
+      {/* 2026-09-08 (владелец): файлы без подпапки (например видео в корне
+          «Зорге 9/Видео») — показать в виртуальной подпапке, Диск не трогаем. */}
+      <div className="mt-4 rounded-xl border border-border p-3">
+        <h3 className="font-medium">Файлы без подпапки</h3>
+        <p className="text-xs text-text-muted">
+          Если в папке файлы лежат вперемешку с подпапками, их можно показать в отдельной подпапке с понятным именем.
+          Путь как на сайте («Зорге 9/Видео») и имя подпапки («Комплекс и территория»). На Яндекс.Диске ничего не меняется.
+        </p>
+        {Object.keys(layout.looseFolders || {}).length > 0 && (
+          <ul className="mt-2 space-y-1 text-sm">
+            {Object.entries(layout.looseFolders || {}).map(([path, name]) => (
+              <li key={path} className="flex items-center gap-2">
+                <span className="font-medium">{path}</span>
+                <span className="text-text-muted">→ подпапка «{name}»</span>
+                {isAdmin && (
+                  <button type="button" className="text-xs text-error" onClick={() => setLayout(setMaterialsLooseFolder(layout, path, null))}>
+                    убрать
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {isAdmin && (
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="block text-sm">
+              <span className="text-xs text-text-muted">Папка</span>
+              <input className="input text-sm min-w-[220px]" list="display-folder-paths" value={loosePath} onChange={(e) => setLoosePath(e.target.value)} placeholder="Зорге 9/Видео" />
+            </label>
+            <label className="block text-sm">
+              <span className="text-xs text-text-muted">Имя подпапки для файлов без папки</span>
+              <input className="input text-sm min-w-[260px]" value={looseName} onChange={(e) => setLooseName(e.target.value)} placeholder="Комплекс и территория" />
+            </label>
+            <button
+              type="button"
+              className="btn btn-secondary text-sm"
+              disabled={!loosePath.trim() || !looseName.trim()}
+              onClick={() => {
+                setLayout(setMaterialsLooseFolder(layout, loosePath, looseName));
+                setLoosePath('');
+                setLooseName('');
+              }}
+            >
+              <Plus className="w-4 h-4" /> Добавить
+            </button>
+          </div>
+        )}
       </div>
       <datalist id="disk-folder-prefixes">
         {diskFolders.map((folder) => (

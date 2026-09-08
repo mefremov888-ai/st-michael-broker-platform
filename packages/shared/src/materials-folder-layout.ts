@@ -28,6 +28,9 @@ export type MaterialsFolderLayout = {
   // 2026-09-08 (владелец): обложки папок — путь папки как на сайте
   // («Зорге 9», «Зорге 9/Видео», «Презентации») → fileUrl фото из материалов.
   covers?: Record<string, string>;
+  // 2026-09-08 (владелец): файлы, лежащие прямо в папке (без подпапки), показывать
+  // в виртуальной подпапке с этим именем: путь папки как на сайте → имя подпапки.
+  looseFolders?: Record<string, string>;
 };
 
 const VIDEO_RE = /\.(mp4|mov|webm|m4v|avi|mkv)(\?|#|$)/i;
@@ -163,14 +166,16 @@ export function isValidMaterialsFolderLayout(value: unknown): value is Materials
     return false;
   }
   const kinds: MaterialsFolderKind[] = ['as_is', 'photo', 'video', 'split'];
-  if (
-    layout.covers !== undefined &&
-    (layout.covers === null ||
-      typeof layout.covers !== 'object' ||
-      Array.isArray(layout.covers) ||
-      Object.values(layout.covers).some((value) => typeof value !== 'string'))
-  ) {
-    return false;
+  for (const map of [layout.covers, layout.looseFolders]) {
+    if (
+      map !== undefined &&
+      (map === null ||
+        typeof map !== 'object' ||
+        Array.isArray(map) ||
+        Object.values(map).some((value) => typeof value !== 'string'))
+    ) {
+      return false;
+    }
   }
   return (
     layout.groups.every(
@@ -381,7 +386,35 @@ export function withDisplaySubcategory<T extends {
     out.push({ ...doc, subcategory: [leafName, ...rest].join('/') });
   }
 
-  return out;
+  return applyLooseFolders(out, layout);
+}
+
+/** Файлы прямо в папке → виртуальная подпапка (layout.looseFolders). */
+function applyLooseFolders<T extends { subcategory: string }>(docs: T[], layout: MaterialsFolderLayout): T[] {
+  const loose = layout.looseFolders || {};
+  const keys = Object.keys(loose).filter((key) => key && String(loose[key] || '').trim());
+  if (!keys.length) return docs;
+  return docs.map((doc) => {
+    const path = splitMaterialPath(doc.subcategory).join('/');
+    const name = loose[path];
+    if (!name) return doc;
+    return { ...doc, subcategory: `${path}/${String(name).trim()}` };
+  });
+}
+
+export function setMaterialsLooseFolder(
+  layout: MaterialsFolderLayout,
+  pathKey: string,
+  folderName: string | null,
+): MaterialsFolderLayout {
+  const next = cloneLayout(layout);
+  const map = { ...(next.looseFolders || {}) };
+  const key = splitMaterialPath(pathKey).join('/');
+  if (!key) return next;
+  if (folderName && folderName.trim()) map[key] = folderName.trim();
+  else delete map[key];
+  next.looseFolders = map;
+  return next;
 }
 
 const COVER_PHOTO_RE = /\.(jpe?g|png|webp)(\?|#|$)/i;
