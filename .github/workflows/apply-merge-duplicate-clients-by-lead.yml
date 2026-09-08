@@ -1,0 +1,58 @@
+name: Apply merge of duplicate clients by (broker, lead)
+
+# 2026-09-08: ОБЪЕДИНЕНИЕ дублей клиентов (телефон+брокер+лид): keeper = старейшая,
+# сделки/встречи переносятся на keeper, поля дописываются, дубли удаляются.
+# По умолчанию dry-run; запись — dry_run=false + confirm_apply=true.
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только отчёт)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю удаление (нужно вместе с dry_run=false)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-merge-duplicate-clients-by-lead
+  cancel-in-progress: false
+
+jobs:
+  dedupe:
+    name: Dedupe on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_INPUT: ${{ inputs.confirm_apply }}
+          
+          
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 12m
+          envs: DRY_INPUT,CONFIRM_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            git show origin/master:scripts/merge-duplicate-clients-by-lead.js > /tmp/merge-duplicate-clients-by-lead.js
+            docker cp /tmp/merge-duplicate-clients-by-lead.js st-michael-api:/app/scripts/merge-duplicate-clients-by-lead.js
+            DRY=1
+            if [ "$DRY_INPUT" = "false" ]; then
+              if [ "$CONFIRM_INPUT" != "true" ]; then echo "dry_run=false требует confirm_apply=true"; exit 1; fi
+              DRY=0
+            fi
+            docker compose exec -T -e DRY_RUN=$DRY api node /app/scripts/merge-duplicate-clients-by-lead.js
