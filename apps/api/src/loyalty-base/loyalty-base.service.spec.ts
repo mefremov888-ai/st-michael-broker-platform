@@ -2550,7 +2550,7 @@ describe("LoyaltyBaseService", () => {
     ).toMatchObject({
       source: "SOURCE_AGGREGATE",
       periodFilterApplied: false,
-      formula: expect.stringContaining("callCount"),
+      formula: expect.stringContaining("звонков"),
     });
     expect(
       result.kpiMetadata["sourceReportedSummary.agencies.brokerTours"],
@@ -2564,7 +2564,7 @@ describe("LoyaltyBaseService", () => {
     ).toMatchObject({
       source: "SOURCE_AGGREGATE",
       periodFilterApplied: false,
-      formula: expect.stringContaining("callCount"),
+      formula: expect.stringContaining("звонков"),
     });
     const brokerOverviewSelect =
       prisma.loyaltySourceRecord.findMany.mock.calls[0][0].select;
