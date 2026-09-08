@@ -57,13 +57,11 @@ jobs:
             echo "распознано серверных chat_id: $(printf '%s\n' "$server_ids" | grep -c . || true)"
             echo "длины распознанных id (без значений):"
             printf '%s\n' "$server_ids" | awk '{print length($0)}' || true
-            if [ "${SEND_TO:-all}" = "server_only" ]; then
-              all=$(printf '%s\n' "$server_ids" | grep -vFx "$GH_CHAT" | grep -E '^-?[0-9]+$' | sort -u || true)
-            elif [ "${SEND_TO:-all}" = "gh_only" ]; then
-              all=$(printf '%s\n' "$GH_CHAT" | grep -E '^-?[0-9]+$' || true)
-            else
-              all=$(printf '%s\n%s\n' "$GH_CHAT" "$server_ids" | grep -E '^-?[0-9]+$' | sort -u)
-            fi
+            # 2026-09-08: ветка all падала молча под set -e; собираем список без ветвлений.
+            gh_part=""; srv_part=""
+            [ "${SEND_TO:-all}" != "server_only" ] && gh_part="$GH_CHAT" || true
+            [ "${SEND_TO:-all}" != "gh_only" ] && srv_part="$server_ids" || true
+            all=$(printf '%s\n%s\n' "$gh_part" "$srv_part" | grep -E '^-?[0-9]+$' | sort -u || true)
             test -n "$all" || { echo "не найдено ни одного chat_id к отправке"; exit 1; }
             echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
             fail=0
