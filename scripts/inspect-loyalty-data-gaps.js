@@ -72,8 +72,7 @@ async function main() {
       WHERE c.created_at >= now() - interval '10 weeks'
       GROUP BY 1 ORDER BY 1
     `);
-    console.log("
-=== ПО НЕДЕЛЯМ: старый кабинет / новый кабинет ===");
+    console.log("\n=== ПО НЕДЕЛЯМ: старый кабинет / новый кабинет ===");
     for (const r of recent) {
       console.log(`  неделя с ${r.w}: старый ${String(n(r.old_rows)).padStart(4)} | новый ${String(n(r.new_rows)).padStart(4)}`);
     }
