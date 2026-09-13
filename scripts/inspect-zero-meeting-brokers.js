@@ -81,6 +81,20 @@ async function main() {
     console.log(`  канал «через брокера»:              ${n(d.channel_broker)}`);
     console.log(`  период:                             ${d.first_deal} — ${d.last_deal}`);
 
+    const years = await q(`
+      WITH z AS (${ZERO})
+      SELECT to_char(rd.paid_at, 'YYYY') AS y, COUNT(*)::int AS c
+      FROM registry_deals rd JOIN z ON z.broker_id = rd.broker_id
+      WHERE rd.paid_at IS NOT NULL GROUP BY 1 ORDER BY 1`);
+    console.log('  сделки этих брокеров по годам:');
+    for (const r of years) console.log(`    ${r.y}: ${n(r.c)}`);
+    const mYears = await q(`
+      SELECT to_char(date, 'YYYY') AS y, COUNT(*)::int AS c
+      FROM meetings WHERE status IN ('CONFIRMED','COMPLETED') AND type <> 'BROKER_TOUR'
+      GROUP BY 1 ORDER BY 1`);
+    console.log('  ВСЕ засчитанные встречи базы по годам:');
+    for (const r of mYears) console.log(`    ${r.y}: ${n(r.c)}`);
+
     // для сравнения: те, у кого встречи ЕСТЬ
     const withMeetings = await q(`
       WITH d AS (SELECT DISTINCT broker_id FROM registry_deals WHERE broker_id IS NOT NULL AND paid_at IS NOT NULL),
