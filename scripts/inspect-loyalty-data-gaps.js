@@ -63,6 +63,27 @@ async function main() {
       console.log(`  ${r.m}: ${String(n(r.all_rows)).padStart(6)} / ${String(n(r.pass_status)).padStart(6)} / ${String(n(r.shown)).padStart(6)}`);
     }
 
+    // ── 2b. Что приходит после разового импорта 07.09 ──────────────────
+    const recent = await q(`
+      SELECT to_char(date_trunc('week', c.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Moscow'), 'YYYY-MM-DD') AS w,
+             COUNT(*) FILTER (WHERE c.comment LIKE '[old-cabinet:%')::int AS old_rows,
+             COUNT(*) FILTER (WHERE c.comment IS NULL OR c.comment NOT LIKE '[old-cabinet:%')::int AS new_rows
+      FROM clients c
+      WHERE c.created_at >= now() - interval '10 weeks'
+      GROUP BY 1 ORDER BY 1
+    `);
+    console.log("
+=== ПО НЕДЕЛЯМ: старый кабинет / новый кабинет ===");
+    for (const r of recent) {
+      console.log(`  неделя с ${r.w}: старый ${String(n(r.old_rows)).padStart(4)} | новый ${String(n(r.new_rows)).padStart(4)}`);
+    }
+    const lastOld = await q(`
+      SELECT to_char(MAX(created_at) AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI') AS last_old,
+             to_char(MIN(created_at) AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD') AS first_old
+      FROM clients WHERE comment LIKE '[old-cabinet:%'
+    `);
+    console.log(`  записи старого кабинета: с ${lastOld[0].first_old} по ${lastOld[0].last_old}`);
+
     // ── 3. Встречи ─────────────────────────────────────────────────────
     const meetings = await q(`
       SELECT
