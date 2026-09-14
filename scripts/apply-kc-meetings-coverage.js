@@ -335,7 +335,12 @@ async function main() {
     for (const y of [...byYear.keys()].sort()) console.log(`  ${y}: ${byYear.get(y)}`);
     console.log("\n  примеры:");
     for (const s of samples) console.log(`    ${s}`);
-    console.log("\nПРОГОН БЕЗ ЗАПИСИ: база не изменена.");
+    if (WRITE) {
+      console.log(`\nЗАПИСЬ ВЫПОЛНЕНА: создано встреч ${stat.created}, ошибок ${stat.writeErrors}`);
+      for (const e of writeErrors) console.log(`    ${e}`);
+    } else {
+      console.log("\nПРОГОН БЕЗ ЗАПИСИ: база не изменена (нужны DRY_RUN=0 и CONFIRM=1).");
+    }
 
   } finally {
     await prisma.$disconnect();
