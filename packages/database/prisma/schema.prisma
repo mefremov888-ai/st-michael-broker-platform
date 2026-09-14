@@ -2045,6 +2045,23 @@ model RegistryDeal {
   // 2026-09-09 (владелец): канал продажи — DIRECT (прямая продажа, без брокера;
   // 709 договоров подтверждены 09.09), BROKER (есть брокер), NULL — не определён.
   saleChannel        String?   @map("sale_channel")
+  // 2026-09-14 (решение владельца): факт комиссии из Google-листа — то, что
+  // реально начислено и выплачено, рядом с расчётом кабинета. Разбирать эти
+  // поля нельзя «в лоб»:
+  //   - commissionPercentRaw: колонка смешанная, в 874 строках из 1 693 там
+  //     не процент, а источник лида («самоход», «yandex», «Купивший»);
+  //   - commissionPaidRaw: 29 разных написаний, встречается «669 138 да» —
+  //     сумма дописана рядом со словом;
+  //   - commissionAmountFact: сумма из листа как есть, без пересчёта.
+  commissionAmountFact  Decimal? @map("commission_amount_fact") @db.Decimal(14, 2)
+  commissionPercentRaw  String?  @map("commission_percent_raw")
+  commissionPaidRaw     String?  @map("commission_paid_raw")
+  commissionPaidAmount  Decimal? @map("commission_paid_amount") @db.Decimal(14, 2)
+  commissionSheetAt     DateTime? @map("commission_sheet_at")
+  // Номер строки листа — чтобы при незаметном сдвиге колонок можно было
+  // восстановить, что откуда взялось (просьба ценового агента 14.09).
+  commissionSheetRow    Int?     @map("commission_sheet_row")
+  leadSourceRaw         String?  @map("lead_source_raw")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
