@@ -1629,9 +1629,12 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               })
               .map((p: any, i: number) => {
               // Ссылка «подробнее»: берём из CMS-поля detailHref, иначе slug-маппинг.
+              // 2026-09-14: оба адреса отвечали 404 — на stmichael.ru страницы
+              // проектов лежат в разделе /projects/. Ссылка «Подробнее»
+              // приводила брокера на «страница не найдена».
               const DETAIL_URLS: Record<string, string> = {
-                'zorge9': 'https://stmichael.ru/zorge9',
-                'silver-bor': 'https://stmichael.ru/kvartaly-serebryanyj-bor',
+                'zorge9': 'https://stmichael.ru/projects/zorge-9/',
+                'silver-bor': 'https://stmichael.ru/projects/kvartal-serebryanyj-bor/',
               };
               const detailUrl: string | null = p.detailHref || DETAIL_URLS[(p.slug || '').toLowerCase()] || null;
               const projectKey = landingProjectKey(p);

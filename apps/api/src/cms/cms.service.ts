@@ -198,6 +198,39 @@ const DEFAULT_CONTENT: Record<string, any> = {
   },
 };
 
+
+/**
+ * 2026-09-14: выбирает НАСТОЯЩУЮ фотографию новости из разметки
+ * stmichael.ru. Возвращает null, если картинки нет вовсе.
+ */
+export function pickStmNewsImage(body: string): string | null {
+  const proxy = "https://stmichael.ru/proxy/";
+  const isBlurred = (url: string) => /\/bl:\d+\//.test(url);
+
+  // 1) ленивый набор — там лежит полноразмерный кадр
+  const srcsetMatch = body.match(/data-lazy-srcset="([^"]+)"/);
+  if (srcsetMatch) {
+    const candidates = srcsetMatch[1]
+      .split(",")
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter((url) => url.startsWith(proxy) && !isBlurred(url));
+    if (candidates.length) {
+      // самый широкий вариант: w:960 лучше, чем w:320
+      const widthOf = (url: string) => Number(url.match(/\/w:(\d+)\//)?.[1] || 0);
+      return candidates.sort((a, b) => widthOf(b) - widthOf(a))[0];
+    }
+  }
+
+  // 2) обычные src/data-src, но только не размытая заглушка
+  const all = [...body.matchAll(/(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/g)]
+    .map((m) => m[1]);
+  const sharp = all.find((url) => !isBlurred(url));
+  if (sharp) return sharp;
+
+  // 3) совсем ничего лучше нет — пусть будет заглушка, чем пустое место
+  return all[0] || null;
+}
+
 @Injectable()
 export class CmsService {
   private readonly logger = new Logger(CmsService.name);
@@ -579,10 +612,15 @@ export class CmsService {
       const slug = m[1];
       const body = m[2];
       const url = `https://stmichael.ru${slug}`;
-      const imgM = body.match(
-        /(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/,
-      );
-      const imageUrl = imgM ? imgM[1] : null;
+      // 2026-09-14 (жалоба владельца «не загружаются картинки»): на
+      // stmichael.ru карточки ниже первого экрана грузятся лениво, и в
+      // теге картинки лежат ДВА адреса: data-src — намеренно размытая
+      // заглушка на ~1 КБ (в пути bl:40 — «размытие 40»), а настоящая
+      // фотография — в data-lazy-srcset (w:960/q:80). Парсер брал первый
+      // попавшийся адрес, то есть заглушку: у первых карточек ленивой
+      // загрузки нет и они выглядели нормально, остальные — размытыми.
+      // Порядок: сначала настоящий кадр, заглушка — только на крайний случай.
+      const imageUrl = pickStmNewsImage(body);
       const dateM = body.match(
         /class="date_\w+"[^>]*>\s*(\d{1,2})\s+([а-яёА-ЯЁ]+)\s+(\d{4})/u,
       );
