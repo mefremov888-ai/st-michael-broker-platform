@@ -9416,6 +9416,35 @@ export class LoyaltyBaseService {
     }
   }
 
+  // 2026-09-14 (решение владельца): «нет данных» вместо нуля там, где встреч
+  // не существует в принципе. Записи о встречах в кабинете начинаются с
+  // первой карточки колл-центра (сейчас это 2024 год) — у брокера, который
+  // продавал в 2020-2023, ноль встреч означает не «не встречался», а
+  // «источника за те годы нет». Границу берём из самих данных, не хардкодим.
+  private ourMeetingsSinceCache: { at: number; value: Date | null } | null = null;
+
+  private async ourMeetingsDataSince(): Promise<Date | null> {
+    const now = Date.now();
+    const cached = this.ourMeetingsSinceCache;
+    if (cached && now - cached.at < 60 * 60_000) return cached.value;
+    let value: Date | null = null;
+    try {
+      const row = await (this.prisma as any).meeting?.aggregate?.({
+        where: {
+          status: { in: ["CONFIRMED", "COMPLETED"] },
+          type: { not: "BROKER_TOUR" },
+        },
+        _min: { date: true },
+      });
+      const min = row?._min?.date;
+      value = min ? new Date(min) : null;
+    } catch {
+      value = null;
+    }
+    this.ourMeetingsSinceCache = { at: now, value };
+    return value;
+  }
+
   private async attachOurBrokerLifetimeAggregates(
     records: any[],
     cabinetSource: CabinetSource | undefined,
@@ -9463,6 +9492,7 @@ export class LoyaltyBaseService {
           .map((group) => [String(group.brokerId), group]),
       );
     const [byClient, byMeeting, byDeal, byCall] = lists.map((list) => index(list!));
+    const meetingsSince = await this.ourMeetingsDataSince();
     const count = (group: any) =>
       finiteNumber(group?._count?._all ?? group?._count?.brokerId) || 0;
     for (const record of records) {
@@ -9478,6 +9508,21 @@ export class LoyaltyBaseService {
         deals: count(deal),
         callLogs: count(call),
       };
+      // Вся активность брокера раньше первой известной встречи → ноль встреч
+      // означает отсутствие источника, а не отсутствие работы.
+      const lastActivityAt = [
+        client?._max?.createdAt,
+        deal?._max?.signedAt,
+        call?._max?.createdAt,
+        record.brokerTourDate,
+      ]
+        .map((value: any) => (value ? new Date(value).getTime() : 0))
+        .reduce((a: number, b: number) => (b > a ? b : a), 0);
+      record.__meetingsNoData =
+        count(meeting) === 0 &&
+        !!meetingsSince &&
+        lastActivityAt > 0 &&
+        lastActivityAt < meetingsSince.getTime();
       record.clients = client?._max?.createdAt
         ? [{ createdAt: client._max.createdAt }]
         : [];
@@ -10963,6 +11008,8 @@ export class LoyaltyBaseService {
         fixations: item._count?.clients || 0,
         deals: item._count?.deals || 0,
         meetings: item._count?.meetings || 0,
+        // true → в интерфейсе «нет данных» вместо «0 встр.»
+        meetingsNoData: item.__meetingsNoData === true,
         // 2026-09-04 (задача E): единый источник числа звонков в списке и
         // карточке — легаси CallLog + workflow-звонки (семантика ourCalls).
         // Раньше карточка показывала _count.calls (телефония Mango), а

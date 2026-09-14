@@ -730,7 +730,20 @@ function LoyaltyTable({
                 <td className="py-2 pr-3 align-top">
                   <span>
                     {number(displayedMetrics.fixations)} фикс. ·{" "}
-                    {number(displayedMetrics.meetings)} встр.
+                    {/* 2026-09-14 (решение владельца): если встреч за период
+                        работы брокера не существует в источнике, пишем «нет
+                        данных» — ноль читается как «не встречался». */}
+                    {(displayedMetrics as any).meetingsNoData &&
+                    Number(displayedMetrics.meetings) === 0 ? (
+                      <span
+                        className="text-text-muted"
+                        title="Встречи фиксируются только с того момента, как появилась воронка колл-центра. Работа этого брокера была раньше — данных о встречах нет."
+                      >
+                        встречи: нет данных
+                      </span>
+                    ) : (
+                      <>{number(displayedMetrics.meetings)} встр.</>
+                    )}
                   </span>
                   <small className="block text-text-muted">
                     {displayedMetrics.label}
