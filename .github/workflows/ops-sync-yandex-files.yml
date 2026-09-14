@@ -1,0 +1,61 @@
+name: Sync Yandex files (materials)
+
+# 2026-09-14: ручной запуск синхронизации материалов с Яндекс.Диска.
+# До сих пор она шла только по расписанию (04:00 МСК), и когда папка
+# «КСБ» перестала синхронизироваться, картинки материалов пропали с сайта,
+# а запустить разбор было нечем.
+#
+# Скрипт scripts/sync-yandex-files.js тянет три публичные папки Диска в
+# /app/uploads/yandex и обновляет Document.fileUrl. По умолчанию файлы с
+# совпадающим размером пропускаются; force=true перекачивает всё заново
+# (долго, до нескольких часов — только когда это действительно нужно).
+#
+# CLEAN_ORPHANS оставлен по умолчанию включённым — то же поведение, что у
+# ночного запуска: удаляются только файлы, которых нет ни в одном источнике.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Перекачать все файлы заново (иначе пропускаются совпадающие по размеру)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: sync-yandex-files
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync materials on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: SSH and sync
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          FORCE_INPUT: ${{ inputs.force }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 175m
+          envs: FORCE_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/sync-yandex-files.js > /tmp/sync-yandex-files.js
+            docker cp /tmp/sync-yandex-files.js st-michael-api:/app/scripts/sync-yandex-files.js
+            FORCE=0
+            if [ "$FORCE_INPUT" = "true" ]; then FORCE=1; fi
+            echo "=== Синхронизация материалов (FORCE=$FORCE) ==="
+            docker compose exec -T -e FORCE=$FORCE api node /app/scripts/sync-yandex-files.js
+            echo "=== Готово ==="
