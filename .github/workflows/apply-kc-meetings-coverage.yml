@@ -1,0 +1,74 @@
+name: Apply KC meetings coverage (amoCRM)
+
+# 2026-09-14: добивка встреч колл-центра. Прежние слои backfill-meetings
+# разносили карточки, чей телефон совпал с заявкой в базе, а план привязки
+# смотрел только спорные карточки. Карточки, где телефон клиента в базе не
+# найден (2 084 из 4 702), не разбирал никто — при этом на многих из них
+# прикреплён контакт брокера, и встречу можно засчитать ему.
+#
+# Правила (от надёжного к слабому, слабое правило «единственная действующая
+# фиксация» здесь НЕ применяется):
+#   1) брокер прикреплён контактом к карточке колл-центра;
+#   2) брокер строки реестра по дочерней сделке / номеру договора.
+# Если по договору сделка прошла через ДРУГОГО брокера — запись
+# пропускается и печатается списком (требование владельца 11.09).
+#
+# Дедуп: у брокера уже есть встреча в этот день, либо карточка уже
+# перенесена (метка [amo:kc-lead:<id>] в комментарии встречи).
+#
+# Боевой режим требует dry_run=false И confirm_apply=true — любая другая
+# комбинация выполняется как dry-run (только отчёт, без записи).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только отчёт, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-kc-meetings-coverage
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Apply KC meetings coverage on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 40m
+          envs: DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/apply-kc-meetings-coverage.js > /tmp/apply-kc-meetings-coverage.js
+            docker cp /tmp/apply-kc-meetings-coverage.js st-michael-api:/app/scripts/apply-kc-meetings-coverage.js
+            MODE=1
+            CONFIRM=0
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; CONFIRM=1; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (без записи) ==="; else echo "=== APPLY (запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE -e CONFIRM=$CONFIRM api node /app/scripts/apply-kc-meetings-coverage.js
+            echo "=== Готово (DRY_RUN=$MODE) ==="
