@@ -56,7 +56,10 @@ async function main() {
     console.log(`  из них есть у нас:              ${refAgencies.length - missingAg.length}`);
     console.log(`  НЕТ у нас:                      ${missingAg.length}`);
     console.log(`  всего агентств в базе:          ${agencies.length}`);
-    console.log("  примеры отсутствующих:", missingAg.slice(0, 8).join(" | "));
+    console.log("\n--- НЕ НАЙДЕННЫЕ НАЗВАНИЯ ИЗ ВЫГРУЗКИ (для сопоставления) ---");
+    console.log(missingAg.join(" ~ "));
+    console.log("\n--- НАШИ АГЕНТСТВА ---");
+    console.log(agencies.map((a) => a.name).sort().join(" ~ "));
 
     const clients = await prisma.client.count({ where: { comment: { startsWith: "[old-cabinet:" } } });
     console.log("\n=== Заявки ===");
