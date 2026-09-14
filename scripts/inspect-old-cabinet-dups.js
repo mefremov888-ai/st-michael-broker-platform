@@ -6,7 +6,7 @@ async function main() {
   try {
     const rows = await prisma.$queryRawUnsafe(`
       SELECT COUNT(*)::int AS всего,
-             COUNT(DISTINCT substring(comment from '\[old-cabinet:(\d+)\]'))::int AS уникальных_маркеров,
+             COUNT(DISTINCT split_part(split_part(comment, '[old-cabinet:', 2), ']', 1))::int AS уникальных_маркеров,
              MIN(created_at)::text AS с, MAX(created_at)::text AS по
       FROM clients WHERE comment LIKE '[old-cabinet:%'
     `);
