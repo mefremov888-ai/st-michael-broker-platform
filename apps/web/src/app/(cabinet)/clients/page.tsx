@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Search, ChevronLeft, ChevronRight, X, AlertTriangle, Mail, Building, User, Phone as PhoneIcon, Calendar, FileText, CheckCircle2, AlertCircle, PhoneCall } from 'lucide-react';
+import { uniquenessHistoryLabel } from '@/lib/uniqueness-history';
 
 const statusLabels: Record<string, { label: string; cls: string }> = {
   CONDITIONALLY_UNIQUE: { label: 'Уникален', cls: 'bg-success/20 text-success' },
@@ -468,18 +469,10 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
             <h3 className="text-sm font-medium mb-2">История</h3>
             <div className="space-y-1.5">
               {client.uniquenessHistory.map((h: any) => {
-                const labels: Record<string, string> = {
-                  CLIENT_FIXATION: '🆕 Создана фиксация',
-                  CLIENT_FIXATION_CONFLICT: '⚠ Конфликт фиксации',
-                  UNIQUENESS_EXTENDED: '⏰ Продление уникальности',
-                  UNIQUENESS_RESOLVED: '✅ Конфликт разрешён',
-                  CLIENT_FIXED: '📌 Закреплён',
-                  AMO_SYNC_FAILED: '❌ Не передан в amoCRM',
-                };
                 return (
                   <div key={h.id} className="bg-surface-secondary rounded p-2 text-xs">
                     <div className="flex justify-between">
-                      <span>{labels[h.action] || h.action}</span>
+                      <span>{uniquenessHistoryLabel(h)}</span>
                       <span className="text-text-muted">{new Date(h.createdAt).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}</span>
                     </div>
                     {h.payload?.reason && <div className="text-text-muted mt-1">Причина: {h.payload.reason}</div>}
