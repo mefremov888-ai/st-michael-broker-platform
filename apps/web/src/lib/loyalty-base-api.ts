@@ -637,6 +637,8 @@ export interface LoyaltyRecord {
   meetings: number | null;
   deals: number | null;
   dealAmount: string | null;
+  /** 2026-09-10: суммарная площадь по сделкам реестра ДДУ, м². */
+  dealSqm: number | null;
   lastCallAt: string;
   lastCallResult: string;
   lastActivityAt: string;
@@ -1643,7 +1645,9 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
         value: evidenceDateLabel(item.signedAt),
       },
     amount && {
-      label: "Сумма",
+      // 2026-09-10 (владелец спросил, что за сумма): у сделки реестра это
+      // «Стоимость по ДДУ» — колонка AB реестра, правило владельца 07.09.
+      label: isDeal ? "Стоимость по ДДУ" : "Сумма",
       value: `${evidenceNumberLabel(amount) || amount} ₽`,
     },
     sqm && { label: "Площадь", value: `${evidenceNumberLabel(sqm) || sqm} м²` },
@@ -2196,6 +2200,10 @@ export function normalizeLoyaltyRecord(
     dealAmount: nullableDecimalValue(
       pick(item, "dealAmount", "dealAmountRub", "sales", "amount") ??
         pick(metrics, "dealAmount", "dealAmountRub", "sales", "amount"),
+    ),
+    // 2026-09-10 (владелец): площадь по сделкам реестра ДДУ, «сумма м²».
+    dealSqm: nullableNumberValue(
+      pick(item, "dealSqm") ?? pick(metrics, "dealSqm"),
     ),
     lastCallAt: stringValue(
       pick(item, "lastCallAt", "lastCallDate"),

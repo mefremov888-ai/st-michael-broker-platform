@@ -4944,12 +4944,18 @@ export class LoyaltyBaseService {
         where: { ...brokerIdWhere(batch), ...this.registrySignedAtWhere() },
         _count: { _all: true },
         _max: { paidAt: true },
+        // 2026-09-10 (владелец): площадь проданного — сумма «м²» строк реестра.
+        _sum: { sqm: true },
       });
       for (const group of (Array.isArray(groups) ? groups : []) as any[]) {
         const record = byId.get(String(group.brokerId));
         if (!record) continue;
         const count = finiteNumber(group._count?._all) || 0;
         if (!count) continue;
+        const sqm = finiteNumber(group._sum?.sqm);
+        if (sqm !== null) {
+          record.__registrySqm = Number(record.__registrySqm || 0) + sqm;
+        }
         record._count = {
           ...(record._count || {}),
           deals: Number(record._count?.deals || 0) + count,
@@ -11021,6 +11027,11 @@ export class LoyaltyBaseService {
             ? item.__workflowCalls.effective.length
             : 0),
         dealAmount,
+        // 2026-09-10 (владелец): «сумма м²» — площадь по сделкам реестра ДДУ.
+        dealSqm:
+          item.__registrySqm === undefined || item.__registrySqm === null
+            ? null
+            : Number(item.__registrySqm),
       },
       periodMetrics: this.unavailablePeriodMetrics(),
       // 2026-09-07: точность VERIFIED — фиксации/встречи/сделки считаются

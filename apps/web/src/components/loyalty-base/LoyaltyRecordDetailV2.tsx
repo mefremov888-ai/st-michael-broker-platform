@@ -356,7 +356,8 @@ function ActivityMetrics({ record }: { record: LoyaltyRecord }) {
     record.fixations !== null ||
     record.meetings !== null ||
     record.deals !== null ||
-    record.dealAmount !== null;
+    record.dealAmount !== null ||
+    record.dealSqm !== null;
   const sourceKnown =
     source !== null &&
     (source.fixations !== null ||
@@ -373,12 +374,21 @@ function ActivityMetrics({ record }: { record: LoyaltyRecord }) {
               {record.metricSource?.label || "Данные кабинета"}
             </span>
           </div>
-          <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
             <Metric label="Фиксации">{count(record.fixations)}</Metric>
             <Metric label="Встречи">{count(record.meetings)}</Metric>
             <Metric label="Сделки">{count(record.deals)}</Metric>
             <Metric label="Сумма ДДУ">
               {formatRubles(record.dealAmount).replace("—", "Нет данных")}
+            </Metric>
+            {/* 2026-09-10 (владелец): площадь проданного — сумма «м²»
+                по строкам реестра ДДУ этого брокера. */}
+            <Metric label="Площадь, м²">
+              {record.dealSqm === null
+                ? "Нет данных"
+                : record.dealSqm.toLocaleString("ru-RU", {
+                    maximumFractionDigits: 1,
+                  })}
             </Metric>
           </dl>
         </section>

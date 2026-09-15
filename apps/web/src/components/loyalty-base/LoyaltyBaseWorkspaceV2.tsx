@@ -32,6 +32,7 @@ import {
   Sparkles,
   Copy,
   Check,
+  ExternalLink,
   GitBranch,
   Trophy,
   UserPlus,
@@ -720,6 +721,20 @@ function LoyaltyTable({
                     ) : null}
                   </button>
                   {item.phone ? <PhoneWithCopy phone={String(item.phone)} /> : null}
+                  {/* 2026-09-10 (владелец): ссылка в amoCRM прямо из строки —
+                      раньше карточку приходилось открывать ради одной ссылки. */}
+                  {item.amoContactUrl ? (
+                    <a
+                      className="mt-0.5 inline-flex items-center gap-1 text-xs text-text-muted transition hover:text-accent"
+                      href={item.amoContactUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Открыть карточку в amoCRM"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      amoCRM <ExternalLink className="h-3 w-3" />
+                    </a>
+                  ) : null}
                 </td>
                 <td className="py-2 pr-3 align-top">
                   <LoyaltyStatusBadges record={item} />
@@ -901,6 +916,54 @@ function AddContactModal({
   );
 }
 
+// 2026-09-10: подписи фильтров колонок — их показываем, когда список пуст.
+const COLUMN_FILTER_LABELS: Record<string, string> = {
+  HAS_PHONE: "с телефоном",
+  NO_PHONE: "без телефона",
+  BT_VISITED: "был на брокер-туре",
+  BT_NOT_VISITED: "не был на брокер-туре",
+  HAS_FIXATIONS: "есть фиксации",
+  HAS_ACTIVE_FIXATIONS: "есть действующие фиксации",
+  NO_FIXATIONS: "нет фиксаций",
+  HAS_MEETINGS: "есть встречи",
+  NO_MEETINGS: "нет встреч",
+  CALLED_IN_PERIOD: "звонили в период",
+  NOT_CALLED_IN_PERIOD: "не звонили в период",
+  UNASSIGNED: "без ответственного",
+  HAS_DEALS: "есть сделки",
+  NO_DEALS: "нет сделок",
+  ONE_TO_TWO: "1–2 сделки",
+  THREE_TO_FOUR: "3–4 сделки",
+  FIVE_TO_NINE: "5–9 сделок",
+  TEN_PLUS: "10+ сделок",
+};
+
+function columnFilterLabels(columns: LoyaltyColumnFilters | undefined): string[] {
+  return Object.values(columns || {})
+    .filter((value): value is string => Boolean(value))
+    .map((value) => COLUMN_FILTER_LABELS[value] || value);
+}
+
+/**
+ * 2026-09-10: снимаем фильтры колонок, которыми теперь управляет панель.
+ * Возвращает тот же объект, если снимать нечего, — лишний ререндер не нужен.
+ */
+function dropConflictingColumns(
+  columns: LoyaltyColumnFilters | undefined,
+  dealsTouched: boolean,
+  meetingsTouched: boolean,
+): LoyaltyColumnFilters {
+  const current = columns || {};
+  const activityConflicts =
+    meetingsTouched &&
+    (current.activity === "HAS_MEETINGS" || current.activity === "NO_MEETINGS");
+  if (!(dealsTouched && current.deals) && !activityConflicts) return current;
+  const next: LoyaltyColumnFilters = { ...current };
+  if (dealsTouched) delete next.deals;
+  if (activityConflicts) delete next.activity;
+  return next;
+}
+
 export function LoyaltyBaseWorkspaceV2() {
   const { broker: me } = useAuth();
   // 2026-09-10 (владелец): при открытии и обновлении страницы показываем
@@ -919,6 +982,8 @@ export function LoyaltyBaseWorkspaceV2() {
   const segment = segmentState[key];
   const columnDraft = columnDrafts[key];
   const columns = columnApplied[key];
+  // 2026-09-10: что стоит в шапке таблицы — показываем при пустом списке.
+  const activeColumnLabels = columnFilterLabels(columns);
   const [mode, setMode] = useState<"base" | "reconciliation">("base");
   const [importOpen, setImportOpen] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
@@ -1225,6 +1290,22 @@ export function LoyaltyBaseWorkspaceV2() {
     options?: { scroll?: boolean },
   ) => {
     const next = sanitizeLoyaltyFilterState(base, entityType, explicit ?? draft);
+    // 2026-09-10 (владелец: «поставил „Нет сделок“ — ноль записей»): фильтры
+    // колонок остаются от прошлого клика по карточке KPI или по воронке и
+    // молча противоречат панели («Есть сделки» в колонке + «Нет сделок» в
+    // панели = пустой список). Панель — то, что человек нажал только что,
+    // поэтому она снимает противоречащий фильтр колонки.
+    const dealsTouched =
+      Boolean(next.dealsMin) || Boolean(next.dealsMax) || Boolean(next.dealsInPeriod);
+    const meetingsTouched = Boolean(next.meetingsMin) || Boolean(next.meetingsMax);
+    setColumnDrafts((current) => ({
+      ...current,
+      [key]: dropConflictingColumns(current[key], dealsTouched, meetingsTouched),
+    }));
+    setColumnApplied((current) => ({
+      ...current,
+      [key]: dropConflictingColumns(current[key], dealsTouched, meetingsTouched),
+    }));
     setDrafts((current) => ({ ...current, [key]: next }));
     setApplied((current) => ({ ...current, [key]: next }));
     setSegmentState((current) => ({ ...current, [key]: "" }));
@@ -1445,18 +1526,6 @@ export function LoyaltyBaseWorkspaceV2() {
       },
     },
   ];
-  // 2026-09-08: блок «Контрольные показатели» берёт цифры по текущей выборке
-  // списка (activitySummary); если её нет (база Анны, ошибка) — цифры обзора.
-  const kpiActivities = activitySummary?.supported
-    ? activitySummary.activities
-    : (overview?.activities ?? null);
-  const kpiDealAmount = activitySummary?.supported
-    ? activitySummary.dealAmount
-    : (overview?.dealAmount ?? null);
-  const withSelectionNote = (text: string) =>
-    activitySummary?.supported
-      ? `${text}. Считаем только по ${entityType === "brokers" ? "брокерам" : "агентствам (их брокерам и строкам реестра с их названием)"}, попавшим под текущие фильтры списка`
-      : text;
   const metricExplanation = (
     key: string,
     fallbackFormula: string,
@@ -1954,76 +2023,9 @@ export function LoyaltyBaseWorkspaceV2() {
               );
             })}
           </section>
-          <section className="card">
-            <div className="flex flex-wrap justify-between gap-3">
-              <div>
-                <h2 className="font-semibold">
-                  Контрольные показатели активности
-                </h2>
-                <p className="text-xs text-text-muted">
-                  {activitySummary?.supported
-                    ? base === "anna"
-                      ? `По сцепленным карточкам кабинета: записей в списке ${activitySummary.selectionCount.toLocaleString("ru-RU")}, из них сцеплено ${(activitySummary.linkedRecords ?? 0).toLocaleString("ru-RU")}${entityType === "agencies" ? `, их брокеров ${activitySummary.brokers.toLocaleString("ru-RU")}` : ""} · период: ${ratingLabel}. Записи без сцепки в цифры не входят.`
-                      : `По текущим фильтрам списка: ${entityType === "brokers" ? "брокеров" : "агентств"} ${activitySummary.selectionCount.toLocaleString("ru-RU")}${entityType === "agencies" ? `, их брокеров ${activitySummary.brokers.toLocaleString("ru-RU")}` : ""} · период: ${ratingLabel}. Нажмите число, чтобы открыть карточки-основания.`
-                    : "Не входят в шесть KPI. Нажмите число для детализации в карточках-основаниях."}
-                </p>
-              </div>
-              <span className="rounded-full bg-accent/10 px-3 py-1 text-xs text-accent">
-                {exactness}
-              </span>
-            </div>
-            <dl className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-              <Metric
-                label="Фиксации"
-                onClick={base === "ours" ? () => openActivityDrilldown("fixations") : undefined}
-                explanation={metricExplanation(
-                  "activities.fixations",
-                  withSelectionNote("Количество подтверждённых фиксаций за выбранный период"),
-                )}
-              >
-                {number(kpiActivities?.fixations ?? null)}
-              </Metric>
-              <Metric
-                label="Встречи"
-                onClick={base === "ours" ? () => openActivityDrilldown("meetings") : undefined}
-                explanation={metricExplanation(
-                  "activities.meetings",
-                  withSelectionNote("Количество подтверждённых встреч с клиентами за выбранный период (брокер-туры не считаются)"),
-                )}
-              >
-                {number(kpiActivities?.meetings ?? null)}
-              </Metric>
-              <Metric
-                label="Платные брони"
-                explanation={metricExplanation(
-                  "activities.paidBookings",
-                  withSelectionNote("Оплаченные ДВОУ из «Реестра сделок» за выбранный период (по дате оплаты ДВОУ)"),
-                )}
-              >
-                {number(kpiActivities?.paidBookings ?? null)}
-              </Metric>
-              <Metric
-                label="Сделки"
-                onClick={base === "ours" ? () => openActivityDrilldown("deals") : undefined}
-                explanation={metricExplanation(
-                  "activities.deals",
-                  withSelectionNote("Оплаченные ДДУ за выбранный период (по «Дате оплаты ДДУ»)"),
-                )}
-              >
-                {number(kpiActivities?.deals ?? null)}
-              </Metric>
-              <Metric
-                label="Сумма ДДУ"
-                onClick={base === "ours" ? () => openActivityDrilldown("dealAmount") : undefined}
-                explanation={metricExplanation(
-                  "dealAmount",
-                  withSelectionNote("Сумма подтверждённых ДДУ за выбранный период"),
-                )}
-              >
-                {money(kpiDealAmount)}
-              </Metric>
-            </dl>
-          </section>
+          {/* 2026-09-10 (владелец): блок «Контрольные показатели активности»
+              убран со страницы — эти же цифры видны в карточках и в
+              шести KPI выше. */}
           {base === "anna" && overview?.cabinetLinks && (
             <section className="card">
               <div className="flex flex-wrap justify-between gap-3">
@@ -2429,6 +2431,15 @@ export function LoyaltyBaseWorkspaceV2() {
                   Проверьте применённые фильтры. Неизвестные значения не
                   превращаются в нули.
                 </p>
+                {/* 2026-09-10 (владелец): фильтры колонок задаются в шапке
+                    таблицы и раньше не были видны при пустом списке — человек
+                    не понимал, почему выборка нулевая. */}
+                {activeColumnLabels.length > 0 && (
+                  <p className="mt-2 text-sm text-warning">
+                    В шапке таблицы стоят фильтры: {activeColumnLabels.join(", ")}.
+                    Снимите их, если искали не это.
+                  </p>
+                )}
               </div>
             ) : (
               <LoyaltyTable

@@ -1143,9 +1143,11 @@ test("maps evidence rows to readable Russian titles with details", () => {
   // Без имени клиента главным именем становится проект.
   assert.equal(deal.title, "Сделка — Серебряный Бор");
   assert.match(deal.description, /подписана/);
+  // 2026-09-10 (владелец спросил, что это за сумма): у сделки подпись
+  // «Стоимость по ДДУ», у остальных записей остаётся «Сумма».
   assert.deepEqual(
-    deal.details?.find((row) => row.label === "Сумма"),
-    { label: "Сумма", value: "35 684 619,08 ₽" },
+    deal.details?.find((row) => row.label === "Стоимость по ДДУ"),
+    { label: "Стоимость по ДДУ", value: "35 684 619,08 ₽" },
   );
   // 2026-09-07: объект сделки и ссылка на сделку amoCRM.
   const dealRows = Object.fromEntries(
@@ -1462,11 +1464,9 @@ test("keeps Anna's dashboard filters and hides Codex extras", () => {
     workspace,
     /base === "anna" \? \([\s\S]*<select[\s\S]*aria-label="Период рейтинга"/,
   );
-  assert.match(
-    workspace,
-    // 2026-09-09 (владелец: база Анны в том же виде, что наша): сводка есть и у Анны — по сцепленным карточкам кабинета.
-    /По сцепленным карточкам кабинета: записей в списке/,
-  );
+  // 2026-09-10 (владелец): блок «Контрольные показатели активности» убран со
+  // страницы — вместе с ним ушла и его подпись про сцепленные карточки.
+  assert.doesNotMatch(workspace, />\s*Контрольные показатели активности\s*</);
   const filterPanelAt = workspace.indexOf("<LoyaltyFilterPanel");
   const legendAt = workspace.indexOf("<LoyaltyStatusLegend");
   assert.notEqual(filterPanelAt, -1);
