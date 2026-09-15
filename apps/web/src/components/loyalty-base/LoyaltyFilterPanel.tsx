@@ -148,6 +148,12 @@ export function LoyaltyFilterPanel({
     "callTo",
     "activityFrom",
     "activityTo",
+    "fixationFrom",
+    "fixationTo",
+    "meetingFrom",
+    "meetingTo",
+    "dealFrom",
+    "dealTo",
     "dealsMin",
     "dealsMax",
     "meetingsMin",
@@ -216,7 +222,7 @@ export function LoyaltyFilterPanel({
                 type="date"
                 aria-label="Звонки с"
                 value={draft.callFrom}
-                max={draft.callTo}
+                max={draft.callTo || undefined}
                 onChange={(event) => update("callFrom", event.target.value)}
               />
               <input
@@ -224,7 +230,7 @@ export function LoyaltyFilterPanel({
                 type="date"
                 aria-label="Звонки по"
                 value={draft.callTo}
-                min={draft.callFrom}
+                min={draft.callFrom || undefined}
                 onChange={(event) => update("callTo", event.target.value)}
               />
             </div>
@@ -238,6 +244,69 @@ export function LoyaltyFilterPanel({
                 «Не звонили в период».
               </p>
             )}
+          </Field>
+          {/* 2026-09-14 (просьба владельца): отдельные даты по видам
+              активности. Достаточно заполнить одну границу — вторая
+              открыта. Пусто — работает общий период активности. */}
+          <Field label="Период фиксаций">
+            <div className="flex gap-1">
+              <input
+                className="input"
+                type="date"
+                aria-label="Фиксации с"
+                value={draft.fixationFrom}
+                max={draft.fixationTo || undefined}
+                onChange={(event) => update("fixationFrom", event.target.value)}
+              />
+              <input
+                className="input"
+                type="date"
+                aria-label="Фиксации по"
+                value={draft.fixationTo}
+                min={draft.fixationFrom || undefined}
+                onChange={(event) => update("fixationTo", event.target.value)}
+              />
+            </div>
+          </Field>
+          <Field label="Период встреч">
+            <div className="flex gap-1">
+              <input
+                className="input"
+                type="date"
+                aria-label="Встречи с"
+                value={draft.meetingFrom}
+                max={draft.meetingTo || undefined}
+                onChange={(event) => update("meetingFrom", event.target.value)}
+              />
+              <input
+                className="input"
+                type="date"
+                aria-label="Встречи по"
+                value={draft.meetingTo}
+                min={draft.meetingFrom || undefined}
+                onChange={(event) => update("meetingTo", event.target.value)}
+              />
+            </div>
+          </Field>
+          <Field label="Период сделок">
+            <div className="flex gap-1">
+              <input
+                className="input"
+                type="date"
+                aria-label="Сделки с"
+                value={draft.dealFrom}
+                max={draft.dealTo || undefined}
+                onChange={(event) => update("dealFrom", event.target.value)}
+              />
+              <input
+                className="input"
+                type="date"
+                aria-label="Сделки по"
+                value={draft.dealTo}
+                min={draft.dealFrom || undefined}
+                onChange={(event) => update("dealTo", event.target.value)}
+              />
+            </div>
           </Field>
           <Field label="Обзвон">
             <select

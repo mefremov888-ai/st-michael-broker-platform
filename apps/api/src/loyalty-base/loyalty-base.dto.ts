@@ -614,6 +614,24 @@ export class LoyaltyCanonicalFilterDto {
   @Type(() => LoyaltyFilterPeriodDto)
   activityPeriod?: LoyaltyFilterPeriodDto;
 
+  // 2026-09-14 (просьба владельца): отдельные даты для фиксаций, встреч и
+  // сделок. Не заполнен свой период — действует общий activityPeriod, как
+  // было раньше. Достаточно одной границы: «с даты» или «по дату».
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  fixationPeriod?: LoyaltyFilterPeriodDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  meetingPeriod?: LoyaltyFilterPeriodDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => LoyaltyFilterPeriodDto)
+  dealPeriod?: LoyaltyFilterPeriodDto;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)

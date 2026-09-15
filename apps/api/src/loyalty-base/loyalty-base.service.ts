@@ -146,6 +146,28 @@ interface LoyaltyFilterPeriod {
   toIso: string;
 }
 
+/**
+ * 2026-09-14 (просьба владельца): у фиксаций, встреч и сделок могут быть
+ * РАЗНЫЕ периоды. Набор передаётся одним объектом; старые вызовы с одним
+ * периодом раскладываются на три одинаковых, поэтому поведение не меняется.
+ */
+export interface LoyaltyPeriodSet {
+  fixation?: LoyaltyFilterPeriod;
+  meeting?: LoyaltyFilterPeriod;
+  deal?: LoyaltyFilterPeriod;
+}
+
+export function toPeriodSet(
+  value?: LoyaltyFilterPeriod | LoyaltyPeriodSet,
+): LoyaltyPeriodSet {
+  if (!value) return {};
+  if ("fromIso" in (value as LoyaltyFilterPeriod)) {
+    const single = value as LoyaltyFilterPeriod;
+    return { fixation: single, meeting: single, deal: single };
+  }
+  return value as LoyaltyPeriodSet;
+}
+
 interface CanonicalLoyaltyFilter {
   archived: "exclude" | "include" | "only";
   includeLowSignal: boolean;
@@ -155,6 +177,11 @@ interface CanonicalLoyaltyFilter {
   segment?: string;
   callPeriod?: LoyaltyFilterPeriod;
   activityPeriod?: LoyaltyFilterPeriod;
+  // 2026-09-14 (просьба владельца): отдельные периоды по видам активности.
+  // Если конкретный не задан — действует общий activityPeriod, как раньше.
+  fixationPeriod?: LoyaltyFilterPeriod;
+  meetingPeriod?: LoyaltyFilterPeriod;
+  dealPeriod?: LoyaltyFilterPeriod;
   campaignIds: string[];
   lastCallResults: string[];
   scenario?: string;
@@ -1031,16 +1058,28 @@ export class LoyaltyBaseService {
     return { from, to };
   }
 
+  // Открытая нижняя граница: раньше любой активности кабинета.
+  private static readonly OPEN_PERIOD_START_VALUE = "2015-01-01";
+
+  private moscowTodayIso(): string {
+    const now = new Date(Date.now() + 3 * 60 * 60 * 1000);
+    return now.toISOString().slice(0, 10);
+  }
+
   private parseOptionalFilterPeriod(
     value: { from?: string; to?: string } | undefined,
     label: string,
   ): LoyaltyFilterPeriod | undefined {
     if (!value?.from && !value?.to) return undefined;
-    if (!value.from || !value.to) {
-      throw new BadRequestException(`${label} requires both from and to`);
-    }
-    const from = parseMoscowBoundary(value.from, false);
-    const to = parseMoscowBoundary(value.to, true);
+    // 2026-09-14 (жалоба владельца «фильтр по датам не работает»): раньше
+    // одна заполненная дата приводила к ошибке API, а интерфейс молча
+    // выбрасывал такой фильтр — человек вводил «с 1 сентября» и не понимал,
+    // почему ничего не изменилось. Теперь одна граница означает открытый
+    // период: «с даты и по сегодня» или «всё до даты».
+    const fromIso = value.from || LoyaltyBaseService.OPEN_PERIOD_START_VALUE;
+    const toIso = value.to || this.moscowTodayIso();
+    const from = parseMoscowBoundary(fromIso, false);
+    const to = parseMoscowBoundary(toIso, true);
     if (
       !Number.isFinite(from.getTime()) ||
       !Number.isFinite(to.getTime()) ||
@@ -1048,14 +1087,22 @@ export class LoyaltyBaseService {
     ) {
       throw new BadRequestException(`Invalid ${label}`);
     }
-    if (to.getTime() - from.getTime() > 5 * 366 * 24 * 60 * 60 * 1000) {
+    // Ограничение в пять лет защищает от случайного «выбрать всё» в две
+    // заполненные даты. Для открытого периода («только с» или «только по»)
+    // оно не применяется: человек сознательно просит всё до или после даты,
+    // а данные кабинета начинаются с декабря 2020 года.
+    const openEnded = !value.from || !value.to;
+    if (
+      !openEnded &&
+      to.getTime() - from.getTime() > 5 * 366 * 24 * 60 * 60 * 1000
+    ) {
       throw new BadRequestException(`${label} is too large`);
     }
     return {
       from,
       to,
-      fromIso: value.from,
-      toIso: value.to,
+      fromIso,
+      toIso,
     };
   }
 
@@ -1075,6 +1122,17 @@ export class LoyaltyBaseService {
       canonical?.activityPeriod || flatPeriod,
       "activityPeriod",
     );
+    // Каждый вид активности можно ограничить своими датами. Не задан свой —
+    // работает общий период активности (поведение до 14.09.2026).
+    const fixationPeriod =
+      this.parseOptionalFilterPeriod(canonical?.fixationPeriod, "fixationPeriod") ||
+      activityPeriod;
+    const meetingPeriod =
+      this.parseOptionalFilterPeriod(canonical?.meetingPeriod, "meetingPeriod") ||
+      activityPeriod;
+    const dealPeriod =
+      this.parseOptionalFilterPeriod(canonical?.dealPeriod, "dealPeriod") ||
+      activityPeriod;
     const range = (
       nested: { min?: number; max?: number } | undefined,
       flatMin?: number,
@@ -1111,6 +1169,9 @@ export class LoyaltyBaseService {
       segment: query.segment,
       callPeriod,
       activityPeriod,
+      fixationPeriod,
+      meetingPeriod,
+      dealPeriod,
       campaignIds: uniqueSorted([
         ...(canonical?.campaignIds || []),
         query.callCampaign,
@@ -8633,8 +8694,8 @@ export class LoyaltyBaseService {
     if (filter.dealsInPeriod !== undefined) {
       // Сделка за период — из любого источника: локальная Deal-таблица или
       // «Реестр сделок» (registry_deals, только оплаченные, период по paidAt).
-      const dealWhere = this.ourConfirmedDealWhere(filter.activityPeriod);
-      const registryWhere = this.registrySignedAtWhere(filter.activityPeriod);
+      const dealWhere = this.ourConfirmedDealWhere(filter.dealPeriod);
+      const registryWhere = this.registrySignedAtWhere(filter.dealPeriod);
       and.push(
         filter.dealsInPeriod
           ? {
@@ -8831,18 +8892,33 @@ export class LoyaltyBaseService {
    */
   private async ourBrokerPeriodMetrics(
     brokerIds: string[],
-    period?: LoyaltyFilterPeriod,
+    period?: LoyaltyFilterPeriod | LoyaltyPeriodSet,
     cabinetSource?: CabinetSource,
   ): Promise<Map<string, any>> {
     const ids = uniqueSorted(brokerIds);
     const result = new Map<string, any>();
-    if (!period) return result;
+    // 2026-09-14: периоды раздельные. Старый вызов с одним периодом
+    // продолжает работать — он раскладывается на три одинаковых.
+    const periods = toPeriodSet(period);
+    const anyPeriod = periods.fixation || periods.meeting || periods.deal;
+    if (!anyPeriod) return result;
 
     // 2026-09-07: exactness VERIFIED — агрегаты считаются напрямую из таблиц
     // кабинета (clients/meetings/deals/registry_deals) по выверенным правилам;
     // методика по-русски, потому что показывается в карточке как есть.
     const empty = () => ({
-      period: { from: period.fromIso, to: period.toIso },
+      period: { from: anyPeriod.fromIso, to: anyPeriod.toIso },
+      periods: {
+        fixations: periods.fixation
+          ? { from: periods.fixation.fromIso, to: periods.fixation.toIso }
+          : null,
+        meetings: periods.meeting
+          ? { from: periods.meeting.fromIso, to: periods.meeting.toIso }
+          : null,
+        deals: periods.deal
+          ? { from: periods.deal.fromIso, to: periods.deal.toIso }
+          : null,
+      },
       availability: "LOCAL_PRELIMINARY",
       exactness: "VERIFIED",
       source: "LOCAL_OPERATIONAL_ROWS",
@@ -8867,7 +8943,9 @@ export class LoyaltyBaseService {
           where: {
             ...brokerIdWhere(batch),
             ...fixationClientWhere(cabinetSource),
-            createdAt: { gte: period.from, lte: period.to },
+            createdAt: periods.fixation
+              ? { gte: periods.fixation.from, lte: periods.fixation.to }
+              : { lt: new Date(0) },
           },
           _count: { _all: true },
           _max: { createdAt: true },
@@ -8877,7 +8955,9 @@ export class LoyaltyBaseService {
           where: {
             ...brokerIdWhere(batch),
             status: { in: ["CONFIRMED", "COMPLETED"] }, type: { not: "BROKER_TOUR" },
-            date: { gte: period.from, lte: period.to },
+            date: periods.meeting
+              ? { gte: periods.meeting.from, lte: periods.meeting.to }
+              : { lt: new Date(0) },
           },
           _count: { _all: true },
           _max: { date: true },
@@ -8886,7 +8966,11 @@ export class LoyaltyBaseService {
           by: ["brokerId"],
           where: {
             ...brokerIdWhere(batch),
-            ...this.ourConfirmedDealWhere({ from: period.from, to: period.to }),
+            ...this.ourConfirmedDealWhere(
+              periods.deal
+                ? { from: periods.deal.from, to: periods.deal.to }
+                : { from: new Date(0), to: new Date(0) },
+            ),
           },
           _count: { _all: true },
           _sum: { amount: true },
@@ -8897,10 +8981,11 @@ export class LoyaltyBaseService {
               by: ["brokerId"],
               where: {
                 ...brokerIdWhere(batch),
-                ...this.registrySignedAtWhere({
-                  from: period.from,
-                  to: period.to,
-                }),
+                ...this.registrySignedAtWhere(
+                  periods.deal
+                    ? { from: periods.deal.from, to: periods.deal.to }
+                    : { from: new Date(0), to: new Date(0) },
+                ),
               },
               _count: { _all: true },
               _sum: { amount: true },
@@ -9920,22 +10005,26 @@ export class LoyaltyBaseService {
 
   private ourAgencyPeriodMetrics(
     relationMetrics: ReturnType<LoyaltyBaseService["ourAgencyRelationMetrics"]>,
-    period?: LoyaltyFilterPeriod,
+    period?: LoyaltyFilterPeriod | LoyaltyPeriodSet,
   ) {
-    if (!period) return this.unavailablePeriodMetrics(period);
-    const inPeriod = (row: any, field: string) => {
+    // 2026-09-14: у каждого вида активности может быть свой период.
+    const periods = toPeriodSet(period);
+    const anyPeriod = periods.fixation || periods.meeting || periods.deal;
+    if (!anyPeriod) return this.unavailablePeriodMetrics(undefined);
+    const inPeriod = (row: any, field: string, p?: LoyaltyFilterPeriod) => {
+      if (!p) return false;
       const value = dateOnly(row?.[field]);
       return Boolean(
         value &&
-        value >= period.fromIso.slice(0, 10) &&
-        value <= period.toIso.slice(0, 10),
+        value >= p.fromIso.slice(0, 10) &&
+        value <= p.toIso.slice(0, 10),
       );
     };
-    const select = (rows: any[] | null, field: string) =>
-      rows === null ? null : rows.filter((row) => inPeriod(row, field));
-    const fixations = select(relationMetrics.fixations, "createdAt");
-    const meetings = select(relationMetrics.meetings, "date");
-    const deals = select(relationMetrics.deals, "signedAt");
+    const select = (rows: any[] | null, field: string, p?: LoyaltyFilterPeriod) =>
+      rows === null ? null : rows.filter((row) => inPeriod(row, field, p));
+    const fixations = select(relationMetrics.fixations, "createdAt", periods.fixation);
+    const meetings = select(relationMetrics.meetings, "date", periods.meeting);
+    const deals = select(relationMetrics.deals, "signedAt", periods.deal);
     const amount =
       deals === null
         ? null
@@ -9962,7 +10051,18 @@ export class LoyaltyBaseService {
             .sort()
             .at(-1) || null;
     return {
-      period: { from: period.fromIso, to: period.toIso },
+      period: { from: anyPeriod.fromIso, to: anyPeriod.toIso },
+      periods: {
+        fixations: periods.fixation
+          ? { from: periods.fixation.fromIso, to: periods.fixation.toIso }
+          : null,
+        meetings: periods.meeting
+          ? { from: periods.meeting.fromIso, to: periods.meeting.toIso }
+          : null,
+        deals: periods.deal
+          ? { from: periods.deal.fromIso, to: periods.deal.toIso }
+          : null,
+      },
       availability: "LOCAL_PRELIMINARY",
       exactness: "APPROXIMATE",
       source: "CURRENT_BROKER_AGENCY_RELATIONS",
@@ -10295,13 +10395,13 @@ export class LoyaltyBaseService {
     const lifetimeDeals = Number(record._count?.deals || 0);
     const lifetimeMeetings = Number(record._count?.meetings || 0);
     const lifetimeFixations = Number(record._count?.clients || 0);
-    const deals = filter.activityPeriod
+    const deals = filter.dealPeriod
       ? finiteNumber(item.periodMetrics?.deals)
       : lifetimeDeals;
-    const meetings = filter.activityPeriod
+    const meetings = filter.meetingPeriod
       ? finiteNumber(item.periodMetrics?.meetings)
       : lifetimeMeetings;
-    const fixations = filter.activityPeriod
+    const fixations = filter.fixationPeriod
       ? finiteNumber(item.periodMetrics?.fixations)
       : lifetimeFixations;
     const bt = record.brokerTourVisited === true;
@@ -10560,20 +10660,21 @@ export class LoyaltyBaseService {
         : null,
     };
     item.dataQualityCodes = [];
-    item.periodMetrics = this.ourAgencyPeriodMetrics(
-      relationMetrics,
-      filter.activityPeriod,
-    );
+    item.periodMetrics = this.ourAgencyPeriodMetrics(relationMetrics, {
+      fixation: filter.fixationPeriod,
+      meeting: filter.meetingPeriod,
+      deal: filter.dealPeriod,
+    });
     // Единое правило с брокерами нашей базы: период задан → метрики за
     // период; период не задан → lifetime-числа. Гейт low-signal ниже
     // намеренно остаётся на lifetime-значениях.
-    const filteredDeals = filter.activityPeriod
+    const filteredDeals = filter.dealPeriod
       ? finiteNumber(item.periodMetrics?.deals)
       : deals;
-    const filteredMeetings = filter.activityPeriod
+    const filteredMeetings = filter.meetingPeriod
       ? finiteNumber(item.periodMetrics?.meetings)
       : meetings;
-    const filteredFixations = filter.activityPeriod
+    const filteredFixations = filter.fixationPeriod
       ? finiteNumber(item.periodMetrics?.fixations)
       : fixations;
     const latestCall = this.applyCallSummary(item, "AGENCY", calls);

@@ -79,6 +79,14 @@ export interface LoyaltyFilterFormState {
   callTo: string;
   activityFrom: string;
   activityTo: string;
+  // 2026-09-14 (просьба владельца): свои даты у фиксаций, встреч и сделок.
+  // Пусто — действует общий «период активности».
+  fixationFrom: string;
+  fixationTo: string;
+  meetingFrom: string;
+  meetingTo: string;
+  dealFrom: string;
+  dealTo: string;
   campaignId: string;
   lastCallResult: LoyaltyCallResult | "";
   scenario: LoyaltyCallScenario | "";
@@ -154,6 +162,12 @@ export function emptyLoyaltyFilters(): LoyaltyFilterFormState {
     callFrom: "",
     callTo: "",
     activityFrom: "",
+    fixationFrom: "",
+    fixationTo: "",
+    meetingFrom: "",
+    meetingTo: "",
+    dealFrom: "",
+    dealTo: "",
     activityTo: "",
     campaignId: "",
     lastCallResult: "",
@@ -208,13 +222,20 @@ export function toCanonicalFilter(
   // 2026-09-04 (задача D): «период звонков» больше НЕ подменяет период
   // активности для базы Анны при dealsInPeriod — сделки фильтруются только
   // по явно выбранному периоду активности.
-  const activityPeriod =
-    state.activityFrom && state.activityTo
-      ? { from: state.activityFrom, to: state.activityTo }
-      : undefined;
+  // 2026-09-14: раньше период строился только когда заполнены ОБЕ даты —
+  // человек вводил одну и фильтр молча не применялся. Теперь хватает одной:
+  // «с даты» или «по дату», вторую границу открывает сервер.
+  const period = (from: string, to: string) =>
+    from || to ? { from: from || undefined, to: to || undefined } : undefined;
+  const activityPeriod = period(state.activityFrom, state.activityTo);
+  const fixationPeriod = period(state.fixationFrom, state.fixationTo);
+  const meetingPeriod = period(state.meetingFrom, state.meetingTo);
+  const dealPeriod = period(state.dealFrom, state.dealTo);
+  // «Сделка в периоде» опирается на период сделок, а если он не задан — на общий.
+  const periodForDeals = dealPeriod || activityPeriod;
   // Пустой период = «за всё время»: без периода «сделки в периоде» становится
   // lifetime-предикатом по количеству сделок, а не ошибкой fail-closed API.
-  const dealsInPeriod = activityPeriod
+  const dealsInPeriod = periodForDeals
     ? boolean(state.dealsInPeriod)
     : undefined;
   const dealCount =
@@ -227,11 +248,11 @@ export function toCanonicalFilter(
           : undefined;
   const common: LoyaltyCanonicalFilter = {
     includeLowSignal: state.includeLowSignal,
-    callPeriod:
-      state.callFrom && state.callTo
-        ? { from: state.callFrom, to: state.callTo }
-        : undefined,
+    callPeriod: period(state.callFrom, state.callTo),
     activityPeriod,
+    fixationPeriod,
+    meetingPeriod,
+    dealPeriod,
     campaignIds: state.campaignId ? [state.campaignId] : undefined,
     lastCallResults: state.lastCallResult ? [state.lastCallResult] : undefined,
     scenario: state.scenario || undefined,
@@ -521,6 +542,12 @@ export function sanitizeLoyaltyFilterState(
     "callTo",
     "activityFrom",
     "activityTo",
+    "fixationFrom",
+    "fixationTo",
+    "meetingFrom",
+    "meetingTo",
+    "dealFrom",
+    "dealTo",
   ] as const) {
     if (!isValidDateOnlyInput(state[key])) clear(key);
   }
