@@ -903,7 +903,9 @@ function AddContactModal({
 
 export function LoyaltyBaseWorkspaceV2() {
   const { broker: me } = useAuth();
-  const [base, setBase] = useState<LoyaltyBaseKey>("anna");
+  // 2026-09-10 (владелец): при открытии и обновлении страницы показываем
+  // нашу базу — с ней работают каждый день, база Анны открывается по клику.
+  const [base, setBase] = useState<LoyaltyBaseKey>("ours");
   const [entityType, setEntityType] = useState<LoyaltyEntityType>("brokers");
   const key = contextKey(base, entityType);
   const [drafts, setDrafts] = useState(contexts);
