@@ -15,8 +15,9 @@
  *   - имя для работы (displayName) ставим из справочника, самоназвание
  *     (fullName) тоже — карточку заводим мы, а не сам брокер;
  *   - агентства НЕ сводим и не создаём: владелец 14.09 решил, что разные
- *     написания — это разные юрлица. Исходное название кладём в заметку,
- *     привязка агентства — отдельным шагом по его решению;
+ *     написания — это разные юрлица. Исходное название кладём в журнал
+ *     (AuditLog, BROKER_IMPORTED_OLD_CABINET) — поля «заметка» у карточки
+ *     брокера нет; привязка агентства — отдельным шагом по его решению;
  *   - дата регистрации старого кабинета идёт в createdAt.
  *
  * DRY_RUN=1 по умолчанию. Боевой режим: DRY_RUN=0 CONFIRM=1.
@@ -43,7 +44,7 @@ async function main() {
     for (const p of extra) { const t = tenDigits(p.phone); if (t) known.add(t); }
 
     const toCreate = [];
-    const stat = { всего: ROWS.length, ужеЕсть: 0, кСозданию: 0, безТелефона: 0, созданоШт: 0, ошибок: 0 };
+    const stat = { всего: ROWS.length, ужеЕсть: 0, кСозданию: 0, безТелефона: 0, созданоШт: 0, ошибок: 0, безЖурнала: 0 };
     for (const row of ROWS) {
       const ten = tenDigits(row.phone);
       if (!ten) { stat.безТелефона++; continue; }
@@ -67,7 +68,12 @@ async function main() {
     }
     for (const r of toCreate) {
       try {
-        await prisma.broker.create({
+        // 2026-09-17: у Broker нет поля `notes` — прежняя версия скрипта
+        // падала на нём все 547 раз (dry-run этого не ловит, до create не
+        // доходит). Исходное название агентства кладём в журнал AuditLog:
+        // агентства по решению владельца не создаём и не сводим, но
+        // строку из источника терять нельзя.
+        const created = await prisma.broker.create({
           data: {
             phone: r.phone,
             fullName: r.fullName,
@@ -79,16 +85,34 @@ async function main() {
             isInBase: true,
             baseSource: "old_cabinet",
             createdAt: r.registeredAt ? new Date(r.registeredAt) : undefined,
-            notes: r.agencyRaw ? `Старый кабинет, агентство в источнике: ${r.agencyRaw}` : "Старый кабинет",
           },
         });
         stat.созданоШт++;
+        // Журнал пишем отдельной попыткой: карточка уже создана, и сбой
+        // записи в журнал не должен считаться ошибкой создания.
+        try {
+          await prisma.auditLog.create({
+            data: {
+              action: "BROKER_IMPORTED_OLD_CABINET",
+              entity: "Broker",
+              entityId: created.id,
+              payload: {
+                oldCabinetId: r.oldId ?? null,
+                agencyRaw: r.agencyRaw || null,
+                registeredAt: r.registeredAt || null,
+                source: "brokers.xlsx 29.08.2026",
+              },
+            },
+          });
+        } catch (e) {
+          stat.безЖурнала++;
+        }
       } catch (e) {
         stat.ошибок++;
         if (stat.ошибок <= 5) console.error(`    ошибка по ${r.phone.slice(0, 5)}***: ${e?.message || e}`);
       }
     }
-    console.log(`\nЗАПИСЬ ВЫПОЛНЕНА: создано ${stat.созданоШт}, ошибок ${stat.ошибок}`);
+    console.log(`\nЗАПИСЬ ВЫПОЛНЕНА: создано ${stat.созданоШт}, ошибок ${stat.ошибок}, без записи в журнал ${stat.безЖурнала}`);
   } finally {
     await prisma.$disconnect();
   }
