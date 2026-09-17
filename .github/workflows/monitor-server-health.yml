@@ -114,9 +114,9 @@ jobs:
               fi
               # 2026-09-17: с прод-сервера соединение до Телеграма периодически
               # отваливается по таймауту (из-за этого 16.09 не ушла часть
-              # дайджестов, а 17.09 — тревога). Ходим по IPv4, даём больше
+              # дайджестов, а 17.09 — тревога). IPv4 до api.telegram.org с этого сервера закрыт, работает IPv6 — семейство адресов не навязываем; даём больше
               # времени на соединение и повторяем две попытки.
-              curl --fail -sS -4 --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 \
+              curl --fail -sS --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 \
                 -X POST "https://api.telegram.org/bot${OPS_TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="$OPS_ALERT_CHAT_ID" \
                 --data-urlencode text="$1" > /dev/null
