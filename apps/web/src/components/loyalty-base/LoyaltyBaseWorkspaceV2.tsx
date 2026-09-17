@@ -1,7 +1,6 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect, @typescript-eslint/no-unused-expressions */
 
-import RegistrySeriesPanel from "@/components/registry/RegistrySeriesPanel";
 import {
   useCallback,
   useEffect,
@@ -2143,15 +2142,8 @@ export function LoyaltyBaseWorkspaceV2() {
               </dl>
             </section>
           )}
-          {base === "ours" && canReadAll && (
-            <RegistrySeriesPanel
-              compact
-              title="Динамика по дням, неделям и месяцам"
-              initialFrom={ratingRange.from?.slice(0, 10)}
-              initialTo={ratingRange.to?.slice(0, 10)}
-              initialGranularity="day"
-            />
-          )}
+          {/* 2026-09-17 (владелец): блок «Динамика по дням, неделям и месяцам»
+              со страницы удалён. Те же ряды остаются в «Реестре сделок». */}
           {base === "anna" && sourceReported && (
             <section className="card border-warning/40 bg-warning/5">
               <div className="flex flex-wrap items-start justify-between gap-3">
