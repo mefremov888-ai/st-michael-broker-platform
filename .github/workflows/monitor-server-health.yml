@@ -157,21 +157,27 @@ jobs:
             QUEUE_RESULT=$(docker compose exec -T api node -e "
               const { PrismaClient } = require('@st-michael/database');
               const p = new PrismaClient();
-              const where = { amoSyncStatus: { in: ['FAILED', 'PENDING'] } };
+              const base = { amoSyncStatus: { in: ['FAILED', 'PENDING'] } };
+              const heldOr = [
+                { amoSyncError: { startsWith: 'MANUAL_HOLD' } },
+                { amoSyncError: { startsWith: 'AMO_UNIQUENESS_RECHECK_REQUIRED' } },
+              ];
+              const where = { ...base, NOT: { OR: heldOr } };
               Promise.all([
                 p.client.count({ where }),
                 p.client.findFirst({ where, orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
                 p.client.count({ where: { ...where, amoSyncAttempts: { gte: 10 } } }),
                 p.client.count({ where: { ...where, amoSyncError: 'BROKER_AMO_CONTACT_MISSING' } }),
-              ]).then(([count, oldest, exhausted, missingContact]) => {
-                console.log([count, oldest ? Math.floor(oldest.createdAt.getTime() / 1000) : 0, exhausted, missingContact].join('|'));
+                p.client.count({ where: { ...base, OR: heldOr } }),
+              ]).then(([count, oldest, exhausted, missingContact, held]) => {
+                console.log([count, oldest ? Math.floor(oldest.createdAt.getTime() / 1000) : 0, exhausted, missingContact, held].join('|'));
               }).catch(() => process.exitCode = 1).finally(() => p.\$disconnect());
             " 2>/dev/null | tail -1)
 
-            if ! printf '%s' "$QUEUE_RESULT" | grep -Eq '^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$'; then
+            if ! printf '%s' "$QUEUE_RESULT" | grep -Eq '^[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+\|[0-9]+$'; then
               add_incident "fixation-queue-check" "не удалось проверить очередь заявок для amoCRM"
             else
-              IFS='|' read -r FAILED_COUNT OLDEST_EPOCH EXHAUSTED_COUNT MISSING_CONTACT_COUNT <<EOF
+              IFS='|' read -r FAILED_COUNT OLDEST_EPOCH EXHAUSTED_COUNT MISSING_CONTACT_COUNT HELD_COUNT <<EOF
             $QUEUE_RESULT
             EOF
               NOW_EPOCH=$(date +%s)
@@ -179,6 +185,12 @@ jobs:
               if [ "$OLDEST_EPOCH" -gt 0 ]; then
                 OLDEST_MINUTES=$(( (NOW_EPOCH - OLDEST_EPOCH) / 60 ))
               fi
+              # 2026-09-17: заявки, намеренно поставленные на удержание
+              # (MANUAL_HOLD_* — ждём агентство брокера; AMO_UNIQUENESS_RECHECK_REQUIRED —
+              # по телефону есть неразрешённая заявка), в счёт неудач НЕ идут:
+              # это не сбой отправки, а ожидание решения человека. Раньше они
+              # поднимали тревогу каждый раз, когда их число менялось. Их
+              # количество печатается в итоговой строке прогона (held=).
               # 2026-09-05 (антиспам): ключ инцидента = «отпечаток» состояния.
               # Количества входят в ключ (изменилось число заявок — новый алерт),
               # а минуты ожидания НЕ входят — они растут сами по себе и не
@@ -240,7 +252,7 @@ jobs:
             fi
 
             printf '%s|%s\n' "$KEYS_TO_STORE" "$ALERT_AT_TO_STORE" > "$STATE_FILE"
-            echo "incidents=${INCIDENT_KEYS:-none}; disk=${DISK_PCT:-unknown}; queue=${QUEUE_RESULT:-unknown}"
+            echo "incidents=${INCIDENT_KEYS:-none}; disk=${DISK_PCT:-unknown}; queue=${QUEUE_RESULT:-unknown} (счёт|старейшая|исчерпали|без контакта|на удержании); held=${HELD_COUNT:-0}"
             if [ "$ALERT_DELIVERY_FAILED" -eq 1 ]; then exit 3; fi
 
       - name: Alert when host monitor fails
