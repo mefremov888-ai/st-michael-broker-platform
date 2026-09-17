@@ -49,6 +49,16 @@ const brokenPrefix9 = (raw) => {
   return d.slice(2); // девять известных цифр настоящего номера
 };
 
+// Мусор из выгрузки: тестовые записи и номера, которые не могут быть
+// мобильными (российский мобильный — десять цифр, первая «9»).
+const TEST_NAME = /(^|\s)(тест|test|тост туст|regata web|проверка)/i;
+const isJunk = (p) => {
+  const ten = tenDigits(p.phone);
+  if (!ten || ten[0] !== "9") return true;
+  if (TEST_NAME.test(String(p.name || ""))) return true;
+  return false;
+};
+
 const nameKey = (raw) =>
   String(raw || "")
     .toLowerCase()
@@ -123,6 +133,7 @@ async function main() {
     const toCreate = [];
     const broken = { всего: 0, нашлиОдного: 0, нашлиНескольких: 0, неНашли: 0, заявокУнайденных: 0 };
     const brokenUnresolved = [];
+    const junk = [];
     let alreadyHave = 0;
     let noName = 0;
     for (const p of people.values()) {
@@ -137,6 +148,7 @@ async function main() {
       }
       if (known.has(p.ten)) { alreadyHave++; continue; }
       if (!p.name || !String(p.name).trim()) { noName++; continue; }
+      if (isJunk(p)) { junk.push(p); continue; }
       toCreate.push(p);
     }
     toCreate.sort((a, b) => b.rows - a.rows);
@@ -147,6 +159,7 @@ async function main() {
     console.log(`  уже есть у нас:            ${alreadyHave}`);
     console.log(`  без ФИО (пропуск):         ${noName}`);
     console.log(`  битых номеров (не заводим): ${broken.всего} — из них узнали человека по девяти цифрам: ${broken.нашлиОдного} (за ними ${broken.заявокУнайденных} заявок), несколько совпадений: ${broken.нашлиНескольких}, не нашли: ${broken.неНашли}`);
+    console.log(`  мусор (тесты, не мобильные): ${junk.length}${junk.length ? " — " + junk.slice(0, 5).map((p) => p.name).join("; ") : ""}`);
     console.log(`  к созданию:                ${toCreate.length}`);
     const rowsCovered = toCreate.reduce((s, p) => s + p.rows, 0);
     console.log(`  заявок за ними:            ${rowsCovered}`);

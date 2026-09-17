@@ -106,6 +106,46 @@ async function main() {
     for (const p of extra) if (p.phone && !byPhone.has(p.phone)) byPhone.set(p.phone, p.brokerId);
     console.log(`Брокеров в базе: ${brokers.length} (+${extra.length} доп. телефонов)`);
 
+    // 2026-09-17: два дополнительных способа узнать брокера, когда точная
+    // строка телефона не совпала.
+    //   а) сравнение по последним десяти цифрам — спасает от разных
+    //      написаний одного и того же номера;
+    //   б) починка побитых номеров выгрузки: часть телефонов записана как
+    //      «+7» + обрезанные до десяти знаков цифры (из +79998223195 вышло
+    //      +77999822319). Последняя цифра потеряна, первые девять известны;
+    //      признаём совпадение ТОЛЬКО если под эти девять цифр подходит
+    //      ровно один брокер в базе.
+    const byTen = new Map();
+    const byPrefix9 = new Map();
+    const addIndexed = (phone, brokerId) => {
+      const d = String(phone || "").replace(/\D/g, "");
+      if (d.length < 10) return;
+      const ten = d.slice(-10);
+      if (!byTen.has(ten)) byTen.set(ten, brokerId);
+      const nine = ten.slice(0, 9);
+      if (!byPrefix9.has(nine)) byPrefix9.set(nine, new Set());
+      byPrefix9.get(nine).add(brokerId);
+    };
+    for (const b of brokers) addIndexed(b.phone, b.id);
+    for (const p of extra) addIndexed(p.phone, p.brokerId);
+
+    const resolveBroker = (raw) => {
+      const exact = byPhone.get(raw);
+      if (exact) return { brokerId: exact, how: "точно" };
+      const d = String(raw || "").replace(/\D/g, "");
+      if (d.length >= 10) {
+        const ten = byTen.get(d.slice(-10));
+        if (ten) return { brokerId: ten, how: "по цифрам" };
+      }
+      if (d.length === 11 && d[0] === "7" && (d[1] === "7" || d[1] === "8")) {
+        const hits = byPrefix9.get(d.slice(2));
+        if (hits && hits.size === 1) {
+          return { brokerId: [...hits][0], how: "починен номер" };
+        }
+      }
+      return { brokerId: null, how: "не найден" };
+    };
+
     // 2. Уже импортированные маркеры.
     const marked = await prisma.client.findMany({ where: { comment: { startsWith: "[old-cabinet:" } }, select: { comment: true } });
     const done = new Set();
@@ -113,7 +153,7 @@ async function main() {
     console.log(`Уже импортировано ранее: ${done.size}`);
 
     // 3. План.
-    const stats = { brokerMatched: 0, brokerMissing: 0, alreadyImported: 0, toCreate: 0, accepted: 0, rejected: 0, stillActive: 0 };
+    const stats = { brokerMatched: 0, brokerMissing: 0, alreadyImported: 0, toCreate: 0, accepted: 0, rejected: 0, stillActive: 0, byHow: {} };
     const missingPhones = new Map();
     const byYear = new Map();
     const byProject = new Map();
@@ -121,13 +161,15 @@ async function main() {
     const now = new Date();
     for (const row of rows) {
       if (done.has(Number(row.oldId))) { stats.alreadyImported++; continue; }
-      const brokerId = byPhone.get(row.brokerPhone);
+      const resolved = resolveBroker(row.brokerPhone);
+      const brokerId = resolved.brokerId;
       if (!brokerId) {
         stats.brokerMissing++;
         missingPhones.set(row.brokerPhone, (missingPhones.get(row.brokerPhone) || 0) + 1);
         continue;
       }
       stats.brokerMatched++;
+      stats.byHow[resolved.how] = (stats.byHow[resolved.how] || 0) + 1;
       const data = buildClientData(row, brokerId, now);
       prepared.push(data);
       stats.toCreate++;
@@ -137,7 +179,7 @@ async function main() {
       byProject.set(data.project, (byProject.get(data.project) || 0) + 1);
     }
     console.log("\n=== Сводка ===");
-    console.log(`Брокер найден по телефону:        ${stats.brokerMatched}`);
+    console.log(`Брокер найден по телефону:        ${stats.brokerMatched} (${Object.entries(stats.byHow).map(([k, v]) => `${k}: ${v}`).join(", ") || "—"})`);
     console.log(`Брокер НЕ найден (пропуск):       ${stats.brokerMissing} (уникальных телефонов: ${missingPhones.size})`);
     console.log(`Уже импортировано (пропуск):      ${stats.alreadyImported}`);
     console.log(`К созданию:                       ${stats.toCreate} (принятых ${stats.accepted}, отклонённых ${stats.rejected}, ещё действующих ${stats.stillActive})`);
