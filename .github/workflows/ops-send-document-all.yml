@@ -61,7 +61,10 @@ jobs:
           script: |
             set -eu
             # 2026-09-09: Telegram с хоста доступен только по IPv6 — сначала -6, потом как получится.
-            tg_curl() { curl -sS -6 --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 "$@" 2>/dev/null || curl -sS --connect-timeout 10 --max-time 25 --retry 2 "$@"; }
+            # 2026-09-17: под set -e подстановка с «| head» роняла весь скрипт молча —
+            # ни одной строки о чатах в журнале не оставалось. Теперь функция
+            # никогда не возвращает ошибку, а ответ режется отдельным шагом.
+            tg_curl() { curl -sS -6 --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 "$@" 2>/dev/null || curl -sS --connect-timeout 10 --max-time 25 --retry 2 "$@" 2>&1 || true; }
             test -n "$BOT" || { echo "нет OPS_TELEGRAM_BOT_TOKEN"; exit 1; }
             # без case: ssh-action переносит строки, и case ломается (грабли 04.09)
             if ! printf '%s' "$DOC_BRANCH" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s' "$DOC_BRANCH" | grep -q '\.\.'; then echo "недопустимое имя ветки"; exit 1; fi
@@ -87,10 +90,11 @@ jobs:
             echo "чатов к отправке: $(printf '%s\n' "$all" | wc -l)"
             fail=0
             for chat in $all; do
-              ok=$(tg_curl -X POST "https://api.telegram.org/bot${BOT}/sendDocument" \
+              resp=$(tg_curl -X POST "https://api.telegram.org/bot${BOT}/sendDocument" \
                 -F chat_id="$chat" \
                 -F caption="$CAPTION" \
-                -F document=@"$tmp/$fname" | head -c 160)
+                -F document=@"$tmp/$fname" || true)
+              ok=$(printf '%s' "$resp" | head -c 160)
               tail4=$(printf '%s' "$chat" | tail -c 4)
               if printf '%s' "$ok" | grep -q '"ok":true'; then
                 echo "chat ...$tail4: отправлено"
