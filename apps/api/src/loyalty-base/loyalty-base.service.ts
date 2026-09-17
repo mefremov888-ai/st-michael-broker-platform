@@ -927,6 +927,62 @@ export function fixationClientWhere(source?: string | null): any {
     ? { AND: [FIXATION_CLIENT_WHERE, sourceWhere] }
     : FIXATION_CLIENT_WHERE;
 }
+// 2026-09-17 (владелец): периоды фиксаций, встреч и сделок СУЖАЮТ список
+// брокеров, а не только пересчитывают числа в строках. Раньше человек ставил
+// «период встреч 17.01 — 17.09», список оставался прежним на 19 758 записей —
+// и это выглядело как неработающий фильтр.
+//
+// Правила отбора совпадают с правилами чисел за период (ourBrokerPeriodMetrics):
+//   фиксации — по правилам фиксации кабинета;
+//   встречи  — подтверждённые и состоявшиеся, брокер-туры не в счёт;
+//   сделки   — подтверждённые ДДУ кабинета ИЛИ оплаченные строки реестра.
+// Если человек отдельно выбрал «Сделка в периоде», условие по сделкам уже
+// добавлено этим фильтром — второй раз не сужаем.
+export function brokerPeriodNarrowingWhere(args: {
+  fixationPeriod?: { from: Date; to: Date } | null;
+  meetingPeriod?: { from: Date; to: Date } | null;
+  dealPeriod?: { from: Date; to: Date } | null;
+  dealsInPeriod?: boolean;
+  cabinetSource?: string | null;
+  dealWhere?: any;
+  registryWhere?: any;
+}): any[] {
+  const clauses: any[] = [];
+  if (args.fixationPeriod) {
+    clauses.push({
+      clients: {
+        some: {
+          ...fixationClientWhere(args.cabinetSource),
+          createdAt: {
+            gte: args.fixationPeriod.from,
+            lte: args.fixationPeriod.to,
+          },
+        },
+      },
+    });
+  }
+  if (args.meetingPeriod) {
+    clauses.push({
+      meetings: {
+        some: {
+          status: { in: ["CONFIRMED", "COMPLETED"] },
+          type: { not: "BROKER_TOUR" },
+          date: { gte: args.meetingPeriod.from, lte: args.meetingPeriod.to },
+        },
+      },
+    });
+  }
+  if (args.dealPeriod && args.dealsInPeriod === undefined) {
+    clauses.push({
+      OR: [
+        { deals: { some: args.dealWhere } },
+        { registryDeals: { some: args.registryWhere } },
+      ],
+    });
+  }
+  return clauses;
+}
+
 export function activeFixationClientWhereFor(
   source?: string | null,
   now: Date = new Date(),
@@ -8710,6 +8766,23 @@ export class LoyaltyBaseService {
             },
       );
     }
+    // 2026-09-17 (владелец): период сужает список — правила в
+    // brokerPeriodNarrowingWhere (там же тесты).
+    and.push(
+      ...brokerPeriodNarrowingWhere({
+        fixationPeriod: filter.fixationPeriod,
+        meetingPeriod: filter.meetingPeriod,
+        dealPeriod: filter.dealPeriod,
+        dealsInPeriod: filter.dealsInPeriod,
+        cabinetSource: filter.cabinetSource,
+        dealWhere: filter.dealPeriod
+          ? this.ourConfirmedDealWhere(filter.dealPeriod)
+          : undefined,
+        registryWhere: filter.dealPeriod
+          ? this.registrySignedAtWhere(filter.dealPeriod)
+          : undefined,
+      }),
+    );
     if (and.length) where.AND = and;
     const callLogWhere = {
       ...(filter.callPeriod

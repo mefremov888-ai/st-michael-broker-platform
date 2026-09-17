@@ -1783,6 +1783,19 @@ export function LoyaltyBaseWorkspaceV2() {
           >
             Все агентства
           </button>
+          {/* 2026-09-17 (владелец): кнопка воронки переехала наверх, в общий ряд
+              кнопок. Раньше она жила в заголовке «Статусы брокеров» внизу
+              страницы и дублировалась кнопкой «Воронка брокера» под вкладками. */}
+          {canReadAll && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setFunnelOpen(true)}
+              title="Тур → фиксация → встреча → бронь → сделка"
+            >
+              <GitBranch className="h-4 w-4" /> Воронка: тур → фиксация → встреча → сделка
+            </button>
+          )}
           {canReconcile && (
             <button
               className={`btn ${mode === "reconciliation" ? "btn-primary" : "btn-secondary"}`}
@@ -1905,18 +1918,6 @@ export function LoyaltyBaseWorkspaceV2() {
                 </button>
               ))}
             </nav>
-            {/* 2026-09-10 (владелец): воронка не раскрыта карточкой в обзоре —
-                кнопка рядом с «Брокеры / Агентства», диаграммы во всплывающем окне. */}
-            {canReadAll && (
-              <button
-                type="button"
-                className="btn btn-secondary text-sm"
-                onClick={() => setFunnelOpen(true)}
-                title="Тур → фиксация → встреча → бронь → сделка"
-              >
-                <GitBranch className="h-4 w-4" /> Воронка брокера
-              </button>
-            )}
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="text-text-muted">Период рейтинга</span>
               {base === "anna" ? (
@@ -1999,6 +2000,12 @@ export function LoyaltyBaseWorkspaceV2() {
               </button>
             </div>
           )}
+          {/* 2026-09-17 (владелец): на «Нашей базе» ряд из шести карточек
+              («Не звонили в текущем месяце», «Новые брокеры», «Посетил БТ и нет
+              фиксации», «Дни рождения», «Топ-брокер», «Топ-агентство») убран —
+              он занимал экран и мешал работе со списком. На панели Анны ряд
+              остаётся: это её рабочие показатели. */}
+          {base !== "ours" && (
           <section
             className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
             aria-label="Ровно шесть ключевых показателей"
@@ -2023,6 +2030,7 @@ export function LoyaltyBaseWorkspaceV2() {
               );
             })}
           </section>
+          )}
           {/* 2026-09-10 (владелец): блок «Контрольные показатели активности»
               убран со страницы — эти же цифры видны в карточках и в
               шести KPI выше. */}
@@ -2341,7 +2349,6 @@ export function LoyaltyBaseWorkspaceV2() {
             active={filters.status}
             sourceStatusesUnconfirmed={!hasActivityEvidence}
             onSelect={(status) => applyEntityPatch("brokers", { status })}
-            onOpenFunnel={() => setFunnelOpen(true)}
           />
           {funnelOpen && (
             <BrokerFunnelModal
