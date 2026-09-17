@@ -86,17 +86,24 @@ async function main() {
     const agencies = await prisma.agency.findMany({ select: { id: true, name: true } });
     const exact = agencies.filter((a) => nameKey(a.name) === nameKey(AGENCY_NAME));
     console.log(`   карточек агентства «${AGENCY_NAME}»: ${exact.length}${exact.length ? " — " + exact.map((a) => a.name).join(", ") : ""}`);
-    if (exact.length !== 1) {
-      // Показываем похожие написания: решение, какое из них верное, за
-      // человеком — агентства по правилу владельца не сводим автоматически.
-      const near = agencies.filter((a) => /anivan|аниван|эстейт|estate/i.test(a.name || ""));
-      console.log(`   похожие названия в базе: ${near.length}`);
-      for (const a of near.slice(0, 25)) console.log(`     · ${a.name}`);
-      if (near.length > 25) console.log(`     … и ещё ${near.length - 25}`);
-      console.log("   ОСТАНОВКА: нужна ровно одна карточка агентства (агентства по решению владельца не сводим и не создаём автоматически).");
+    if (exact.length > 1) {
+      console.log("   ОСТАНОВКА: под это название подходит несколько карточек — какая верная, решает человек.");
+      for (const a of exact) console.log(`     · ${a.name}`);
       return;
     }
-    const agency = exact[0];
+    // Карточки с таким названием в базе нет ни в одном написании (проверено
+    // 17.09: ни «Anivan», ни «Аниван»). Заводим одну — название берём ровно
+    // как в amoCRM. ИНН у нас NOT NULL и уникальный, поэтому ставим
+    // детерминированный плейсхолдер, как делает импорт справочника агентств.
+    let agency = exact[0];
+    if (!agency) {
+      const inn = "NOINN-" + require("crypto").createHash("sha1").update("anivanestate", "utf8").digest("hex").slice(0, 10);
+      console.log(`   карточки нет ни в одном написании — заводим новую «${AGENCY_NAME}» (ИНН-плейсхолдер ${inn})`);
+      if (WRITE) {
+        agency = await prisma.agency.create({ data: { name: AGENCY_NAME, inn } });
+        console.log("   карточка агентства создана");
+      }
+    }
 
     const links = await prisma.brokerAgency.findMany({ where: { brokerId: broker.id }, select: { id: true, agencyId: true } });
     console.log(`   агентств у брокера сейчас: ${links.length}`);
