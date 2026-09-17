@@ -68,14 +68,62 @@ export const DEFAULT_MATERIALS_LAYOUT: MaterialsFolderLayout = {
       visibleInCabinet: true,
       sortOrder: 10,
     },
+    // 2026-09-17 (владелец): презентации больше не живут отдельной карточкой
+    // в «Материалах для продвижения» — они переехали внутрь проектов.
+    // Правило выбирается по самому длинному совпадению пути, поэтому три
+    // точных правила перекрывают общее «Презентации».
     {
-      id: 'presentations',
-      prefix: 'Презентации',
-      groupId: null,
+      id: 'presentations-zorge',
+      prefix: 'Презентации/Зорге 9',
+      groupId: 'zorge',
       kind: 'as_is',
+      displayName: 'Презентации',
       visibleOnLanding: true,
       visibleInCabinet: true,
-      sortOrder: 20,
+      sortOrder: 44,
+    },
+    {
+      // «Pure. Home Comfort» — материал Зорге 9 (там же есть фотопапка с этим
+      // названием), поэтому презентация уходит в Зорге 9.
+      id: 'presentations-pure',
+      prefix: 'Презентации/Pure. Home Comfort',
+      groupId: 'zorge',
+      kind: 'as_is',
+      displayName: 'Презентации',
+      visibleOnLanding: true,
+      visibleInCabinet: true,
+      sortOrder: 45,
+    },
+    {
+      id: 'presentations-ksb',
+      prefix: 'Презентации/Квартал Серебряный Бор',
+      groupId: 'berarina',
+      kind: 'as_is',
+      displayName: 'Презентации',
+      visibleOnLanding: true,
+      visibleInCabinet: true,
+      sortOrder: 54,
+    },
+    // Раздел «Презентации проектов» тоже расходится по проектам.
+    {
+      id: 'project-presentations-zorge',
+      prefix: 'Презентации проектов/_Зорге 9_',
+      groupId: 'zorge',
+      kind: 'as_is',
+      displayName: 'Презентации',
+      visibleOnLanding: true,
+      visibleInCabinet: true,
+      sortOrder: 46,
+    },
+    {
+      id: 'project-presentations-ksb',
+      prefix: 'Презентации проектов/_Квартал Серебряный бор_',
+      groupId: 'berarina',
+      kind: 'as_is',
+      displayName: 'Презентации',
+      visibleOnLanding: true,
+      visibleInCabinet: true,
+      sortOrder: 55,
     },
     {
       id: 'commission',
@@ -109,6 +157,28 @@ export const DEFAULT_MATERIALS_LAYOUT: MaterialsFolderLayout = {
       prefix: 'Видеоконтент/Зорге 9',
       groupId: 'zorge',
       kind: 'video',
+      visibleOnLanding: true,
+      visibleInCabinet: true,
+      sortOrder: 43,
+    },
+    // 2026-09-17 (владелец): Reels вынесены из «Видео» в свою папку — их
+    // почти сотня, и в общей куче видео они терялись.
+    {
+      id: 'zorge-reels',
+      prefix: 'ЗОРГЕ 9/2. Видео/reels',
+      groupId: 'zorge',
+      kind: 'as_is',
+      displayName: 'Reels',
+      visibleOnLanding: true,
+      visibleInCabinet: true,
+      sortOrder: 43,
+    },
+    {
+      id: 'zorge-reels-pack',
+      prefix: 'Видеоконтент/Зорге 9/Reels',
+      groupId: 'zorge',
+      kind: 'as_is',
+      displayName: 'Reels',
       visibleOnLanding: true,
       visibleInCabinet: true,
       sortOrder: 43,

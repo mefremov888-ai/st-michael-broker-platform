@@ -188,13 +188,20 @@ const DEFAULT_CONTENT: Record<string, any> = {
     phoneHours: "Ежедневно с 9:00 до 21:00",
     email: "info@zorge9.com",
     telegram: "https://t.me/stmichaelBroker",
+    // 2026-09-17 (владелец): Ксения Цепляева больше не работает. Персональный
+    // контакт — Дарья Великанова; общий телефон отдела остаётся прежним.
     manager: {
-      name: "Ксения Цепляева",
-      role: "Руководитель отдела по работе с партнёрами",
-      // 2026-07-01: телефон отдела по работе с брокерами (был личный
-      // мобильный Ксении +7 906 061-78-00).
-      phone: "+7 (499) 226-22-49",
+      name: "Дарья Великанова",
+      role: "Менеджер по работе с брокерами",
+      phone: "+7 (930) 012-94-52",
     },
+    managers: [
+      {
+        name: "Дарья Великанова",
+        role: "Менеджер по работе с брокерами",
+        phone: "+7 (930) 012-94-52",
+      },
+    ],
   },
 };
 
@@ -1188,6 +1195,47 @@ export class CmsService {
           data: { key, value: DEFAULT_CONTENT[key] },
         });
       }
+    }
+
+    // 2026-09-17 (владелец): Ксения Цепляева больше не работает — в сохранённом
+    // блоке контактов её карточку заменяем на Дарью Великанову.
+    // Идемпотентно: срабатывает, только пока в БД стоит прежняя фамилия.
+    try {
+      const contactRow = await this.prisma.siteContent.findUnique({
+        where: { key: "contact" },
+      });
+      const contactValue = contactRow?.value as any;
+      const staleManager = /Цепляева/i.test(
+        String(contactValue?.manager?.name || ""),
+      );
+      const staleList = Array.isArray(contactValue?.managers)
+        ? contactValue.managers.some((item: any) =>
+            /Цепляева/i.test(String(item?.name || "")),
+          )
+        : false;
+      if (contactValue && (staleManager || staleList)) {
+        const darya = {
+          name: "Дарья Великанова",
+          role: "Менеджер по работе с брокерами",
+          phone: "+7 (930) 012-94-52",
+        };
+        const keptManagers = (
+          Array.isArray(contactValue.managers) ? contactValue.managers : []
+        ).filter((item: any) => !/Цепляева/i.test(String(item?.name || "")));
+        await this.prisma.siteContent.update({
+          where: { key: "contact" },
+          data: {
+            value: {
+              ...contactValue,
+              manager: staleManager ? darya : contactValue.manager,
+              managers: keptManagers.length ? keptManagers : [darya],
+            },
+          },
+        });
+        console.log("[CMS migration] контакт Ксении заменён на Дарью");
+      }
+    } catch (error) {
+      console.warn("[CMS migration] не удалось обновить блок контактов", error);
     }
 
     // 2026-07-01: миграция телефона менеджера с личного мобильного Ксении

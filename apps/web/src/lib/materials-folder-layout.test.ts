@@ -13,12 +13,14 @@ import { foldersAndFilesAt, fileCountUnder } from './materials-folder-tree';
 
 const docs = [
   { subcategory: 'Актуальные условия рассрочки', name: 'rassrochka.pdf', type: 'PDF' },
-  { subcategory: 'Презентации', name: 'Зорге 9. Общая презентация.pdf', type: 'PDF' },
   { subcategory: 'Условия вознаграждения', name: 'условия.pdf', type: 'PDF' },
   { subcategory: 'ЗОРГЕ 9/1. Фото/01. Двор', name: 'yard.jpg', type: 'image/jpeg' },
   { subcategory: 'ЗОРГЕ 9/2. Видео', name: 'tour.mp4', type: 'video/mp4' },
   { subcategory: 'Зорге9 (фото)/Альбом', name: 'lobby.jpg', type: 'image/jpeg' },
   { subcategory: 'Видеоконтент/Зорге 9/Reels', name: 'reel.mp4', type: 'video/mp4' },
+  { subcategory: 'ЗОРГЕ 9/2. Видео/reels/мобильные', name: 'mobile-reel.mp4', type: 'video/mp4' },
+  { subcategory: 'Презентации/Зорге 9', name: 'zorge-pres.pdf', type: 'PDF' },
+  { subcategory: 'Презентации проектов/_Квартал Серебряный бор_', name: 'ksb-pres.pdf', type: 'PDF' },
   { subcategory: 'КСБ/1. Фото', name: 'ksb.jpg', type: 'image/jpeg' },
   { subcategory: 'КСБ/3. Reels', name: 'ksb.mp4', type: 'video/mp4' },
   { subcategory: 'Квартал Серебряный Бор рендеры', name: 'render.jpg', type: 'image/jpeg' },
@@ -26,12 +28,13 @@ const docs = [
   { subcategory: 'Видеоконтент/Для роликов сторис reels', name: 'misc.mp4', type: 'video/mp4' },
 ];
 
+// 2026-09-17 (владелец): отдельной карточки «Презентации» наверху больше нет —
+// презентации лежат внутри проектов.
 test('landing roots are standalone terms plus two residential complexes', () => {
   const mapped = withDisplaySubcategory(docs, DEFAULT_MATERIALS_LAYOUT, 'landing');
   const { folders } = foldersAndFilesAt(mapped, []);
   assert.deepEqual(sortMaterialsRootFolders(folders, DEFAULT_MATERIALS_LAYOUT), [
     'Актуальные условия рассрочки',
-    'Презентации',
     'Условия вознаграждения',
     'Зорге 9',
     'Квартал Серебряный Бор',
@@ -41,15 +44,28 @@ test('landing roots are standalone terms plus two residential complexes', () => 
 test('Зорге 9 contains photo and video, not raw Disk names', () => {
   const mapped = withDisplaySubcategory(docs, DEFAULT_MATERIALS_LAYOUT, 'landing');
   const { folders } = foldersAndFilesAt(mapped, ['Зорге 9']);
-  assert.deepEqual(folders, ['Видео', 'Фото']);
+  // 2026-09-17: Reels вынесены из «Видео» в отдельную папку проекта.
+  assert.deepEqual(folders, ['Видео', 'Презентации', 'Фото', 'Reels']);
   assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Фото']), 2);
-  assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Видео']), 2);
+  // «Видео» осталось без рилсов: они теперь в своей папке.
+  assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Видео']), 1);
+  assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Reels']), 2);
+});
+
+// 2026-09-17 (владелец): презентации переехали внутрь проектов.
+test('презентации лежат внутри проектов, а не отдельной карточкой', () => {
+  const mapped = withDisplaySubcategory(docs, DEFAULT_MATERIALS_LAYOUT, 'cabinet');
+  assert.equal(fileCountUnder(mapped, ['Зорге 9', 'Презентации']), 1);
+  assert.equal(fileCountUnder(mapped, ['Квартал Серебряный Бор', 'Презентации']), 1);
+  const { folders } = foldersAndFilesAt(mapped, []);
+  assert.equal(folders.includes('Презентации'), false);
+  assert.equal(folders.includes('Презентации проектов'), false);
 });
 
 test('Квартал Серебряный Бор contains photo and video from КСБ, renders and video pack', () => {
   const mapped = withDisplaySubcategory(docs, DEFAULT_MATERIALS_LAYOUT, 'landing');
   const { folders } = foldersAndFilesAt(mapped, ['Квартал Серебряный Бор']);
-  assert.deepEqual(folders, ['Видео', 'Фото']);
+  assert.deepEqual(folders, ['Видео', 'Презентации', 'Фото']);
   assert.equal(fileCountUnder(mapped, ['Квартал Серебряный Бор', 'Фото']), 2);
   assert.equal(fileCountUnder(mapped, ['Квартал Серебряный Бор', 'Видео']), 2);
 });
