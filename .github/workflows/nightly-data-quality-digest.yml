@@ -45,7 +45,7 @@ jobs:
           script: |
             set -eu
             # 2026-09-09: Telegram с хоста доступен только по IPv6 — сначала -6, потом как получится.
-            tg_curl() { curl -sS --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 "$@" 2>/dev/null || curl -sS -6 --connect-timeout 10 --max-time 25 "$@"; }
+            tg_curl() { curl -sS -6 --connect-timeout 10 --max-time 25 --retry 2 --retry-delay 3 "$@" 2>/dev/null || curl -sS --connect-timeout 10 --max-time 25 --retry 2 "$@"; }
             cd "${{ secrets.DEPLOY_PATH }}"
             git fetch origin master
             git show origin/master:scripts/data-quality-digest.js > /tmp/data-quality-digest.js
