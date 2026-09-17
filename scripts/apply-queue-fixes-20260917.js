@@ -87,6 +87,12 @@ async function main() {
     const exact = agencies.filter((a) => nameKey(a.name) === nameKey(AGENCY_NAME));
     console.log(`   карточек агентства «${AGENCY_NAME}»: ${exact.length}${exact.length ? " — " + exact.map((a) => a.name).join(", ") : ""}`);
     if (exact.length !== 1) {
+      // Показываем похожие написания: решение, какое из них верное, за
+      // человеком — агентства по правилу владельца не сводим автоматически.
+      const near = agencies.filter((a) => /anivan|аниван|эстейт|estate/i.test(a.name || ""));
+      console.log(`   похожие названия в базе: ${near.length}`);
+      for (const a of near.slice(0, 25)) console.log(`     · ${a.name}`);
+      if (near.length > 25) console.log(`     … и ещё ${near.length - 25}`);
       console.log("   ОСТАНОВКА: нужна ровно одна карточка агентства (агентства по решению владельца не сводим и не создаём автоматически).");
       return;
     }
