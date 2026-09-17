@@ -1,0 +1,53 @@
+name: Inspect Telegram reachability (read-only)
+
+# 2026-09-17: с прод-сервера перестали уходить сообщения в Телеграм.
+# Проверяем, каким путём сервер вообще достаёт до api.telegram.org:
+# по IPv4, по IPv6 и без указания. Печатаем ТОЛЬКО код ответа и время —
+# ни токена, ни адреса чата в выводе нет.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: inspect-telegram-reachability
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Probe api.telegram.org from production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and probe
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          BOT: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: false
+          command_timeout: 8m
+          envs: BOT
+          script: |
+            echo "=== DNS ==="
+            getent ahostsv4 api.telegram.org | head -2 | awk '{print "IPv4:", $1}'
+            getent ahostsv6 api.telegram.org | head -2 | awk '{print "IPv6:", $1}'
+            probe() {
+              label="$1"; shift
+              code=$(curl -sS -o /dev/null -w '%{http_code} за %{time_total}s' "$@" \
+                "https://api.telegram.org/bot${BOT}/getMe" 2>&1 | tail -1)
+              echo "$label -> $code"
+            }
+            echo "=== Попытки ==="
+            probe "по IPv4        " -4 --connect-timeout 10 --max-time 25
+            probe "по IPv6        " -6 --connect-timeout 10 --max-time 25
+            probe "без указания   " --connect-timeout 10 --max-time 25
+            echo "=== Общая доступность наружу ==="
+            curl -sS -o /dev/null -w 'ya.ru: %{http_code}\n' --max-time 15 https://ya.ru 2>&1 | tail -1
+            curl -sS -o /dev/null -w 'github.com: %{http_code}\n' --max-time 15 https://github.com 2>&1 | tail -1
+            echo "=== Готово ==="
