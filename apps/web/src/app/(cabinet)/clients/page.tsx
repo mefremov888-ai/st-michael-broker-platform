@@ -26,6 +26,15 @@ function isExecutorView(c: any, myBrokerId: string | undefined): boolean {
     && c.responsibleBroker.id === myBrokerId;
 }
 
+// 2026-09-17 (просьба владельца): брокеру мало одной плашки «Исполнитель по
+// фиксации» — он не понимает, откуда у него взялся клиент. Показываем, кто
+// подал заявку за него, когда и что это значит. Телефон подавшего не
+// показываем: брокеру достаточно имени, чтобы узнать своего координатора.
+function executorSubmitterLabel(c: any): string {
+  const name = c?.broker?.fullName || 'другой брокер';
+  return c?.broker?.isCoordinator ? `${name} (координатор)` : name;
+}
+
 const projectLabels: Record<string, string> = {
   ZORGE9: 'Зорге 9',
   SILVER_BOR: 'Серебряный бор',
@@ -214,7 +223,10 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
               на него) — не показываем «Уникален», показываем «Исполнитель»:
               уникальность принадлежит создателю (А). */}
           {isExecutorView(client, broker?.id) ? (
-            <span className="text-xs px-2 py-1 rounded bg-info/20 text-info">
+            <span
+              className="text-xs px-2 py-1 rounded bg-info/20 text-info"
+              title="Заявку на этого клиента подали за вас. Клиент закреплён за вами — вы ведёте показы и сделку."
+            >
               Исполнитель по фиксации
             </span>
           ) : (
@@ -236,6 +248,27 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
             </span>
           )}
         </div>
+
+        {/* 2026-09-17 (просьба владельца): объясняем брокеру, откуда у него
+            этот клиент — кто подал заявку, когда и что это значит для него.
+            Раньше была только плашка «Исполнитель по фиксации» без пояснений. */}
+        {isExecutorView(client, broker?.id) && (
+          <div className="mb-4 rounded-lg border border-info/30 bg-info/10 p-3">
+            <div className="text-sm font-medium">
+              Заявку за вас подал {executorSubmitterLabel(client)}
+              {(client.amoCreatedAt || client.createdAt) && (
+                <> · {new Date(client.amoCreatedAt || client.createdAt).toLocaleDateString('ru-RU')}</>
+              )}
+            </div>
+            <div className="text-xs text-text-muted mt-1 leading-relaxed">
+              Клиент закреплён за вами — вы ведёте показы и сделку. Срок уникальности
+              и зачёт по программе лояльности остаются у того, кто подал заявку,
+              поэтому статус и таймер в вашем кабинете не показываются.
+              Если заявка появилась у вас по ошибке — напишите своему координатору
+              или менеджеру Святого Михаила.
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3 text-sm mb-4">
           <div className="bg-surface-secondary rounded-lg p-3">
@@ -696,7 +729,10 @@ export default function ClientsPage() {
                         {/* 2026-07-02: исполнитель по фиксации не видит «Уникален» —
                             уникальность принадлежит создателю (А). */}
                         {isExecutorView(c, broker?.id) ? (
-                          <span className="text-xs px-2 py-1 rounded bg-info/20 text-info">
+                          <span
+                            className="text-xs px-2 py-1 rounded bg-info/20 text-info"
+                            title={`Заявку за вас подал ${executorSubmitterLabel(c)}. Клиент закреплён за вами — вы ведёте показы и сделку.`}
+                          >
                             Исполнитель по фиксации
                           </span>
                         ) : (
