@@ -30,6 +30,25 @@ const tenDigits = (raw) => {
   return d.length >= 10 ? d.slice(-10) : null;
 };
 
+/**
+ * 2026-09-17: в выгрузке старого кабинета часть телефонов побита. Исходную
+ * строку обрезали до 10 знаков и приписали спереди «+7»:
+ *   +7 999 822 31 95  →  79998223195  →  обрезано до 7999822319  →  +77999822319
+ *   8 911 958 74 78   →  89119587478  →  обрезано до 8911958747  →  +78911958747
+ * Признак: 11 цифр, первая «7», вторая «7» или «8» (у настоящих российских
+ * мобильных вторая цифра всегда «9»). Последняя цифра номера потеряна
+ * безвозвратно, но первые девять известны — по ним ищем человека в базе.
+ * Таких номеров 235 из 8 232, и почти все принадлежат людям, которые у нас
+ * уже есть под правильным номером. Заводить по ним карточки нельзя.
+ */
+const brokenPrefix9 = (raw) => {
+  const d = String(raw || "").replace(/\D/g, "");
+  if (d.length !== 11) return null;
+  if (d[0] !== "7") return null;
+  if (d[1] !== "7" && d[1] !== "8") return null;
+  return d.slice(2); // девять известных цифр настоящего номера
+};
+
 const nameKey = (raw) =>
   String(raw || "")
     .toLowerCase()
@@ -91,10 +110,31 @@ async function main() {
       }
     }
 
+    // для поиска по девяти известным цифрам побитых номеров
+    const byPrefix9 = new Map();
+    for (const b of brokers) {
+      const t = tenDigits(b.phone);
+      if (!t) continue;
+      const k = t.slice(0, 9);
+      if (!byPrefix9.has(k)) byPrefix9.set(k, []);
+      byPrefix9.get(k).push(b);
+    }
+
     const toCreate = [];
+    const broken = { всего: 0, нашлиОдного: 0, нашлиНескольких: 0, неНашли: 0, заявокУнайденных: 0 };
+    const brokenUnresolved = [];
     let alreadyHave = 0;
     let noName = 0;
     for (const p of people.values()) {
+      const prefix9 = brokenPrefix9(p.phone);
+      if (prefix9) {
+        broken.всего++;
+        const hits = byPrefix9.get(prefix9) || [];
+        if (hits.length === 1) { broken.нашлиОдного++; broken.заявокУнайденных += p.rows; }
+        else if (hits.length > 1) broken.нашлиНескольких++;
+        else { broken.неНашли++; brokenUnresolved.push(p); }
+        continue; // карточки по битым номерам НЕ заводим
+      }
       if (known.has(p.ten)) { alreadyHave++; continue; }
       if (!p.name || !String(p.name).trim()) { noName++; continue; }
       toCreate.push(p);
@@ -106,6 +146,7 @@ async function main() {
     console.log(`  уникальных брокеров:       ${people.size}`);
     console.log(`  уже есть у нас:            ${alreadyHave}`);
     console.log(`  без ФИО (пропуск):         ${noName}`);
+    console.log(`  битых номеров (не заводим): ${broken.всего} — из них узнали человека по девяти цифрам: ${broken.нашлиОдного} (за ними ${broken.заявокУнайденных} заявок), несколько совпадений: ${broken.нашлиНескольких}, не нашли: ${broken.неНашли}`);
     console.log(`  к созданию:                ${toCreate.length}`);
     const rowsCovered = toCreate.reduce((s, p) => s + p.rows, 0);
     console.log(`  заявок за ними:            ${rowsCovered}`);
@@ -125,6 +166,14 @@ async function main() {
       console.log(`    ${d.p.name} · ${d.p.phone.slice(0, 6)}***${d.p.phone.slice(-2)} · заявок ${d.p.rows} — в базе уже есть ${d.hits.length} карточк(а/и) с этим ФИО`);
     }
     if (dupes.length > 30) console.log(`    … и ещё ${dupes.length - 30}`);
+
+    if (brokenUnresolved.length) {
+      console.log(`\n  битые номера, по которым человека не нашли: ${brokenUnresolved.length}`);
+      for (const p of brokenUnresolved.slice(0, 15)) {
+        console.log(`    ${p.name} · ${p.phone.slice(0, 6)}***${p.phone.slice(-2)} · заявок ${p.rows}`);
+      }
+      if (brokenUnresolved.length > 15) console.log(`    … и ещё ${brokenUnresolved.length - 15}`);
+    }
 
     console.log("\n  примеры к созданию:");
     for (const p of toCreate.slice(0, 5)) {
