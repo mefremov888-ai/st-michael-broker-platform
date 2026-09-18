@@ -185,11 +185,20 @@ async function main() {
 
     // 2. Акции
     const promos = await prisma.landingPromo.findMany({
-      select: { id: true, title: true, imageUrl: true },
+      select: { id: true, title: true, imageUrl: true, ctaHref: true, project: true },
     });
     console.log(`\nАкций: ${promos.length}`);
     for (const promo of promos) {
-      const local = await mirror(promo.imageUrl, null, `акция «${promo.title}»`);
+      // Исходник мёртв — ищем свежую картинку на странице акции, а если
+      // ссылки нет, берём со страницы проекта, к которому акция относится.
+      const page =
+        (promo.ctaHref && /^https?:/i.test(promo.ctaHref) ? promo.ctaHref : null) ||
+        (promo.project === "ZORGE9"
+          ? PROJECT_PAGES.zorge9
+          : promo.project === "SILVER_BOR"
+            ? PROJECT_PAGES["silver-bor"]
+            : null);
+      const local = await mirror(promo.imageUrl, page, `акция «${promo.title}»`);
       if (WRITE && local) {
         await prisma.landingPromo.update({ where: { id: promo.id }, data: { imageUrl: local } });
       }
