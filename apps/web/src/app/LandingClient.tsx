@@ -751,7 +751,10 @@ function MaterialsSection({ materials, layout }: { materials: any[]; layout: Mat
           Материалы ещё загружаются. По вопросам: <a href="tel:+74992262249" style={{color:'var(--gold)'}}>+7 (499) 226-22-49</a>
         </div>
       ) : (
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(230px,1fr))',gap:18}}>
+        {/* 2026-09-18 (владелец): блок разъезжался на разных экранах и оставлял
+            пустоту справа. auto-fill держал пустые колонки про запас; auto-fit
+            убирает их, и карточки растягиваются на всю ширину строки. */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(230px,1fr))',gap:18}}>
           {roots.map((cat, idx) => {
             const cover = folderCover(mapped, [cat], layout);
             const counts = mediaCountsUnder(mapped, [cat]);
