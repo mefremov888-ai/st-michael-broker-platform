@@ -57,6 +57,32 @@ async function download(url) {
   return { buf, name, localUrl: `${PUBLIC_PREFIX}/${name}` };
 }
 
+// Адреса страниц проектов на stmichael.ru: наши slug'и с ними не совпадают.
+const PROJECT_PAGES = {
+  zorge9: "https://stmichael.ru/projects/zorge-9/",
+  "silver-bor": "https://stmichael.ru/projects/kvartal-serebryanyj-bor/",
+};
+
+/** Все крупные картинки со страницы — первая обычно главная (og:image). */
+async function pageImages(pageUrl) {
+  try {
+    const res = await fetch(pageUrl, { redirect: "follow" });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const out = [];
+    const og = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+    if (og && og[1]) out.push(og[1]);
+    const rx = /https?:[/][/][^"'\s]+?[.](?:jpg|jpeg|png|webp)/gi;
+    for (const url of html.match(rx) || []) {
+      if (/logo|icon|favicon|sprite|placeholder/i.test(url)) continue;
+      if (!out.includes(url)) out.push(url);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /** Свежая картинка со страницы stmichael.ru (og:image). */
 async function freshFromPage(pageUrl) {
   try {
@@ -116,17 +142,31 @@ async function main() {
     });
     console.log(`Проектов: ${projects.length}`);
     for (const p of projects) {
-      const page = p.slug ? `https://stmichael.ru/projects/${p.slug}/` : null;
+      const page = PROJECT_PAGES[p.slug] || null;
+      const spare = page ? await pageImages(page) : [];
+      let spareIdx = 0;
+      const takeSpare = () => (spareIdx < spare.length ? spare[spareIdx++] : null);
       const patch = {};
-      const main = await mirror(p.imageUrl, page, `проект «${p.name}»`);
+      let main = await mirror(p.imageUrl, page, `проект «${p.name}»`);
+      if (!main && spare.length) {
+        // исходник мёртв — берём свежую картинку со страницы проекта
+        const replacement = takeSpare();
+        if (replacement) main = await mirror(replacement, null, `проект «${p.name}» (замена)`);
+      }
       if (main) patch.imageUrl = main;
       if (Array.isArray(p.gallery)) {
         const next = [];
         let changed = false;
         for (const item of p.gallery) {
-          const local = await mirror(item, page, `галерея «${p.name}»`);
-          next.push(local || item);
-          if (local) changed = true;
+          let local = await mirror(item, null, `галерея «${p.name}»`);
+          if (!local) {
+            const replacement = takeSpare();
+            if (replacement) local = await mirror(replacement, null, `галерея «${p.name}» (замена)`);
+          }
+          if (local) { next.push(local); changed = true; }
+          // мёртвую картинку в галерее не тащим дальше: пустая рамка хуже,
+          // чем галерея на снимок короче
+          else changed = true;
         }
         if (changed) patch.gallery = next;
       }
