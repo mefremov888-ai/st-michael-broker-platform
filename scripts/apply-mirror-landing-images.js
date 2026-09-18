@@ -28,9 +28,15 @@ const WRITE = !DRY_RUN && CONFIRMED;
 
 const UPLOADS_ROOT = process.env.UPLOADS_DIR || "/app/uploads";
 const DIR = path.join(UPLOADS_ROOT, "landing");
-const PUBLIC_PREFIX = "/uploads/landing";
+// Файлы с диска сервера раздаются по адресу /files/... (папка /app/uploads),
+// а не по /uploads/... — это видно по ссылкам документов «Материалов».
+const PUBLIC_PREFIX = "/files/landing";
+const WRONG_PREFIX = "/uploads/landing/";
 
-const isOurs = (url) => typeof url === "string" && url.startsWith("/uploads/");
+const isOurs = (url) => typeof url === "string" && url.startsWith("/files/");
+// Первый прогон 18.09 записал ссылки с неверным началом — чиним их на лету.
+const isWrongOurs = (url) => typeof url === "string" && url.startsWith(WRONG_PREFIX);
+const repairOurs = (url) => `${PUBLIC_PREFIX}/${url.slice(WRONG_PREFIX.length)}`;
 const isExternal = (url) => typeof url === "string" && /^https?:\/\//i.test(url);
 
 const EXT_BY_TYPE = {
@@ -42,7 +48,7 @@ const EXT_BY_TYPE = {
   "image/gif": ".gif",
 };
 
-const stat = { найдено: 0, ужеНаши: 0, скачано: 0, переснято: 0, мёртвых: 0, ошибок: 0 };
+const stat = { найдено: 0, ужеНаши: 0, починено: 0, скачано: 0, переснято: 0, мёртвых: 0, ошибок: 0 };
 const dead = [];
 
 async function download(url) {
@@ -100,6 +106,7 @@ async function freshFromPage(pageUrl) {
 
 /** Возвращает нашу ссылку либо null, если исходник недоступен. */
 async function mirror(url, fallbackPage, label) {
+  if (isWrongOurs(url)) { stat.починено++; return repairOurs(url); }
   if (!url || isOurs(url)) { stat.ужеНаши++; return null; }
   if (!isExternal(url)) return null;
   stat.найдено++;
