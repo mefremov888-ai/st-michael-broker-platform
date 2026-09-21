@@ -20,10 +20,22 @@ async function fetchAllContacts() {
   const byPhone = new Map();
   let page = 1, total = 0;
   for (;;) {
-    const r = await fetch(`${API}/contacts?limit=250&page=${page}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    // сеть до amo из контейнера иногда рвётся — до 6 попыток с нарастающей паузой
+    let r = null;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        r = await fetch(`${API}/contacts?limit=250&page=${page}`, { headers: { Authorization: `Bearer ${TOKEN}` }, signal: AbortSignal.timeout(30000) });
+        if (r.status === 429 || r.status >= 500) { await sleep(1500 * attempt); r = null; continue; }
+        break;
+      } catch (e) {
+        console.log(`  страница ${page}: сбой сети (${e?.message || e}), попытка ${attempt}`);
+        await sleep(1500 * attempt);
+      }
+    }
+    if (!r) throw new Error(`amo не ответил на странице ${page} после 6 попыток`);
     if (r.status === 204) break;
-    if (r.status === 429) { await sleep(2000); continue; }
     if (!r.ok) throw new Error(`amo ${r.status} на странице ${page}`);
+    if (page % 20 === 0) console.log(`  … страница ${page}, контактов ${total}`);
     const j = await r.json();
     const list = (j._embedded && j._embedded.contacts) || [];
     if (!list.length) break;
