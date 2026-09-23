@@ -49,6 +49,12 @@ async function main() {
     const byProj = {};
     for (const l of lots) byProj[l.project] = (byProj[l.project] || 0) + 1;
     console.log("По проектам:", JSON.stringify(byProj));
+    for (const proj of Object.keys(byProj)) {
+      const mine = lots.filter((l) => l.project === proj);
+      const mx = mine.reduce((m, l) => (l.updatedAt > m ? l.updatedAt : m), new Date(0));
+      const st = {}; for (const l of mine) st[l.status] = (st[l.status] || 0) + 1;
+      console.log(`  ${proj}: последнее обновление ${fmt(mx)} UTC; статусы ${JSON.stringify(st)}`);
+    }
     if (!FEEDS.length) { console.log("Адреса фидов не найдены ни в окружении, ни в собранном коде каталога"); return; }
 
     for (const feed of FEEDS) {
