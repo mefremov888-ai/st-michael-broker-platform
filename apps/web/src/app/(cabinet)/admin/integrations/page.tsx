@@ -83,6 +83,50 @@ const SETTINGS_META: Record<string, { label: string; description: string; placeh
       'Каждые 30 минут scheduler скачивает и upsert\'ит брокеров по телефону. Колонки: Имя | Телефон брокера | Кол-во заявок | Встречи | Сделки | ЗВОНОК | Результат звонка | Обзвон по Зорге | Комментарий.',
     placeholder: 'https://docs.google.com/spreadsheets/d/.../export?format=csv&gid=0',
   },
+  // 2026-09-24: СМС Центр (smsc.ru). Код рождается и проверяется в кабинете,
+  // СМС Центр только доставляет. Флаги читаются при каждой отправке —
+  // рестарт не нужен. Включаем по плану: сначала вход и регистрация,
+  // через неделю — смена пароля и истечение закрепления.
+  SMSC_LOGIN: {
+    label: 'СМС Центр — логин аккаунта',
+    description: 'Логин аккаунта smsc.ru (у нас — stmichael). Вместе с ключом ниже даёт доступ к отправке.',
+    placeholder: 'stmichael',
+  },
+  SMSC_API_KEY: {
+    label: 'СМС Центр — API-ключ (HTTP/S)',
+    description: 'API-ключ из личного кабинета smsc.ru (или пароль аккаунта). Хранится как секрет: в интерфейсе видны только последние символы.',
+    placeholder: 'ключ из ЛК smsc.ru',
+  },
+  SMSC_SENDER: {
+    label: 'СМС Центр — имя отправителя',
+    description: 'Зарегистрированное у операторов имя (например St. Michael). Пока имя на подключении — оставьте пустым, уйдёт отправитель аккаунта по умолчанию.',
+    placeholder: 'St. Michael',
+  },
+  SMS_ENABLED: {
+    label: 'СМС — общий выключатель',
+    description: '1 — СМС разрешены (с учётом флагов ниже), пусто или 0 — ни одна СМС не уходит, только запись «пропущено» в журнале. Тестовая отправка с этой страницы работает независимо от выключателя.',
+    placeholder: '1',
+  },
+  SMS_OTP_LOGIN: {
+    label: 'СМС — код входа',
+    description: '1 — на странице входа появляется «Войти по коду из СМС» (текст: «Код входа в кабинет брокера: 482913. Никому не сообщайте.»).',
+    placeholder: '1',
+  },
+  SMS_OTP_REGISTER: {
+    label: 'СМС — подтверждение номера при регистрации',
+    description: '1 — регистрация требует код из СМС (текст: «Код подтверждения номера: 482913. Действует 10 минут.»). Защищает от регистрации на чужой номер.',
+    placeholder: '1',
+  },
+  SMS_OTP_PASSWORD_RESET: {
+    label: 'СМС — смена пароля по коду',
+    description: '1 — на «Восстановлении пароля» появляется путь «По СМС» (текст: «Код для смены пароля: 482913. Если это не вы — не вводите его.»).',
+    placeholder: '1',
+  },
+  SMS_FIXATION_EXPIRY: {
+    label: 'СМС — истечение закрепления',
+    description: '1 — за 7, 3 и 1 день до конца уникальности брокеру уходит «Закрепление клиента Иванов А. истекает 20.10. Продлить — в кабинете.» (без телефона клиента).',
+    placeholder: '1',
+  },
 };
 
 export default function AdminIntegrationsPage() {
@@ -222,12 +266,177 @@ export default function AdminIntegrationsPage() {
                   {s.key === 'GSHEETS_BROKERS_URL' && (
                     <GSheetsSyncRow />
                   )}
+                  {/* 2026-09-24: баланс, тестовая отправка и журнал СМС Центра —
+                      под полем имени отправителя (последним из доступов). */}
+                  {s.key === 'SMSC_SENDER' && (
+                    <SmsAdminRow />
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+const SMS_SAMPLES: Array<{ value: string; label: string }> = [
+  { value: 'LOGIN_CODE', label: 'Код входа' },
+  { value: 'REGISTER_CODE', label: 'Код регистрации' },
+  { value: 'PASSWORD_RESET_CODE', label: 'Код смены пароля' },
+  { value: 'FIXATION_EXPIRY', label: 'Истечение закрепления' },
+];
+
+const SMS_STATUS_RU: Record<string, string> = {
+  QUEUED: 'в очереди',
+  SENT: 'отправлено',
+  DELIVERED: 'доставлено',
+  FAILED: 'ошибка',
+  SKIPPED: 'пропущено',
+};
+
+/**
+ * 2026-09-24: блок СМС Центра на странице интеграций: проверить баланс,
+ * отправить один из четырёх согласованных текстов на тестовый номер и
+ * посмотреть журнал последних отправок (код в журнале скрыт).
+ */
+function SmsAdminRow() {
+  const [balance, setBalance] = useState<any>(null);
+  const [checking, setChecking] = useState(false);
+  const [testPhone, setTestPhone] = useState('');
+  const [sample, setSample] = useState('LOGIN_CODE');
+  const [sending, setSending] = useState(false);
+  const [testResult, setTestResult] = useState<any>(null);
+  const [journal, setJournal] = useState<any[]>([]);
+
+  const loadJournal = async () => {
+    try {
+      setJournal(await apiGet<any[]>('/admin/sms/journal?limit=20'));
+    } catch {}
+  };
+  useEffect(() => { loadJournal(); }, []);
+
+  const checkBalance = async () => {
+    setChecking(true);
+    try {
+      setBalance(await apiGet<any>('/admin/sms/balance'));
+    } catch (e: any) {
+      setBalance({ ok: false, error: e?.message || 'Ошибка' });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const sendTest = async () => {
+    const digits = testPhone.replace(/\D/g, '');
+    const phone = digits.length === 11 && (digits[0] === '7' || digits[0] === '8') ? '+7' + digits.slice(1) : digits.length === 10 ? '+7' + digits : '';
+    if (!phone) {
+      setTestResult({ ok: false, error: 'Введите номер: 10 цифр после +7' });
+      return;
+    }
+    setSending(true);
+    setTestResult(null);
+    try {
+      const r = await apiPost<any>('/admin/sms/test', { phone, sample });
+      setTestResult(r);
+      await loadJournal();
+    } catch (e: any) {
+      setTestResult({ ok: false, error: e?.message || 'Ошибка' });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 pt-3 border-t border-border space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          className="btn btn-secondary flex items-center gap-2 text-sm"
+          onClick={checkBalance}
+          disabled={checking}
+        >
+          <RefreshCw className={`w-4 h-4 ${checking ? 'animate-spin' : ''}`} />
+          {checking ? 'Проверяю…' : 'Проверить баланс'}
+        </button>
+        {balance && (
+          <span className={`text-sm ${balance.ok ? 'text-success' : 'text-error'}`}>
+            {balance.ok
+              ? <>Баланс: <b>{balance.balance}</b> {balance.currency || ''}{balance.sender ? <> · отправитель {balance.sender}</> : <> · отправитель по умолчанию</>}</>
+              : <>✗ {balance.error || 'ошибка'}</>}
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="label">Тестовый номер</label>
+          <input
+            type="tel"
+            className="input font-mono text-sm"
+            placeholder="+7 999 123-45-67"
+            value={testPhone}
+            onChange={(e) => setTestPhone(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="label">Текст</label>
+          <select className="input text-sm" value={sample} onChange={(e) => setSample(e.target.value)}>
+            {SMS_SAMPLES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary text-sm"
+          onClick={sendTest}
+          disabled={sending}
+        >
+          {sending ? 'Отправляю…' : 'Отправить тест'}
+        </button>
+      </div>
+      {testResult && (
+        <div className={`text-sm rounded px-3 py-2 ${testResult.ok ? 'bg-success/10 text-success' : 'bg-error/10 text-error'}`}>
+          {testResult.ok ? <>✓ Ушло, id у СМС Центра: {testResult.providerId}</> : <>✗ {testResult.error || 'не отправлено'}</>}
+        </div>
+      )}
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-sm font-medium">Журнал последних СМС</div>
+          <button type="button" className="text-xs text-accent hover:text-accent-hover" onClick={loadJournal}>Обновить</button>
+        </div>
+        {journal.length === 0 ? (
+          <div className="text-xs text-text-muted">Пока ничего не отправлялось.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-text-muted">
+                <tr>
+                  <th className="text-left py-1 pr-2">Когда</th>
+                  <th className="text-left py-1 pr-2">Вид</th>
+                  <th className="text-left py-1 pr-2">Номер</th>
+                  <th className="text-left py-1 pr-2">Статус</th>
+                  <th className="text-left py-1 pr-2">Цена</th>
+                  <th className="text-left py-1">Текст / ошибка</th>
+                </tr>
+              </thead>
+              <tbody>
+                {journal.map((m) => (
+                  <tr key={m.id} className="border-t border-border align-top">
+                    <td className="py-1 pr-2 whitespace-nowrap">{new Date(m.createdAt).toLocaleString('ru-RU')}</td>
+                    <td className="py-1 pr-2 font-mono">{m.kind}</td>
+                    <td className="py-1 pr-2 font-mono">{m.phone}</td>
+                    <td className={`py-1 pr-2 ${m.status === 'FAILED' ? 'text-error' : m.status === 'DELIVERED' ? 'text-success' : ''}`}>{SMS_STATUS_RU[m.status] || m.status}</td>
+                    <td className="py-1 pr-2">{m.cost ?? '—'}</td>
+                    <td className="py-1">{m.error ? <span className="text-error">{m.error}</span> : m.text}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

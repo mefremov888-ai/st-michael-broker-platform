@@ -1,10 +1,12 @@
 import { Process, Processor } from '@nestjs/bull';
 import { telegramApiBase } from '../common/telegram-api-base';
-import { Logger, Inject } from '@nestjs/common';
+import { Logger, Inject, Optional } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaClient } from '@st-michael/database';
 import * as webpush from 'web-push';
 import * as sgMail from '@sendgrid/mail';
+import { SmsService } from '../sms/sms.service';
+import { SMS_KINDS, SmsKind } from '../sms/sms-templates';
 
 interface NotificationJob {
   brokerId: string;
@@ -13,6 +15,10 @@ interface NotificationJob {
   channel: 'SMS' | 'TELEGRAM' | 'EMAIL' | 'PUSH';
   subject?: string;
   body: string;
+  // 2026-09-24: для channel SMS — вид из утверждённого списка (sms-templates).
+  // Без него СМС не уходит: старые постановки с телефонами клиентов в тексте
+  // владелец не утверждал.
+  smsKind?: string;
   // Event type — if set, processor checks broker's notification preferences and
   // skips sending when (eventType × channel) is disabled. Missing pref row = enabled.
   eventType?: string;
@@ -52,11 +58,14 @@ function configureWebPush() {
 export class NotificationProcessor {
   private readonly logger = new Logger(NotificationProcessor.name);
 
-  constructor(@Inject('PrismaClient') private prisma: PrismaClient) {}
+  constructor(
+    @Inject('PrismaClient') private prisma: PrismaClient,
+    @Optional() private readonly sms?: SmsService,
+  ) {}
 
   @Process('send')
   async handleSend(job: Job<NotificationJob>) {
-    const { brokerId, channel, subject, body, data, eventType } = job.data;
+    const { brokerId, channel, subject, body, data, eventType, smsKind } = job.data;
     this.logger.log(`Processing notification: ${channel} → broker ${brokerId}${eventType ? ` (${eventType})` : ''}`);
 
     // Honor broker preferences — skip silently if (eventType × channel) is disabled.
@@ -85,7 +94,7 @@ export class NotificationProcessor {
 
       switch (channel) {
         case 'SMS':
-          await this.sendSms(broker.phone, body);
+          await this.sendSms(brokerId, broker.phone, body, smsKind);
           break;
         case 'TELEGRAM':
           await this.sendTelegram(broker.telegramChatId, body);
@@ -119,16 +128,23 @@ export class NotificationProcessor {
 
   // ─── Channel Implementations ────────────────────────
 
-  private async sendSms(phone: string, body: string) {
-    const apiKey = process.env.SMS_PROVIDER_API_KEY;
-    if (!apiKey) {
-      this.logger.warn(`[SMS] No API key configured. Message to ${phone}: ${body}`);
+  // 2026-09-24: СМС Центр. Уходят только сообщения с утверждённым видом
+  // (smsKind); остальное — молча пропускаем, чтобы не платить за тексты,
+  // которые владелец не согласовывал. Включение по видам — флаги в
+  // «Интеграциях» (SmsService сам пишет SKIPPED в журнал).
+  private async sendSms(brokerId: string, phone: string, body: string, smsKind?: string) {
+    if (!smsKind || !SMS_KINDS.includes(smsKind as SmsKind)) {
+      this.logger.log(`[SMS] пропуск: вид не утверждён (${smsKind || '—'})`);
       return;
     }
-
-    // Integration with SMS provider (e.g., SMS.RU, SMSC)
-    this.logger.log(`[SMS] Sending to ${phone}: ${body.substring(0, 50)}...`);
-    // In production: await fetch(`https://sms.ru/sms/send?api_id=${apiKey}&to=${phone}&msg=${encodeURIComponent(body)}&json=1`)
+    if (!this.sms) {
+      this.logger.warn('[SMS] SmsService не подключён');
+      return;
+    }
+    const res = await this.sms.send({ kind: smsKind as SmsKind, phone, text: body, brokerId });
+    if (!res.ok && !res.skipped) {
+      throw new Error(`[SMS] ${res.error || 'не отправлено'}`);
+    }
   }
 
   private async sendTelegram(chatId: bigint | null, body: string) {

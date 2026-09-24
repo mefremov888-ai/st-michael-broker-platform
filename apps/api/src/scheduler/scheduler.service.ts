@@ -6,6 +6,8 @@ import type { Queue } from 'bull';
 import { AmoCrmAdapter, AMO_CONTACT_FIELDS, AMO_LEAD_FIELDS, AMO_PIPELINES, amoFixationRecoverWindowFromCreatedAt, getLeadCustomFieldNumber, getLeadCustomFieldValue, pipelineToProject, leadToProject, statusToDealStatus, isDealStage, mapMeetingStatus, BROKER_PIPELINE_ID, MorekitAdapter, morekitPhone, morekitProjectName, morekitLeadDate, normalizeAmoFixationClientPhone } from '@st-michael/integrations';
 import { getSystemSetting } from '../common/system-setting';
 import { CmsService } from '../cms/cms.service';
+import { SmsService } from '../sms/sms.service';
+import { fixationExpiryText } from '../sms/sms-templates';
 /**
  * Чистит имя клиента от служебных суффиксов amoCRM: "от брокера", "от Владимира",
  * "от боркера" (опечатка) и т.п. Убираем всё начиная от слова "от ".
@@ -76,7 +78,23 @@ export class SchedulerService {
     private readonly fixationPhoneLock: AmoFixationPhoneLockService,
     @Optional() private readonly opsAlerts?: OpsAlertService,
     @Optional() private readonly clientFixation?: ClientFixationService,
+    // 2026-09-24: статусы доставки СМС у СМС Центра.
+    @Optional() private readonly sms?: SmsService,
   ) {}
+
+  // 2026-09-24: подтянуть статусы доставки недавних СМС (каждые 10 минут).
+  @Cron('7 */10 * * * *')
+  async handleSmsStatusRefresh() {
+    if (!this.sms) return;
+    try {
+      const r = await this.sms.refreshStatuses();
+      if (r.checked) {
+        this.logger.log(`SMS statuses: checked ${r.checked}, delivered ${r.delivered}, failed ${r.failed}`);
+      }
+    } catch (e: any) {
+      this.logger.warn(`SMS status refresh failed: ${e?.message || e}`);
+    }
+  }
 
   // Placeholder — AmoReconciliationService не подключён в этой версии.
   @Cron('30 */10 * * * *')
@@ -524,8 +542,15 @@ export class SchedulerService {
         const subject = 'Истечение фиксации';
         const body = `Уникальность клиента ${client.fullName} (${client.phone}) истекает через ${daysLeft} дн. Продлите или завершите фиксацию.`;
         // Fan out to all channels — processor will respect broker preferences.
+        // 2026-09-24: СМС — только согласованный текст (фамилия и инициал,
+        // без телефона клиента), вид FIXATION_EXPIRY; уходит, когда включён
+        // флаг SMS_FIXATION_EXPIRY в «Интеграциях».
         await this.notificationQueue.add('send', {
-          brokerId: client.brokerId, channel: 'SMS', body, eventType: 'FIXATION_EXPIRY',
+          brokerId: client.brokerId,
+          channel: 'SMS',
+          body: fixationExpiryText(client.fullName, client.uniquenessExpiresAt!),
+          eventType: 'FIXATION_EXPIRY',
+          smsKind: 'FIXATION_EXPIRY',
         });
         await this.notificationQueue.add('send', {
           brokerId: client.brokerId, channel: 'EMAIL', subject, body, eventType: 'FIXATION_EXPIRY',

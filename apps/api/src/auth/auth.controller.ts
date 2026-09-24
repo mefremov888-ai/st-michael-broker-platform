@@ -5,7 +5,13 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { CurrentUser, CurrentUserPayload } from './current-user.decorator';
-import { registerDtoSchema, loginDtoSchema, phoneSchema, forgotPasswordDtoSchema, resetPasswordDtoSchema } from '@st-michael/shared';
+import { registerDtoSchema, loginDtoSchema, phoneSchema, forgotPasswordDtoSchema, resetPasswordDtoSchema, otpRequestDtoSchema, otpLoginDtoSchema, otpResetPasswordDtoSchema } from '@st-michael/shared';
+
+function clientIp(req: Request): string | null {
+  return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+    || req.socket?.remoteAddress
+    || null;
+}
 
 @ApiTags('auth')
 @Controller('auth')
@@ -52,7 +58,7 @@ export class AuthController {
         errors: unique,
       });
     }
-    const data = parsed.data as { phone: string; fullName: string; email?: string; password: string; inn?: string; innType?: 'PERSONAL' | 'AGENCY'; agencyName?: string; offerAccepted?: boolean; privacyAccepted?: boolean };
+    const data = parsed.data as { phone: string; smsCode?: string; fullName: string; email?: string; password: string; inn?: string; innType?: 'PERSONAL' | 'AGENCY'; agencyName?: string; offerAccepted?: boolean; privacyAccepted?: boolean };
     const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
       || req.socket?.remoteAddress
       || null;
@@ -76,6 +82,50 @@ export class AuthController {
   async login(@Body() body: unknown) {
     const data = loginDtoSchema.parse(body) as { phone: string; password: string };
     return this.authService.login(data);
+  }
+
+  // ─── 2026-09-24: коды по СМС (СМС Центр) ───────────────────────────
+  @Get('sms-options')
+  @ApiOperation({ summary: 'Какие СМС-подтверждения включены (вход/регистрация/смена пароля)' })
+  async smsOptions() {
+    return this.authService.smsOptions();
+  }
+
+  @Post('otp/request')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Отправить код по СМС (LOGIN | REGISTER | PASSWORD_RESET)' })
+  async requestOtp(@Body() body: unknown, @Req() req: Request) {
+    const parsed = otpRequestDtoSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException({ message: 'Введите номер телефона — 10 цифр после +7', field: 'phone' });
+    }
+    return this.authService.requestOtp(parsed.data.purpose, parsed.data.phone, clientIp(req));
+  }
+
+  @Post('otp/login')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Вход по коду из СМС' })
+  async loginByCode(@Body() body: unknown) {
+    const parsed = otpLoginDtoSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new BadRequestException({ message: 'Введите номер и код из СМС (6 цифр)', field: 'code' });
+    }
+    return this.authService.loginByCode(parsed.data);
+  }
+
+  @Post('otp/reset-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Новый пароль по коду из СМС' })
+  async resetPasswordByCode(@Body() body: unknown) {
+    const parsed = otpResetPasswordDtoSchema.safeParse(body);
+    if (!parsed.success) {
+      const field = String(parsed.error.issues[0]?.path?.[0] || '');
+      throw new BadRequestException({
+        message: field === 'password' ? 'Пароль должен быть не менее 8 символов' : 'Введите номер и код из СМС (6 цифр)',
+        field: field || undefined,
+      });
+    }
+    return this.authService.resetPasswordByCode(parsed.data);
   }
 
   @Post('forgot-password')

@@ -107,6 +107,11 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      # 2026-09-24: СМС Центр (smsc.ru). Непустые SystemSetting в БД
+      # (админка «Интеграции») имеют приоритет над этими значениями.
+      SMSC_LOGIN: ${SMSC_LOGIN:-}
+      SMSC_API_KEY: ${SMSC_API_KEY:-}
+      SMSC_SENDER: ${SMSC_SENDER:-}
       # Technical alerts use a dedicated Telegram chat. Keep the broker bot
       # token as a fallback so existing installations continue to work.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}

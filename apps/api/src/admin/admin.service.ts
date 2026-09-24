@@ -2490,6 +2490,16 @@ export class AdminService {
     'MANGO_OUTBOUND_LINE',
     // 2026-06-09: Google Sheets — URL CSV-экспорта таблицы с базой брокеров.
     'GSHEETS_BROKERS_URL',
+    // 2026-09-24: СМС Центр (smsc.ru) — доступ и выключатели по видам СМС.
+    // SmsService читает их при каждой отправке — рестарт не нужен.
+    'SMSC_LOGIN',
+    'SMSC_API_KEY',
+    'SMSC_SENDER',
+    'SMS_ENABLED',
+    'SMS_OTP_LOGIN',
+    'SMS_OTP_REGISTER',
+    'SMS_OTP_PASSWORD_RESET',
+    'SMS_FIXATION_EXPIRY',
   ];
 
   // Ключи, значение которых не возвращаем в UI «как есть» (длинные JWT-токены / API keys).
@@ -2501,6 +2511,7 @@ export class AdminService {
     'MANGO_API_SALT',
     // The integration-webhook URL may embed code/API_key query parameters.
     'MANGO_CALLBACK_URL',
+    'SMSC_API_KEY',
   ]);
 
   async getIntegrationSettings() {

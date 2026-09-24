@@ -9,3 +9,4 @@ export * from "./mango.adapter";
 export * from "./morekit.adapter";
 export * from "./profitbase.adapter";
 export * from "./whatsapp.adapter";
+export * from "./smsc.adapter";

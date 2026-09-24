@@ -1,19 +1,30 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
 import { parseApiError } from '@/lib/api';
 import { SupportContacts } from '@/components/SupportContacts';
+import { SmsCodeField } from '@/components/SmsCodeField';
+import { fetchSmsOptions } from '@/lib/sms-options';
 
 export default function LoginPage() {
   const [phoneDigits, setPhoneDigits] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // 2026-09-24: вход по коду из СМС — альтернатива паролю, показывается
+  // только если включён в админке «Интеграции» (СМС Центр).
+  const [smsLoginAvailable, setSmsLoginAvailable] = useState(false);
+  const [mode, setMode] = useState<'password' | 'code'>('password');
+  const [smsCode, setSmsCode] = useState('');
   const { login } = useAuth();
   const router = useRouter();
+
+  useEffect(() => {
+    fetchSmsOptions().then((o) => setSmsLoginAvailable(o.login));
+  }, []);
 
   const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setPhoneDigits(e.target.value.replace(/\D/g, '').slice(0, 10));
@@ -27,48 +38,69 @@ export default function LoginPage() {
       ? `Введено ${phoneDigits.length} из 10 цифр — не хватает ${digitsLeft}`
       : '';
 
+  const phoneError = () =>
+    phoneDigits.length === 0
+      ? 'Введите номер телефона — 10 цифр после +7'
+      : `Номер введён не полностью: ${phoneDigits.length} из 10 цифр, не хватает ${digitsLeft}`;
+
+  // 2026-06-30: бэк может вернуть код NEEDS_REGISTRATION (телефона нет
+  // в БД) или NEEDS_ACTIVATION (есть, но пароля нет — импортированный
+  // брокер). В обоих случаях редиректим на /register с предзаполненным
+  // телефоном — пользователь там введёт ФИО, email, пароль и завершит
+  // регистрацию/активацию.
+  const redirectIfNeeded = (code: string | undefined) => {
+    if (code === 'NEEDS_REGISTRATION' || code === 'NEEDS_ACTIVATION') {
+      router.push(`/register?phone=${phoneDigits}`);
+      return true;
+    }
+    return false;
+  };
+
   const handleLogin = async () => {
     if (phoneDigits.length !== 10) {
-      setError(
-        phoneDigits.length === 0
-          ? 'Введите номер телефона — 10 цифр после +7'
-          : `Номер введён не полностью: ${phoneDigits.length} из 10 цифр, не хватает ${digitsLeft}`,
-      );
+      setError(phoneError());
       return;
     }
-    if (!password) {
+    if (mode === 'password' && !password) {
       setError('Введите пароль');
+      return;
+    }
+    if (mode === 'code' && smsCode.length !== 6) {
+      setError('Введите код из СМС — 6 цифр');
       return;
     }
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: '+7' + phoneDigits, password }),
-      });
+      const res = mode === 'password'
+        ? await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: '+7' + phoneDigits, password }),
+          })
+        : await fetch('/api/auth/otp/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: '+7' + phoneDigits, code: smsCode }),
+          });
       if (res.ok) {
         const data = await res.json();
         login(data.accessToken, data.refreshToken);
       } else {
-        // 2026-06-30: бэк может вернуть код NEEDS_REGISTRATION (телефона нет
-        // в БД) или NEEDS_ACTIVATION (есть, но пароля нет — импортированный
-        // брокер). В обоих случаях редиректим на /register с предзаполненным
-        // телефоном — пользователь там введёт ФИО, email, пароль и завершит
-        // регистрацию/активацию.
         const body = await res.json().catch(() => null);
-        const code = body?.code;
-        if (code === 'NEEDS_REGISTRATION' || code === 'NEEDS_ACTIVATION') {
-          router.push(`/register?phone=${phoneDigits}`);
-          return;
-        }
-        setError(body?.message || await parseApiError(res, 'Неверный телефон или пароль'));
+        if (redirectIfNeeded(body?.code)) return;
+        setError(body?.message || await parseApiError(res, mode === 'password' ? 'Неверный телефон или пароль' : 'Код неверный или истёк'));
       }
     } catch {
       setError('Ошибка соединения с сервером');
     }
     setLoading(false);
+  };
+
+  const switchMode = (next: 'password' | 'code') => {
+    setMode(next);
+    setError('');
+    setSmsCode('');
   };
 
   return (
@@ -102,17 +134,28 @@ export default function LoginPage() {
             )}
           </div>
 
-          <div>
-            <label className="label">Пароль</label>
-            <input
-              type="password"
-              className="input"
-              placeholder="Введите пароль"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+          {mode === 'password' ? (
+            <div>
+              <label className="label">Пароль</label>
+              <input
+                type="password"
+                className="input"
+                placeholder="Введите пароль"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+              />
+            </div>
+          ) : (
+            <SmsCodeField
+              phone={phoneDigits.length === 10 ? '+7' + phoneDigits : null}
+              purpose="LOGIN"
+              value={smsCode}
+              onChange={setSmsCode}
+              onEnter={handleLogin}
+              onRequestError={(r) => redirectIfNeeded(r.code)}
             />
-          </div>
+          )}
 
           <button
             className="btn btn-primary w-full"
@@ -124,6 +167,18 @@ export default function LoginPage() {
         </div>
 
         <div className="mt-6 text-center space-y-2">
+          {smsLoginAvailable && (
+            <div>
+              <button
+                type="button"
+                className="text-accent hover:text-accent-hover text-sm"
+                onClick={() => switchMode(mode === 'password' ? 'code' : 'password')}
+                data-testid="login-mode-toggle"
+              >
+                {mode === 'password' ? 'Войти по коду из СМС' : 'Войти по паролю'}
+              </button>
+            </div>
+          )}
           <div>
             <Link href="/forgot-password" className="text-accent hover:text-accent-hover text-sm">
               Забыли пароль?

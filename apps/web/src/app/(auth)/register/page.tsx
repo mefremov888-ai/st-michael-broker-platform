@@ -7,12 +7,14 @@ import { parseApiError } from '@/lib/api';
 import { SupportContacts } from '@/components/SupportContacts';
 import { InnAutocomplete } from '@/components/InnAutocomplete';
 import { HintIcon } from '@/components/HintIcon';
+import { SmsCodeField } from '@/components/SmsCodeField';
+import { fetchSmsOptions } from '@/lib/sms-options';
 
 // 2026-06-15: подсветка обязательных полей при попытке submit (правки Ксении).
 // До первого submit ошибки не показываем — не давим на пользователя.
 // После submit поля с ошибкой подсвечиваем красной рамкой + текстом снизу.
 type FieldErrors = Partial<Record<
-  'fullName' | 'phone' | 'email' | 'inn' | 'password' | 'passwordConfirm' | 'offer' | 'privacy',
+  'fullName' | 'phone' | 'smsCode' | 'email' | 'inn' | 'password' | 'passwordConfirm' | 'offer' | 'privacy',
   string
 >>;
 
@@ -37,7 +39,15 @@ function RegisterForm() {
   // 2026-09-08: номер занят другой карточкой — показываем путь восстановления.
   const [recovery, setRecovery] = useState<null | { kind: 'forgot_password' | 'await_admin' | 'support'; name: string; emailHint: string | null }>(null);
   const [submitted, setSubmitted] = useState(false);
+  // 2026-09-24: подтверждение номера кодом из СМС — только если включено в
+  // админке «Интеграции» (СМС Центр). Без флага форма работает как раньше.
+  const [smsRequired, setSmsRequired] = useState(false);
+  const [smsCode, setSmsCode] = useState('');
   const router = useRouter();
+
+  useEffect(() => {
+    fetchSmsOptions().then((o) => setSmsRequired(o.register));
+  }, []);
 
   const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setPhoneDigits(e.target.value.replace(/\D/g, '').slice(0, 10));
@@ -47,6 +57,7 @@ function RegisterForm() {
     const errs: FieldErrors = {};
     if (!fullName.trim()) errs.fullName = 'Заполните ФИО';
     if (phoneDigits.length !== 10) errs.phone = 'Введите 10 цифр номера';
+    if (smsRequired && smsCode.length !== 6) errs.smsCode = 'Введите код из СМС (6 цифр)';
     if (!email) errs.email = 'Введите email';
     else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errs.email = 'Неверный формат email';
     if (inn.length !== 10 && inn.length !== 12) errs.inn = 'ИНН должен быть 10 или 12 цифр';
@@ -71,6 +82,7 @@ function RegisterForm() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phone: '+7' + phoneDigits,
+          smsCode: smsRequired ? smsCode : undefined,
           fullName,
           email,
           password,
@@ -96,7 +108,7 @@ function RegisterForm() {
             ? { kind: raw.recovery || 'support', name: '', emailHint: null }
             : null,
         );
-        const valid: Array<keyof FieldErrors> = ['fullName','phone','email','inn','password','passwordConfirm','offer','privacy'];
+        const valid: Array<keyof FieldErrors> = ['fullName','phone','smsCode','email','inn','password','passwordConfirm','offer','privacy'];
         const list: Array<{ field?: string; message: string }> = Array.isArray(raw?.errors)
           ? raw.errors
           : (raw?.field || raw?.message)
@@ -211,6 +223,26 @@ function RegisterForm() {
               </div>
               {errorText('phone')}
             </div>
+
+            {smsRequired && (
+              <SmsCodeField
+                phone={phoneDigits.length === 10 ? '+7' + phoneDigits : null}
+                purpose="REGISTER"
+                value={smsCode}
+                onChange={(v) => { setSmsCode(v); if (submitted) setFieldErrors(validate()); }}
+                error={fieldErrors.smsCode}
+                inputClassName={fieldClass('smsCode')}
+                onRequestError={(r) => {
+                  // Номер занят — тот же блок восстановления, что и при submit.
+                  if (r.code === 'PHONE_TAKEN') {
+                    setRecovery({ kind: (r.recovery as any) || 'support', name: '', emailHint: null });
+                    setFieldErrors((prev) => ({ ...prev, phone: r.message }));
+                    return true;
+                  }
+                  return false;
+                }}
+              />
+            )}
 
             <div>
               <label className="label">Email <span className="text-error">*</span></label>

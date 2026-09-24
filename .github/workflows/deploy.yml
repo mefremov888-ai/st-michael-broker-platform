@@ -255,6 +255,12 @@ jobs:
           OPS_TELEGRAM_BOT_TOKEN: ${{ secrets.OPS_TELEGRAM_BOT_TOKEN }}
           OPS_ALERT_CHAT_ID: ${{ secrets.OPS_ALERT_CHAT_ID }}
           OPS_ALERT_CHAT_IDS: ${{ secrets.OPS_ALERT_CHAT_IDS }}
+          # 2026-09-24: СМС Центр (smsc.ru) — коды входа/регистрации и
+          # уведомления. Приоритет у настроек в БД (админка «Интеграции»),
+          # env — запасной вариант.
+          SMSC_LOGIN: ${{ secrets.SMSC_LOGIN }}
+          SMSC_API_KEY: ${{ secrets.SMSC_API_KEY }}
+          SMSC_SENDER: ${{ secrets.SMSC_SENDER }}
           EXPECTED_DEPLOY_SHA: ${{ github.sha }}
           ATTESTED_BACKUP_RUN_ID: ${{ steps.backup_attestation.outputs.run_id }}
           ATTESTED_BACKUP_RUN_ATTEMPT: ${{ steps.backup_attestation.outputs.run_attempt }}
@@ -312,6 +318,7 @@ jobs:
             SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_FROM SMTP_SECURE
             DADATA_API_KEY ANTHROPIC_API_KEY GOOGLE_SERVICE_ACCOUNT_JSON
             TELEGRAM_BOT_TOKEN OPS_TELEGRAM_BOT_TOKEN OPS_ALERT_CHAT_ID OPS_ALERT_CHAT_IDS
+            SMSC_LOGIN SMSC_API_KEY SMSC_SENDER
             EXPECTED_DEPLOY_SHA ATTESTED_BACKUP_RUN_ID ATTESTED_BACKUP_RUN_ATTEMPT
             PRODUCTION_PG_SYSTEM_IDENTIFIER PRODUCTION_MIN_BROKER_ROWS
             PRODUCTION_COMPOSE_OVERRIDE_SHA256 DEPLOY_PATH
