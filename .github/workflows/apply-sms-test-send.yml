@@ -1,0 +1,71 @@
+name: SMS Center — test send
+
+# 2026-09-24: разовая проверка после подключения СМС Центра — баланс аккаунта
+# и тестовая отправка одного из четырёх согласованных текстов на указанный
+# номер. Сам код читает доступы из БД (SystemSetting) или из env-fallback
+# (secrets SMSC_LOGIN/SMSC_API_KEY/SMSC_SENDER, уже на сервере после
+# деплоя). Баланс проверяется всегда; отправка — только при apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      phone:
+        description: 'Номер в формате +7XXXXXXXXXX'
+        required: true
+        type: string
+      sample:
+        description: 'Какой текст отправить'
+        required: true
+        default: 'LOGIN_CODE'
+        type: choice
+        options:
+          - LOGIN_CODE
+          - REGISTER_CODE
+          - PASSWORD_RESET_CODE
+          - FIXATION_EXPIRY
+      apply:
+        description: 'Отправить реально (иначе — только баланс, без отправки)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-sms-test-send
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          PHONE_INPUT: ${{ inputs.phone }}
+          SAMPLE_INPUT: ${{ inputs.sample }}
+          APPLY_INPUT: ${{ inputs.apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          envs: PHONE_INPUT,SAMPLE_INPUT,APPLY_INPUT
+          script: |
+            set -e
+            echo "$PHONE_INPUT" | grep -qE '^\+7[0-9]{10}$' || { echo "phone: формат +7XXXXXXXXXX"; exit 2; }
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/apply-sms-test-send.js > /tmp/apply-sms-test-send.js
+            docker cp /tmp/apply-sms-test-send.js st-michael-api:/app/scripts/apply-sms-test-send.js
+            APPLY=0
+            if [ "$APPLY_INPUT" = "true" ]; then APPLY=1; fi
+            if [ "$APPLY" = "1" ]; then echo "=== APPLY (реальная отправка) ==="; else echo "=== Только баланс, без отправки ==="; fi
+            docker compose exec -T -e PHONE="$PHONE_INPUT" -e SAMPLE="$SAMPLE_INPUT" -e APPLY=$APPLY api node /app/scripts/apply-sms-test-send.js
+            echo "=== Готово ==="
