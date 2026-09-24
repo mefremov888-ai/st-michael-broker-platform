@@ -9,6 +9,7 @@ import { AmocrmModule } from '../amocrm/amocrm.module';
 import { CmsModule } from '../cms/cms.module';
 import { AmoFixationPhoneLockModule } from '../common/amo-fixation-phone-lock.module';
 import { ClientFixationModule } from '../client-fixation/client-fixation.module';
+import { SmsModule } from '../sms/sms.module';
 
 @Module({
   imports: [
@@ -24,6 +25,8 @@ import { ClientFixationModule } from '../client-fixation/client-fixation.module'
     // 2026-08-31: крон сам заводит контакт брокера в amoCRM, иначе фиксация
     // висит в очереди до ручного провижининга.
     ClientFixationModule,
+    // 2026-09-24: статусы доставки СМС.
+    SmsModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
   providers: [SchedulerService],

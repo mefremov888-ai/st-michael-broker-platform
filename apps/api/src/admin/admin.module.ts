@@ -8,6 +8,7 @@ import { DatabaseModule } from '../database/database.module';
 import { AmocrmModule } from '../amocrm/amocrm.module';
 import { AuthModule } from '../auth/auth.module';
 import { MangoCallSafetyModule } from '../common/mango-call-safety.module';
+import { SmsModule } from '../sms/sms.module';
 
 @Module({
   imports: [
@@ -15,6 +16,8 @@ import { MangoCallSafetyModule } from '../common/mango-call-safety.module';
     AmocrmModule,
     AuthModule,
     MangoCallSafetyModule,
+    // 2026-09-24: СМС Центр — баланс/журнал/тест из «Интеграций».
+    SmsModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
   controllers: [AdminController],

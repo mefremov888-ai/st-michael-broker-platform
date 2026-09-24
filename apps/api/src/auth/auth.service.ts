@@ -1,10 +1,14 @@
 import {
   Injectable,
   Inject,
+  Optional,
   UnauthorizedException,
   BadRequestException,
 } from "@nestjs/common";
 import { SAFE_MESSAGES } from "../common/safe-messages";
+import { OTP_INVALID_MESSAGE, OtpService } from "../sms/otp.service";
+import { SmsService } from "../sms/sms.service";
+import type { OtpPurpose } from "../sms/sms-templates";
 import { JwtService } from "@nestjs/jwt";
 import { PrismaClient, UserStatus } from "@st-michael/database";
 import { InjectQueue } from "@nestjs/bull";
@@ -41,6 +45,18 @@ import {
   reconcileExactAmoBrokerContact,
   recordResolvedAmoBrokerContactCreate,
 } from "../common/amo-broker-contact-lock";
+
+/** Минимум полей брокера для выдачи сессии (см. issueSession). */
+type SessionBroker = {
+  id: string;
+  phone: string;
+  role: string;
+  status: string;
+  fullName: string;
+  funnelStage: string;
+  amoContactId: bigint | null;
+  brokerAgencies: Array<{ agency: unknown }>;
+};
 
 const UPLOADS_ROOT = process.env.UPLOADS_DIR || "/app/uploads";
 const AVATAR_PUBLIC_PREFIX = "/files";
@@ -165,11 +181,16 @@ export class AuthService {
     private jwtService: JwtService,
     @InjectQueue("notifications") private notificationQueue: Queue,
     private readonly catalogService: CatalogService,
+    // 2026-09-24: СМС Центр — коды входа/регистрации/смены пароля. Optional,
+    // чтобы существующие тесты и сборки без SmsModule не ломались.
+    @Optional() private readonly otp?: OtpService,
+    @Optional() private readonly sms?: SmsService,
   ) {}
 
   async register(
     data: {
       phone: string;
+      smsCode?: string;
       fullName?: string;
       firstName?: string;
       lastName?: string;
@@ -265,6 +286,22 @@ export class AuthService {
         errors,
         ...(phoneTaken || {}),
       });
+    }
+
+    // 2026-09-24: подтверждение номера кодом из СМС (когда включено в
+    // настройках «Интеграции»). Проверяем после остальных ошибок формы,
+    // чтобы код не сгорал зря; при успехе код гасится.
+    if (this.otp && (await this.otp.isPurposeEnabled("REGISTER"))) {
+      if (!data.smsCode) {
+        const message = "Введите код из СМС";
+        throw new BadRequestException({
+          message,
+          field: "smsCode",
+          errors: [{ field: "smsCode", message }],
+          code: "SMS_CODE_REQUIRED",
+        });
+      }
+      await this.otp.verify({ purpose: "REGISTER", phone: data.phone, code: data.smsCode });
     }
 
     const passwordHash = await bcrypt.hash(data.password, 10);
@@ -689,6 +726,11 @@ export class AuthService {
       throw new UnauthorizedException("Неверный логин или пароль");
     }
 
+    return this.issueSession(broker);
+  }
+
+  /** Общий хвост входа (по паролю и по коду): токены и фоновые синки. */
+  private issueSession(broker: SessionBroker) {
     const payload = { sub: broker.id, phone: broker.phone, role: broker.role };
     const accessToken = this.jwtService.sign(payload);
     const refreshToken = this.jwtService.sign(payload, {
@@ -735,6 +777,162 @@ export class AuthService {
         agency: broker.brokerAgencies[0]?.agency ?? null,
       },
     };
+  }
+
+  // ─── 2026-09-24: коды по СМС (СМС Центр) ─────────────────────────────
+  // Код рождается и проверяется в кабинете (OtpService), СМС Центр только
+  // доставляет. Что включено — флаги в «Интеграциях»; пока формы показывают
+  // СМС-вариант только если он включён (см. smsOptions).
+
+  /** Что из СМС-подтверждений включено — для форм входа/регистрации. */
+  async smsOptions() {
+    if (!this.sms) return { login: false, register: false, passwordReset: false };
+    return this.sms.publicOptions();
+  }
+
+  /** Те же проверки, что в login(), но без пароля — для входа по коду. */
+  private assertCanLogin(
+    broker: { status: string; role: string; passwordHash: string | null } | null,
+  ): void {
+    if (!broker) {
+      throw new UnauthorizedException({
+        message: "Аккаунт не найден. Зарегистрируйтесь.",
+        code: "NEEDS_REGISTRATION",
+      });
+    }
+    if (broker.status === UserStatus.BLOCKED) {
+      throw new UnauthorizedException(
+        "Учётная запись заблокирована. Свяжитесь с менеджером.",
+      );
+    }
+    const canSelfActivate =
+      broker.status === UserStatus.PENDING &&
+      broker.role === "BROKER" &&
+      !broker.passwordHash;
+    if (!broker.passwordHash && canSelfActivate) {
+      throw new UnauthorizedException({
+        message: "Аккаунт ещё не активирован. Завершите регистрацию.",
+        code: "NEEDS_ACTIVATION",
+      });
+    }
+    if (!broker.passwordHash) {
+      throw new UnauthorizedException({
+        message:
+          "Доступ к аккаунту пока не разрешён. Обратитесь к администратору.",
+        code: "ACCOUNT_UNAVAILABLE",
+      });
+    }
+    if (broker.status !== UserStatus.ACTIVE) {
+      throw new UnauthorizedException({
+        message: "Аккаунт ожидает активации администратором.",
+        code: "ACCOUNT_PENDING",
+      });
+    }
+  }
+
+  /**
+   * Запрос кода по СМС. Вход и смена пароля — только существующему
+   * активному брокеру; регистрация — на свободный номер (или на
+   * импортированную карточку без пароля). Про чужие номера ничего не
+   * раскрываем: для смены пароля ответ одинаков, есть карточка или нет.
+   */
+  async requestOtp(purpose: OtpPurpose, phone: string, ip?: string | null) {
+    if (!this.otp) {
+      throw new BadRequestException({
+        message: "Подтверждение по СМС сейчас недоступно.",
+        code: "SMS_OTP_DISABLED",
+      });
+    }
+    const broker = await this.prisma.broker.findUnique({
+      where: { phone },
+      select: { id: true, status: true, role: true, passwordHash: true, email: true },
+    });
+    const silentOk = { ok: true as const, expiresInSec: 600, retryAfterSec: 60 };
+
+    if (purpose === "LOGIN") {
+      this.assertCanLogin(broker);
+      return this.otp.request({ purpose, phone, ip, brokerId: broker!.id });
+    }
+    if (purpose === "PASSWORD_RESET") {
+      if (!broker || broker.status !== UserStatus.ACTIVE || !broker.passwordHash) {
+        return silentOk;
+      }
+      return this.otp.request({ purpose, phone, ip, brokerId: broker.id });
+    }
+    // REGISTER
+    const isActivation =
+      Boolean(broker) &&
+      !broker!.passwordHash &&
+      broker!.status === UserStatus.PENDING &&
+      broker!.role === "BROKER";
+    if (broker && !isActivation) {
+      // Тот же ответ, что даёт сама регистрация на занятый номер (2026-09-08).
+      const canSelfRecover =
+        broker.role === "BROKER" &&
+        broker.status === UserStatus.ACTIVE &&
+        Boolean(broker.passwordHash) &&
+        Boolean(broker.email);
+      const awaitsAdmin =
+        broker.role === "BROKER" &&
+        broker.status === UserStatus.PENDING &&
+        Boolean(broker.passwordHash);
+      throw new BadRequestException({
+        message: SAFE_MESSAGES.PHONE_TAKEN,
+        field: "phone",
+        errors: [{ field: "phone", message: SAFE_MESSAGES.PHONE_TAKEN }],
+        code: "PHONE_TAKEN",
+        recovery: canSelfRecover ? "forgot_password" : awaitsAdmin ? "await_admin" : "support",
+      });
+    }
+    return this.otp.request({ purpose, phone, ip, brokerId: broker?.id || null });
+  }
+
+  /** Вход по коду из СМС — альтернатива паролю. */
+  async loginByCode(data: { phone: string; code: string }) {
+    if (!this.otp) {
+      throw new BadRequestException({
+        message: "Вход по СМС сейчас недоступен.",
+        code: "SMS_OTP_DISABLED",
+      });
+    }
+    const broker = await this.prisma.broker.findUnique({
+      where: { phone: data.phone },
+      include: {
+        brokerAgencies: {
+          include: { agency: true },
+          where: { isPrimary: true },
+          take: 1,
+        },
+      },
+    });
+    this.assertCanLogin(broker);
+    await this.otp.verify({ purpose: "LOGIN", phone: data.phone, code: data.code });
+    return this.issueSession(broker!);
+  }
+
+  /** Новый пароль по коду из СМС — для тех, у кого нет email или письма не доходят. */
+  async resetPasswordByCode(data: { phone: string; code: string; password: string }) {
+    if (!this.otp) {
+      throw new BadRequestException({
+        message: "Смена пароля по СМС сейчас недоступна.",
+        code: "SMS_OTP_DISABLED",
+      });
+    }
+    const broker = await this.prisma.broker.findUnique({
+      where: { phone: data.phone },
+      select: { id: true, status: true, passwordHash: true },
+    });
+    // Код на такой номер не выдавался — ответ тот же, что при неверном коде.
+    if (!broker || broker.status !== UserStatus.ACTIVE || !broker.passwordHash) {
+      throw new BadRequestException({ message: OTP_INVALID_MESSAGE, code: "OTP_INVALID" });
+    }
+    await this.otp.verify({ purpose: "PASSWORD_RESET", phone: data.phone, code: data.code });
+    const passwordHash = await bcrypt.hash(data.password, 10);
+    await this.prisma.broker.update({
+      where: { id: broker.id },
+      data: { passwordHash, passwordResetToken: null, passwordResetExpiresAt: null },
+    });
+    return { message: "Пароль успешно изменён" };
   }
 
   private async syncBrokerFromAmo(

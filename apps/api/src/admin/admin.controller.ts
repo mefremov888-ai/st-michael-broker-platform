@@ -8,6 +8,8 @@ import { CurrentUser, CurrentUserPayload } from '../auth/current-user.decorator'
 import { UserRole } from '@st-michael/shared';
 import { AdminService } from './admin.service';
 import { GoogleSheetsSyncService } from './google-sheets-sync.service';
+import { SmsService } from '../sms/sms.service';
+import { SmsTestDto } from './admin-sms.dto';
 import {
   AssignCallCenterBrokersDto,
   LogCallCenterCallDto,
@@ -26,6 +28,7 @@ export class AdminController {
   constructor(
     private readonly adminService: AdminService,
     private readonly gsheets: GoogleSheetsSyncService,
+    private readonly sms: SmsService,
   ) {}
 
   @Get('brokers')
@@ -399,6 +402,30 @@ export class AdminController {
     @Body() body: UpdateIntegrationSettingDto,
   ) {
     return this.adminService.updateIntegrationSetting(key, body.value, user.id);
+  }
+
+  // ─── СМС Центр (admin only) ───────────────────────────────
+  // 2026-09-24: баланс, журнал отправок и тестовая отправка четырёх
+  // согласованных текстов — прямо со страницы «Интеграции».
+  @Get('sms/balance')
+  @ApiOperation({ summary: 'Баланс СМС Центра и статус настройки' })
+  @Roles(UserRole.ADMIN)
+  async smsBalance() {
+    return this.sms.getBalance();
+  }
+
+  @Get('sms/journal')
+  @ApiOperation({ summary: 'Журнал отправленных СМС (последние)' })
+  @Roles(UserRole.ADMIN)
+  async smsJournal(@Query('limit') limit?: string) {
+    return this.sms.listJournal(Number(limit) || 50);
+  }
+
+  @Post('sms/test')
+  @ApiOperation({ summary: 'Тестовая отправка одного из согласованных текстов' })
+  @Roles(UserRole.ADMIN)
+  async smsTest(@CurrentUser() user: CurrentUserPayload, @Body() body: SmsTestDto) {
+    return this.sms.sendTest(body.phone, body.sample, user.id);
   }
 
   // ─── Reassign client to another broker (manager/admin) ────

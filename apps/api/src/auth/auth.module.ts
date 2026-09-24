@@ -8,11 +8,14 @@ import { JwtStrategy } from './jwt.strategy';
 import { RolesGuard } from './roles.guard';
 import { DatabaseModule } from '../database/database.module';
 import { CatalogModule } from '../catalog/catalog.module';
+import { SmsModule } from '../sms/sms.module';
 
 @Module({
   imports: [
     DatabaseModule,
     CatalogModule,
+    // 2026-09-24: коды по СМС (вход, регистрация, смена пароля).
+    SmsModule,
     PassportModule,
     JwtModule.register({
       secret: process.env.JWT_SECRET,

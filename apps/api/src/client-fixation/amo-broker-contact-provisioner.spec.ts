@@ -1309,6 +1309,10 @@ describe("production-safe amo broker-contact provisioner", () => {
       "OPS_TELEGRAM_BOT_TOKEN",
       "OPS_ALERT_CHAT_ID",
       "OPS_ALERT_CHAT_IDS",
+      // 2026-09-24: СМС Центр.
+      "SMSC_LOGIN",
+      "SMSC_API_KEY",
+      "SMSC_SENDER",
     ]);
 
     const extraction = deployScript.indexOf(

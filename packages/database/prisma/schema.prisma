@@ -2073,3 +2073,52 @@ model RegistryDeal {
   @@index([saleChannel])
   @@map("registry_deals")
 }
+
+// ─── СМС Центр (smsc.ru) — коды и уведомления ──────────────────────────
+// 2026-09-24: код рождается и проверяется в кабинете, СМС Центр только
+// доставляет. Здесь журнал отправок (без кода в тексте) и одноразовые коды
+// (хранится хеш, не код). Строковые поля вместо enum — чтобы миграция была
+// простой и добавление вида СМС не требовало ALTER TYPE.
+model SmsMessage {
+  id            String    @id @default(uuid())
+  brokerId      String?   @map("broker_id")
+  phone         String
+  // LOGIN_CODE | REGISTER_CODE | PASSWORD_RESET_CODE | FIXATION_EXPIRY | TEST
+  kind          String
+  // Текст как ушёл, но код заменён на «••••••».
+  text          String
+  // QUEUED | SENT | DELIVERED | FAILED | SKIPPED
+  status        String    @default("QUEUED")
+  providerId    String?   @map("provider_id")
+  providerStatus Int?     @map("provider_status")
+  error         String?
+  parts         Int?
+  cost          Decimal?  @db.Decimal(10, 2)
+  sentAt        DateTime? @map("sent_at")
+  deliveredAt   DateTime? @map("delivered_at")
+  statusCheckedAt DateTime? @map("status_checked_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([phone, createdAt])
+  @@index([status, createdAt])
+  @@index([brokerId, createdAt])
+  @@map("sms_messages")
+}
+
+model PhoneOtp {
+  id           String    @id @default(uuid())
+  phone        String
+  // LOGIN | REGISTER | PASSWORD_RESET
+  purpose      String
+  codeHash     String    @map("code_hash")
+  expiresAt    DateTime  @map("expires_at")
+  attempts     Int       @default(0)
+  consumedAt   DateTime? @map("consumed_at")
+  ip           String?
+  smsMessageId String?   @map("sms_message_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([phone, purpose, createdAt])
+  @@index([ip, createdAt])
+  @@map("phone_otps")
+}

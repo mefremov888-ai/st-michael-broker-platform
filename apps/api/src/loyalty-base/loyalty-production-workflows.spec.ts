@@ -146,6 +146,10 @@ describe("loyalty production workflow safety", () => {
       "OPS_TELEGRAM_BOT_TOKEN",
       "OPS_ALERT_CHAT_ID",
       "OPS_ALERT_CHAT_IDS",
+      // 2026-09-24: СМС Центр.
+      "SMSC_LOGIN",
+      "SMSC_API_KEY",
+      "SMSC_SENDER",
       "EXPECTED_DEPLOY_SHA",
       "ATTESTED_BACKUP_RUN_ID",
       "ATTESTED_BACKUP_RUN_ATTEMPT",

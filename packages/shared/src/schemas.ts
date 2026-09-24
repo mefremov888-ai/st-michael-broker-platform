@@ -26,6 +26,9 @@ export const registerDtoSchema = z.object({
   // но не блокируют submit. Если брокер их отметил — фиксируем акцепт.
   offerAccepted: z.boolean().optional(),
   privacyAccepted: z.boolean().optional(),
+  // 2026-09-24: код подтверждения номера из СМС — обязателен, только когда
+  // подтверждение включено в настройках (проверяет AuthService.register).
+  smsCode: z.string().regex(/^\d{6}$/, 'Код — 6 цифр').optional(),
 }).refine((d) => d.fullName || (d.firstName && d.lastName), {
   message: 'Either fullName or firstName+lastName required',
 });
@@ -41,6 +44,23 @@ export const resetPasswordDtoSchema = z.object({
 
 export const sendOtpDtoSchema = z.object({
   phone: phoneSchema,
+});
+
+// 2026-09-24: коды по СМС (СМС Центр). Код — ровно 6 цифр, ведущие нули важны.
+export const otpPurposeSchema = z.enum(['LOGIN', 'REGISTER', 'PASSWORD_RESET']);
+export const otpCodeSchema = z.string().regex(/^\d{6}$/, 'Код — 6 цифр');
+export const otpRequestDtoSchema = z.object({
+  phone: phoneSchema,
+  purpose: otpPurposeSchema,
+});
+export const otpLoginDtoSchema = z.object({
+  phone: phoneSchema,
+  code: otpCodeSchema,
+});
+export const otpResetPasswordDtoSchema = z.object({
+  phone: phoneSchema,
+  code: otpCodeSchema,
+  password: z.string().min(8),
 });
 
 export const loginDtoSchema = z.object({
