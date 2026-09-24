@@ -12,7 +12,7 @@ async function main() {
   const { PrismaClient } = require("@st-michael/database");
   const prisma = new PrismaClient();
   try {
-    const broker = await prisma.broker.findUnique({ where: { id: "6e414141-f2ca-4c71-8402-2032c9186568" }, select: { id: true, fullName: true, phone: true, status: true, amoContactId: true } });
+    const broker = await prisma.broker.findUnique({ where: { id: "ce64ec23-cc4c-4ae9-9782-7395bb70c6a8" }, select: { id: true, fullName: true, phone: true, status: true, amoContactId: true } });
     if (!broker) { console.log("Брокер не найден"); return; }
     console.log(`Брокер: ${broker.fullName} | тел. ${mask(broker.phone)} | ${broker.status} | amoContactId в карточке: ${broker.amoContactId ?? "—"}`);
 
