@@ -7,12 +7,14 @@
  * услугу «код с проверкой» не используем.
  *
  * HTTP API: https://smsc.ru/api/http/ — send.php / status.php / balance.php,
- * ответ в JSON (fmt=3). В `psw` принимается пароль или API-ключ.
+ * ответ в JSON (fmt=3). Авторизация — `login` + `apikey` (API-ключ HTTP/S из
+ * личного кабинета). 2026-09-24: проверено на живом аккаунте — `psw` (пароль
+ * аккаунта) с этим ключом даёт «authorise error»; только `apikey` работает.
  */
 
 export interface SmscConfig {
   login: string;
-  /** Пароль аккаунта или API-ключ (HTTP/S). */
+  /** API-ключ (HTTP/S) из личного кабинета smsc.ru — идёт в параметр `apikey`. */
   apiKey: string;
   /** Имя отправителя, зарегистрированное у операторов; пусто — по умолчанию аккаунта. */
   sender?: string;
@@ -171,7 +173,7 @@ export class SmscAdapter {
     if (!normalized) return { ok: false, errorCode: 7, error: SMSC_ERROR_TEXT[7] };
     const body: Record<string, string> = {
       login: this.cfg.login,
-      psw: this.cfg.apiKey,
+      apikey: this.cfg.apiKey,
       phones: normalized,
       mes: text,
       charset: "utf-8",
@@ -190,7 +192,7 @@ export class SmscAdapter {
     if (!normalized) return { ok: false, errorCode: 7, error: SMSC_ERROR_TEXT[7] };
     const json = await this.post("/status.php", {
       login: this.cfg.login,
-      psw: this.cfg.apiKey,
+      apikey: this.cfg.apiKey,
       phone: normalized,
       id: String(id),
       fmt: "3",
@@ -202,7 +204,7 @@ export class SmscAdapter {
     if (!this.isConfigured) return { ok: false, error: "СМС Центр не настроен (логин/ключ)" };
     const json = (await this.post("/balance.php", {
       login: this.cfg.login,
-      psw: this.cfg.apiKey,
+      apikey: this.cfg.apiKey,
       cur: "1",
       fmt: "3",
     })) as Record<string, unknown>;
