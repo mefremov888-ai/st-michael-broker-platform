@@ -43,7 +43,7 @@ describe("SmscAdapter (smsc.ru)", () => {
     expect(isSmscFinalStatus(3)).toBe(true);
   });
 
-  it("send: POST form с логином, ключом, номером, текстом, отправителем и fmt=3", async () => {
+  it("send: POST form с логином, apikey, номером, текстом, отправителем и fmt=3", async () => {
     const calls: any[] = [];
     const fetchImpl = jest.fn(async (url: string, init: any) => {
       calls.push({ url, init });
@@ -55,7 +55,8 @@ describe("SmscAdapter (smsc.ru)", () => {
     expect(calls[0].url).toBe("https://smsc.ru/sys/send.php");
     const params = new URLSearchParams(calls[0].init.body);
     expect(params.get("login")).toBe("stmichael");
-    expect(params.get("psw")).toBe("secret$key");
+    expect(params.get("apikey")).toBe("secret$key");
+    expect(params.has("psw")).toBe(false);
     expect(params.get("phones")).toBe("79260701101");
     expect(params.get("mes")).toContain("482913");
     expect(params.get("sender")).toBe("St. Michael");
