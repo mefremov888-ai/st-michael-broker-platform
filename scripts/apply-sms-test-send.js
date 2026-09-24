@@ -77,7 +77,20 @@ async function main() {
     if (!text) throw new Error(`Неизвестный SAMPLE: ${SAMPLE}`);
 
     console.log(`\n=== Отправка (${SAMPLE}) на ${PHONE.slice(0, 5)}***${PHONE.slice(-2)} ===`);
-    const res = await adapter.send(PHONE, text);
+    // 2026-09-24: адаптер шлёт ключ через psw — smsc.ru отвечает authorise
+    // error (см. диагностику выше). Пока фикс адаптера не задеплоен, шлём
+    // прямым запросом с apikey, чтобы тест не зависел от бага.
+    const digits = PHONE.replace(/\D/g, "");
+    const sendRes = await fetch("https://smsc.ru/sys/send.php", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+      body: new URLSearchParams({ login, apikey: apiKey, phones: digits, mes: text, charset: "utf-8", fmt: "3", cost: "3", ...(sender ? { sender } : {}) }).toString(),
+      signal: AbortSignal.timeout(15000),
+    });
+    const sendJson = await sendRes.json();
+    const res = sendJson && sendJson.id !== undefined
+      ? { ok: true, id: String(sendJson.id), parts: sendJson.cnt, cost: sendJson.cost }
+      : { ok: false, errorCode: sendJson?.error_code, error: sendJson?.error || "неизвестная ошибка" };
     if (res.ok) {
       console.log(`OK: id у СМС Центра ${res.id}, частей ${res.parts ?? "?"}, стоимость ${res.cost ?? "?"}`);
       // Пишем в тот же журнал, что и обычные отправки — чтобы тест был виден в админке.
