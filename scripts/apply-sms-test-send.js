@@ -34,9 +34,31 @@ async function main() {
 
     const adapter = new SmscAdapter({ login, apiKey, sender });
 
-    console.log("\n=== Баланс СМС Центра ===");
+    console.log("\n=== Баланс СМС Центра (через psw=ключ) ===");
     const balance = await adapter.getBalance();
     console.log(balance.ok ? `Баланс: ${balance.balance} ${balance.currency || ""}` : `Ошибка: ${balance.error}`);
+
+    // 2026-09-24: диагностика — smsc.ru может ожидать API-ключ в отдельном
+    // параметре apikey, а не в psw (psw — это пароль аккаунта, apikey — новый
+    // способ авторизации). Пробуем оба варианта, чтобы понять, какой рабочий.
+    for (const variant of [
+      { label: "login+psw", params: { login, psw: apiKey } },
+      { label: "login+apikey", params: { login, apikey: apiKey } },
+      { label: "apikey (без login)", params: { apikey: apiKey } },
+    ]) {
+      try {
+        const r = await fetch("https://smsc.ru/sys/balance.php", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+          body: new URLSearchParams({ ...variant.params, cur: "1", fmt: "3" }).toString(),
+          signal: AbortSignal.timeout(15000),
+        });
+        const text = await r.text();
+        console.log(`  [${variant.label}] HTTP ${r.status}: ${text}`);
+      } catch (e) {
+        console.log(`  [${variant.label}] сеть: ${e?.message || e}`);
+      }
+    }
 
     if (!APPLY) {
       console.log(`\n=== DRY-RUN: отправка НЕ выполнена (APPLY!=1) ===`);
