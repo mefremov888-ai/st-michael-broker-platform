@@ -1,0 +1,63 @@
+name: Reset Pavel's stuck fixation (amo reconciliation)
+
+# 2026-09-26: разовый сброс ОДНОЙ заявки (Павел, Серебряный Бор), зависшей с
+# AMO_CREATE_RECONCILIATION_REQUIRED:AMO_NETWORK_ERROR. Инспектор подтвердил:
+# контакта клиента в amo нет, лид не создался — сеть оборвалась до записи.
+# Скрипт сам перепроверяет это ещё раз перед записью и отказывается сбрасывать,
+# если контакт вдруг появился. После сброса лид создаётся обычным автоповтором
+# (крон каждые 5 минут), не этим workflow.
+#
+# Боевой режим требует dry_run=false И confirm_apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (только план, ничего не пишется)'
+        required: true
+        default: true
+        type: boolean
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД (нужно вместе с dry_run=false)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-reset-pavel-reconciliation
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 10m
+          envs: DRY_RUN_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/apply-reset-pavel-reconciliation.js > /tmp/apply-reset-pavel-reconciliation.js
+            docker cp /tmp/apply-reset-pavel-reconciliation.js st-michael-api:/app/scripts/apply-reset-pavel-reconciliation.js
+            APPLY=0
+            if [ "$DRY_RUN_INPUT" = "false" ] && [ "$CONFIRM_APPLY" = "true" ]; then APPLY=1; fi
+            if [ "$APPLY" = "1" ]; then echo "=== APPLY (запись в БД) ==="; else echo "=== DRY-RUN (без записи) ==="; fi
+            docker compose exec -T -e APPLY=$APPLY api node /app/scripts/apply-reset-pavel-reconciliation.js
+            echo "=== Готово (APPLY=$APPLY) ==="
