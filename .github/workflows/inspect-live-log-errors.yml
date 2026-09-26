@@ -1,0 +1,55 @@
+name: Inspect live docker log errors (read-only)
+
+# 2026-09-26: тот же расчёт, что в daily-error-digest.yml (топ повторяющихся
+# ERROR-строк за 24ч из docker logs st-michael-api), но выводит результат в
+# лог запуска вместо отправки в Телеграм. Только чтение, ничего не пишет.
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'За какой период (docker logs --since), например 24h или 2h'
+        required: false
+        default: '24h'
+        type: string
+
+concurrency:
+  group: inspect-live-log-errors
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SINCE_INPUT: ${{ inputs.since }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 5m
+          envs: SINCE_INPUT
+          script: |
+            set -eu
+            echo "$SINCE_INPUT" | grep -qE '^[0-9]+[hm]$' || { echo "since: например 24h или 30m"; exit 2; }
+            cd ${{ secrets.DEPLOY_PATH }}
+            TMP_LOG=$(mktemp /tmp/stmichael-live-errors.XXXXXX)
+            trap 'rm -f -- "$TMP_LOG"' EXIT
+            docker logs st-michael-api --since "$SINCE_INPUT" > "$TMP_LOG" 2>&1 || true
+            ERR_TOTAL=$(grep -c 'ERROR' "$TMP_LOG" || true)
+            ERR_TOTAL=${ERR_TOTAL:-0}
+            echo "=== Всего ERROR-строк за $SINCE_INPUT: $ERR_TOTAL ==="
+            echo
+            echo "=== Топ повторяющихся (число × текст) ==="
+            grep -o 'ERROR \[[^]]*\].*' "$TMP_LOG" | sed 's/[0-9a-f-]\{8,\}/#/g' | cut -c1-200 | sort | uniq -c | sort -rn | head -20 || true
+            echo
+            echo "=== Последние 20 строк ERROR (свежие, полные) ==="
+            grep 'ERROR' "$TMP_LOG" | tail -20 | cut -c1-400 || true
