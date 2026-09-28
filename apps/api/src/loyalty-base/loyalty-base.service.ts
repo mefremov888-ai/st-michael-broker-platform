@@ -173,6 +173,8 @@ interface CanonicalLoyaltyFilter {
   includeLowSignal: boolean;
   city?: string;
   hasAmo?: boolean;
+  // 2026-09-28 (владелец): вкладки «Наша база с номерами» / «без номеров».
+  phonePresence?: "WITH" | "WITHOUT";
   activityType?: string;
   segment?: string;
   callPeriod?: LoyaltyFilterPeriod;
@@ -1221,6 +1223,10 @@ export class LoyaltyBaseService {
         canonical?.includeLowSignal ?? query.includeLowSignal ?? false,
       city: query.city?.trim(),
       hasAmo: query.hasAmo,
+      phonePresence:
+        query.phonePresence === "WITH" || query.phonePresence === "WITHOUT"
+          ? query.phonePresence
+          : undefined,
       activityType: query.activityType,
       segment: query.segment,
       callPeriod,
@@ -8671,6 +8677,13 @@ export class LoyaltyBaseService {
     }
     if (filter.hasAmo !== undefined)
       where.amoContactId = filter.hasAmo ? { not: null } : null;
+    // 2026-09-28 (владелец): вкладки «с номерами» / «без номеров». Без
+    // номера — контакты из Telegram-чатов: телефон обязателен и уникален в
+    // схеме, поэтому у них phone='tg:<ник>' (см. admin.service, 2026-07-23).
+    // На проде 28.09: 13 733 с номером, 6 082 без.
+    if (filter.phonePresence === "WITHOUT") where.phone = { startsWith: "tg:" };
+    else if (filter.phonePresence === "WITH")
+      where.phone = { not: { startsWith: "tg:" } };
     // «Не звонить»: по умолчанию список показывает всех (фильтр не
     // применяется); кампании обзвона исключают doNotCall отдельно и всегда
     // (см. resolveSelection excludeDoNotCall).
@@ -8866,6 +8879,7 @@ export class LoyaltyBaseService {
       if (!callLogsFiltered) {
         await this.attachOurBrokerLastCalls(loaded as any[]);
       }
+      await this.attachOurAnnaLastCalls(loaded as any[]);
       await this.attachOurBrokerLifetimeAggregates(
         loaded as any[],
         filter.cabinetSource,
@@ -9514,6 +9528,10 @@ export class LoyaltyBaseService {
       this.callSortKey(this.lastCall(this.ourCalls(record)) || {}),
       record.__lifetimeLastCallAt,
       record.lastCallAt,
+      // 2026-09-28: «последний звонок» по тому же номеру из базы Анны
+      // (см. attachOurAnnaLastCalls) — участвует в статусе DORMANT и
+      // «последней активности» наравне со звонками кабинета.
+      record.__annaLastCallAt,
     ]
       .map(dateOnly)
       .filter(Boolean) as string[];
@@ -9539,6 +9557,90 @@ export class LoyaltyBaseService {
    * record.callLogs так же, как раньше делал findMany (массив из ≤ 1 записи).
    * В окружениях без $queryRawUnsafe (моки) ничего не трогает.
    */
+  /**
+   * 2026-09-28 (владелец): у брокера из нашей базы может не быть звонков в
+   * кабинете, хотя в базе Анны по тому же номеру есть «последний звонок».
+   * Подтягиваем его по телефону (основному и дополнительным) из активного
+   * снимка Анны: record.__annaLastCallAt / __annaCallCount. Дальше
+   * mapOurBroker показывает эту дату с пометкой источника, а
+   * ourLastCallLifetime учитывает её в статусе и «последней активности».
+   * Один запрос по индексу (type, normalizedValue) на всю страницу/базу,
+   * порциями по 5 000 номеров; при ошибке — молча без данных Анны.
+   */
+  private async attachOurAnnaLastCalls(records: any[]): Promise<void> {
+    for (const record of records) {
+      record.__annaLastCallAt = record.__annaLastCallAt ?? null;
+      record.__annaCallCount = record.__annaCallCount ?? null;
+    }
+    if (!records.length) return;
+    const active = await this.activeAnnaSnapshot();
+    if (!active) return;
+    const byPhone = new Map<string, any[]>();
+    for (const record of records) {
+      const values = [
+        record.phone,
+        ...((Array.isArray(record.phones) ? record.phones : []).map(
+          (p: any) => p?.phone,
+        )),
+      ];
+      for (const value of values) {
+        const normalized = normalizeLoyaltyContactPoint(
+          "PHONE",
+          String(value || ""),
+        );
+        if (!normalized) continue;
+        const list = byPhone.get(normalized) || [];
+        list.push(record);
+        byPhone.set(normalized, list);
+      }
+    }
+    const keys = [...byPhone.keys()];
+    if (!keys.length) return;
+    const CHUNK = 5000;
+    for (let i = 0; i < keys.length; i += CHUNK) {
+      let points: any[] = [];
+      try {
+        points = await this.prisma.loyaltyContactPoint.findMany({
+          where: {
+            type: "PHONE",
+            normalizedValue: { in: keys.slice(i, i + CHUNK) },
+            sourceRecord: { snapshotId: active.snapshot.id },
+          },
+          select: {
+            normalizedValue: true,
+            sourceRecord: {
+              select: {
+                sourceAggregate: {
+                  select: { lastCallAt: true, callCount: true },
+                },
+              },
+            },
+          },
+        });
+      } catch (error) {
+        console.warn(
+          `[loyalty] последний звонок из базы Анны не подгружен: ${(error as Error)?.message}`,
+        );
+        return;
+      }
+      for (const point of (Array.isArray(points) ? points : []) as any[]) {
+        const aggregate = point?.sourceRecord?.sourceAggregate;
+        if (!aggregate?.lastCallAt) continue;
+        const at = new Date(aggregate.lastCallAt);
+        if (Number.isNaN(at.getTime())) continue;
+        for (const record of byPhone.get(point.normalizedValue) || []) {
+          const current = record.__annaLastCallAt
+            ? new Date(record.__annaLastCallAt)
+            : null;
+          if (!current || at > current) {
+            record.__annaLastCallAt = aggregate.lastCallAt;
+            record.__annaCallCount = aggregate.callCount ?? null;
+          }
+        }
+      }
+    }
+  }
+
   private async attachOurBrokerLastCalls(records: any[]): Promise<void> {
     if (!records.length) return;
     const raw = (this.prisma as any).$queryRawUnsafe;
@@ -11236,6 +11338,19 @@ export class LoyaltyBaseService {
     const latest = this.applyCallSummary(result, "BROKER", calls);
     this.applyEngagementSummary(result, item);
     if (!latest && item.lastCallAt) result.lastCallAt = item.lastCallAt;
+    // 2026-09-28 (владелец): у брокера без звонков в кабинете, но с тем же
+    // номером в базе Анны, показываем её «последний звонок» с пометкой
+    // источника; если звонок Анны свежее нашего — тоже её дату.
+    const annaLast = dateOnly(item.__annaLastCallAt);
+    const ownLast = dateOnly(result.lastCallAt);
+    if (annaLast && (!ownLast || annaLast > ownLast)) {
+      result.lastCallAt = item.__annaLastCallAt;
+      result.lastCallSource = "ANNA";
+      if (item.__annaCallCount != null)
+        result.annaCallCount = Number(item.__annaCallCount);
+    } else if (result.lastCallAt) {
+      result.lastCallSource = "CABINET";
+    }
     if (latest?.employee || latest?.employeeId) {
       result.assignee = {
         id: latest.employeeId || null,
@@ -12577,6 +12692,7 @@ export class LoyaltyBaseService {
         "BROKER",
         engagementEvents,
       );
+      await this.attachOurAnnaLastCalls([broker as any]);
       const item = this.mapOurBroker(
         broker,
         centsToMoney(
