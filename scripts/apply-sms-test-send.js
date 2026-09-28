@@ -60,6 +60,26 @@ async function main() {
       }
     }
 
+    // 2026-09-28: проверка доставки уже отправленного сообщения — STATUS_ID
+    // (id у СМС Центра). all=1 даёт полную запись: статус, отправитель,
+    // оператор, время. Печатаем как есть — секретов в ответе нет.
+    if (process.env.STATUS_ID) {
+      const digits = PHONE.replace(/\D/g, "");
+      const r = await fetch("https://smsc.ru/sys/status.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+        body: new URLSearchParams({ login, apikey: apiKey, phone: digits, id: String(process.env.STATUS_ID), all: "1", fmt: "3" }).toString(),
+        signal: AbortSignal.timeout(15000),
+      });
+      const j = await r.json();
+      console.log(`
+=== Статус сообщения id=${process.env.STATUS_ID} на ${PHONE.slice(0, 5)}***${PHONE.slice(-2)} ===`);
+      console.log(JSON.stringify(j, null, 2));
+      const rows = await prisma.smsMessage.findMany({ where: { providerId: String(process.env.STATUS_ID) }, select: { kind: true, status: true, sentAt: true, parts: true, cost: true } });
+      console.log("Журнал кабинета:", JSON.stringify(rows));
+      return;
+    }
+
     if (!APPLY) {
       console.log(`\n=== DRY-RUN: отправка НЕ выполнена (APPLY!=1) ===`);
       console.log(`План: вид ${SAMPLE} → номер ${PHONE.slice(0, 5)}***${PHONE.slice(-2)}`);

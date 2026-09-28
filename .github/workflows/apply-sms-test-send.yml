@@ -28,6 +28,10 @@ on:
         required: true
         default: false
         type: boolean
+      status_id:
+        description: 'Проверить доставку: id сообщения у СМС Центра (без отправки)'
+        required: false
+        type: string
 
 concurrency:
   group: apply-sms-test-send
@@ -48,6 +52,7 @@ jobs:
           PHONE_INPUT: ${{ inputs.phone }}
           SAMPLE_INPUT: ${{ inputs.sample }}
           APPLY_INPUT: ${{ inputs.apply }}
+          STATUS_ID_INPUT: ${{ inputs.status_id }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -55,7 +60,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 8m
-          envs: PHONE_INPUT,SAMPLE_INPUT,APPLY_INPUT
+          envs: PHONE_INPUT,SAMPLE_INPUT,APPLY_INPUT,STATUS_ID_INPUT
           script: |
             set -e
             echo "$PHONE_INPUT" | grep -qE '^\+7[0-9]{10}$' || { echo "phone: формат +7XXXXXXXXXX"; exit 2; }
@@ -67,5 +72,5 @@ jobs:
             APPLY=0
             if [ "$APPLY_INPUT" = "true" ]; then APPLY=1; fi
             if [ "$APPLY" = "1" ]; then echo "=== APPLY (реальная отправка) ==="; else echo "=== Только баланс, без отправки ==="; fi
-            docker compose exec -T -e PHONE="$PHONE_INPUT" -e SAMPLE="$SAMPLE_INPUT" -e APPLY=$APPLY api node /app/scripts/apply-sms-test-send.js
+            docker compose exec -T -e PHONE="$PHONE_INPUT" -e SAMPLE="$SAMPLE_INPUT" -e APPLY=$APPLY -e STATUS_ID="$STATUS_ID_INPUT" api node /app/scripts/apply-sms-test-send.js
             echo "=== Готово ==="
