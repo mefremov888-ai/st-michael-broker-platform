@@ -33,12 +33,14 @@ const unwrapDocs = (d: any): any[] => (Array.isArray(d?.documents) ? d.documents
 export default async function Page() {
   const base = getApiBase();
   // 2026-09-28 (обновление макета от Рината): сверху карусель «Акции» из
-  // CMS-акций (LandingPromo), блок «Новости» из макета убран.
-  const [content, projects, events, promos, cooperationDocs, summary] = await Promise.all([
+  // CMS-акций (LandingPromo); блок «Новости» вернулся в макет (версия 7004) —
+  // те же карточки из /public/cms/news, что и на старом лендинге.
+  const [content, projects, events, promos, news, cooperationDocs, summary] = await Promise.all([
     safeFetch<any>(`${base}/api/public/cms/content`),
     safeFetch<any[]>(`${base}/api/public/cms/projects`),
     safeFetch<any[]>(`${base}/api/public/cms/events`),
     safeFetch<any[]>(`${base}/api/public/cms/promos`),
+    safeFetch<any[]>(`${base}/api/public/cms/news`),
     safeFetch<any>(`${base}/api/public/documents?category=cooperation`),
     safeFetch<any>(`${base}/api/public/documents/summary`),
   ]);
@@ -48,6 +50,7 @@ export default async function Page() {
     projects: Array.isArray(projects) ? projects : [],
     events: Array.isArray(events) ? events : [],
     promos: Array.isArray(promos) ? promos : [],
+    news: Array.isArray(news) ? news : [],
     cooperationDocs: unwrapDocs(cooperationDocs),
     materials: summary?.groups || {},
   };
