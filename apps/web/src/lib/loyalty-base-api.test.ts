@@ -22,6 +22,7 @@ import {
   loyaltyLeaderMode,
   loyaltyMetricSourceLabelRu,
   loyaltyMetricsForDisplay,
+  loyaltyOverviewPath,
   normalizeActiveLinks,
   normalizeImportResult,
   normalizeLoyaltyDetail,
@@ -684,6 +685,30 @@ test("prefers exact leaders and only falls back to source leaders for an explici
     leader: null,
     usesSource: false,
   });
+});
+
+// 2026-09-28: вкладки «с номерами / без номеров» — счётчик «Брокеры N» над
+// списком берётся из обзора, поэтому обзор должен получать ту же вкладку,
+// что и список (иначе 19 816 при списке в 13 734).
+test("overview request carries the phone tab so the broker counter follows the list", () => {
+  assert.equal(
+    loyaltyOverviewPath(
+      "ours",
+      { from: "2026-08-01", to: "2026-08-31" },
+      { cabinetSource: "new", phonePresence: "WITH" },
+    ),
+    "/loyalty-base/ours/overview?from=2026-08-01&to=2026-08-31&cabinetSource=new&phonePresence=WITH",
+  );
+  assert.equal(
+    loyaltyOverviewPath("ours", undefined, { phonePresence: "WITHOUT" }),
+    "/loyalty-base/ours/overview?phonePresence=WITHOUT",
+  );
+  // Без вкладки (база Анны, прежние вызовы) параметр не отправляется.
+  assert.equal(
+    loyaltyOverviewPath("anna", { from: "2026-08-01", to: "2026-08-31" }),
+    "/loyalty-base/anna/overview?from=2026-08-01&to=2026-08-31",
+  );
+  assert.equal(loyaltyOverviewPath("ours"), "/loyalty-base/ours/overview");
 });
 
 test("normalizes the strict overview envelope without turning unavailable birthdays into zero", () => {

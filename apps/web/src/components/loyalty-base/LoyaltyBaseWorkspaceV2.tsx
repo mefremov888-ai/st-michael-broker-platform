@@ -1150,8 +1150,11 @@ export function LoyaltyBaseWorkspaceV2() {
     setOverviewError("");
     try {
       // 2026-09-07: обзор следует за фильтром источника «старый / новый кабинет».
+      // 2026-09-28: и за вкладкой «с номерами / без номеров» — иначе число
+      // во вкладке «Брокеры» оставалось 19 816 при списке в 13 734.
       const next = await getLoyaltyOverview(base, ratingRange, {
         cabinetSource: filters.cabinetSource || undefined,
+        phonePresence: base === "ours" ? phoneMode : undefined,
       });
       if (request === overviewRequest.current) setOverview(next);
     } catch (reason) {
@@ -1164,7 +1167,7 @@ export function LoyaltyBaseWorkspaceV2() {
     } finally {
       if (request === overviewRequest.current) setOverviewLoading(false);
     }
-  }, [base, canReadAll, ratingRange, filters.cabinetSource]);
+  }, [base, canReadAll, ratingRange, filters.cabinetSource, phoneMode]);
   const loadList = useCallback(async () => {
     if (!canReadAll) {
       setListLoading(false);

@@ -263,6 +263,12 @@ export class LoyaltyOverviewQueryDto {
   @IsIn(["old", "new", "all"])
   cabinetSource?: "old" | "new" | "all";
 
+  // 2026-09-28: «Наша база» — вкладка «с номерами» / «без номеров»: счётчик
+  // брокеров в обзоре считается в выбранной базе, как и список под вкладкой.
+  @IsOptional()
+  @IsIn(["WITH", "WITHOUT"])
+  phonePresence?: "WITH" | "WITHOUT";
+
   // 2026-09-08: база Анны — сцепка с кабинетом: linked / unlinked.
   @IsOptional()
   @IsIn(["linked", "unlinked"])

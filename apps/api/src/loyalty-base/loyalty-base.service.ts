@@ -961,6 +961,19 @@ export function fixationClientWhere(source?: string | null): any {
 // кабинета: легаси CallLog, попытки workflow-обзвонов и телефония Mango
 // (входящие и исходящие, любой исход). Звонок брокера своему клиенту из
 // кабинета (Call.clientId задан) — не общение с нами, поэтому не считается.
+// 2026-09-28 (владелец): вкладки «с номерами» / «без номеров». Без номера —
+// контакты из Telegram-чатов: телефон обязателен и уникален в схеме, поэтому
+// у них phone='tg:<ник>' (см. admin.service, 2026-07-23). На проде 28.09:
+// 13 733 с номером, 6 082 без. Одно условие для списка и для счётчика
+// вкладки «Брокеры» в обзоре — чтобы число во вкладке совпадало со списком.
+export function brokerPhonePresenceWhere(
+  phonePresence?: "WITH" | "WITHOUT" | null,
+): { phone?: any } {
+  if (phonePresence === "WITHOUT") return { phone: { startsWith: "tg:" } };
+  if (phonePresence === "WITH") return { phone: { not: { startsWith: "tg:" } } };
+  return {};
+}
+
 export function brokerCallInPeriodWhere(period: {
   from: Date;
   to: Date;
@@ -3539,7 +3552,7 @@ export class LoyaltyBaseService {
     const period = this.parsePeriod(query);
     return base === "anna"
       ? this.annaOverview(period)
-      : this.oursOverview(period, query.cabinetSource);
+      : this.oursOverview(period, query.cabinetSource, query.phonePresence);
   }
 
   private async annaOverview(period: { from: Date; to: Date }) {
@@ -4396,6 +4409,7 @@ export class LoyaltyBaseService {
   private async oursOverview(
     period: { from: Date; to: Date },
     cabinetSource?: CabinetSource,
+    phonePresence?: "WITH" | "WITHOUT",
   ) {
     const currentMonth = { ...moscowCurrentMonthRange(), to: new Date() };
     const periodDto = {
@@ -4448,8 +4462,15 @@ export class LoyaltyBaseService {
       paidBookingsTotal,
       directRegistryDeals,
     ] = await Promise.all([
+      // 2026-09-28: счётчик вкладки «Брокеры» — в выбранной базе (с
+      // номерами / без), как и список под ней. Остальные KPI обзора
+      // считаются по всей базе, как раньше.
       this.prisma.broker.count({
-        where: { role: "BROKER", mergedIntoId: null },
+        where: {
+          role: "BROKER",
+          mergedIntoId: null,
+          ...brokerPhonePresenceWhere(phonePresence),
+        },
       }),
       this.prisma.agency.count(),
       this.prisma.client.count({
@@ -8756,13 +8777,9 @@ export class LoyaltyBaseService {
     }
     if (filter.hasAmo !== undefined)
       where.amoContactId = filter.hasAmo ? { not: null } : null;
-    // 2026-09-28 (владелец): вкладки «с номерами» / «без номеров». Без
-    // номера — контакты из Telegram-чатов: телефон обязателен и уникален в
-    // схеме, поэтому у них phone='tg:<ник>' (см. admin.service, 2026-07-23).
-    // На проде 28.09: 13 733 с номером, 6 082 без.
-    if (filter.phonePresence === "WITHOUT") where.phone = { startsWith: "tg:" };
-    else if (filter.phonePresence === "WITH")
-      where.phone = { not: { startsWith: "tg:" } };
+    // 2026-09-28 (владелец): вкладки «с номерами» / «без номеров» — одно
+    // условие со счётчиком вкладки в обзоре (brokerPhonePresenceWhere).
+    Object.assign(where, brokerPhonePresenceWhere(filter.phonePresence));
     // «Не звонить»: по умолчанию список показывает всех (фильтр не
     // применяется); кампании обзвона исключают doNotCall отдельно и всегда
     // (см. resolveSelection excludeDoNotCall).

@@ -3207,17 +3207,31 @@ export async function getLoyaltyFunnel(
   return root;
 }
 
+export interface LoyaltyOverviewOptions {
+  cabinetSource?: "old" | "new" | "all";
+  // 2026-09-28: вкладка «с номерами» / «без номеров» — счётчик «Брокеры»
+  // в обзоре считается в выбранной базе, как и список под вкладкой.
+  phonePresence?: "WITH" | "WITHOUT";
+}
+
+export function loyaltyOverviewPath(
+  base: LoyaltyBaseKey,
+  range?: { from: string; to: string },
+  options?: LoyaltyOverviewOptions,
+): string {
+  return `/loyalty-base/${base}/overview${queryString({
+    ...(range || {}),
+    cabinetSource: options?.cabinetSource,
+    phonePresence: options?.phonePresence,
+  })}`;
+}
+
 export async function getLoyaltyOverview(
   base: LoyaltyBaseKey,
   range?: { from: string; to: string },
-  options?: { cabinetSource?: "old" | "new" | "all" },
+  options?: LoyaltyOverviewOptions,
 ) {
-  const value = await apiGet<unknown>(
-    `/loyalty-base/${base}/overview${queryString({
-      ...(range || {}),
-      cabinetSource: options?.cabinetSource,
-    })}`,
-  );
+  const value = await apiGet<unknown>(loyaltyOverviewPath(base, range, options));
   return normalizeLoyaltyOverview(value, base);
 }
 
