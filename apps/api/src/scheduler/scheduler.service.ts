@@ -28,6 +28,7 @@ import {
   buildBrokerTourUpdate,
 } from '../amocrm/broker-tour-sync';
 import { OpsAlertService } from '../ops-alert/ops-alert.service';
+import { AmoTouchSyncService } from '../amocrm/amo-touch-sync.service';
 import { ClientFixationService } from '../client-fixation/client-fixation.service';
 import {
   AMO_CREATE_IN_PROGRESS_MARKER,
@@ -80,6 +81,8 @@ export class SchedulerService {
     @Optional() private readonly clientFixation?: ClientFixationService,
     // 2026-09-24: статусы доставки СМС у СМС Центра.
     @Optional() private readonly sms?: SmsService,
+    // 2026-09-28: ночной синк касаний amo → BrokerAmoContactSync.
+    @Optional() private readonly amoTouchSync?: AmoTouchSyncService,
   ) {}
 
   // 2026-09-24: подтянуть статусы доставки недавних СМС (каждые 10 минут).
@@ -390,6 +393,35 @@ export class SchedulerService {
       );
     } catch (e: any) {
       this.logger.error(`[amo-brokers] FAILED: ${e?.message || e}`);
+    }
+  }
+
+  // 2026-09-28: 00:00 МСК (21:00 UTC) — ночной синк «касаний» amoCRM →
+  // BrokerAmoContactSync / AmoUser для «Нашей базы» лояльности. Только чтение
+  // из amo; замок и аудит — LoyaltySyncRun(AMOCRM, amo-touch-v1). Аварийное
+  // выключение: AMO_TOUCH_SYNC_ENABLED=false. Окно свободно: 02:00 maintenance,
+  // 03:00 amo-brokers, 04:00 Я.Диск. См. docs/amo-integration.md §11.
+  @Cron('0 21 * * *')
+  async handleAmoTouchSync() {
+    if (/^(0|false|off)$/i.test(String(process.env.AMO_TOUCH_SYNC_ENABLED || '').trim())) {
+      this.logger.log('[amo-touch-sync] AMO_TOUCH_SYNC_ENABLED=false — skip');
+      return;
+    }
+    if (!this.amoTouchSync) return;
+    if (!hasConfiguredAmoCredentials()) {
+      this.logger.warn('[amo-touch-sync] AMO_ACCESS_TOKEN не задан — skip');
+      await this.alertAmoTokenMissing();
+      return;
+    }
+    try {
+      const r = await this.amoTouchSync.run({ mode: 'apply' });
+      this.logger.log(
+        `[amo-touch-sync] ${r.status}${r.errorCode ? ` ${r.errorCode}` : ''}${r.reason ? ` (${r.reason})` : ''}: `
+          + `contacts=${r.stats.contactsTotal} changed=${r.stats.contactsChanged} touched=${r.stats.touched} `
+          + `linked=${r.stats.linked} errors=${r.stats.errors} requests=${r.stats.requests} ${Math.round(r.stats.durationMs / 1000)}s`,
+      );
+    } catch (e: any) {
+      this.logger.error(`[amo-touch-sync] FAILED: ${e?.message || e}`);
     }
   }
 
