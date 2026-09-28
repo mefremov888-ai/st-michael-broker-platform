@@ -796,6 +796,8 @@ model CallLog {
 
   @@index([brokerId, createdAt])
   @@index([operatorId, createdAt])
+  // 2026-09-28: «Период звонков» в базе лояльности — один проход по дате.
+  @@index([createdAt])
   @@map("call_logs")
 }
 
@@ -1532,6 +1534,8 @@ model LoyaltyCallAttempt {
   @@index([assignmentId, occurredAt])
   @@index([operatorId, occurredAt])
   @@index([correctsAttemptId])
+  // 2026-09-28: «Период звонков» в базе лояльности — один проход по дате.
+  @@index([occurredAt])
   @@map("loyalty_call_attempts")
 }
 
