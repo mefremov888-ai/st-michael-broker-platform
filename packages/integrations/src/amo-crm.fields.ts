@@ -62,6 +62,17 @@ export const AMO_TASK_TYPES = {
   MEETING: 2,
 } as const;
 
+// 2026-09-28: системные/интеграционные пользователи amo — их примечания и
+// задачи НЕ считаются «касанием» брокера в ночном синке (amo-touch-sync).
+// Снято с живого аккаунта 28.09 (инспектор по контакту 47242693).
+// Расширить без релиза: env AMO_TOUCH_SYSTEM_USER_IDS="id,id,…" — см.
+// amoTouchSystemUserIds() в amo-crm.touches.ts.
+export const AMO_SYSTEM_USER_IDS: readonly number[] = [
+  6089620,  // «Админ Св. Михаил» — наш бот (OAuth-интеграция кабинета)
+  9542642,  // «Web-regata» — сайт/формы
+  12706398, // «SMARTIS» — сквозная аналитика
+];
+
 // Stages of "Воронка брокеров" (10787390)
 export const AMO_BROKER_STAGE = {
   NEW: 84932446,           // Новый брокер

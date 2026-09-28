@@ -1,0 +1,91 @@
+name: Apply amo touch sync (amoCRM → BrokerAmoContactSync)
+
+# 2026-09-28: ручной запуск ночного синка «касаний» amoCRM → таблица
+# broker_amo_contact_sync (+ справочник amo_users). Тот же сервис, что
+# крон 00:00 МСК (AmoTouchSyncService), но запускается из контейнера api
+# отдельным процессом — для первого бэкфилла и проверок на проде.
+#
+# Режимы:
+#   dry-run — все чтения из amo по-настоящему, записи в транзакции с откатом
+#             (ошибки записи ловятся до боевого прогона), ничего не меняется;
+#   apply   — боевая запись. Пишет только broker_amo_contact_sync, amo_users
+#             и Broker.amoContactId (фаза 3, однозначная привязка).
+# В amo ничего не пишется. Прогон занимает замок LoyaltySyncRun(AMOCRM) —
+# параллельно с ночным кроном не стартует.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run (без записи) или apply (боевой)'
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      max_contacts:
+        description: 'Сколько изменившихся контактов обработать в фазе 2 (по умолчанию 2000)'
+        required: false
+        default: '2000'
+        type: string
+      phases:
+        description: 'Фазы через запятую (0 сотрудники, 1 контакты, 2 касания, 3 поиск по телефону)'
+        required: false
+        default: '0,1,2,3'
+        type: string
+      lookup_quota:
+        description: 'Квота фазы 3 — поисков по телефону за прогон (по умолчанию 300)'
+        required: false
+        default: '300'
+        type: string
+      backfill:
+        description: 'Перечитать касания у всех контактов (игнорировать updated_at)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-amo-touch-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Run amo touch sync on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          MODE_INPUT: ${{ inputs.mode }}
+          MAX_CONTACTS_INPUT: ${{ inputs.max_contacts }}
+          PHASES_INPUT: ${{ inputs.phases }}
+          LOOKUP_QUOTA_INPUT: ${{ inputs.lookup_quota }}
+          BACKFILL_INPUT: ${{ inputs.backfill }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 85m
+          envs: MODE_INPUT,MAX_CONTACTS_INPUT,PHASES_INPUT,LOOKUP_QUOTA_INPUT,BACKFILL_INPUT
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/apply-amo-touch-sync.js > /tmp/apply-amo-touch-sync.js
+            docker cp /tmp/apply-amo-touch-sync.js st-michael-api:/app/scripts/apply-amo-touch-sync.js
+            case "$MODE_INPUT" in apply) MODE=apply ;; *) MODE=dry-run ;; esac
+            case "$MAX_CONTACTS_INPUT" in ''|*[!0-9]*) MAX_CONTACTS= ;; *) MAX_CONTACTS=$MAX_CONTACTS_INPUT ;; esac
+            case "$LOOKUP_QUOTA_INPUT" in ''|*[!0-9]*) LOOKUP_QUOTA= ;; *) LOOKUP_QUOTA=$LOOKUP_QUOTA_INPUT ;; esac
+            case "$PHASES_INPUT" in ''|*[!0-9,]*) PHASES= ;; *) PHASES=$PHASES_INPUT ;; esac
+            if [ "$BACKFILL_INPUT" = "true" ]; then BACKFILL=1; else BACKFILL=0; fi
+            if [ "$MODE" = "apply" ]; then echo "=== APPLY (запись в БД) ==="; else echo "=== DRY-RUN (без записи) ==="; fi
+            docker compose exec -T -e MODE=$MODE -e MAX_CONTACTS=$MAX_CONTACTS -e PHASES=$PHASES -e LOOKUP_QUOTA=$LOOKUP_QUOTA -e BACKFILL=$BACKFILL api node /app/scripts/apply-amo-touch-sync.js
+            echo "=== Готово (MODE=$MODE) ==="

@@ -368,4 +368,125 @@ Email: ivanov@example.ru
 
 ---
 
+## 11. Ночной синк касаний (amo-touch-sync)
+
+**Что это.** Раз в сутки читаем из amoCRM «последнее касание» каждого брокера
+и складываем в отдельную таблицу `broker_amo_contact_sync` (1:1 с `Broker`) +
+справочник сотрудников amo `amo_users`. Это источник для колонок «Последний
+контакт», «Результат звонка», «Ответственный (КЦ)» в «Нашей базе» лояльности.
+Только чтение из amo; в amo ничего не пишется.
+
+Код: `apps/api/src/amocrm/amo-touch-sync.service.ts` (`AmoTouchSyncService.run`),
+крон `handleAmoTouchSync` в `scheduler.service.ts`, чистые правила выбора —
+`packages/integrations/src/amo-crm.touches.ts` (`pickLatestCallNote`,
+`pickLatestCompletedTask`, `pickLatestKcLead`).
+
+### 11.1. Расписание и фазы
+
+Крон `0 21 * * *` UTC = **00:00 МСК** (окно свободно: 02:00 maintenance,
+03:00 amo-brokers, 04:00 Я.Диск). Все запросы к amo идут как фон под
+«светофором» (`amo-traffic-light.ts`): ~3 rps, уступают живым фиксациям.
+
+| Фаза | Что читает | Что пишет |
+|---|---|---|
+| 0 | `GET /users` (все, ~124) | `amo_users`: id, name, email, isActive. Автопривязка `brokerId` по email = `Broker.email` (роли MANAGER/ADMIN, `matchedBy='email'`). Ручная привязка (`matchedBy='manual'`) не перезаписывается |
+| 1 | контакты всех брокеров с `amoContactId` (role BROKER, не слитые) пачками по 250 `GET /contacts?filter[id][]…&with=leads` | ничего; сравнивает `contact.updated_at` с `amoUpdatedAt` в таблице — совпало и `sourceHash` есть → контакт пропущен. Контакт не вернулся из amo → `syncError=CONTACT_NOT_FOUND_IN_AMO` |
+| 2 | только по изменившимся, пачками по 50: лиды контакта (`GET /leads?filter[id][]`), примечания-звонки контакта и его лидов (`GET /contacts/notes`, `/leads/notes`, `note_type=call_in/call_out`), выполненные задачи контакта и лидов (`GET /tasks?filter[is_completed]=1`) | `lastCall*` (последний звонок по `created_at`), `lastTouch*` = max(последний звонок, последняя выполненная задача) с видом `CALL_IN/CALL_OUT/TASK_COMPLETED`, `kcLeadId/kcResponsibleUserId/kcLeadUpdatedAt` (последний по `updated_at` лид воронки КЦ), `amoResponsibleUserId` (ответственный карточки), `amoClosestTaskAt`, `sourceHash`, `syncedAt` |
+| 3 | брокеры без `amoContactId` (телефон не `tg:`, не искали ≥ 30 дней), квота 300 за ночь: `GET /contacts?query=<10 цифр>` со строгим обходом страниц | ровно одно точное совпадение по 10 цифрам **и** галочка «Брокер» **и** id свободен → `Broker.amoContactId` + статус `LINKED`; ≥ 2 совпадений или id занят другим брокером → `AMBIGUOUS` + `amoLookupCandidates` (до 10: id, name, phoneMasked, responsibleUserId, updatedAt, isBroker); 0 → `NOT_FOUND`; одно без галочки → `NOT_BROKER` с кандидатом. Везде `amoLookupAt=now`. Имя/почту брокера не трогает |
+
+Правила отбора касаний:
+- примечания и задачи системных пользователей не считаются: `AMO_SYSTEM_USER_IDS`
+  в `amo-crm.fields.ts` (6089620 «Админ Св. Михаил» — наш бот, 9542642
+  «Web-regata», 12706398 «SMARTIS»), расширяется без релиза через env
+  `AMO_TOUCH_SYSTEM_USER_IDS="id,id"`; `note_type=service_message` тоже мимо;
+- выполненная задача — любая, независимо от типа, исполнитель — человек;
+  момент выполнения = `updated_at`;
+- **лид КЦ** (`kcLeadId`, `kcResponsibleUserId`) — последний по `updated_at`
+  лид воронки КЦ среди **всех** лидов контакта, где брокер есть в контактах в
+  любой роли (главный или второй). Заявка на уникальность клиента, где брокер
+  прикреплён вторым контактом, — тоже: ответственный там «как назначил
+  Морикит» (решение владельца 28.09, пример: контакт 47242693 → лид 32323585,
+  отв. Корнева);
+- **звонки** читаются с контакта и со **всех** его лидов (любая роль), но
+  звонком с брокером считаются только примечания, у которых `params.phone`
+  совпал с телефоном брокера по последним 10 цифрам (`Broker.phone` +
+  `BrokerPhone`). Пустой `params.phone` — считаем только если примечание
+  лежит на самом контакте или на лиде, где брокер главный/единственный.
+  Так звонки клиенту по фиксации не попадают в «последний контакт» брокера;
+- **выполненные задачи** — только с контакта и с лидов, где брокер
+  **главный контакт** (`is_main`) или единственный: задачи на клиентских
+  фиксациях — про клиента. Env-переключателя нет (прежний
+  `AMO_TOUCH_ALL_LEADS` убран);
+- `sourceHash` = sha256(`updated_at` контакта, ответственный, id последнего
+  звонка, id последней задачи, id/`updated_at`/ответственный лида КЦ) —
+  совпал → строку не переписываем.
+
+Первый прогон (бэкфилл): за ночь обрабатывается не более `maxContacts`
+(2000) изменившихся контактов, «необработанные» (нет строки или `sourceHash`
+пуст) идут первыми в порядке `Broker.id`; остаток — следующей ночью.
+Состояние — `SystemSetting.AMO_TOUCH_SYNC_STATE` = `{lastRunAt, lastRunStats,
+backfillDone}`. При 13,7 тыс. контактов бэкфилл займёт ~7 ночей, либо один
+ручной прогон с `max_contacts=20000` (см. 11.3).
+
+Синк **не пишет** `Broker.assignedManagerId`, `Broker.lastCallAt`, имена и
+почты брокеров.
+
+### 11.2. Замок, аудит, алерты
+
+- Каждый прогон — строка `loyalty_sync_runs` (`source=AMOCRM`,
+  `ruleVersion=amo-touch-v1`): RUNNING → SUCCEEDED/FAILED, в `counts` —
+  сводка `{mode, users, contactsTotal, contactsChanged, contactsSkipped,
+  contactsMissing, contactsDeferred, touched, unchangedHash, calls, tasks,
+  lookups, linked, ambiguous, notFound, notBroker, errors, requests,
+  durationMs, backfillDone}`.
+- Уже есть RUNNING моложе 4 ч (в т.ч. amo-dry-run лояльности) → прогон не
+  стартует; старше 4 ч → помечается FAILED (`STALE_RUN`) + алерт.
+- 401/403 от amo или 5 подряд 429 (после ретраев адаптера) → прогон
+  останавливается, FAILED (`AMO_AUTH_FAILED` / `AMO_RATE_LIMITED`), алерт в
+  ops-чат с dedup-ключом `amo-touch-sync`. Ошибка по одному контакту →
+  `syncError` в его строке, прогон идёт дальше.
+- По завершении одна строка в лог и в ops-чат:
+  `amo-touch-sync apply SUCCEEDED: users=… contacts=… changed=… skipped=…
+  missing=… deferred=… touched=… sameHash=… calls=… tasks=… lookups=…
+  linked=… ambiguous=… notFound=… notBroker=… errors=… requests=… 37s`
+  (⚠️ вместо 🟢, если ошибок > 5 % контактов). Телефонов и ФИО в сводке нет.
+
+### 11.3. Ручной запуск и выключение
+
+Workflow **Apply amo touch sync** (`.github/workflows/apply-amo-touch-sync.yml`)
+→ `scripts/apply-amo-touch-sync.js` в контейнере api (сервис берётся из
+`apps/api/dist`, без NestFactory — кроны внутри скрипта не поднимаются).
+Входы: `mode` (dry-run / apply), `max_contacts`, `phases` (0,1,2,3),
+`lookup_quota`, `backfill`.
+
+- `dry-run` — все чтения из amo настоящие, все записи выполняются внутри
+  транзакции и откатываются (ошибки записи ловятся до боевого прогона);
+  печатает сводку и до 5 примеров изменений с замаскированными телефонами.
+- `apply` — боевой режим, запись по мере обработки (прогресс сохраняется,
+  даже если прогон оборвётся).
+- Бэкфилл на проде: сначала `dry-run` с `max_contacts=200`, затем `apply` с
+  `max_contacts=20000` в согласованное окно (≈ 2 тыс. запросов, 10–15 мин
+  при 3 rps) — или оставить крону по 2000 в ночь.
+
+Аварийно выключить крон: env `AMO_TOUCH_SYNC_ENABLED=false` у api
+(по умолчанию включён). Квота фазы 3: env `AMO_TOUCH_LOOKUP_QUOTA`.
+Актор аудита: первый ADMIN, либо env `AMO_TOUCH_SYNC_ACTOR_ID`.
+
+### 11.4. Как читать сводку
+
+- `contacts` — сколько брокеров привязано к amo; `changed` — у скольких
+  контакт менялся с прошлой ночи (после бэкфилла обычно 200–800);
+  `skipped` — не менялись; `deferred` — не влезли в `maxContacts` (норма
+  только во время бэкфилла); `missing` — контакт удалён/слит в amo.
+- `touched` — строк реально переписано; `sameHash` — контакт менялся, но
+  касания те же (например, правили поля карточки).
+- `linked/ambiguous/notFound/notBroker` — итоги фазы 3. `AMBIGUOUS` и
+  `NOT_BROKER` — очередь ручной привязки в админке
+  (`amo_lookup_candidates`), кнопка `apply-link-broker-amo-contact.yml`.
+- `requests` — HTTP-запросов к amo за прогон. Ежедневная норма после
+  бэкфилла: 1 (users) + ~55 (контакты) + ~7 на каждые 50 изменившихся +
+  ≤ 300 (фаза 3) ≈ 0,4–0,5 тыс.; бэкфилл 13,7 тыс. контактов ≈ 2 тыс.
+
+---
+
 *Документ составлен 2026-06-03 после серии правок по уникальности и интеграции. Будет дополняться по мере развития Фазы 3.*

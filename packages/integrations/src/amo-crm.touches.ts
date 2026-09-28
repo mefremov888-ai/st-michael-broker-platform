@@ -7,7 +7,27 @@ import {
   AMO_CALL_STATUS_TEXT,
   AMO_NOTE_TYPES,
   AMO_PIPELINES,
+  AMO_SYSTEM_USER_IDS,
 } from "./amo-crm.fields";
+
+// === Системные пользователи ===
+
+/**
+ * Множество id пользователей amo, чьи примечания/задачи не считаются
+ * касанием: константа AMO_SYSTEM_USER_IDS + env AMO_TOUCH_SYSTEM_USER_IDS
+ * ("id,id,…"). Читается при каждом вызове — синк дёргает раз за прогон.
+ */
+export function amoTouchSystemUserIds(
+  env: string | undefined = process.env.AMO_TOUCH_SYSTEM_USER_IDS,
+): Set<number> {
+  const out = new Set<number>(AMO_SYSTEM_USER_IDS);
+  for (const part of String(env || "").split(/[,\s;]+/)) {
+    if (!part) continue;
+    const id = Number(part);
+    if (Number.isSafeInteger(id) && id > 0) out.add(id);
+  }
+  return out;
+}
 
 // === Примечания (notes) ===
 
