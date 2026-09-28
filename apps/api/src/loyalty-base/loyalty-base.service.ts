@@ -8,6 +8,7 @@ import {
   GoneException,
   Inject,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from "@nestjs/common";
 import { createHash, randomUUID } from "crypto";
@@ -32,6 +33,16 @@ import {
 } from "./loyalty-base.dto";
 import { withLoyaltyFullScanSlot } from "./loyalty-full-scan-coordinator";
 import { buildPhoneSearchConditions } from "../admin/brokers-import.helper";
+import {
+  amoCallStatusLabel,
+  amoLinkMatches,
+  amoLinkStatusOf,
+  amoTouchKindToContactKind,
+  maskAmoCandidatePhone,
+  pickLatestContact,
+  type LoyaltyAmoLinkStatus,
+  type LoyaltyContactCandidate,
+} from "./loyalty-amo-touch";
 
 export {
   LOYALTY_FULL_SCAN_RETRY_AFTER_SECONDS,
@@ -216,6 +227,10 @@ interface CanonicalLoyaltyFilter {
   // 2026-09-09 (владелец): «Наша база» — «В базе Анны»: linked — только карточки,
   // подтверждённо сцепленные с записями Анны; unlinked — только без сцепки.
   linkedAnna?: "linked" | "unlinked";
+  // 2026-09-28 (владелец): «Привязка к amo» — только «Наша база»/брокеры:
+  // привязан / требует решения (несколько кандидатов) / не найден / не
+  // проверялся (см. loyalty-amo-touch.ts, amoLinkStatusOf).
+  amoLink?: LoyaltyAmoLinkStatus;
   columns: {
     contact?: string;
     statusStage?: string;
@@ -1348,6 +1363,7 @@ export class LoyaltyBaseService {
         canonical?.linkedOurs ?? (query as any).linkedOurs ?? undefined,
       linkedAnna:
         canonical?.linkedAnna ?? (query as any).linkedAnna ?? undefined,
+      amoLink: canonical?.amoLink ?? (query as any).amoLink ?? undefined,
       columns: {
         contact: columnInput.contact,
         statusStage: columnInput.statusStage,
@@ -6141,6 +6157,7 @@ export class LoyaltyBaseService {
             filter.columns.activity === "HAS_ACTIVE_FIXATIONS"
               ? "columns.activity"
               : undefined,
+            filter.amoLink !== undefined ? "amoLink" : undefined,
           ],
     );
     if (ourBrokerOnlyFields.length) {
@@ -6866,6 +6883,25 @@ export class LoyaltyBaseService {
     item.lastCallNextStep = latest?.nextStep || null;
     item.lastCallNextActionAt = latest?.nextActionAt || null;
     return latest;
+  }
+
+  // 2026-09-28 (владелец): у брокера без звонков в кабинете, но с тем же
+  // номером в базе Анны, показываем её «последний звонок» с пометкой
+  // источника; если звонок Анны свежее нашего — тоже её дату. Одна точка для
+  // карточки (mapOurBroker) и списка (matchesOurBroker).
+  private applyOurAnnaLastCall(record: any, item: any) {
+    const annaLast = dateOnly(record?.__annaLastCallAt);
+    const ownLast = dateOnly(item.lastCallAt);
+    if (annaLast && (!ownLast || annaLast > ownLast)) {
+      item.lastCallAt = record.__annaLastCallAt;
+      item.lastCallSource = "ANNA";
+      if (record.__annaCallCount != null)
+        item.annaCallCount = Number(record.__annaCallCount);
+    } else if (item.lastCallAt) {
+      item.lastCallSource = "CABINET";
+    } else {
+      item.lastCallSource = null;
+    }
   }
 
   private annaMetricValue(item: any, field: string): number | null {
@@ -8058,6 +8094,16 @@ export class LoyaltyBaseService {
         return (
           item.lastCallAt || item.sourceReportedMetrics?.lastCallAt || null
         );
+      // 2026-09-28: колонка «Последний контакт» (звонки + касания amo +
+      // встречи/фиксации/сделки); у записей без слияния — последняя активность.
+      if (filter.sortBy === "lastContactAt")
+        return (
+          item.lastContactAt ||
+          item.lastActivityAt ||
+          item.lastCallAt ||
+          item.sourceReportedMetrics?.lastCallAt ||
+          null
+        );
       if (filter.sortBy === "updatedAt") return item.updatedAt || null;
       if (filter.sortBy === "brokerCount")
         return finiteNumber(
@@ -8918,6 +8964,9 @@ export class LoyaltyBaseService {
         await this.attachOurBrokerLastCalls(loaded as any[]);
       }
       await this.attachOurAnnaLastCalls(loaded as any[]);
+      // 2026-09-28: срез amoCRM (ответственный КЦ, последнее касание,
+      // звонок, статус привязки) — один findMany по brokerId in.
+      await this.attachOurBrokerAmoTouches(loaded as any[]);
       await this.attachOurBrokerLifetimeAggregates(
         loaded as any[],
         filter.cabinetSource,
@@ -9720,6 +9769,489 @@ export class LoyaltyBaseService {
     }
   }
 
+  // ── 2026-09-28: срез amoCRM в «Нашей базе» (BrokerAmoContactSync + AmoUser) ──
+  // Синк пишет модуль amocrm; здесь только чтение и слияние по правилам
+  // владельца: ответственный = ответственный последнего лида КЦ (Морикит),
+  // «последний контакт» = самое свежее из наших звонков, касаний amo и ленты
+  // (встречи/фиксации/сделки), результат звонка amo — если он свежее наших.
+  private amoUsersCache: { at: number; value: Map<string, any> } | null = null;
+
+  /** Справочник сотрудников amo одним запросом, кэш 5 минут. */
+  private async amoUsersById(): Promise<Map<string, any>> {
+    const now = Date.now();
+    if (this.amoUsersCache && now - this.amoUsersCache.at < 5 * 60_000)
+      return this.amoUsersCache.value;
+    const map = new Map<string, any>();
+    const delegate = (this.prisma as any).amoUser;
+    if (typeof delegate?.findMany === "function") {
+      try {
+        const rows = await delegate.findMany({
+          select: { id: true, name: true, brokerId: true, isActive: true },
+        });
+        for (const row of (Array.isArray(rows) ? rows : []) as any[]) {
+          if (row?.id === null || row?.id === undefined) continue;
+          map.set(String(row.id), {
+            id: String(row.id),
+            name: row.name ? String(row.name) : null,
+            brokerId: row.brokerId ? String(row.brokerId) : null,
+            isActive: row.isActive !== false,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[loyalty] справочник сотрудников amo не загружен: ${(error as Error)?.message}`,
+        );
+      }
+    }
+    this.amoUsersCache = { at: now, value: map };
+    return map;
+  }
+
+  private amoUserView(users: Map<string, any>, userId: unknown) {
+    if (userId === null || userId === undefined) return null;
+    const id = String(userId);
+    return (
+      users.get(id) || { id, name: null, brokerId: null, isActive: true }
+    );
+  }
+
+  /**
+   * Один findMany по brokerId in — строки BrokerAmoContactSync для страницы
+   * или всего полного чтения. Кладёт в record.__amoSync (уже с именами
+   * сотрудников), ошибка базы список не роняет. Никаких запросов в amo.
+   */
+  private async attachOurBrokerAmoTouches(
+    records: any[],
+    options: { candidates?: boolean } = {},
+  ): Promise<void> {
+    for (const record of records) {
+      record.__amoSync = record.__amoSync ?? null;
+      record.__amoResponsible = record.__amoResponsible ?? null;
+    }
+    if (!records.length) return;
+    const delegate = (this.prisma as any).brokerAmoContactSync;
+    if (typeof delegate?.findMany !== "function") return;
+    const byId = new Map<string, any[]>();
+    for (const record of records) {
+      const id = String(record?.id || "");
+      if (!id) continue;
+      const list = byId.get(id) || [];
+      list.push(record);
+      byId.set(id, list);
+    }
+    const ids = [...byId.keys()];
+    if (!ids.length) return;
+    const select: Record<string, boolean> = {
+      brokerId: true,
+      amoContactId: true,
+      amoLookupAt: true,
+      amoLookupStatus: true,
+      kcResponsibleUserId: true,
+      kcLeadId: true,
+      lastTouchAt: true,
+      lastTouchKind: true,
+      lastTouchRef: true,
+      lastTouchUserId: true,
+      lastCallAt: true,
+      lastCallDirection: true,
+      lastCallStatus: true,
+      lastCallResultText: true,
+      lastCallDurationSec: true,
+      lastCallUserId: true,
+      syncedAt: true,
+      ...(options.candidates
+        ? { amoLookupCandidates: true, syncError: true, amoUpdatedAt: true }
+        : {}),
+    };
+    const rows: any[] = [];
+    const CHUNK = 5000;
+    try {
+      for (let index = 0; index < ids.length; index += CHUNK) {
+        const part = await delegate.findMany({
+          where: { brokerId: { in: ids.slice(index, index + CHUNK) } },
+          select,
+        });
+        rows.push(...((Array.isArray(part) ? part : []) as any[]));
+      }
+    } catch (error) {
+      console.warn(
+        `[loyalty] срез amoCRM по брокерам не загружен: ${(error as Error)?.message}`,
+      );
+      return;
+    }
+    if (!rows.length) return;
+    const users = await this.amoUsersById();
+    for (const row of rows) {
+      const targets = byId.get(String(row?.brokerId || ""));
+      if (!targets) continue;
+      const sync = {
+        amoContactId:
+          row.amoContactId === null || row.amoContactId === undefined
+            ? null
+            : String(row.amoContactId),
+        amoLookupAt: this.isoDateTime(row.amoLookupAt),
+        amoLookupStatus: row.amoLookupStatus
+          ? String(row.amoLookupStatus)
+          : null,
+        kcResponsibleUserId:
+          row.kcResponsibleUserId === null ||
+          row.kcResponsibleUserId === undefined
+            ? null
+            : String(row.kcResponsibleUserId),
+        kcLeadId:
+          row.kcLeadId === null || row.kcLeadId === undefined
+            ? null
+            : String(row.kcLeadId),
+        lastTouchAt: this.isoDateTime(row.lastTouchAt),
+        lastTouchKind: row.lastTouchKind ? String(row.lastTouchKind) : null,
+        lastTouchRef: row.lastTouchRef ? String(row.lastTouchRef) : null,
+        lastTouchUser: this.amoUserView(users, row.lastTouchUserId),
+        lastCallAt: this.isoDateTime(row.lastCallAt),
+        lastCallDirection: row.lastCallDirection
+          ? String(row.lastCallDirection).toUpperCase()
+          : null,
+        lastCallStatus:
+          row.lastCallStatus === null || row.lastCallStatus === undefined
+            ? null
+            : Number(row.lastCallStatus),
+        lastCallResultText: row.lastCallResultText
+          ? String(row.lastCallResultText)
+          : null,
+        lastCallDurationSec:
+          row.lastCallDurationSec === null ||
+          row.lastCallDurationSec === undefined
+            ? null
+            : Number(row.lastCallDurationSec),
+        lastCallUser: this.amoUserView(users, row.lastCallUserId),
+        syncedAt: this.isoDateTime(row.syncedAt),
+        amoUpdatedAt: this.isoDateTime(row.amoUpdatedAt),
+        syncError: row.syncError ? true : false,
+        candidates: options.candidates
+          ? (Array.isArray(row.amoLookupCandidates)
+              ? row.amoLookupCandidates
+              : []
+            )
+              .filter((candidate: any) => candidate && typeof candidate === "object")
+              .map((candidate: any) => {
+                const responsible = this.amoUserView(
+                  users,
+                  candidate.responsibleUserId,
+                );
+                return {
+                  id: String(candidate.id ?? ""),
+                  name: candidate.name ? String(candidate.name) : null,
+                  // Телефон кандидата — только маска: админ сверяет хвост.
+                  phoneMasked: maskAmoCandidatePhone(candidate.phone),
+                  responsibleUserId: responsible?.id ?? null,
+                  responsibleName: responsible?.name ?? null,
+                  updatedAt: this.isoDateTime(candidate.updatedAt),
+                };
+              })
+              .filter((candidate: any) => /^\d+$/.test(candidate.id))
+          : [],
+      };
+      const responsible = this.amoUserView(users, sync.kcResponsibleUserId);
+      for (const record of targets) {
+        record.__amoSync = sync;
+        record.__amoResponsible = responsible;
+      }
+    }
+  }
+
+  /** Статус привязки к amo + кандидаты (для карточки). */
+  private ourBrokerAmoLink(record: any) {
+    const sync = record?.__amoSync || null;
+    const status = amoLinkStatusOf(record?.amoContactId, sync);
+    const contactId =
+      record?.amoContactId !== null && record?.amoContactId !== undefined
+        ? String(record.amoContactId)
+        : sync?.amoContactId || null;
+    return {
+      status,
+      contactId,
+      checkedAt: sync?.amoLookupAt || null,
+      syncedAt: sync?.syncedAt || null,
+      syncError: sync?.syncError === true,
+      candidates:
+        status === "AMBIGUOUS" && Array.isArray(sync?.candidates)
+          ? sync.candidates
+          : [],
+    };
+  }
+
+  /**
+   * Слияние среза amo с уже посчитанными полями записи (после
+   * applyCallSummary и правила «оператор последнего звонка»). Общая точка для
+   * списка (matchesOurBroker) и карточки (mapOurBroker).
+   */
+  private applyOurBrokerAmoOverlay(record: any, item: any) {
+    const sync = record?.__amoSync || null;
+    const responsible = record?.__amoResponsible || null;
+    // 1. Ответственный: главный источник — ответственный последнего лида КЦ
+    // (назначает Морикит). Если его нет — прежнее поведение (ручное
+    // закрепление / оператор последнего звонка).
+    if (responsible) {
+      item.assignee = {
+        id: responsible.brokerId || `amo:${responsible.id}`,
+        name: responsible.name || `Сотрудник amo #${responsible.id}`,
+        amoUserId: responsible.id,
+      };
+      item.assigneeSource = responsible.brokerId ? "CABINET" : "AMO";
+    } else {
+      item.assigneeSource = item.assignee ? "CABINET" : null;
+    }
+    // 2. Результат звонка: если звонок amo свежее наших — его статус.
+    const previousCallSource =
+      item.lastCallSource === "ANNA" ? "ANNA" : item.lastCallAt ? "CABINET" : null;
+    item.lastCallResultSource = item.lastCallResult ? previousCallSource : null;
+    item.lastCallResultLabel = null;
+    item.lastCallResultText = null;
+    item.lastCallDirection = null;
+    const ownCallAt = this.isoDateTime(item.lastCallAt);
+    const amoCallAt = sync?.lastCallAt || null;
+    if (amoCallAt && (!ownCallAt || amoCallAt > ownCallAt)) {
+      item.lastCallAt = amoCallAt;
+      item.lastCallSource = "AMO";
+      item.lastCallResultSource = "AMO";
+      item.lastCallResultLabel = amoCallStatusLabel(sync.lastCallStatus);
+      item.lastCallResultText = sync.lastCallResultText || null;
+      item.lastCallDirection = sync.lastCallDirection || null;
+      if (sync.lastCallUser?.name) item.lastCallOperator = sync.lastCallUser.name;
+    }
+    // 3. Последний контакт — самое свежее из всех источников.
+    const candidates: LoyaltyContactCandidate[] = [
+      {
+        at: item.lastCallAt,
+        kind:
+          item.lastCallSource === "AMO" && item.lastCallDirection === "IN"
+            ? "CALL_IN"
+            : "CALL_OUT",
+        source:
+          item.lastCallSource === "AMO"
+            ? "amo"
+            : item.lastCallSource === "ANNA"
+              ? "anna"
+              : "cabinet",
+      },
+      { at: record?.clients?.[0]?.createdAt, kind: "FIXATION", source: "cabinet" },
+      { at: record?.meetings?.[0]?.date, kind: "MEETING", source: "cabinet" },
+      { at: record?.deals?.[0]?.signedAt, kind: "DEAL", source: "cabinet" },
+      { at: record?.brokerTourDate, kind: "BROKER_TOUR", source: "cabinet" },
+    ];
+    if (Array.isArray(record?.__registryDeals) && record.__registryDeals[0]) {
+      const registry = record.__registryDeals[0];
+      candidates.push({
+        at: registry.paidAt || registry.signedAt,
+        kind: "DEAL",
+        source: "cabinet",
+      });
+    }
+    if (sync?.lastTouchAt) {
+      const kind = amoTouchKindToContactKind(
+        sync.lastTouchKind,
+        sync.lastCallDirection,
+      );
+      if (kind) candidates.push({ at: sync.lastTouchAt, kind, source: "amo" });
+    }
+    const latest = pickLatestContact(candidates);
+    item.lastContactAt = latest?.at || null;
+    item.lastContactKind = latest?.kind || null;
+    item.lastContactSource = latest?.source || null;
+    // 4. Привязка к amo.
+    item.amoLink = this.ourBrokerAmoLink(record);
+    return item;
+  }
+
+  /** Строки ленты «События и карточки-основания» из среза amo (последнее касание и звонок). */
+  private amoTouchEvidenceRows(record: any): any[] {
+    const sync = record?.__amoSync;
+    if (!sync) return [];
+    const rows: any[] = [];
+    const typeOf = (kind: string | null) => {
+      switch (String(kind || "").toUpperCase()) {
+        case "CALL_IN":
+        case "CALL_OUT":
+          return "AMO_CALL";
+        case "TASK_COMPLETED":
+          return "AMO_TASK";
+        case "MEETING":
+          return "AMO_MEETING";
+        case "NOTE":
+          return "AMO_NOTE";
+        default:
+          return "AMO_ACTIVITY";
+      }
+    };
+    const touchIsCall =
+      sync.lastTouchKind === "CALL_IN" || sync.lastTouchKind === "CALL_OUT";
+    if (sync.lastTouchAt) {
+      rows.push({
+        id: `AMO_TOUCH:${sync.lastTouchRef || sync.lastTouchAt}`,
+        sourceId: sync.lastTouchRef || null,
+        type: typeOf(sync.lastTouchKind),
+        touchKind: sync.lastTouchKind,
+        date: sync.lastTouchAt,
+        occurredAt: sync.lastTouchAt,
+        status: null,
+        direction:
+          sync.lastTouchKind === "CALL_IN"
+            ? "IN"
+            : sync.lastTouchKind === "CALL_OUT"
+              ? "OUT"
+              : null,
+        employee: sync.lastTouchUser?.name || null,
+        result:
+          touchIsCall && sync.lastTouchAt === sync.lastCallAt
+            ? amoCallStatusLabel(sync.lastCallStatus)
+            : null,
+        comment:
+          touchIsCall && sync.lastTouchAt === sync.lastCallAt
+            ? sync.lastCallResultText
+            : null,
+        durationSec:
+          touchIsCall && sync.lastTouchAt === sync.lastCallAt
+            ? sync.lastCallDurationSec
+            : null,
+        amoContactId: sync.amoContactId,
+        source: "AMO_SYNC",
+        exactness: "VERIFIED",
+        provenance: "Последнее касание из amoCRM (ночной синк контактов)",
+      });
+    }
+    if (sync.lastCallAt && !(touchIsCall && sync.lastTouchAt === sync.lastCallAt)) {
+      rows.push({
+        id: `AMO_CALL:${sync.lastCallAt}`,
+        sourceId: null,
+        type: "AMO_CALL",
+        touchKind: sync.lastCallDirection === "IN" ? "CALL_IN" : "CALL_OUT",
+        date: sync.lastCallAt,
+        occurredAt: sync.lastCallAt,
+        status: null,
+        direction: sync.lastCallDirection || null,
+        employee: sync.lastCallUser?.name || null,
+        result: amoCallStatusLabel(sync.lastCallStatus),
+        comment: sync.lastCallResultText || null,
+        durationSec: sync.lastCallDurationSec,
+        amoContactId: sync.amoContactId,
+        source: "AMO_SYNC",
+        exactness: "VERIFIED",
+        provenance: "Последний звонок из amoCRM (ночной синк контактов)",
+      });
+    }
+    return rows;
+  }
+
+  /**
+   * Ручная привязка брокера к контакту amo из карточки (кнопка «Привязать»
+   * у кандидата). Пишет Broker.amoContactId и строку синка LINKED с пустым
+   * sourceHash, чтобы ночной синк перечитал контакт. Занятый id → 409.
+   */
+  async linkOurBrokerAmoContact(
+    id: string,
+    amoContactIdInput: string | number,
+    actorId?: string,
+  ) {
+    const digits = String(amoContactIdInput ?? "").trim();
+    if (!/^\d{1,18}$/.test(digits))
+      throw new BadRequestException("Укажите числовой id контакта amoCRM");
+    const amoContactId = BigInt(digits);
+    const prisma = this.prisma as any;
+    const broker = await prisma.broker.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        role: true,
+        amoContactId: true,
+        fullName: true,
+        displayName: true,
+      },
+    });
+    if (!broker || String(broker.role || "BROKER") !== "BROKER")
+      throw new NotFoundException("Брокер не найден");
+    const occupied = await prisma.broker.findFirst({
+      where: { amoContactId, NOT: { id } },
+      select: { id: true, fullName: true, displayName: true },
+    });
+    if (occupied) {
+      throw new ConflictException(
+        `Контакт amoCRM #${digits} уже привязан к другому брокеру («${occupied.displayName || occupied.fullName || occupied.id}»). Сначала отвяжите его в той карточке.`,
+      );
+    }
+    const now = new Date();
+    try {
+      await prisma.$transaction([
+        prisma.broker.update({ where: { id }, data: { amoContactId } }),
+        prisma.brokerAmoContactSync.upsert({
+          where: { brokerId: id },
+          create: {
+            brokerId: id,
+            amoContactId,
+            amoLookupAt: now,
+            amoLookupStatus: "LINKED",
+            amoLookupCandidates: Prisma.DbNull,
+            sourceHash: null,
+            syncedAt: now,
+          },
+          update: {
+            amoContactId,
+            amoLookupAt: now,
+            amoLookupStatus: "LINKED",
+            amoLookupCandidates: Prisma.DbNull,
+            sourceHash: null,
+            syncError: null,
+          },
+        }),
+      ]);
+    } catch (error) {
+      if ((error as any)?.code === "P2002")
+        throw new ConflictException(
+          `Контакт amoCRM #${digits} уже привязан к другому брокеру.`,
+        );
+      console.error(
+        `[loyalty] привязка брокера ${id} к контакту amo ${digits} не удалась: ${(error as Error)?.message}`,
+      );
+      throw new InternalServerErrorException(
+        "Не удалось сохранить привязку к amoCRM. Попробуйте ещё раз.",
+      );
+    }
+    try {
+      await prisma.auditLog.create({
+        data: {
+          userId: actorId || null,
+          action: "AMO_CONTACT_LINK",
+          entity: "Broker",
+          entityId: id,
+          payload: {
+            before:
+              broker.amoContactId === null || broker.amoContactId === undefined
+                ? null
+                : String(broker.amoContactId),
+            after: digits,
+            source: "loyalty-base-manual",
+          },
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[loyalty] аудит привязки amo не записан: ${(error as Error)?.message}`,
+      );
+    }
+    this.amoUsersCache = null;
+    clearLoyaltyFullScanCache();
+    return {
+      id,
+      amoContactId: digits,
+      amoLink: {
+        status: "LINKED" as LoyaltyAmoLinkStatus,
+        contactId: digits,
+        checkedAt: now.toISOString(),
+        syncedAt: now.toISOString(),
+        syncError: false,
+        candidates: [],
+      },
+    };
+  }
+
   // 2026-09-14 (решение владельца): «нет данных» вместо нуля там, где встреч
   // не существует в принципе. Записи о встречах в кабинете начинаются с
   // первой карточки колл-центра (сейчас это 2024 год) — у брокера, который
@@ -9846,18 +10378,27 @@ export class LoyaltyBaseService {
     // Задача D: DORMANT определяется по последнему звонку за всё время,
     // а не по callLogs, суженным «периодом звонков».
     const lastCallAt = this.ourLastCallLifetime(record);
+    // 2026-09-28: касание из amo (звонок/задача/примечание) тоже «будит»
+    // брокера — иначе живой в amo контакт у нас числится DORMANT.
+    const amoTouchAt = record.__amoSync?.lastTouchAt || null;
     const lastDates = [
       lastCallAt,
       record.brokerTourDate,
       record.clients?.[0]?.createdAt,
       record.meetings?.[0]?.date,
       record.deals?.[0]?.signedAt,
+      amoTouchAt,
     ]
       .map(dateOnly)
       .filter(Boolean) as string[];
     const inactiveDays = daysSinceDate(lastDates.sort().at(-1));
     const hadActivity =
-      fixations > 0 || meetings > 0 || deals > 0 || bt || Boolean(lastCallAt);
+      fixations > 0 ||
+      meetings > 0 ||
+      deals > 0 ||
+      bt ||
+      Boolean(lastCallAt) ||
+      Boolean(amoTouchAt);
     const primary =
       hadActivity && inactiveDays !== null && inactiveDays > 90
         ? "DORMANT"
@@ -9968,6 +10509,8 @@ export class LoyaltyBaseService {
       record.clients?.[0]?.createdAt,
       record.meetings?.[0]?.date,
       record.deals?.[0]?.signedAt,
+      // 2026-09-28: последнее касание из amoCRM (ночной синк).
+      record.__amoSync?.lastTouchAt,
     ]
       .map(dateOnly)
       .filter(Boolean) as string[];
@@ -10554,6 +11097,8 @@ export class LoyaltyBaseService {
         exactness: "VERIFIED",
         provenance: "Строка реестра сделок (дата оплаты ДДУ, стоимость по ДДУ)",
       })),
+      // 2026-09-28: последнее касание и звонок из amoCRM (срез ночного синка).
+      ...this.amoTouchEvidenceRows(item),
     ].sort((left, right) =>
       String(right.occurredAt || "").localeCompare(
         String(left.occurredAt || ""),
@@ -10569,8 +11114,9 @@ export class LoyaltyBaseService {
       finiteNumber(item._count?.deals),
     ];
     const known = counts.every((value) => value !== null);
+    const amoRows = rows.filter((row) => row.source === "AMO_SYNC").length;
     const count = known
-      ? counts.reduce((sum, value) => sum + (value || 0), 0)
+      ? counts.reduce((sum, value) => sum + (value || 0), 0) + amoRows
       : null;
     const items = rows.slice(0, limit);
     return {
@@ -10650,10 +11196,17 @@ export class LoyaltyBaseService {
     const callAssignees = uniqueSorted(
       calls.flatMap((call) => this.callAssigneeValues(call)),
     );
+    // 2026-09-28 (владелец): ответственный последнего лида КЦ из amo —
+    // главный; он же участвует в фильтре/фасете «Ответственный» (по имени,
+    // а если сотрудник amo привязан к нашему Broker — и по его id).
+    const amoResponsible = record.__amoResponsible || null;
     const assignees = uniqueSorted([
       assigneeId,
       assigneeName,
       ...callAssignees,
+      amoResponsible?.name,
+      amoResponsible?.brokerId,
+      amoResponsible ? `amo:${amoResponsible.id}` : undefined,
     ]);
     const statuses = this.ourBrokerStatusCodes(record);
     const quality = this.ourDataQualityCodes(record);
@@ -10665,12 +11218,23 @@ export class LoyaltyBaseService {
       : null;
     const latestCall = this.applyCallSummary(item, "BROKER", calls);
     if (!latestCall && record.lastCallAt) item.lastCallAt = record.lastCallAt;
+    // applyCallSummary выше сбрасывает дату, выставленную в mapOurBroker по
+    // базе Анны, — применяем то же правило ещё раз, чтобы список и карточка
+    // совпадали.
+    this.applyOurAnnaLastCall(record, item);
     if (latestCall?.employee || latestCall?.employeeId) {
       item.assignee = {
         id: latestCall.employeeId || null,
         name: latestCall.employeeName || latestCall.employee || null,
       };
     }
+    // Срез amo поверх: ответственный КЦ, звонок amo, «последний контакт».
+    this.applyOurBrokerAmoOverlay(record, item);
+    if (
+      filter.amoLink !== undefined &&
+      !amoLinkMatches(filter.amoLink, item.amoLink?.status)
+    )
+      return false;
 
     if (filter.segment === "NOT_CALLED_CURRENT_MONTH") {
       // Как в KPI «Не звонили в этом месяце»: только активные брокеры.
@@ -11398,25 +11962,17 @@ export class LoyaltyBaseService {
     const latest = this.applyCallSummary(result, "BROKER", calls);
     this.applyEngagementSummary(result, item);
     if (!latest && item.lastCallAt) result.lastCallAt = item.lastCallAt;
-    // 2026-09-28 (владелец): у брокера без звонков в кабинете, но с тем же
-    // номером в базе Анны, показываем её «последний звонок» с пометкой
-    // источника; если звонок Анны свежее нашего — тоже её дату.
-    const annaLast = dateOnly(item.__annaLastCallAt);
-    const ownLast = dateOnly(result.lastCallAt);
-    if (annaLast && (!ownLast || annaLast > ownLast)) {
-      result.lastCallAt = item.__annaLastCallAt;
-      result.lastCallSource = "ANNA";
-      if (item.__annaCallCount != null)
-        result.annaCallCount = Number(item.__annaCallCount);
-    } else if (result.lastCallAt) {
-      result.lastCallSource = "CABINET";
-    }
+    this.applyOurAnnaLastCall(item, result);
     if (latest?.employee || latest?.employeeId) {
       result.assignee = {
         id: latest.employeeId || null,
         name: latest.employeeName || latest.employee || null,
       };
     }
+    // 2026-09-28: срез amoCRM поверх (ответственный КЦ, звонок amo,
+    // «последний контакт», привязка). В списке matchesOurBroker пересчитает
+    // то же самое после своих предикатов.
+    this.applyOurBrokerAmoOverlay(item, result);
     if (detailed) {
       const history = this.ourCallHistory(item);
       const evidence = this.ourBrokerEvidence(item);
@@ -11424,6 +11980,10 @@ export class LoyaltyBaseService {
       result.callHistory = history;
       result.activities = evidence.items;
       result.activityEvidence = evidence;
+      // Карточка: «Последний контакт» — единое правило со списком (раньше
+      // фронт брал первый элемент ленты).
+      result.lastActivityAt =
+        result.lastContactAt || this.ourLastActivity(item) || null;
       result.attributes = {
         calls: history,
         activityEvidence: {
@@ -12022,6 +12582,7 @@ export class LoyaltyBaseService {
       }
       if (!loaded.length) return loaded;
       await this.attachOurBrokerLastCalls(loaded);
+      await this.attachOurBrokerAmoTouches(loaded);
       await this.attachOurBrokerLifetimeAggregates(loaded, cabinetSource);
       await this.attachOurBrokerRegistryDeals(loaded);
         return loaded;
@@ -12753,6 +13314,11 @@ export class LoyaltyBaseService {
         engagementEvents,
       );
       await this.attachOurAnnaLastCalls([broker as any]);
+      // 2026-09-28: карточка — тот же срез amo плюс кандидаты ручной
+      // привязки (amoLookupCandidates) для блока «Контакт в amoCRM».
+      await this.attachOurBrokerAmoTouches([broker as any], {
+        candidates: true,
+      });
       const item = this.mapOurBroker(
         broker,
         centsToMoney(
