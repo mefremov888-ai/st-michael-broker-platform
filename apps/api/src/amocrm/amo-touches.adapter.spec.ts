@@ -363,6 +363,76 @@ describe("AmoCrmAdapter — чтение касаний", () => {
       ).rejects.toThrow("AMO_READONLY_FILTER_INVALID");
     });
   });
+
+  // 2026-09-28: точечные правки адаптера под ночной синк касаний.
+  describe("findContactsByPhoneExact (фаза 3 синка)", () => {
+    const withPhone = (id: number, phone: string) => ({
+      id,
+      name: `c${id}`,
+      custom_fields_values: [{ field_id: 557903, values: [{ value: phone }] }],
+    });
+
+    it("возвращает всех точных кандидатов вместо AMBIGUOUS_EXACT_CONTACT, пагинирует strict", async () => {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce(
+          ok({
+            _embedded: {
+              contacts: [withPhone(1, "+79250000001"), withPhone(2, "+7 (925) 000-00-19")],
+            },
+            _links: { next: { href: "x" } },
+          }),
+        )
+        .mockResolvedValueOnce(
+          ok({ _embedded: { contacts: [withPhone(3, "89250000001")] } }),
+        );
+      global.fetch = fetchMock;
+      const adapter = new AmoCrmAdapter();
+      const found = await adapter.findContactsByPhoneExact("+7 925 000-00-01");
+      expect(found.map((c) => c.id)).toEqual([1, 3]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(calledUrls(fetchMock)[0].searchParams.get("query")).toBe("9250000001");
+      expect(calledUrls(fetchMock)[1].searchParams.get("page")).toBe("2");
+      expect(await adapter.findContactsByPhoneExact("123")).toEqual([]);
+    });
+
+    it("findContactByPhone strict по-прежнему бросает AMBIGUOUS_EXACT_CONTACT на 2 совпадениях", async () => {
+      global.fetch = jest.fn().mockResolvedValue(
+        ok({ _embedded: { contacts: [withPhone(1, "+79250000001"), withPhone(2, "+79250000001")] } }),
+      );
+      const adapter = new AmoCrmAdapter();
+      await expect(
+        adapter.findContactByPhone("+79250000001", { strict: true }),
+      ).rejects.toThrow("AMBIGUOUS_EXACT_CONTACT");
+    });
+  });
+
+  describe("getContactsByIds propagateErrors", () => {
+    it("пробрасывает 403 вместо пустой Map, без strict-проверок полноты", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        status: 403,
+        ok: false,
+        headers: new Headers(),
+        json: async () => ({}),
+      });
+      const adapter = new AmoCrmAdapter();
+      await expect(
+        adapter.getContactsByIds([1, 2], { propagateErrors: true }),
+      ).rejects.toThrow(/amoCRM 403/);
+      // без флага — прежнее поведение: ошибка глотается, Map пустая
+      const silent = await adapter.getContactsByIds([1, 2]);
+      expect(silent.size).toBe(0);
+    });
+
+    it("неполный ответ (контакт удалён в amo) не считается ошибкой", async () => {
+      global.fetch = jest.fn().mockResolvedValue(
+        ok({ _embedded: { contacts: [{ id: 1, name: "a" }] } }),
+      );
+      const adapter = new AmoCrmAdapter();
+      const found = await adapter.getContactsByIds([1, 2], { propagateErrors: true });
+      expect([...found.keys()]).toEqual([1]);
+    });
+  });
 });
 
 describe("чистые функции касаний", () => {

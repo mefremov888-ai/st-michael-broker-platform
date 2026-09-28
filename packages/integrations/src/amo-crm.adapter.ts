@@ -179,6 +179,19 @@ const last10Digits = (phone: any): string =>
     .replace(/\D/g, "")
     .slice(-10);
 
+/** Контакты, у которых хотя бы один телефон точно равен target (10 цифр). */
+function filterContactsByExactPhone(contacts: any[], target: string): any[] {
+  return contacts.filter((c: any) => {
+    const fields = c?.custom_fields_values || [];
+    const phoneField = fields.find(
+      (f: any) =>
+        f?.field_id === AMO_CONTACT_FIELDS.PHONE || f?.field_code === "PHONE",
+    );
+    const vals = phoneField?.values || [];
+    return vals.some((v: any) => last10Digits(v?.value) === target);
+  });
+}
+
 export interface AmoContact {
   id: number;
   name: string;
@@ -448,6 +461,15 @@ export function setAmoTokenRefreshHook(hook: AmoTokenRefreshHook | null): void {
   amoTokenRefreshHook = hook;
 }
 
+// 2026-09-28: процесс-глобальный счётчик HTTP-запросов к amo (каждая
+// попытка fetch, включая retry). Нужен ночному синку касаний для сводки
+// «сколько запросов ушло» — разница до/после прогона.
+let amoRequestCounter = 0;
+
+export function getAmoRequestCount(): number {
+  return amoRequestCounter;
+}
+
 export class AmoCrmAdapter {
   // 2026-05-27: api-b.amocrm.ru (JWT payload.api_domain) отдаёт 401 даже на
   // валидный токен — используем AMO_API_DOMAIN/дефолт stmichael.amocrm.ru.
@@ -599,6 +621,7 @@ export class AmoCrmAdapter {
         ? (options.timeoutMs as number)
         : AMO_REQUEST_TIMEOUT_MS;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    amoRequestCounter += 1;
     try {
       res = await fetch(url, {
         ...init,
@@ -863,44 +886,14 @@ export class AmoCrmAdapter {
     if (target.length < 10) return null;
     let contacts: any[] = [];
     if (options.strict) {
-      const seenIds = new Set<number>();
-      for (let page = 1; page <= AMO_EXACT_CONTACT_MAX_PAGES; page += 1) {
-        const data = await this.request<any>(
-          `/contacts?query=${target}&limit=${AMO_EXACT_CONTACT_PAGE_LIMIT}&page=${page}`,
-        );
-        if (data === null) break;
-        const pageContacts = data?._embedded?.contacts;
-        if (!Array.isArray(pageContacts)) {
-          throw new Error("AMO_EXACT_CONTACT_PAGE_INVALID");
-        }
-        for (const contact of pageContacts) {
-          const id = Number(contact?.id);
-          if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) {
-            throw new Error("AMO_EXACT_CONTACT_PAGE_ID_INVALID");
-          }
-          seenIds.add(id);
-          contacts.push(contact);
-        }
-        if (!data?._links?.next) break;
-        if (page === AMO_EXACT_CONTACT_MAX_PAGES) {
-          throw new Error("AMO_EXACT_CONTACT_PAGE_BOUND_EXCEEDED");
-        }
-      }
+      contacts = await this.listExactPhoneQueryPages(target);
     } else {
       const data = await this.request<any>(
         `/contacts?query=${target}&limit=50`,
       );
       contacts = data?._embedded?.contacts || [];
     }
-    const matches = contacts.filter((c: any) => {
-      const fields = c.custom_fields_values || [];
-      const phoneField = fields.find(
-        (f: any) =>
-          f?.field_id === AMO_CONTACT_FIELDS.PHONE || f?.field_code === "PHONE",
-      );
-      const vals = phoneField?.values || [];
-      return vals.some((v: any) => last10Digits(v?.value) === target);
-    });
+    const matches = filterContactsByExactPhone(contacts, target);
     if (matches.length === 0) return null;
     if (matches.length === 1) return matches[0];
     if (options.strict) {
@@ -910,6 +903,48 @@ export class AmoCrmAdapter {
     // means "contact does not exist" and lets callers create duplicates.
     matches.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     return matches[0];
+  }
+
+  /**
+   * 2026-09-28 (синк касаний, фаза 3): ВСЕ контакты с точным совпадением
+   * последних 10 цифр телефона — полный strict-обход страниц query-поиска,
+   * как у findContactByPhone({strict:true}), но вместо AMBIGUOUS_EXACT_CONTACT
+   * возвращает список кандидатов (0, 1 или несколько), чтобы вызывающий
+   * сложил их в очередь ручной привязки. Ошибки транспорта пробрасываются.
+   */
+  async findContactsByPhoneExact(phone: string): Promise<AmoContact[]> {
+    const target = last10Digits(phone);
+    if (target.length < 10) return [];
+    const contacts = await this.listExactPhoneQueryPages(target);
+    return filterContactsByExactPhone(contacts, target);
+  }
+
+  private async listExactPhoneQueryPages(target: string): Promise<any[]> {
+    const contacts: any[] = [];
+    const seenIds = new Set<number>();
+    for (let page = 1; page <= AMO_EXACT_CONTACT_MAX_PAGES; page += 1) {
+      const data = await this.request<any>(
+        `/contacts?query=${target}&limit=${AMO_EXACT_CONTACT_PAGE_LIMIT}&page=${page}`,
+      );
+      if (data === null) break;
+      const pageContacts = data?._embedded?.contacts;
+      if (!Array.isArray(pageContacts)) {
+        throw new Error("AMO_EXACT_CONTACT_PAGE_INVALID");
+      }
+      for (const contact of pageContacts) {
+        const id = Number(contact?.id);
+        if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) {
+          throw new Error("AMO_EXACT_CONTACT_PAGE_ID_INVALID");
+        }
+        seenIds.add(id);
+        contacts.push(contact);
+      }
+      if (!data?._links?.next) break;
+      if (page === AMO_EXACT_CONTACT_MAX_PAGES) {
+        throw new Error("AMO_EXACT_CONTACT_PAGE_BOUND_EXCEEDED");
+      }
+    }
+    return contacts;
   }
 
   async findBrokerContactByPhone(
@@ -975,9 +1010,12 @@ export class AmoCrmAdapter {
   // Это ~250x меньше HTTP-запросов чем перебор по одному.
   // Возвращает Map<id, AmoContact> с найденными контактами. Те, что не вернулись,
   // в map просто отсутствуют — вызывающий код решает, ошибка это или нет.
+  // 2026-09-28: propagateErrors — пробрасывать ошибку пачки (401/403/429/
+  // сеть) без strict-проверок целостности; нужен ночному синку касаний,
+  // которому «контакт удалён в amo» — норма, а «токен умер» — стоп прогона.
   async getContactsByIds(
     ids: number[],
-    options: { strict?: boolean } = {},
+    options: { strict?: boolean; propagateErrors?: boolean } = {},
   ): Promise<Map<number, AmoContact>> {
     if (
       options.strict &&
@@ -1023,7 +1061,7 @@ export class AmoCrmAdapter {
           throw new Error("AMO_UNIQUENESS_CONTACTS_INCOMPLETE");
         }
       } catch (e: any) {
-        if (options.strict) throw e;
+        if (options.strict || options.propagateErrors) throw e;
         // Pacht прошёл с ошибкой — оставляем missing, не валим всю операцию.
         console.error("[getContactsByIds] batch failed:", e?.message || e);
       }
