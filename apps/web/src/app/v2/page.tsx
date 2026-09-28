@@ -32,11 +32,13 @@ const unwrapDocs = (d: any): any[] => (Array.isArray(d?.documents) ? d.documents
 
 export default async function Page() {
   const base = getApiBase();
-  const [content, projects, events, news, cooperationDocs, summary] = await Promise.all([
+  // 2026-09-28 (обновление макета от Рината): сверху карусель «Акции» из
+  // CMS-акций (LandingPromo), блок «Новости» из макета убран.
+  const [content, projects, events, promos, cooperationDocs, summary] = await Promise.all([
     safeFetch<any>(`${base}/api/public/cms/content`),
     safeFetch<any[]>(`${base}/api/public/cms/projects`),
     safeFetch<any[]>(`${base}/api/public/cms/events`),
-    safeFetch<any[]>(`${base}/api/public/cms/news`),
+    safeFetch<any[]>(`${base}/api/public/cms/promos`),
     safeFetch<any>(`${base}/api/public/documents?category=cooperation`),
     safeFetch<any>(`${base}/api/public/documents/summary`),
   ]);
@@ -45,7 +47,7 @@ export default async function Page() {
     content: content || {},
     projects: Array.isArray(projects) ? projects : [],
     events: Array.isArray(events) ? events : [],
-    news: Array.isArray(news) ? news : [],
+    promos: Array.isArray(promos) ? promos : [],
     cooperationDocs: unwrapDocs(cooperationDocs),
     materials: summary?.groups || {},
   };

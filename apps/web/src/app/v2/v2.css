@@ -64,20 +64,35 @@
 .v2-title-row .v2-btn { margin-top: 0; }
 
 /* проекты */
-.v2-projects { display: grid; grid-template-columns: repeat(2, 437px); gap: 24px; margin-top: 72px; }
+.v2-projects { display: grid; grid-template-columns: repeat(2, 668px); gap: 24px; margin-top: 72px; }
 .v2-projects.v2-projects--3 { grid-template-columns: repeat(3, 437px); }
-.v2-pcard { background: #fff; border-radius: 24px; overflow: hidden; height: 807px; position: relative; }
+.v2-pcard { background: #fff; border-radius: 24px; overflow: hidden; height: 777px; position: relative; }
 .v2-pcard-photo { width: 100%; height: 437px; object-fit: cover; }
-.v2-pcard-body { padding: 38px 40px 40px; }
+.v2-pcard-body { padding: 38px 40px 0; }
 .v2-tags { display: flex; gap: 8px; }
 .v2-tag { display: inline-flex; align-items: center; height: 28px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--v2-line); color: var(--v2-gray); font-size: 16px; line-height: 18px; white-space: nowrap; }
 .v2-tag--dark { background: var(--v2-dark); border-color: var(--v2-dark); color: #fff; }
-.v2-pcard-name { margin-top: 26px; font-size: 16px; line-height: 18px; }
+.v2-pcard-name { margin-top: 26px; font-size: 16px; line-height: 21px; }
 .v2-pcard-name span { display: block; color: var(--v2-gray); }
-.v2 .v2-pcard-desc { margin-top: 12px; font-size: 16px; line-height: 18px; max-width: 360px; max-height: 90px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
-.v2-pcard-more { display: inline-block; margin-top: 12px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
+.v2 .v2-pcard-desc { margin-top: 12px; font-size: 16px; line-height: 18px; max-width: 588px; max-height: 54px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.v2-pcard-more { display: inline-block; margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
 .v2-pcard-more:hover { color: var(--v2-black); }
 .v2-pcard .v2-btn--dark { position: absolute; left: 40px; right: 40px; bottom: 40px; }
+
+/* акции (2026-09-28: карусель 1360×600 по обновлённому макету) */
+.v2-promo { position: relative; height: 600px; border-radius: 24px; overflow: hidden; background: #1f1f1f center / cover no-repeat; color: #fff; }
+.v2 .v2-promo-title { position: absolute; left: 50px; top: 50px; max-width: 560px; font-size: 44px; line-height: 51px; font-weight: 500; }
+.v2 .v2-promo-sub { position: absolute; left: 50px; top: 170px; max-width: 560px; font-size: 24px; line-height: 28px; }
+.v2-promo-cta { position: absolute; left: 50px; bottom: 90px; }
+.v2-promo-arrow { position: absolute; top: 278px; width: 44px; height: 44px; }
+.v2-promo-arrow::before { content: ''; position: absolute; left: 16px; top: 12px; width: 15px; height: 15px; border-top: 3px solid #fff; border-right: 3px solid #fff; transform: rotate(45deg); }
+.v2-promo-arrow--prev { left: 32px; }
+.v2-promo-arrow--prev::before { transform: rotate(-135deg); left: 20px; }
+.v2-promo-arrow--next { right: 32px; }
+.v2-promo-arrow:hover { opacity: .8; }
+.v2-promo-dots { position: absolute; left: 50px; top: 535px; display: flex; gap: 12px; align-items: center; }
+.v2 .v2-promo-dot { width: 15px; height: 15px; border-radius: 50%; background: #fff; }
+.v2 .v2-promo-dot--active { width: 46px; border-radius: 7.5px; background: var(--v2-gold); }
 
 /* шаги */
 .v2-steps { display: grid; grid-template-columns: repeat(4, 322px); gap: 24px; margin-top: 72px; }
