@@ -20,6 +20,17 @@ import {
   AMO_KC_STATUS,
   agencyToAmoCompanyFields,
 } from "./amo-crm.fields";
+import {
+  AmoNote,
+  AmoNoteEntityType,
+  AmoNotesListOptions,
+  AmoTask,
+  AmoTaskEntityType,
+  AmoTasksListOptions,
+  AmoUser,
+  normalizeAmoTask,
+  normalizeAmoUser,
+} from "./amo-crm.touches";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -110,6 +121,50 @@ function isKcPipelineLeadInWindow(
     createdAt <= createdBeforeUnix
   );
 }
+// 2026-09-28: синк касаний — filter[entity_id][] amo принимает пачками,
+// держим ≤ 50 id на запрос (длина query + лимит 250 записей на страницу).
+const AMO_TOUCHES_FILTER_BATCH = 50;
+const AMO_TOUCHES_BATCH_PAUSE_MS = process.env.JEST_WORKER_ID ? 0 : 150;
+const AMO_TOUCHES_DEFAULT_MAX_PAGES = 40;
+
+function touchesPageLimit(limit: number | undefined): number {
+  const value = limit ?? 250;
+  if (!Number.isInteger(value) || value < 1 || value > 250) {
+    throw new Error("AMO_TOUCHES_LIMIT_INVALID");
+  }
+  return value;
+}
+
+function touchesMaxPages(maxPages: number | undefined): number {
+  const value = maxPages ?? AMO_TOUCHES_DEFAULT_MAX_PAGES;
+  if (!Number.isInteger(value) || value < 1 || value > 10_000) {
+    throw new Error("AMO_TOUCHES_MAX_PAGES_INVALID");
+  }
+  return value;
+}
+
+function uniquePositiveIds(ids: number[], errorCode: string): number[] {
+  if (!Array.isArray(ids)) throw new Error(errorCode);
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const raw of ids) {
+    const id = Number(raw);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error(errorCode);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** Есть ли следующая страница: по _links.next или пока страница полная. */
+function hasNextPage(data: any, itemsOnPage: number, limit: number): boolean {
+  if (itemsOnPage === 0) return false;
+  const next = data?._links?.next?.href;
+  if (typeof next === "string" && next) return true;
+  return itemsOnPage >= limit;
+}
+
 const AMO_READONLY_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const AMO_EXACT_CONTACT_PAGE_LIMIT = 250;
 const AMO_EXACT_CONTACT_MAX_PAGES = 20;
@@ -132,7 +187,19 @@ export interface AmoContact {
   custom_fields_values?: any[];
   created_at?: number;
   updated_at?: number;
-  _embedded?: any;
+  // 2026-09-28: поля для синка касаний. _embedded оставлен any-совместимым
+  // (leads/tags/companies приходят только с ?with=…).
+  responsible_user_id?: number;
+  created_by?: number;
+  updated_by?: number;
+  /** Ближайшая незакрытая задача (unix, сек) или null. */
+  closest_task_at?: number | null;
+  _embedded?: {
+    leads?: { id: number; _links?: any }[];
+    tags?: { id: number; name: string; color?: string | null }[];
+    companies?: { id: number; _links?: any }[];
+    [key: string]: any;
+  };
 }
 
 export interface AmoCompany {
@@ -701,10 +768,10 @@ export class AmoCrmAdapter {
       throw new Error("AMO_READONLY_WITH_INVALID");
     }
     const pipelineIds = Array.from(new Set(options.pipelineIds || []));
-    if (
-      resource !== "leads" &&
-      (pipelineIds.length > 0 || options.updatedFrom !== undefined)
-    ) {
+    // 2026-09-28: filter[updated_at][from] amo поддерживает и для contacts /
+    // companies — нужен ночному синку касаний (инкрементальный проход по
+    // контактам). Запрет оставлен только для pipelineIds вне leads.
+    if (resource !== "leads" && pipelineIds.length > 0) {
       throw new Error("AMO_READONLY_FILTER_INVALID");
     }
     if (
@@ -1121,38 +1188,101 @@ export class AmoCrmAdapter {
   // 2026-06-10: список задач по entity (лиду / контакту). Используется
   // для диагностики «кто ответственный за задачу» — чтобы убедиться
   // что Морикит / наш код проставляет правильного человека.
+  //
+  // 2026-09-28: опции (isCompleted / limit / maxPages / order) + пагинация
+  // для синка касаний. Без opts поведение прежнее: одна страница на 50,
+  // ошибки глотаются (возвращаем []). С opts — полная пагинация, но ошибки
+  // тоже глотаются (совместимость); если нужен throw — getTasksForEntities.
   async getTasksByEntity(
-    entityType: "leads" | "contacts",
+    entityType: AmoTaskEntityType,
     entityId: number,
-  ): Promise<
-    Array<{
-      id: number;
-      text: string;
-      task_type_id: number;
-      responsible_user_id: number;
-      is_completed: boolean;
-      complete_till: number;
-      created_at: number;
-    }>
-  > {
+    opts?: AmoTasksListOptions,
+  ): Promise<AmoTask[]> {
     try {
-      const data = await this.request<any>(
-        `/tasks?filter[entity_type]=${entityType}&filter[entity_id]=${entityId}&limit=50`,
-      );
-      const items = data?._embedded?.tasks || [];
-      return items.map((t: any) => ({
-        id: t.id,
-        text: t.text,
-        task_type_id: t.task_type_id,
-        responsible_user_id: t.responsible_user_id,
-        is_completed: t.is_completed,
-        complete_till: t.complete_till,
-        created_at: t.created_at,
-      }));
+      if (!opts) {
+        const data = await this.request<any>(
+          `/tasks?filter[entity_type]=${entityType}&filter[entity_id]=${entityId}&limit=50`,
+        );
+        const items = data?._embedded?.tasks || [];
+        return items
+          .map((t: any) => normalizeAmoTask(t))
+          .filter((t: AmoTask | null): t is AmoTask => t !== null);
+      }
+      return await this.listTasksPaged(entityType, [entityId], opts);
     } catch (e: any) {
       console.error("[getTasksByEntity] failed:", e?.message || e);
       return [];
     }
+  }
+
+  /**
+   * 2026-09-28: задачи по пачке сущностей (filter[entity_id][]=…, ≤ 50 id
+   * на запрос) с полной пагинацией. Ошибки НЕ глотаются — ночной синк
+   * должен знать, что пачка не прочиталась. Только GET, идёт как фон
+   * (светофор). Возвращает Map<entityId, AmoTask[]>; сущности без задач
+   * в Map отсутствуют.
+   */
+  async getTasksForEntities(
+    entityType: AmoTaskEntityType,
+    ids: number[],
+    opts: AmoTasksListOptions = {},
+  ): Promise<Map<number, AmoTask[]>> {
+    const result = new Map<number, AmoTask[]>();
+    const uniqueIds = uniquePositiveIds(ids, "AMO_TOUCHES_ENTITY_IDS_INVALID");
+    for (let i = 0; i < uniqueIds.length; i += AMO_TOUCHES_FILTER_BATCH) {
+      const chunk = uniqueIds.slice(i, i + AMO_TOUCHES_FILTER_BATCH);
+      const tasks = await this.listTasksPaged(entityType, chunk, opts);
+      for (const task of tasks) {
+        const list = result.get(task.entity_id);
+        if (list) list.push(task);
+        else result.set(task.entity_id, [task]);
+      }
+      if (i + AMO_TOUCHES_FILTER_BATCH < uniqueIds.length) {
+        await sleep(AMO_TOUCHES_BATCH_PAUSE_MS);
+      }
+    }
+    return result;
+  }
+
+  private async listTasksPaged(
+    entityType: AmoTaskEntityType,
+    ids: number[],
+    opts: AmoTasksListOptions,
+  ): Promise<AmoTask[]> {
+    if (entityType !== "leads" && entityType !== "contacts") {
+      throw new Error("AMO_TOUCHES_ENTITY_TYPE_INVALID");
+    }
+    const limit = touchesPageLimit(opts.limit);
+    const maxPages = touchesMaxPages(opts.maxPages);
+    const out: AmoTask[] = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        page: String(page),
+      });
+      params.set("filter[entity_type]", entityType);
+      for (const id of ids) params.append("filter[entity_id][]", String(id));
+      if (opts.isCompleted !== undefined) {
+        params.set("filter[is_completed]", opts.isCompleted ? "1" : "0");
+      }
+      if (opts.order) params.set("order[complete_till]", opts.order);
+      const data = await this.request<any>(`/tasks?${params.toString()}`);
+      // amo отвечает 204 (request → null), когда задач нет.
+      if (data === null || data === undefined) break;
+      const items = data?._embedded?.tasks;
+      if (!Array.isArray(items)) throw new Error("AMO_TOUCHES_PAGE_INVALID");
+      for (const raw of items) {
+        const task = normalizeAmoTask(raw);
+        if (task) out.push(task);
+      }
+      if (!hasNextPage(data, items.length, limit)) break;
+      if (page === maxPages) {
+        console.warn(
+          `[getTasksForEntities] ${entityType}: достигнут maxPages=${maxPages}, хвост не прочитан`,
+        );
+      }
+    }
+    return out;
   }
 
   // 2026-06-11: Морикит создаёт задачу на КЦ-менеджере по графику смен, НО
@@ -1241,6 +1371,135 @@ export class AmoCrmAdapter {
       method: "POST",
       body: JSON.stringify([{ note_type: "common", params: { text } }]),
     });
+  }
+
+  // === Примечания (чтение) — 2026-09-28, синк касаний ===
+  //
+  // GET /api/v4/{contacts|leads}/notes?filter[entity_id][]=…&filter[note_type][]=…
+  //   &order[updated_at]=desc&limit=250&page=N
+  // Пачки ≤ 50 id, полная пагинация (по _links.next / пока страница полная).
+  // Только GET, через общий request() → ретраи/лимиты/светофор как фон.
+
+  /** Примечания одного контакта. С opts.page — одна страница, иначе все. */
+  async getContactNotes(
+    contactId: number,
+    opts: AmoNotesListOptions = {},
+  ): Promise<AmoNote[]> {
+    const ids = uniquePositiveIds([contactId], "AMO_TOUCHES_ENTITY_IDS_INVALID");
+    return this.listNotesPaged("contacts", ids, opts);
+  }
+
+  /** Примечания одного лида. С opts.page — одна страница, иначе все. */
+  async getLeadNotes(
+    leadId: number,
+    opts: AmoNotesListOptions = {},
+  ): Promise<AmoNote[]> {
+    const ids = uniquePositiveIds([leadId], "AMO_TOUCHES_ENTITY_IDS_INVALID");
+    return this.listNotesPaged("leads", ids, opts);
+  }
+
+  /**
+   * Примечания по пачке контактов → Map<contactId, AmoNote[]>. Контакты без
+   * примечаний в Map отсутствуют. Ошибки не глотаются.
+   */
+  async getNotesForContacts(
+    contactIds: number[],
+    opts: AmoNotesListOptions = {},
+  ): Promise<Map<number, AmoNote[]>> {
+    return this.listNotesForEntities("contacts", contactIds, opts);
+  }
+
+  /** То же для лидов → Map<leadId, AmoNote[]>. */
+  async getNotesForLeads(
+    leadIds: number[],
+    opts: AmoNotesListOptions = {},
+  ): Promise<Map<number, AmoNote[]>> {
+    return this.listNotesForEntities("leads", leadIds, opts);
+  }
+
+  private async listNotesForEntities(
+    entityType: AmoNoteEntityType,
+    ids: number[],
+    opts: AmoNotesListOptions,
+  ): Promise<Map<number, AmoNote[]>> {
+    const result = new Map<number, AmoNote[]>();
+    const uniqueIds = uniquePositiveIds(ids, "AMO_TOUCHES_ENTITY_IDS_INVALID");
+    for (let i = 0; i < uniqueIds.length; i += AMO_TOUCHES_FILTER_BATCH) {
+      const chunk = uniqueIds.slice(i, i + AMO_TOUCHES_FILTER_BATCH);
+      const notes = await this.listNotesPaged(entityType, chunk, opts);
+      for (const note of notes) {
+        const list = result.get(note.entity_id);
+        if (list) list.push(note);
+        else result.set(note.entity_id, [note]);
+      }
+      if (i + AMO_TOUCHES_FILTER_BATCH < uniqueIds.length) {
+        await sleep(AMO_TOUCHES_BATCH_PAUSE_MS);
+      }
+    }
+    return result;
+  }
+
+  private async listNotesPaged(
+    entityType: AmoNoteEntityType,
+    ids: number[],
+    opts: AmoNotesListOptions,
+  ): Promise<AmoNote[]> {
+    if (entityType !== "leads" && entityType !== "contacts") {
+      throw new Error("AMO_TOUCHES_ENTITY_TYPE_INVALID");
+    }
+    if (ids.length > AMO_TOUCHES_FILTER_BATCH) {
+      throw new Error("AMO_TOUCHES_BATCH_TOO_LARGE");
+    }
+    const limit = touchesPageLimit(opts.limit);
+    const singlePage = opts.page !== undefined;
+    if (
+      singlePage &&
+      (!Number.isInteger(opts.page) || (opts.page as number) < 1)
+    ) {
+      throw new Error("AMO_TOUCHES_PAGE_INVALID_ARG");
+    }
+    const firstPage = singlePage ? (opts.page as number) : 1;
+    const maxPages = singlePage ? 1 : touchesMaxPages(opts.maxPages);
+    const noteTypes = Array.from(
+      new Set((opts.noteTypes || []).map((v) => String(v).trim()).filter(Boolean)),
+    );
+    const out: AmoNote[] = [];
+    for (let n = 0; n < maxPages; n += 1) {
+      const page = firstPage + n;
+      const params = new URLSearchParams({
+        limit: String(limit),
+        page: String(page),
+      });
+      for (const id of ids) params.append("filter[entity_id][]", String(id));
+      for (const t of noteTypes) params.append("filter[note_type][]", t);
+      params.set("order[updated_at]", "desc");
+      const data = await this.request<any>(
+        `/${entityType}/notes?${params.toString()}`,
+      );
+      // amo отвечает 204 (request → null), когда примечаний нет.
+      if (data === null || data === undefined) break;
+      const items = data?._embedded?.notes;
+      if (!Array.isArray(items)) throw new Error("AMO_TOUCHES_PAGE_INVALID");
+      for (const raw of items) {
+        const id = Number(raw?.id);
+        if (!Number.isSafeInteger(id) || id <= 0) continue;
+        out.push({
+          ...raw,
+          id,
+          entity_id: Number(raw?.entity_id) || 0,
+          note_type: String(raw?.note_type ?? ""),
+          params:
+            raw?.params && typeof raw.params === "object" ? raw.params : {},
+        } as AmoNote);
+      }
+      if (!hasNextPage(data, items.length, limit)) break;
+      if (n + 1 === maxPages && !singlePage) {
+        console.warn(
+          `[getNotesFor${entityType}] достигнут maxPages=${maxPages}, хвост не прочитан`,
+        );
+      }
+    }
+    return out;
   }
 
   // === Companies ===
@@ -1751,6 +2010,78 @@ export class AmoCrmAdapter {
     return leads;
   }
 
+  // 2026-09-28: bulk-чтение лидов пачками ≤ 250 (как getContactsByIds) для
+  // синка касаний: id, pipeline_id, status_id, responsible_user_id,
+  // updated_at, created_at, _embedded.contacts. Map<id, AmoLead>; лиды,
+  // которых amo не вернул, в Map отсутствуют. В strict-режиме любая
+  // нестыковка (ошибка пачки, лишний/дублирующий id, неполный ответ) →
+  // throw; без strict пачка с ошибкой логируется и пропускается.
+  async getLeadsByIds(
+    ids: number[],
+    options: { strict?: boolean; with?: string } = {},
+  ): Promise<Map<number, AmoLead>> {
+    const result = new Map<number, AmoLead>();
+    if (
+      options.strict &&
+      (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+        new Set(ids).size !== ids.length)
+    ) {
+      throw new Error("AMO_TOUCHES_LEAD_IDS_INVALID");
+    }
+    const cleanIds = options.strict
+      ? ids
+      : Array.from(
+          new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0)),
+        );
+    const withParam = options.with ?? "contacts";
+    const BATCH = 250;
+    for (let i = 0; i < cleanIds.length; i += BATCH) {
+      const chunk = cleanIds.slice(i, i + BATCH);
+      const requested = new Set(chunk);
+      const params = new URLSearchParams({ limit: String(BATCH) });
+      for (const id of chunk) params.append("filter[id][]", String(id));
+      if (withParam) params.set("with", withParam);
+      try {
+        const data = await this.request<any>(`/leads?${params.toString()}`);
+        // 204 → null: ни один id не найден.
+        const rawList =
+          data === null || data === undefined ? [] : data?._embedded?.leads;
+        if (options.strict && !Array.isArray(rawList)) {
+          throw new Error("AMO_TOUCHES_LEADS_PAGE_INVALID");
+        }
+        const list: AmoLead[] = Array.isArray(rawList) ? rawList : [];
+        for (const lead of list) {
+          const id = Number(lead?.id);
+          if (options.strict) {
+            if (!Number.isSafeInteger(id) || id <= 0) {
+              throw new Error("AMO_TOUCHES_LEAD_ID_INVALID");
+            }
+            if (!requested.has(id)) {
+              throw new Error("AMO_TOUCHES_LEAD_ID_UNREQUESTED");
+            }
+            if (result.has(id)) {
+              throw new Error("AMO_TOUCHES_LEAD_ID_DUPLICATE");
+            }
+          } else if (!Number.isSafeInteger(id) || id <= 0) {
+            continue;
+          }
+          result.set(id, lead);
+        }
+        if (
+          options.strict &&
+          chunk.some((requestedId) => !result.has(requestedId))
+        ) {
+          throw new Error("AMO_TOUCHES_LEADS_INCOMPLETE");
+        }
+      } catch (e: any) {
+        if (options.strict) throw e;
+        console.error("[getLeadsByIds] batch failed:", e?.message || e);
+      }
+      if (i + BATCH < cleanIds.length) await sleep(AMO_TOUCHES_BATCH_PAUSE_MS);
+    }
+    return result;
+  }
+
   async getLeadsByPipeline(
     pipelineId: number,
     limit = 250,
@@ -1855,9 +2186,30 @@ export class AmoCrmAdapter {
   }
 
   // === Users ===
-  async getUsers(): Promise<any[]> {
-    const data = await this.request<any>("/users");
-    return data?._embedded?.users || [];
+  // 2026-09-28: пагинация (раньше — одна страница с дефолтным limit=50 amo)
+  // и типизация AmoUser (id, name, email, rights.is_active + плоское
+  // is_active). Параметр with не добавляем намеренно: getUsers зовут живые
+  // админ-потоки, и 400 от amo на неизвестный with их сломал бы.
+  async getUsers(): Promise<AmoUser[]> {
+    const out: AmoUser[] = [];
+    const seen = new Set<number>();
+    const limit = 250;
+    for (let page = 1; page <= 20; page += 1) {
+      const data = await this.request<any>(
+        `/users?limit=${limit}&page=${page}`,
+      );
+      if (data === null || data === undefined) break; // 204
+      const items = data?._embedded?.users;
+      if (!Array.isArray(items)) break;
+      for (const raw of items) {
+        const user = normalizeAmoUser(raw);
+        if (!user || seen.has(user.id)) continue;
+        seen.add(user.id);
+        out.push(user);
+      }
+      if (!hasNextPage(data, items.length, limit)) break;
+    }
+    return out;
   }
 
   async findUserByPhone(phone: string): Promise<any | null> {

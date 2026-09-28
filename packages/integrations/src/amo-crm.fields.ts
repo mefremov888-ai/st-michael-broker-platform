@@ -11,6 +11,57 @@ export const AMO_PIPELINES = {
 export const AMO_STATUS_FINAL_WON = 142;
 export const AMO_STATUS_FINAL_LOST = 143;
 
+// 2026-09-28: типы примечаний amoCRM (note_type) — для чтения «касаний»
+// (GET /api/v4/{contacts|leads}/notes?filter[note_type][]=…).
+// Полный список по доке: common, call_in, call_out, service_message,
+// extended_service_message, message_cashier, geolocation, sms_in, sms_out,
+// attachment.
+export const AMO_NOTE_TYPES = {
+  COMMON: 'common',
+  CALL_IN: 'call_in',
+  CALL_OUT: 'call_out',
+  SERVICE_MESSAGE: 'service_message',
+  EXTENDED_SERVICE_MESSAGE: 'extended_service_message',
+  MESSAGE_CASHIER: 'message_cashier',
+  GEOLOCATION: 'geolocation',
+  SMS_IN: 'sms_in',
+  SMS_OUT: 'sms_out',
+  ATTACHMENT: 'attachment',
+} as const;
+
+export type AmoNoteTypeCode = (typeof AMO_NOTE_TYPES)[keyof typeof AMO_NOTE_TYPES];
+
+/** Типы примечаний, которые считаем звонком. */
+export const AMO_CALL_NOTE_TYPES: readonly string[] = [
+  AMO_NOTE_TYPES.CALL_IN,
+  AMO_NOTE_TYPES.CALL_OUT,
+];
+
+// call_status в params примечания-звонка (дока amoCRM, раздел «Звонки»).
+// ⚠ Сверить на живом аккаунте: телефония (Mango) может не проставлять
+// статус вовсе — тогда в note.params.call_status пусто.
+export const AMO_CALL_STATUS_TEXT = {
+  1: 'оставил сообщение',
+  2: 'перезвонить позже',
+  3: 'нет на месте',
+  4: 'разговор состоялся',
+  5: 'неверный номер',
+  6: 'не дозвонился',
+  7: 'номер занят',
+} as const;
+
+export type AmoCallStatusCode = keyof typeof AMO_CALL_STATUS_TEXT;
+
+/** Статусы, при которых разговор реально состоялся. */
+export const AMO_CALL_STATUS_TALKED: readonly number[] = [4];
+
+// Типы задач amo (task_type_id). Кастомные типы («Аларм») задаются через env
+// AMO_ALARM_TASK_TYPE_ID — см. docs/amo-integration.md §5.2.
+export const AMO_TASK_TYPES = {
+  CALL: 1,
+  MEETING: 2,
+} as const;
+
 // Stages of "Воронка брокеров" (10787390)
 export const AMO_BROKER_STAGE = {
   NEW: 84932446,           // Новый брокер

@@ -2,6 +2,7 @@
 export * from "./amo-crm.adapter";
 export * from "./amo-traffic-light";
 export * from "./amo-crm.fields";
+export * from "./amo-crm.touches";
 export * from "./amo-fixation-phone-lock";
 export * from "./loyalty-readonly-audit";
 export * from "./dadata.adapter";
