@@ -16,6 +16,7 @@
  *   PHASES=0,1,2,3          какие фазы выполнять
  *   LOOKUP_QUOTA=300        квота фазы 3 (поиск по телефону)
  *   BACKFILL=1              перечитать касания у всех (игнорировать updated_at)
+ *   UNLOCK_STALE_MIN=N      перед прогоном пометить FAILED зависшие RUNNING старше N минут
  *
  * dry-run делает ВСЕ чтения из amo и все записи внутри транзакции с откатом —
  * ошибки записи видны до боевого прогона.
@@ -97,6 +98,18 @@ function parsePhases(raw) {
         `backfill=${opts.backfill} ===`,
     );
 
+    // 28.09: разовое снятие замка — RUNNING-строка amo-touch-v1 старше N минут
+    // помечается FAILED/MANUAL_UNLOCK (нужно после прогона, упавшего до записи
+    // итога; сам сервис снимает замок только через 4 часа).
+    const unlockMin = positiveInt(process.env.UNLOCK_STALE_MIN);
+    if (unlockMin) {
+      const before = new Date(Date.now() - unlockMin * 60_000);
+      const unlocked = await prisma.loyaltySyncRun.updateMany({
+        where: { source: 'AMOCRM', ruleVersion: 'amo-touch-v1', status: 'RUNNING', startedAt: { lt: before } },
+        data: { status: 'FAILED', errorCode: 'MANUAL_UNLOCK', completedAt: new Date() },
+      });
+      console.log(`Снят замок: ${unlocked.count} зависших RUNNING старше ${unlockMin} мин`);
+    }
     const service = new AmoTouchSyncService(prisma, opsAlerts);
     const result = await service.run(opts);
 

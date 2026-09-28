@@ -716,12 +716,16 @@ export class AmoTouchSyncService {
     stats.requests = getAmoRequestCount() - requestsBefore;
     stats.durationMs = Date.now() - startedAt;
     const counts = { mode, ...stats, backfillDone, plannedWrites: sink.planned };
+    // 28.09: check-констрейнт loyalty_sync_runs_state_check требует у SUCCEEDED
+    // непустой content_hash — первый сухой прогон на проде упал именно на этом
+    // (23514). Хэш = сводка прогона.
     await this.prisma.loyaltySyncRun.updateMany({
       where: { id: runId, status: 'RUNNING' },
       data: {
         status,
         errorCode,
         counts: counts as Prisma.InputJsonValue,
+        contentHash: computeSourceHash(['amo-touch-sync', mode, status, stats]),
         completedAt: new Date(),
       },
     });
