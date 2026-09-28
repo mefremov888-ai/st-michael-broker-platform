@@ -91,8 +91,9 @@
 .v2-pcard-name b { display: block; font-weight: 500; }
 .v2-pcard-name span { display: block; color: var(--v2-gray); }
 .v2 .v2-pcard-desc { margin-top: 12px; width: 360px; height: 90px; font-size: 16px; line-height: 18px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
-.v2-pcard-more { display: inline-block; margin-top: 12px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
-a.v2-pcard-more:hover { color: var(--v2-black); }
+/* 28.09: у ссылки цвет перебивало `.v2 a { color: inherit }` — «Подробнее →» была чёрной; в макете серая с подчёркиванием */
+.v2 .v2-pcard-more, .v2 a.v2-pcard-more { display: inline-block; margin-top: 12px; font-size: 16px; line-height: 18px; color: var(--v2-gray); text-decoration: underline; text-underline-offset: 3px; }
+.v2 a.v2-pcard-more:hover { color: var(--v2-black); }
 .v2-pcard .v2-btn { position: absolute; left: 40px; width: 357px; bottom: 40px; }
 .v2-pcard .v2-btn--soon { bottom: 39px; }
 
