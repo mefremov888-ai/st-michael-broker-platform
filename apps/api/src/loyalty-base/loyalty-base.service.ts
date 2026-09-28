@@ -940,6 +940,30 @@ export function fixationClientWhere(source?: string | null): any {
 //   сделки   — подтверждённые ДДУ кабинета ИЛИ оплаченные строки реестра.
 // Если человек отдельно выбрал «Сделка в периоде», условие по сделкам уже
 // добавлено этим фильтром — второй раз не сужаем.
+// 2026-09-28 (решение владельца): «Период звонков» сам сужает список
+// брокеров «Нашей базы» — остаются только те, с кем за период был хоть один
+// звонок по телефону: мы звонили или нам звонили. Три источника звонков
+// кабинета: легаси CallLog, попытки workflow-обзвонов и телефония Mango
+// (входящие и исходящие, любой исход). Звонок брокера своему клиенту из
+// кабинета (Call.clientId задан) — не общение с нами, поэтому не считается.
+export function brokerCallInPeriodWhere(period: {
+  from: Date;
+  to: Date;
+}): any {
+  const range = { gte: period.from, lte: period.to };
+  return {
+    OR: [
+      { callLogs: { some: { createdAt: range } } },
+      {
+        loyaltyAssignmentsAsTarget: {
+          some: { attempts: { some: { occurredAt: range } } },
+        },
+      },
+      { calls: { some: { clientId: null, createdAt: range } } },
+    ],
+  };
+}
+
 export function brokerPeriodNarrowingWhere(args: {
   fixationPeriod?: { from: Date; to: Date } | null;
   meetingPeriod?: { from: Date; to: Date } | null;
@@ -948,8 +972,17 @@ export function brokerPeriodNarrowingWhere(args: {
   cabinetSource?: string | null;
   dealWhere?: any;
   registryWhere?: any;
+  callPeriod?: { from: Date; to: Date } | null;
+  // «Не звонили в период» — исключение: список не сужается до звонивших,
+  // наоборот, убираем всех, у кого звонок за период был (по тем же трём
+  // источникам, чтобы «Звонили» и «Не звонили» не пересекались).
+  notCalledInPeriod?: boolean;
 }): any[] {
   const clauses: any[] = [];
+  if (args.callPeriod) {
+    const called = brokerCallInPeriodWhere(args.callPeriod);
+    clauses.push(args.notCalledInPeriod ? { NOT: called } : called);
+  }
   if (args.fixationPeriod) {
     clauses.push({
       clients: {
@@ -8781,8 +8814,13 @@ export class LoyaltyBaseService {
     }
     // 2026-09-17 (владелец): период сужает список — правила в
     // brokerPeriodNarrowingWhere (там же тесты).
+    // 2026-09-28 (решение владельца): «Период звонков» тоже сужает — только
+    // брокеры со звонком за период (включая телефонию Mango); «Не звонили в
+    // период» остаётся исключением.
     and.push(
       ...brokerPeriodNarrowingWhere({
+        callPeriod: filter.callPeriod,
+        notCalledInPeriod: this.isNotCalledInPeriodFilter(filter),
         fixationPeriod: filter.fixationPeriod,
         meetingPeriod: filter.meetingPeriod,
         dealPeriod: filter.dealPeriod,
@@ -10562,6 +10600,31 @@ export class LoyaltyBaseService {
     );
   }
 
+  // 2026-09-28 (решение владельца): «не звонили» в любом из трёх видов —
+  // колонка «Прошлые обзвоны», сценарий или флаг called=false. Для них
+  // «Период звонков» работает исключением, а не сужением до звонивших.
+  private isNotCalledInPeriodFilter(filter: CanonicalLoyaltyFilter): boolean {
+    return (
+      filter.columns.calls === "NOT_CALLED_IN_PERIOD" ||
+      filter.scenario === "NOT_CALLED_IN_PERIOD" ||
+      filter.called === false
+    );
+  }
+
+  // Был ли у брокера «Нашей базы» звонок за период. Если период задан и
+  // фильтр не «не звонили», выборка уже сужена в БД до брокеров со звонком
+  // за период (brokerCallInPeriodWhere — в т.ч. телефония Mango, которой нет
+  // в ourCalls), поэтому присутствие известно без пересчёта по легаси и
+  // workflow-звонкам. Иначе — прежний расчёт по загруженным звонкам.
+  private ourBrokerCallPresence(
+    calls: LoyaltyCallView[],
+    filter: CanonicalLoyaltyFilter,
+  ): boolean | null {
+    if (filter.callPeriod && !this.isNotCalledInPeriodFilter(filter))
+      return true;
+    return this.callPresenceInPeriod(calls, 0, filter.callPeriod);
+  }
+
   private matchesOurBroker(
     record: any,
     item: any,
@@ -10583,6 +10646,7 @@ export class LoyaltyBaseService {
     const assigneeId = record.assignedManagerId || "";
     const assigneeName = record.assignedManager?.fullName || "";
     const calls = this.ourCalls(record);
+    const callPresence = this.ourBrokerCallPresence(calls, filter);
     const callAssignees = uniqueSorted(
       calls.flatMap((call) => this.callAssigneeValues(call)),
     );
@@ -10658,10 +10722,8 @@ export class LoyaltyBaseService {
       if (!latest || !resultAliases.includes(lower(latest.result)))
         return false;
     }
-    if (filter.called !== undefined) {
-      const presence = this.callPresenceInPeriod(calls, 0, filter.callPeriod!);
-      if (presence !== filter.called) return false;
-    }
+    if (filter.called !== undefined && callPresence !== filter.called)
+      return false;
     if (
       filter.assigneeIds.length &&
       !filter.assigneeIds.some((value) => assignees.includes(value))
@@ -10758,7 +10820,7 @@ export class LoyaltyBaseService {
         bt,
         fixations,
         meetings,
-        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod),
+        callPresence,
         assignees,
         deals,
       })
@@ -10783,9 +10845,7 @@ export class LoyaltyBaseService {
     if (
       filter.scenario &&
       ["NOT_CALLED_IN_PERIOD", "CALLED_IN_PERIOD"].includes(filter.scenario) &&
-      !this.matchesScenario(filter.scenario, {
-        callPresence: this.callPresenceInPeriod(calls, 0, filter.callPeriod!),
-      })
+      !this.matchesScenario(filter.scenario, { callPresence })
     )
       return false;
     // Agency-only dimensions have no canonical backing fields in Broker.
