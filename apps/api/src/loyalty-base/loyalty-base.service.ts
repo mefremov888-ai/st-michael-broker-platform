@@ -992,6 +992,12 @@ export function brokerCallInPeriodWhere(period: {
   };
 }
 
+// 2026-09-28 (перф, 504 на проде): условие по трём связям Postgres разворачивал
+// в коррелированные подзапросы на каждого из 19,8 тыс. брокеров — «Период
+// звонков» не укладывался в 60 с. Поэтому в бою множество брокеров со звонком
+// считается заранее (calledBrokerIdsInPeriod, три прямых запроса по таблицам
+// звонков) и в where кладётся `id in (...)`. Условие по связям остаётся
+// запасным для окружений без нужных делегатов (моки в тестах).
 export function brokerPeriodNarrowingWhere(args: {
   fixationPeriod?: { from: Date; to: Date } | null;
   meetingPeriod?: { from: Date; to: Date } | null;
@@ -1005,10 +1011,17 @@ export function brokerPeriodNarrowingWhere(args: {
   // наоборот, убираем всех, у кого звонок за период был (по тем же трём
   // источникам, чтобы «Звонили» и «Не звонили» не пересекались).
   notCalledInPeriod?: boolean;
+  // Заранее посчитанные id брокеров со звонком за callPeriod. null/undefined —
+  // множество не считалось (нет делегатов), берётся условие по связям.
+  calledBrokerIds?: string[] | null;
 }): any[] {
   const clauses: any[] = [];
   if (args.callPeriod) {
-    const called = brokerCallInPeriodWhere(args.callPeriod);
+    // NOT (id IN (...)) вместо notIn: Postgres хеширует `= ANY(массив)` и
+    // под отрицанием, а `<> ALL` (во что превращается NOT IN) — нет.
+    const called = args.calledBrokerIds
+      ? { id: { in: args.calledBrokerIds } }
+      : brokerCallInPeriodWhere(args.callPeriod);
     clauses.push(args.notCalledInPeriod ? { NOT: called } : called);
   }
   if (args.fixationPeriod) {
@@ -8879,11 +8892,17 @@ export class LoyaltyBaseService {
     // brokerPeriodNarrowingWhere (там же тесты).
     // 2026-09-28 (решение владельца): «Период звонков» тоже сужает — только
     // брокеры со звонком за период (включая телефонию Mango); «Не звонили в
-    // период» остаётся исключением.
+    // период» остаётся исключением. Множество звонивших считается заранее
+    // прямыми запросами (см. calledBrokerIdsInPeriod) и переиспользуется в
+    // in-memory проверке «звонили / не звонили» (ourBrokerCallPresence).
+    const calledInPeriod = filter.callPeriod
+      ? await this.calledBrokerIdsInPeriod(filter.callPeriod)
+      : null;
     and.push(
       ...brokerPeriodNarrowingWhere({
         callPeriod: filter.callPeriod,
         notCalledInPeriod: this.isNotCalledInPeriodFilter(filter),
+        calledBrokerIds: calledInPeriod ? [...calledInPeriod].sort() : null,
         fixationPeriod: filter.fixationPeriod,
         meetingPeriod: filter.meetingPeriod,
         dealPeriod: filter.dealPeriod,
@@ -9026,7 +9045,7 @@ export class LoyaltyBaseService {
         return { record, item };
       })
       .filter(({ record, item }) =>
-        this.matchesOurBroker(record, item, filter),
+        this.matchesOurBroker(record, item, filter, calledInPeriod),
       )
       .filter(this.linkedAnnaPredicate(linkedAnnaIds, filter));
     await this.attachOurDealAmounts(
@@ -11174,15 +11193,67 @@ export class LoyaltyBaseService {
     );
   }
 
-  // Был ли у брокера «Нашей базы» звонок за период. Если период задан и
-  // фильтр не «не звонили», выборка уже сужена в БД до брокеров со звонком
-  // за период (brokerCallInPeriodWhere — в т.ч. телефония Mango, которой нет
-  // в ourCalls), поэтому присутствие известно без пересчёта по легаси и
-  // workflow-звонкам. Иначе — прежний расчёт по загруженным звонкам.
+  // 2026-09-28 (перф): множество id брокеров «Нашей базы», с кем за период
+  // был звонок, — тремя прямыми запросами по таблицам звонков, каждый идёт
+  // по индексу даты один раз (а не по разу на каждого брокера):
+  //   call_logs.created_at              → broker_id      (легаси КЦ);
+  //   loyalty_call_attempts.occurred_at → assignment → our_broker_id (обзвоны);
+  //   calls.created_at, client_id IS NULL → broker_id    (Mango, без клиента).
+  // Семантика та же, что у brokerCallInPeriodWhere: любой звонок любого
+  // исхода; звонок брокера своему клиенту (clientId задан) не считается.
+  // Размер множества ограничен числом брокеров (~20 тыс.) — ниже лимита
+  // параметров Postgres (65 535) и порога дробления `in` у Prisma (32 766).
+  // null — в окружении нет нужных делегатов (моки): берётся условие по связям.
+  private async calledBrokerIdsInPeriod(period: {
+    from: Date;
+    to: Date;
+  }): Promise<Set<string> | null> {
+    const prisma = this.prisma as any;
+    if (
+      typeof prisma.callLog?.groupBy !== "function" ||
+      typeof prisma.loyaltyCallAssignment?.findMany !== "function" ||
+      typeof prisma.call?.groupBy !== "function"
+    )
+      return null;
+    const range = { gte: period.from, lte: period.to };
+    const [legacy, assignments, mango] = await Promise.all([
+      prisma.callLog.groupBy({ by: ["brokerId"], where: { createdAt: range } }),
+      prisma.loyaltyCallAssignment.findMany({
+        where: {
+          ourBrokerId: { not: null },
+          attempts: { some: { occurredAt: range } },
+        },
+        select: { ourBrokerId: true },
+      }),
+      prisma.call.groupBy({
+        by: ["brokerId"],
+        where: { clientId: null, createdAt: range },
+      }),
+    ]);
+    const ids = new Set<string>();
+    for (const row of (Array.isArray(legacy) ? legacy : []) as any[])
+      if (row?.brokerId) ids.add(String(row.brokerId));
+    for (const row of (Array.isArray(assignments) ? assignments : []) as any[])
+      if (row?.ourBrokerId) ids.add(String(row.ourBrokerId));
+    for (const row of (Array.isArray(mango) ? mango : []) as any[])
+      if (row?.brokerId) ids.add(String(row.brokerId));
+    return ids;
+  }
+
+  // Был ли у брокера «Нашей базы» звонок за период. Если период задан,
+  // ответ берётся из того же множества, которым сужалась выборка в БД
+  // (calledBrokerIdsInPeriod — в т.ч. телефония Mango, которой нет в
+  // ourCalls). Без множества (моки): выборка уже сужена условием по связям,
+  // поэтому для «звонили» присутствие известно; для «не звонили» — прежний
+  // расчёт по загруженным звонкам. Без периода — прежний lifetime-расчёт.
   private ourBrokerCallPresence(
+    record: any,
     calls: LoyaltyCallView[],
     filter: CanonicalLoyaltyFilter,
+    calledInPeriod?: Set<string> | null,
   ): boolean | null {
+    if (filter.callPeriod && calledInPeriod)
+      return calledInPeriod.has(String(record?.id));
     if (filter.callPeriod && !this.isNotCalledInPeriodFilter(filter))
       return true;
     return this.callPresenceInPeriod(calls, 0, filter.callPeriod);
@@ -11192,6 +11263,7 @@ export class LoyaltyBaseService {
     record: any,
     item: any,
     filter: CanonicalLoyaltyFilter,
+    calledInPeriod?: Set<string> | null,
   ): boolean {
     const lifetimeDeals = Number(record._count?.deals || 0);
     const lifetimeMeetings = Number(record._count?.meetings || 0);
@@ -11209,7 +11281,12 @@ export class LoyaltyBaseService {
     const assigneeId = record.assignedManagerId || "";
     const assigneeName = record.assignedManager?.fullName || "";
     const calls = this.ourCalls(record);
-    const callPresence = this.ourBrokerCallPresence(calls, filter);
+    const callPresence = this.ourBrokerCallPresence(
+      record,
+      calls,
+      filter,
+      calledInPeriod,
+    );
     const callAssignees = uniqueSorted(
       calls.flatMap((call) => this.callAssigneeValues(call)),
     );

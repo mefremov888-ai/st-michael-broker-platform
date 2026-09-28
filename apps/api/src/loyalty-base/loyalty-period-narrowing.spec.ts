@@ -1,6 +1,7 @@
 import {
   brokerCallInPeriodWhere,
   brokerPeriodNarrowingWhere,
+  brokerPhonePresenceWhere,
 } from "./loyalty-base.service";
 
 const period = (from: string, to: string) => ({
@@ -75,14 +76,49 @@ describe("периоды сужают список «Нашей базы»", () 
 // 2026-09-28 (решение владельца): «Период звонков» сам сужает список —
 // остаются только брокеры, с кем за период был звонок: мы звонили или нам
 // звонили. «Не звонили в период» — то же условие, но как исключение.
+// 2026-09-28 (перф, 504 на проде): в бою множество звонивших считается
+// заранее прямыми запросами и передаётся списком id — в where попадает
+// `id in (...)`, а не три коррелированных подзапроса по связям.
 describe("период звонков сужает список «Нашей базы»", () => {
   const callPeriod = period("2026-08-01T00:00:00Z", "2026-08-31T23:59:59Z");
 
   it("без периода звонков условия нет — даже при «не звонили»", () => {
     expect(brokerPeriodNarrowingWhere({ notCalledInPeriod: true })).toEqual([]);
+    expect(
+      brokerPeriodNarrowingWhere({
+        notCalledInPeriod: true,
+        calledBrokerIds: ["b1"],
+      }),
+    ).toEqual([]);
   });
 
-  it("остаются брокеры со звонком из любого источника: легаси, обзвон, телефония", () => {
+  it("с заранее посчитанным множеством — простое условие id in", () => {
+    const clauses = brokerPeriodNarrowingWhere({
+      callPeriod,
+      calledBrokerIds: ["b1", "b2"],
+    });
+    expect(clauses).toEqual([{ id: { in: ["b1", "b2"] } }]);
+  });
+
+  it("пустое множество звонивших даёт пустой список, а не «все»", () => {
+    const clauses = brokerPeriodNarrowingWhere({
+      callPeriod,
+      calledBrokerIds: [],
+    });
+    expect(clauses).toEqual([{ id: { in: [] } }]);
+  });
+
+  it("«Не звонили в период» — то же множество под NOT (а не notIn)", () => {
+    const clauses = brokerPeriodNarrowingWhere({
+      callPeriod,
+      notCalledInPeriod: true,
+      calledBrokerIds: ["b1"],
+    });
+    expect(clauses).toEqual([{ NOT: { id: { in: ["b1"] } } }]);
+    expect(clauses[0].id).toBeUndefined();
+  });
+
+  it("без множества (нет делегатов) остаётся условие по трём источникам", () => {
     const clauses = brokerPeriodNarrowingWhere({ callPeriod });
     expect(clauses).toHaveLength(1);
     const sources = clauses[0].OR;
@@ -101,9 +137,13 @@ describe("период звонков сужает список «Нашей б�
     });
     expect(sources[2].calls.some).not.toHaveProperty("direction");
     expect(sources[2].calls.some).not.toHaveProperty("status");
+    // null — то же, что отсутствие множества
+    expect(
+      brokerPeriodNarrowingWhere({ callPeriod, calledBrokerIds: null }),
+    ).toEqual(clauses);
   });
 
-  it("«Не звонили в период» — то же условие как исключение", () => {
+  it("без множества «Не звонили в период» — условие по связям под NOT", () => {
     const clauses = brokerPeriodNarrowingWhere({
       callPeriod,
       notCalledInPeriod: true,
@@ -116,10 +156,29 @@ describe("период звонков сужает список «Нашей б�
   it("период звонков не мешает периодам встреч и сделок", () => {
     const clauses = brokerPeriodNarrowingWhere({
       callPeriod,
+      calledBrokerIds: ["b1"],
       meetingPeriod: callPeriod,
     });
     expect(clauses).toHaveLength(2);
-    expect(clauses[0].OR).toBeDefined();
+    expect(clauses[0].id).toEqual({ in: ["b1"] });
     expect(clauses[1].meetings).toBeDefined();
+  });
+});
+
+// 2026-09-28: вкладки «с номерами» / «без номеров» — одно условие для списка
+// и для счётчика «Брокеры» в обзоре.
+describe("вкладка «с номерами / без номеров»", () => {
+  it("без номера — контакты из Telegram (phone='tg:…'), с номером — все прочие", () => {
+    expect(brokerPhonePresenceWhere("WITHOUT")).toEqual({
+      phone: { startsWith: "tg:" },
+    });
+    expect(brokerPhonePresenceWhere("WITH")).toEqual({
+      phone: { not: { startsWith: "tg:" } },
+    });
+  });
+
+  it("без вкладки условие пустое (вся база)", () => {
+    expect(brokerPhonePresenceWhere(undefined)).toEqual({});
+    expect(brokerPhonePresenceWhere(null)).toEqual({});
   });
 });

@@ -4461,20 +4461,39 @@ describe("LoyaltyBaseService", () => {
   });
 
   // 2026-09-28 (решение владельца): «Период звонков» сам сужает список
-  // брокеров «Нашей базы» — where содержит OR по трём источникам звонков
-  // (легаси CallLog, попытки обзвона, телефония Mango); «Не звонили в
-  // период» кладёт то же условие под NOT. База Анны не затрагивается.
+  // брокеров «Нашей базы»; «Не звонили в период» — исключение. База Анны
+  // не затрагивается.
+  // 2026-09-28 (перф, 504 на проде): множество брокеров со звонком за
+  // период считается ДО findMany тремя прямыми запросами по таблицам
+  // звонков (легаси call_logs, попытки обзвона через назначения, телефония
+  // Mango без клиента), в where — `id in (...)`, а не три relation-`some`.
+  const callSourcesMock = (prisma: any) => {
+    prisma.callLog = { groupBy: jest.fn().mockResolvedValue([]) };
+    prisma.call = { groupBy: jest.fn().mockResolvedValue([]) };
+    prisma.loyaltyCallAssignment.findMany = jest.fn().mockResolvedValue([]);
+  };
+
   it("период звонков сужает список «Нашей базы» до брокеров со звонком", async () => {
-    const prisma = prismaMock();
+    const prisma: any = prismaMock();
+    callSourcesMock(prisma);
     const service = new LoyaltyBaseService(prisma);
     prisma.broker.findMany.mockResolvedValue([]);
+    prisma.callLog.groupBy.mockResolvedValue([{ brokerId: "b-legacy" }]);
+    prisma.loyaltyCallAssignment.findMany.mockResolvedValue([
+      { ourBrokerId: "b-workflow" },
+      { ourBrokerId: "b-legacy" },
+    ]);
+    prisma.call.groupBy.mockResolvedValue([{ brokerId: "b-mango" }]);
     const callPeriod = { from: "2026-08-01", to: "2026-08-31" };
-    const callClause = (and: any[] | undefined) =>
-      (and || []).find((entry: any) =>
-        Array.isArray(entry?.OR) && entry.OR.some((item: any) => item?.calls),
-      );
+    const idClause = (and: any[] | undefined) =>
+      (and || []).find((entry: any) => entry?.id?.in);
     const notClause = (and: any[] | undefined) =>
       (and || []).find((entry: any) => entry?.NOT);
+    const relationClause = (and: any[] | undefined) =>
+      (and || []).find(
+        (entry: any) =>
+          Array.isArray(entry?.OR) && entry.OR.some((item: any) => item?.calls),
+      );
 
     await service.list(
       "ours",
@@ -4484,11 +4503,40 @@ describe("LoyaltyBaseService", () => {
       { callPeriod } as any,
     );
     let and = prisma.broker.findMany.mock.calls[0][0].where.AND;
-    expect(callClause(and).OR).toHaveLength(3);
-    expect(callClause(and).OR[2].calls.some.clientId).toBeNull();
+    // Объединение трёх источников без дублей, отсортировано (стабильный
+    // ключ кэша полного чтения).
+    expect(idClause(and).id.in).toEqual(["b-legacy", "b-mango", "b-workflow"]);
+    expect(relationClause(and)).toBeUndefined();
     expect(notClause(and)).toBeUndefined();
 
-    // «Не звонили в период» — исключение, а не сужение до звонивших.
+    // Три прямых запроса — только по диапазону дат, без условия на брокера.
+    const range = {
+      gte: expect.any(Date),
+      lte: expect.any(Date),
+    };
+    expect(prisma.callLog.groupBy).toHaveBeenCalledWith({
+      by: ["brokerId"],
+      where: { createdAt: range },
+    });
+    expect(prisma.loyaltyCallAssignment.findMany).toHaveBeenCalledWith({
+      where: {
+        ourBrokerId: { not: null },
+        attempts: { some: { occurredAt: range } },
+      },
+      select: { ourBrokerId: true },
+    });
+    // Mango: любой исход и направление, но без звонков брокера своему
+    // клиенту (clientId задан).
+    expect(prisma.call.groupBy).toHaveBeenCalledWith({
+      by: ["brokerId"],
+      where: { clientId: null, createdAt: range },
+    });
+    const legacyRange = prisma.callLog.groupBy.mock.calls[0][0].where.createdAt;
+    expect(legacyRange.gte.toISOString()).toBe("2026-07-31T21:00:00.000Z");
+    expect(legacyRange.lte.getTime()).toBeGreaterThan(legacyRange.gte.getTime());
+
+    // «Не звонили в период» — то же множество под NOT (не notIn: Postgres
+    // хеширует `= ANY` и под отрицанием).
     prisma.broker.findMany.mockClear();
     await service.list(
       "ours",
@@ -4498,29 +4546,57 @@ describe("LoyaltyBaseService", () => {
       { callPeriod } as any,
     );
     and = prisma.broker.findMany.mock.calls[0][0].where.AND;
-    expect(callClause(and)).toBeUndefined();
-    expect(notClause(and).NOT.OR).toHaveLength(3);
+    expect(idClause(and)).toBeUndefined();
+    expect(notClause(and).NOT).toEqual({
+      id: { in: ["b-legacy", "b-mango", "b-workflow"] },
+    });
 
-    // Без периода звонков список не сужается (лайфтайм-поведение прежнее).
+    // Без периода звонков список не сужается и прямые запросы не идут
+    // (лайфтайм-поведение прежнее).
     prisma.broker.findMany.mockClear();
+    prisma.callLog.groupBy.mockClear();
     await service.list("ours", "BROKER", {
       page: 1,
       pageSize: 30,
       columns: { calls: "NOT_CALLED_IN_PERIOD" },
     } as any);
     and = prisma.broker.findMany.mock.calls[0][0].where.AND;
-    expect(callClause(and)).toBeUndefined();
+    expect(idClause(and)).toBeUndefined();
     expect(notClause(and)).toBeUndefined();
+    expect(prisma.callLog.groupBy).not.toHaveBeenCalled();
+  });
+
+  it("без делегатов таблиц звонков (моки) остаётся условие по связям", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.findMany.mockResolvedValue([]);
+    const callPeriod = { from: "2026-08-01", to: "2026-08-31" };
+    await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30 } as any,
+      undefined,
+      { callPeriod } as any,
+    );
+    const and = prisma.broker.findMany.mock.calls[0][0].where.AND;
+    const relation = (and || []).find(
+      (entry: any) =>
+        Array.isArray(entry?.OR) && entry.OR.some((item: any) => item?.calls),
+    );
+    expect(relation.OR).toHaveLength(3);
+    expect(relation.OR[2].calls.some.clientId).toBeNull();
   });
 
   // 2026-09-28: брокер, у которого за период есть только звонок телефонии
-  // Mango (его нет в легаси CallLog и workflow-попытках), не выпадает из
-  // списка на in-memory проверке «Звонили в период» — присутствие звонка
-  // уже гарантировано условием в БД.
+  // Mango (его нет в легаси CallLog и workflow-попытках), остаётся в списке
+  // «Звонили в период»: in-memory проверка берёт то же множество, которым
+  // сужалась выборка в БД, а не пересчитывает по загруженным звонкам.
   it("брокер только с Mango-звонком за период остаётся в списке «Звонили в период»", async () => {
-    const prisma = prismaMock();
+    const prisma: any = prismaMock();
+    callSourcesMock(prisma);
     const service = new LoyaltyBaseService(prisma);
     prisma.deal.groupBy.mockResolvedValue([]);
+    prisma.call.groupBy.mockResolvedValue([{ brokerId: "broker-mango" }]);
     prisma.broker.findMany.mockResolvedValue([
       {
         id: "broker-mango",
@@ -4544,9 +4620,8 @@ describe("LoyaltyBaseService", () => {
     expect(result.total).toBe(1);
     expect(result.items[0].id).toBe("broker-mango");
 
-    // А при «Не звонили в период» in-memory проверка остаётся прежней:
-    // без загруженных звонков брокер считается «не звонили» (БД уже
-    // исключила тех, у кого звонок был).
+    // «Не звонили в период» — тот же брокер уже не подходит: он есть в
+    // множестве звонивших (в бою БД его и не вернула бы — NOT id in).
     const excluded = await service.list(
       "ours",
       "BROKER",
@@ -4554,7 +4629,18 @@ describe("LoyaltyBaseService", () => {
       undefined,
       { callPeriod } as any,
     );
-    expect(excluded.total).toBe(1);
+    expect(excluded.total).toBe(0);
+
+    // А брокер без звонка в этом множестве при «Не звонили» остаётся.
+    prisma.call.groupBy.mockResolvedValue([]);
+    const idle = await service.list(
+      "ours",
+      "BROKER",
+      { page: 1, pageSize: 30, columns: { calls: "NOT_CALLED_IN_PERIOD" } } as any,
+      undefined,
+      { callPeriod } as any,
+    );
+    expect(idle.total).toBe(1);
   });
 
   // 2026-09-04 (задача F): «тип активности» у агентств без периода работает
@@ -5115,6 +5201,42 @@ describe("LoyaltyBaseService", () => {
         expect.objectContaining({ id: "our-agency-award" }),
       ]),
     );
+  });
+
+  // 2026-09-28: счётчик вкладки «Брокеры» над списком берётся из обзора —
+  // он должен считаться в выбранной вкладке «с номерами / без номеров».
+  it("счётчик брокеров обзора «Нашей базы» следует за вкладкой телефонов", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma);
+    prisma.broker.count.mockResolvedValue(0);
+    prisma.agency.count.mockResolvedValue(0);
+    prisma.client.count.mockResolvedValue(0);
+    prisma.meeting.count.mockResolvedValue(0);
+    prisma.deal.count.mockResolvedValue(0);
+    prisma.deal.aggregate.mockResolvedValue({ _sum: { amount: null } });
+    prisma.broker.findMany.mockResolvedValue([]);
+    prisma.deal.groupBy.mockResolvedValue([]);
+    const totalWhere = () => prisma.broker.count.mock.calls[0][0].where;
+
+    await service.overview("ours", { phonePresence: "WITH" } as any);
+    expect(totalWhere()).toEqual({
+      role: "BROKER",
+      mergedIntoId: null,
+      phone: { not: { startsWith: "tg:" } },
+    });
+
+    prisma.broker.count.mockClear();
+    await service.overview("ours", { phonePresence: "WITHOUT" } as any);
+    expect(totalWhere()).toEqual({
+      role: "BROKER",
+      mergedIntoId: null,
+      phone: { startsWith: "tg:" },
+    });
+
+    // Без вкладки — вся база, как раньше.
+    prisma.broker.count.mockClear();
+    await service.overview("ours", {});
+    expect(totalWhere()).toEqual({ role: "BROKER", mergedIntoId: null });
   });
 
   it("labels OUR overview KPIs as local preliminary with per-metric provenance", async () => {
