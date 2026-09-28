@@ -754,7 +754,10 @@ export class CmsService {
     // карточку и кладём в очередь колл-центра (isInBase=true), чтобы
     // оператор перезвонил. Сейчас включаем для broker-tour и
     // landing-contact (обе подразумевают что человек хочет общаться).
-    const callCenterSources = new Set(["broker-tour", "landing-contact"]);
+    // 2026-09-28: landing-callback — кнопка «Стать партнёром / перезвоним за
+    // 1 час» на новом лендинге: та же карточка брокера, но лид и задача в
+    // amoCRM уходят в воронку КЦ (решение владельца 28.09).
+    const callCenterSources = new Set(["broker-tour", "landing-contact", "landing-callback"]);
     if (callCenterSources.has(data.source || "")) {
       try {
         await this.upsertBrokerFromLandingLead({
@@ -996,9 +999,13 @@ export class CmsService {
         source:
           data.source === "broker-tour"
             ? "LANDING_BROKER_TOUR"
-            : "LANDING_FORM",
+            : data.source === "landing-callback"
+              ? "LANDING_CALLBACK"
+              : "LANDING_FORM",
         note: data.note,
         existingContactId: amoContactId,
+        // 2026-09-28: «перезвоним за 1 час» — в воронку КЦ, задача на час.
+        pipeline: data.source === "landing-callback" ? "KC" : "BROKERS",
       });
       amoLeadId = amo?.leadId;
       if (amo?.contactId && amo.contactId !== amoContactId) {
@@ -1015,7 +1022,9 @@ export class CmsService {
     // на КЦ-менеджере по графику смен (Ксения как руководитель направления
     // может пропустить — нужен явный обзвон от КЦ-оператора). Лид остаётся
     // на Ксении (PR #165), а задача Морикита уйдёт на текущего оператора КЦ.
-    if (amoLeadId) {
+    // 2026-09-28: для «перезвоним за 1 час» лид уже в воронке КЦ — Морикит
+    // подхватывает его сам по правилам amoCRM, второй раз не дёргаем.
+    if (amoLeadId && data.source !== "landing-callback") {
       try {
         const morekitUrl = await getSystemSetting(
           this.prisma,

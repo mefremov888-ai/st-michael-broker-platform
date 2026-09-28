@@ -57,6 +57,42 @@ export class DocumentsService {
     return { documents, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
+  /**
+   * 2026-09-28: счётчики для карточек «Материалы» нового лендинга — по
+   * проекту (по проекту документа или префиксу подпапки) и виду файла
+   * (фото / видео / документ). Только публичные материалы, только числа.
+   */
+  async getMaterialsSummary() {
+    const docs = await this.prisma.document.findMany({
+      where: { category: 'materials', isPublic: true },
+      select: { subcategory: true, type: true, fileUrl: true, project: true },
+    });
+    const empty = () => ({ photo: 0, video: 0, doc: 0, total: 0 });
+    const groups: Record<string, { photo: number; video: number; doc: number; total: number }> = {
+      zorge9: empty(),
+      'silver-bor': empty(),
+      other: empty(),
+    };
+    for (const d of docs) {
+      const sub = String(d.subcategory || '').toLowerCase();
+      const key =
+        d.project === 'ZORGE9' || /зорге|zorge/.test(sub)
+          ? 'zorge9'
+          : d.project === 'SILVER_BOR' || /ксб|серебрян|silver|берзарин/.test(sub)
+            ? 'silver-bor'
+            : 'other';
+      const ext = String(d.type || String(d.fileUrl || '').split('?')[0].split('.').pop() || '').toLowerCase();
+      const kind = /^(jpe?g|png|webp|heic|heif|gif|tiff?|bmp|image)/.test(ext)
+        ? 'photo'
+        : /^(mp4|mov|webm|m4v|avi|mkv|video)/.test(ext)
+          ? 'video'
+          : 'doc';
+      groups[key][kind] += 1;
+      groups[key].total += 1;
+    }
+    return { groups };
+  }
+
   async getDocument(id: string) {
     const doc = await this.prisma.document.findUnique({ where: { id } });
     if (!doc) throw new NotFoundException('Document not found');
