@@ -392,6 +392,18 @@ enum LoyaltySyncStatus {
   FAILED
 }
 
+// 2026-09-28: вид последнего «касания» брокера в amoCRM (ночной синк
+// «Нашей базы» лояльности). Берётся из примечаний, задач, лидов контакта.
+enum AmoTouchKind {
+  CALL_IN
+  CALL_OUT
+  TASK_COMPLETED
+  MEETING
+  NOTE
+  LEAD_STATUS
+  CONTACT_UPDATE
+}
+
 // ─── MODELS ──────────────────────────────────────────
 
 model Agency {
@@ -549,6 +561,10 @@ model Broker {
   mergedBrokers                     Broker[]                     @relation("BrokerMergedInto")
   mergedAt                          DateTime?                    @map("merged_at")
   registryDeals                     RegistryDeal[]
+  // 2026-09-28: срез amoCRM по брокеру (ночной синк касаний) и привязка
+  // к сотруднику amo (для MANAGER/ADMIN).
+  amoContactSync                    BrokerAmoContactSync?
+  amoUser                           AmoUser?
 
   @@index([category])
   @@index([nextCallAt])
@@ -1710,6 +1726,74 @@ model LoyaltySyncRun {
   @@index([status, startedAt])
   @@index([requestedById, startedAt])
   @@map("loyalty_sync_runs")
+}
+
+/// 2026-09-28: срез данных amoCRM по брокеру (1:1 с Broker). Заполняется
+/// ТОЛЬКО ночным синком «касаний» для «Нашей базы» лояльности: последнее
+/// касание, последний звонок, ответственный воронки КЦ, результат поиска
+/// контакта по телефону. Кабинет и КЦ читают, руками не правят.
+model BrokerAmoContactSync {
+  brokerId             String        @id @map("broker_id")
+  broker               Broker        @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+  // null = контакт в amo не найден
+  amoContactId         BigInt?       @map("amo_contact_id")
+  // когда последний раз искали контакт по телефону (фаза 3)
+  amoLookupAt          DateTime?     @map("amo_lookup_at")
+  // LINKED | NOT_FOUND | AMBIGUOUS | NOT_BROKER
+  amoLookupStatus      String?       @map("amo_lookup_status")
+  // [{id,name,phone,responsibleUserId,updatedAt}] — очередь ручной привязки
+  amoLookupCandidates  Json?         @map("amo_lookup_candidates")
+  // ответственный карточки контакта (справочно)
+  amoResponsibleUserId BigInt?       @map("amo_responsible_user_id")
+  // ответственный последнего лида воронки КЦ — ГЛАВНЫЙ для показа
+  kcResponsibleUserId  BigInt?       @map("kc_responsible_user_id")
+  kcLeadId             BigInt?       @map("kc_lead_id")
+  kcLeadUpdatedAt      DateTime?     @map("kc_lead_updated_at")
+  amoUpdatedAt         DateTime?     @map("amo_updated_at")
+  amoClosestTaskAt     DateTime?     @map("amo_closest_task_at")
+  lastTouchAt          DateTime?     @map("last_touch_at")
+  lastTouchKind        AmoTouchKind? @map("last_touch_kind")
+  // "note:123" | "task:456" | "lead:789"
+  lastTouchRef         String?       @map("last_touch_ref")
+  lastTouchUserId      BigInt?       @map("last_touch_user_id")
+  lastCallAt           DateTime?     @map("last_call_at")
+  // IN | OUT
+  lastCallDirection    String?       @map("last_call_direction")
+  // amo call_status 1..7
+  lastCallStatus       Int?          @map("last_call_status")
+  lastCallResultText   String?       @map("last_call_result_text") @db.Text
+  lastCallDurationSec  Int?          @map("last_call_duration_sec")
+  lastCallUserId       BigInt?       @map("last_call_user_id")
+  syncedAt             DateTime      @map("synced_at")
+  syncError            String?       @map("sync_error")
+  sourceHash           String?       @map("source_hash") @db.VarChar(64)
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
+
+  @@index([lastTouchAt])
+  @@index([kcResponsibleUserId])
+  @@index([amoLookupStatus])
+  @@map("broker_amo_contact_sync")
+}
+
+/// 2026-09-28: справочник сотрудников amoCRM (GET /api/v4/users).
+/// Нужен, чтобы показывать ФИО ответственного вместо amo user id и
+/// сопоставлять сотрудника amo с нашим Broker (role MANAGER/ADMIN).
+model AmoUser {
+  // amo user id
+  id        BigInt   @id
+  name      String
+  email     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  // наш сотрудник (Broker с ролью MANAGER/ADMIN)
+  brokerId  String?  @unique @map("broker_id")
+  broker    Broker?  @relation(fields: [brokerId], references: [id], onDelete: SetNull)
+  // email | manual
+  matchedBy String?  @map("matched_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("amo_users")
 }
 
 /// Manual ANNA entity overlay. It is deliberately outside immutable imported
