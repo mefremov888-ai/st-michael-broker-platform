@@ -14,7 +14,7 @@ export interface LandingV2Data {
   content: any;
   projects: any[];
   events: any[];
-  news: any[];
+  promos: any[];
   cooperationDocs: any[];
   materials: Record<string, { photo: number; video: number; doc: number; total: number }>;
 }
@@ -49,8 +49,8 @@ const REASONS = [
 ];
 
 const ROMAN = ['', 'I', 'II', 'III', 'IV'];
-const MONTHS_RU = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+const DEFAULT_PROMO = { id: 'default', title: 'Комиссия за сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' };
 
 function plural(n: number, one: string, few: string, many: string) {
   const m10 = n % 10, m100 = n % 100;
@@ -61,7 +61,6 @@ function plural(n: number, one: string, few: string, many: string) {
 const fmtDay = (d: Date) => `${DOW_RU[d.getDay()]}. ${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
 const fmtTime = (d: Date) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const fmtNewsDate = (iso: string) => { const d = new Date(iso); return `${d.getDate()} ${MONTHS_RU[d.getMonth()]} ${d.getFullYear()}`; };
 
 /** «Брокер-тур: Зорге 9 + Серебряный Бор» → ['Зорге 9', 'Квартал Серебряный Бор'] */
 function projectsFromTitle(title: string): string[] {
@@ -240,6 +239,46 @@ function MonthModal({ events, onClose }: { events: any[]; onClose: () => void })
   );
 }
 
+// 2026-09-28 (обновление макета): карусель «Акции» — фото на всю ширину
+// контейнера 1360×600, заголовок белым, стрелки по бокам, точки слева внизу.
+// Данные — CMS-акции; если их нет — один слайд из макета.
+function PromoCarousel({ promos }: { promos: any[] }) {
+  const slides = promos.length ? promos : [DEFAULT_PROMO];
+  const [index, setIndex] = useState(0);
+  const count = slides.length;
+  useEffect(() => {
+    if (count < 2) return;
+    const timer = setInterval(() => setIndex((v) => (v + 1) % count), 6000);
+    return () => clearInterval(timer);
+  }, [count]);
+  const slide = slides[index % count] || slides[0];
+  const image = slide.imageUrl || DEFAULT_PROMO.imageUrl;
+  return (
+    <section className="v2-section" id="promos">
+      <div className="v2-container">
+        <div className="v2-promo" style={{ backgroundImage: `url(${image})` }}>
+          <h2 className="v2-promo-title">{slide.title}</h2>
+          {slide.subtitle && <p className="v2-promo-sub">{slide.subtitle}</p>}
+          {slide.ctaHref && (
+            <a className="v2-btn v2-btn--cta v2-promo-cta" href={slide.ctaHref} target="_blank" rel="noopener noreferrer">{slide.ctaText || 'Подробнее'}</a>
+          )}
+          {count > 1 && (
+            <>
+              <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => setIndex((index - 1 + count) % count)} />
+              <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => setIndex((index + 1) % count)} />
+            </>
+          )}
+          <div className="v2-promo-dots">
+            {slides.map((s: any, k: number) => (
+              <button key={s.id || k} className={`v2-promo-dot${k === index % count ? ' v2-promo-dot--active' : ''}`} aria-label={`Акция ${k + 1}`} onClick={() => setIndex(k)} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ─── страница ───────────────────────────────────────────────────────────────
 
 export default function LandingV2({ data }: { data: LandingV2Data }) {
@@ -272,7 +311,10 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const week = useMemo(() => workWeek(0), []);
   const todayKey = dayKey(new Date());
   const activeEvents = useMemo(() => (data.events || []).filter((e) => e.isActive !== false), [data.events]);
-  const news = useMemo(() => (data.news || []).filter((n) => n.isActive !== false).slice(0, 4), [data.news]);
+  const promos = useMemo(
+    () => (data.promos || []).filter((p) => p.isActive !== false && (!p.expiresAt || new Date(p.expiresAt) > new Date())),
+    [data.promos],
+  );
 
   const matCount = (key: string) => {
     const g = data.materials?.[key];
@@ -307,7 +349,6 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <a href="#materials">Материалы</a>
               <a href="#events">Брокер-туры</a>
               <a href="#reasons">Почему St Michael</a>
-              <a href="#news">Новости</a>
               <a href="#contacts">Контакты</a>
               <button onClick={() => setModal('conditions')}>Условия вознаграждения</button>
               <Link href="/register">Регистрация</Link>
@@ -317,8 +358,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
       </header>
 
       <main id="top">
+        {/* ── акции ── */}
+        <PromoCarousel promos={promos} />
+
         {/* ── наши проекты ── */}
-        <section className="v2-section v2-section--first" id="projects">
+        <section className="v2-section" id="projects">
           <div className="v2-container">
             <div className="v2-title-row">
               <div>
@@ -468,25 +512,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
           </div>
         </section>
 
-        {/* ── новости ── */}
-        <section className="v2-section" id="news">
-          <div className="v2-container">
-            <div className="v2-title-row">
-              <div>
-                <h2 className="v2-title">Новости</h2>
-              </div>
-            </div>
-            <div className="v2-news">
-              {news.map((n) => (
-                <a className="v2-ncard" key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer">
-                  {n.imageUrl ? <img className="v2-ncard-cover" src={n.imageUrl} alt="" /> : <div className="v2-ncard-cover" />}
-                  <div className="v2-ncard-title">{n.title}</div>
-                  <div className="v2-ncard-meta">{n.publishedAt ? fmtNewsDate(n.publishedAt) : ''}{n.source ? ` · ${n.source}` : ''}</div>
-                </a>
-              ))}
-            </div>
-          </div>
-        </section>
+        {/* 2026-09-28: блок «Новости» из макета убран (обновление Рината). */}
 
         {/* ── заявка + контакты ── */}
         <section id="contacts">
