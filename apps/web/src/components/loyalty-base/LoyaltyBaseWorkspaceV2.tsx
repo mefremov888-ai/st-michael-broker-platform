@@ -47,6 +47,7 @@ import {
   getLoyaltyList,
   getLoyaltyOverview,
   hasLoyaltyActivityEvidence,
+  loyaltyContactLabel,
   loyaltyLeaderMode,
   loyaltyMetricsForDisplay,
   type LoyaltyActivitySummary,
@@ -489,7 +490,10 @@ function LoyaltyTable({
                 <SortHeader field="meetings"><span className="text-xs">встречи</span></SortHeader>
               </span>
             </th>
-            <th className="pb-2 pr-3"><SortHeader field="lastCallAt">Прошлые обзвоны</SortHeader></th>
+            {/* 2026-09-28 (владелец): «Прошлые обзвоны» → «Последний контакт»:
+                самое свежее из наших звонков, касаний amoCRM и встреч/фиксаций/
+                сделок; под датой — вид и источник. Фильтры по звонкам не меняются. */}
+            <th className="pb-2 pr-3"><SortHeader field="lastContactAt">Последний контакт</SortHeader></th>
             <th className="pb-2 pr-3">Ответственный</th>
             <th className="pb-2 text-right">
               <span className="inline-flex items-center justify-end gap-2">
@@ -786,19 +790,48 @@ function LoyaltyTable({
                     )}
                 </td>
                 <td className="py-2 pr-3 align-top">
-                  {date(item.lastCallAt)}
-                  {item.lastCallSource === "ANNA" && (
+                  {date(item.lastContactAt || item.lastCallAt)}
+                  {item.lastContactAt ? (
+                    <small className="block text-text-muted">
+                      {loyaltyContactLabel(item.lastContactKind, item.lastContactSource)}
+                    </small>
+                  ) : item.lastCallSource === "ANNA" ? (
                     <small className="block text-text-muted">по базе Анны</small>
-                  )}
+                  ) : null}
                   <div className="mt-1">
-                    <LoyaltyCallResultBadge
-                      result={item.lastCallResult}
-                      entityType={item.entityType}
-                      emptyLabel="Результат не указан"
-                    />
+                    {item.lastCallResultSource === "AMO" && item.lastCallResultLabel ? (
+                      <span
+                        className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border px-2 py-1 text-xs font-medium"
+                        title={
+                          item.lastCallResultText
+                            ? `Результат в amoCRM: ${item.lastCallResultText}`
+                            : "Результат звонка из amoCRM"
+                        }
+                        data-call-result-source="AMO"
+                      >
+                        {item.lastCallResultLabel}
+                        <span className="rounded bg-accent/10 px-1 text-[10px] uppercase text-accent">amo</span>
+                      </span>
+                    ) : (
+                      <LoyaltyCallResultBadge
+                        result={item.lastCallResult}
+                        entityType={item.entityType}
+                        emptyLabel="Результат не указан"
+                      />
+                    )}
                   </div>
                 </td>
-                <td className="py-2 pr-3 align-top">{item.assignee || "Не назначен"}</td>
+                <td className="py-2 pr-3 align-top">
+                  {item.assignee || "Не назначен"}
+                  {item.assignee && item.assigneeSource === "AMO" && (
+                    <span
+                      className="ml-1 rounded bg-accent/10 px-1 text-[10px] uppercase text-accent"
+                      title="Ответственный последнего лида колл-центра в amoCRM"
+                    >
+                      amo
+                    </span>
+                  )}
+                </td>
                 <td className="py-2 text-right align-top">
                   <b>{number(displayedMetrics.deals)}</b>
                   {/* 2026-09-08 (просьба владельца): сумма тем же размером, что соседние столбцы */}

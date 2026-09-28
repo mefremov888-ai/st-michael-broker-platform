@@ -3,6 +3,7 @@
 import { Filter, RotateCcw } from "lucide-react";
 import {
   getLoyaltyCallResultOptions,
+  LOYALTY_AMO_LINK_OPTIONS,
   type LoyaltyBaseKey,
   type LoyaltyEntityType,
   type LoyaltyFacets,
@@ -576,6 +577,30 @@ export function LoyaltyFilterPanel({
                 <option value="">Все карточки</option>
                 <option value="linked">Только из базы Анны</option>
                 <option value="unlinked">Нет в базе Анны</option>
+              </select>
+            </Field>
+          )}
+
+          {/* 2026-09-28 (владелец): спорные привязки к amo — очередь для
+              ручного решения из карточки («Контакт в amoCRM»). */}
+          {capabilities.amoLink && (
+            <Field label="Привязка к amo">
+              <select
+                className="input"
+                value={draft.amoLink}
+                onChange={(event) =>
+                  update(
+                    "amoLink",
+                    event.target.value as LoyaltyFilterFormState["amoLink"],
+                  )
+                }
+              >
+                <option value="">Любая</option>
+                {LOYALTY_AMO_LINK_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </select>
             </Field>
           )}

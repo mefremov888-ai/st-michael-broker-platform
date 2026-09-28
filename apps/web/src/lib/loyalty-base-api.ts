@@ -273,7 +273,78 @@ export type LoyaltySortField =
   | "brokerTours"
   | "brokerCount"
   | "rating"
-  | "updatedAt";
+  | "updatedAt"
+  // 2026-09-28: колонка «Последний контакт» (звонки + касания amo + лента).
+  | "lastContactAt";
+
+// 2026-09-28 (владелец): «Привязка к amo» — только «Наша база»/брокеры.
+export type LoyaltyAmoLinkFilter =
+  | "LINKED"
+  | "AMBIGUOUS"
+  | "NOT_FOUND"
+  | "UNCHECKED";
+
+export const LOYALTY_AMO_LINK_OPTIONS: ReadonlyArray<
+  readonly [LoyaltyAmoLinkFilter, string]
+> = [
+  ["LINKED", "Привязан"],
+  ["AMBIGUOUS", "Требует решения"],
+  ["NOT_FOUND", "Не найден в amo"],
+  ["UNCHECKED", "Не проверялся"],
+];
+
+export const LOYALTY_AMO_LINK_STATUS_LABELS: Record<LoyaltyAmoLinkFilter, string> = {
+  LINKED: "Привязан",
+  AMBIGUOUS: "Требует решения",
+  NOT_FOUND: "Не найден в amo",
+  UNCHECKED: "Не проверялся",
+};
+
+/** Вид последнего контакта (см. loyalty-amo-touch.ts на API). */
+export type LoyaltyContactKind =
+  | "CALL_IN"
+  | "CALL_OUT"
+  | "TASK_COMPLETED"
+  | "MEETING"
+  | "NOTE"
+  | "FIXATION"
+  | "DEAL"
+  | "BROKER_TOUR"
+  | "LEAD_STATUS"
+  | "CONTACT_UPDATE";
+
+export type LoyaltyContactSource = "cabinet" | "amo" | "anna";
+
+const CONTACT_KIND_LABELS: Record<LoyaltyContactKind, string> = {
+  CALL_IN: "звонок вх.",
+  CALL_OUT: "звонок исх.",
+  TASK_COMPLETED: "задача",
+  MEETING: "встреча",
+  NOTE: "примечание",
+  FIXATION: "фиксация",
+  DEAL: "сделка",
+  BROKER_TOUR: "брокер-тур",
+  LEAD_STATUS: "статус лида",
+  CONTACT_UPDATE: "правка карточки",
+};
+
+const CONTACT_SOURCE_LABELS: Record<LoyaltyContactSource, string> = {
+  cabinet: "кабинет",
+  amo: "amo",
+  anna: "база Анны",
+};
+
+/** Подпись «звонок исх. · amo» под датой последнего контакта. */
+export function loyaltyContactLabel(
+  kind: LoyaltyContactKind | null,
+  source: LoyaltyContactSource | null,
+): string {
+  const parts = [
+    kind ? CONTACT_KIND_LABELS[kind] || kind.toLowerCase() : "",
+    source ? CONTACT_SOURCE_LABELS[source] || source : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
 
 export interface LoyaltyCanonicalFilter {
   includeLowSignal?: boolean;
@@ -315,6 +386,8 @@ export interface LoyaltyCanonicalFilter {
   linkedOurs?: "linked" | "unlinked";
   // 2026-09-09: «Наша база» — сцепка с базой Анны: linked / unlinked.
   linkedAnna?: "linked" | "unlinked";
+  // 2026-09-28: «Привязка к amo» — только «Наша база»/брокеры.
+  amoLink?: LoyaltyAmoLinkFilter;
 }
 
 export interface LoyaltyColumnFilters {
@@ -645,9 +718,39 @@ export interface LoyaltyRecord {
   /** 2026-09-10: суммарная площадь по сделкам реестра ДДУ, м². */
   dealSqm: number | null;
   lastCallAt: string;
-  /** 2026-09-28: откуда дата последнего звонка — кабинет или база Анны по тому же номеру. */
-  lastCallSource: "CABINET" | "ANNA" | null;
+  /** 2026-09-28: откуда дата последнего звонка — кабинет, база Анны по тому же номеру или amoCRM. */
+  lastCallSource: "CABINET" | "ANNA" | "AMO" | null;
   lastCallResult: string;
+  /**
+   * 2026-09-28 (владелец): результат звонка из amo, если он свежее наших —
+   * русская подпись по call_status, текст результата во всплывашке.
+   */
+  lastCallResultSource: "CABINET" | "ANNA" | "AMO" | null;
+  lastCallResultLabel: string;
+  lastCallResultText: string;
+  /** 2026-09-28: «Последний контакт» — самое свежее из звонков, касаний amo и ленты. */
+  lastContactAt: string;
+  lastContactKind: LoyaltyContactKind | null;
+  lastContactSource: LoyaltyContactSource | null;
+  /** AMO — ответственный последнего лида КЦ, не привязанный к нашему сотруднику. */
+  assigneeSource: "CABINET" | "AMO" | null;
+  /** 2026-09-28: статус привязки к контакту amoCRM и кандидаты ручной привязки. */
+  amoLink: {
+    status: LoyaltyAmoLinkFilter;
+    contactId: string;
+    contactUrl: string;
+    checkedAt: string;
+    syncedAt: string;
+    syncError: boolean;
+    candidates: Array<{
+      id: string;
+      name: string;
+      phoneMasked: string;
+      responsibleName: string;
+      updatedAt: string;
+      url: string;
+    }>;
+  } | null;
   lastActivityAt: string;
   daysWithoutContact: number | null;
   nextTask: string;
@@ -1501,6 +1604,12 @@ const EVIDENCE_TYPE_LABELS: Record<string, string> = {
   APPLICATION: "Заявка",
   REQUEST: "Заявка",
   BROKER_TOUR: "Брокер-тур",
+  // 2026-09-28: последнее касание / звонок из amoCRM (ночной синк).
+  AMO_CALL: "Звонок (amo)",
+  AMO_TASK: "Задача выполнена (amo)",
+  AMO_MEETING: "Встреча (amo)",
+  AMO_NOTE: "Примечание (amo)",
+  AMO_ACTIVITY: "Активность в amo",
 };
 
 const EVIDENCE_STATUS_LABELS: Record<string, string> = {
@@ -1613,6 +1722,11 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
   const amoDealId = stringValue(item.amoDealId);
   const amoLeadHref = safeAmoLeadUrl(amoLeadId);
   const amoDealHref = safeAmoLeadUrl(amoDealId);
+  const isAmoTouch = rawType.startsWith("AMO_");
+  const amoEmployee = isAmoTouch ? stringValue(item.employee) : "";
+  const amoDirection = isAmoTouch ? stringValue(item.direction).toUpperCase() : "";
+  const amoComment = isAmoTouch ? stringValue(item.comment) : "";
+  const amoDurationSec = isAmoTouch ? nullableNumberValue(item.durationSec) : null;
   // 2026-09-07: встреча PENDING с меткой backfill-а «нет ответа из amo» —
   // карточка показывает оранжевый бейдж. Бэкенд шлёт готовый код
   // (amoStatusMark, без сырого comment); parsing comment — запасной путь.
@@ -1630,6 +1744,8 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
     statusLabel,
     meetingTypeLabel,
     clientName && projectLabel ? projectLabel : "",
+    isAmoTouch && amoEmployee ? amoEmployee : "",
+    isAmoTouch && amoComment ? amoComment : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -1673,6 +1789,25 @@ function evidenceHistoryEntry(item: UnknownRecord, rawType: string) {
       value: amoDealId,
       ...(amoDealHref ? { href: amoDealHref } : {}),
     },
+    // 2026-09-28: строки среза amo — кто касался, направление, результат.
+    isAmoTouch && amoEmployee && { label: "Сотрудник amo", value: amoEmployee },
+    isAmoTouch &&
+      amoDirection && {
+        label: "Направление",
+        value: amoDirection === "IN" ? "входящий" : "исходящий",
+      },
+    isAmoTouch && amoComment && { label: "Комментарий", value: amoComment },
+    isAmoTouch &&
+      amoDurationSec !== null && {
+        label: "Длительность",
+        value: `${amoDurationSec} с`,
+      },
+    isAmoTouch &&
+      amoContactGoUrl(item.amoContactId) && {
+        label: "Контакт amoCRM",
+        value: stringValue(item.amoContactId),
+        href: amoContactGoUrl(item.amoContactId),
+      },
   ].filter(Boolean) as Array<{ label: string; value: string; href?: string }>;
   return {
     id: stringValue(pick(item, "id", "externalId")),
@@ -1818,6 +1953,68 @@ function safeAmoContactUrl(identities: UnknownRecord[]): string {
     }
   }
   return `https://stmichael.amocrm.ru/contacts/detail/${encodeURIComponent(externalId)}`;
+}
+
+const CONTACT_KINDS: ReadonlyArray<LoyaltyContactKind> = [
+  "CALL_IN",
+  "CALL_OUT",
+  "TASK_COMPLETED",
+  "MEETING",
+  "NOTE",
+  "FIXATION",
+  "DEAL",
+  "BROKER_TOUR",
+  "LEAD_STATUS",
+  "CONTACT_UPDATE",
+];
+
+function normalizeContactKind(value: unknown): LoyaltyContactKind | null {
+  const kind = stringValue(value).toUpperCase() as LoyaltyContactKind;
+  return CONTACT_KINDS.includes(kind) ? kind : null;
+}
+
+function normalizeContactSource(value: unknown): LoyaltyContactSource | null {
+  const source = stringValue(value).toLowerCase();
+  return source === "cabinet" || source === "amo" || source === "anna"
+    ? source
+    : null;
+}
+
+/**
+ * 2026-09-28: ссылка на контакт amoCRM через /go/amo кабинета (как в Excel:
+ * прямые ссылки на amo из офисных клиентов не открываются, редирект — да).
+ */
+export function amoContactGoUrl(rawId: unknown): string {
+  const id = stringValue(rawId);
+  if (!/^\d+$/.test(id)) return "";
+  return `/go/amo/contact/${id}`;
+}
+
+function normalizeAmoLink(value: unknown): LoyaltyRecord["amoLink"] {
+  const raw = nonEmptyRecord(value);
+  if (!raw) return null;
+  const status = stringValue(raw.status).toUpperCase() as LoyaltyAmoLinkFilter;
+  if (!(status in LOYALTY_AMO_LINK_STATUS_LABELS)) return null;
+  const contactId = stringValue(raw.contactId);
+  return {
+    status,
+    contactId,
+    contactUrl: amoContactGoUrl(contactId),
+    checkedAt: stringValue(raw.checkedAt),
+    syncedAt: stringValue(raw.syncedAt),
+    syncError: booleanValue(raw.syncError) === true,
+    candidates: arrayValue(raw.candidates)
+      .map(asRecord)
+      .map((candidate) => ({
+        id: stringValue(candidate.id),
+        name: stringValue(candidate.name),
+        phoneMasked: stringValue(candidate.phoneMasked),
+        responsibleName: stringValue(candidate.responsibleName),
+        updatedAt: stringValue(candidate.updatedAt),
+        url: amoContactGoUrl(candidate.id),
+      }))
+      .filter((candidate) => /^\d+$/.test(candidate.id)),
+  };
 }
 
 function normalizeRecognition(value: unknown) {
@@ -2223,12 +2420,30 @@ export function normalizeLoyaltyRecord(
     ),
     lastCallSource: (() => {
       const source = pick(item, "lastCallSource");
-      return source === "ANNA" || source === "CABINET" ? source : null;
+      return source === "ANNA" || source === "CABINET" || source === "AMO"
+        ? source
+        : null;
     })(),
     lastCallResult: stringValue(
       pick(item, "lastCallResult", "callResult"),
       stringValue(pick(attributes, "lastCallResult", "callResult")),
     ),
+    lastCallResultSource: (() => {
+      const source = pick(item, "lastCallResultSource");
+      return source === "ANNA" || source === "CABINET" || source === "AMO"
+        ? source
+        : null;
+    })(),
+    lastCallResultLabel: stringValue(pick(item, "lastCallResultLabel")),
+    lastCallResultText: stringValue(pick(item, "lastCallResultText")),
+    lastContactAt: stringValue(pick(item, "lastContactAt")),
+    lastContactKind: normalizeContactKind(pick(item, "lastContactKind")),
+    lastContactSource: normalizeContactSource(pick(item, "lastContactSource")),
+    assigneeSource: (() => {
+      const source = pick(item, "assigneeSource");
+      return source === "AMO" || source === "CABINET" ? source : null;
+    })(),
+    amoLink: normalizeAmoLink(item.amoLink),
     lastActivityAt: stringValue(
       pick(item, "lastActivityAt", "lastActivityDate"),
       stringValue(
@@ -3132,6 +3347,22 @@ export async function updateAnnaLoyaltyRecord(
 // 2026-09-07: кнопка «Исправить имя» в карточке брокера «Нашей базы».
 // Правит «имя для работы» (Broker.displayName, source='manual');
 // самоназвание брокера в его кабинете не меняется. Пустая строка — сброс.
+// 2026-09-28: ручная привязка брокера «Нашей базы» к контакту amoCRM
+// (кнопка «Привязать» у кандидата в блоке «Контакт в amoCRM»). Только ADMIN.
+export async function linkOurBrokerAmoContact(id: string, amoContactId: string) {
+  const value = asRecord(
+    await apiPost<unknown>(
+      `/loyalty-base/ours/brokers/${encodeURIComponent(id)}/amo-link`,
+      { amoContactId },
+    ),
+  );
+  return {
+    id: stringValue(value.id),
+    amoContactId: stringValue(value.amoContactId),
+    amoLink: normalizeAmoLink(value.amoLink),
+  };
+}
+
 export async function updateOurBrokerDisplayName(id: string, displayName: string) {
   const value = asRecord(
     await apiPatch<unknown>(

@@ -7,6 +7,9 @@ import {
   BROKER_CALL_RESULT_OPTIONS,
   BROKER_CALL_RESULTS,
   LOYALTY_CALL_RESULT_CATALOG,
+  amoContactGoUrl,
+  linkOurBrokerAmoContact,
+  loyaltyContactLabel,
   getLoyaltyCallResultPresentation,
   getLoyaltyDetail,
   getLoyaltyList,
@@ -2773,4 +2776,193 @@ test("карточка принимает период с одной датой"
   assert.ok(!calls[0].includes("to="), calls[0]);
   assert.ok(calls[1].includes("to=2026-09-10"), calls[1]);
   assert.ok(!calls[1].includes("from="), calls[1]);
+});
+
+// 2026-09-28 (владелец): срез amoCRM в «Нашей базе» — «последний контакт»,
+// результат звонка amo, ответственный КЦ, привязка к контакту amo.
+test("карточка: последний контакт, результат amo, ответственный и привязка нормализуются", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "broker-amo",
+        entityType: "BROKER",
+        displayName: "Broker",
+        amoContactId: null,
+        assignee: { id: "amo:777", name: "Мажаровская Арина", amoUserId: "777" },
+        assigneeSource: "AMO",
+        lastCallAt: "2026-09-18T11:00:00.000Z",
+        lastCallSource: "AMO",
+        lastCallResult: "NO_ANSWER",
+        lastCallResultSource: "AMO",
+        lastCallResultLabel: "разговор состоялся",
+        lastCallResultText: "Обсудили объект",
+        lastContactAt: "2026-09-25T10:00:00.000Z",
+        lastContactKind: "TASK_COMPLETED",
+        lastContactSource: "amo",
+        amoLink: {
+          status: "AMBIGUOUS",
+          contactId: null,
+          checkedAt: "2026-09-27T21:00:00.000Z",
+          syncedAt: "2026-09-27T21:05:00.000Z",
+          syncError: false,
+          candidates: [
+            {
+              id: "501",
+              name: "Иванов Иван",
+              phoneMasked: "+7 925 ***-**-19",
+              responsibleName: "Мажаровская Арина",
+              updatedAt: "2026-09-01T10:00:00.000Z",
+            },
+            { id: "abc", name: "мусор" },
+          ],
+        },
+        activities: [
+          {
+            id: "AMO_TOUCH:task:5",
+            type: "AMO_TASK",
+            occurredAt: "2026-09-25T10:00:00.000Z",
+            employee: "Мажаровская Арина",
+            amoContactId: "1001",
+            source: "AMO_SYNC",
+          },
+          {
+            id: "AMO_CALL:2026-09-18T11:00:00.000Z",
+            type: "AMO_CALL",
+            occurredAt: "2026-09-18T11:00:00.000Z",
+            direction: "IN",
+            result: "разговор состоялся",
+            comment: "Обсудили объект",
+            durationSec: 120,
+            source: "AMO_SYNC",
+          },
+        ],
+      },
+    },
+    "brokers",
+  );
+  assert.equal(detail.assignee, "Мажаровская Арина");
+  assert.equal(detail.assigneeSource, "AMO");
+  assert.equal(detail.lastCallSource, "AMO");
+  assert.equal(detail.lastCallResult, "NO_ANSWER");
+  assert.equal(detail.lastCallResultSource, "AMO");
+  assert.equal(detail.lastCallResultLabel, "разговор состоялся");
+  assert.equal(detail.lastCallResultText, "Обсудили объект");
+  assert.equal(detail.lastContactAt, "2026-09-25T10:00:00.000Z");
+  assert.equal(detail.lastContactKind, "TASK_COMPLETED");
+  assert.equal(detail.lastContactSource, "amo");
+  assert.equal(
+    loyaltyContactLabel(detail.lastContactKind, detail.lastContactSource),
+    "задача · amo",
+  );
+  assert.equal(loyaltyContactLabel("CALL_OUT", "cabinet"), "звонок исх. · кабинет");
+  assert.equal(loyaltyContactLabel("MEETING", null), "встреча");
+  assert.ok(detail.amoLink);
+  assert.equal(detail.amoLink?.status, "AMBIGUOUS");
+  assert.equal(detail.amoLink?.contactId, "");
+  assert.equal(detail.amoLink?.candidates.length, 1);
+  assert.equal(detail.amoLink?.candidates[0].url, "/go/amo/contact/501");
+  assert.equal(detail.amoLink?.candidates[0].phoneMasked, "+7 925 ***-**-19");
+  const amoTask = detail.history.find((entry) => entry.type === "AMO_TASK");
+  assert.ok(amoTask);
+  assert.equal(amoTask?.title, "Задача выполнена (amo)");
+  assert.equal(amoTask?.description, "Мажаровская Арина");
+  assert.deepEqual(
+    amoTask?.details?.find((row) => row.label === "Контакт amoCRM"),
+    { label: "Контакт amoCRM", value: "1001", href: "/go/amo/contact/1001" },
+  );
+  const amoCall = detail.history.find((entry) => entry.type === "AMO_CALL");
+  assert.equal(amoCall?.title, "Звонок (amo) — разговор состоялся");
+  assert.ok(
+    amoCall?.details?.some(
+      (row) => row.label === "Направление" && row.value === "входящий",
+    ),
+  );
+  assert.ok(
+    amoCall?.details?.some(
+      (row) => row.label === "Длительность" && row.value === "120 с",
+    ),
+  );
+  assert.equal(amoContactGoUrl("1001"), "/go/amo/contact/1001");
+  assert.equal(amoContactGoUrl("../x"), "");
+});
+
+test("карточка без среза amo: поля пустые, привязка null", () => {
+  const detail = normalizeLoyaltyDetail(
+    {
+      item: {
+        id: "b",
+        entityType: "BROKER",
+        displayName: "Broker",
+        lastCallSource: "CABINET",
+      },
+    },
+    "brokers",
+  );
+  assert.equal(detail.lastCallSource, "CABINET");
+  assert.equal(detail.lastCallResultSource, null);
+  assert.equal(detail.lastContactAt, "");
+  assert.equal(detail.lastContactKind, null);
+  assert.equal(detail.assigneeSource, null);
+  assert.equal(detail.amoLink, null);
+  assert.equal(
+    normalizeLoyaltyDetail(
+      { item: { id: "b", entityType: "BROKER", amoLink: { status: "WEIRD" } } },
+      "brokers",
+    ).amoLink,
+    null,
+  );
+});
+
+test("фильтр «Привязка к amo» — только «Наша база»/брокеры, уходит в канонический фильтр", () => {
+  const state = emptyLoyaltyFilters();
+  state.amoLink = "AMBIGUOUS";
+  assert.equal(loyaltyFilterCapabilities("ours", "brokers").amoLink, true);
+  assert.equal(loyaltyFilterCapabilities("ours", "agencies").amoLink, false);
+  assert.equal(loyaltyFilterCapabilities("anna", "brokers").amoLink, false);
+  assert.equal(toCanonicalFilter(state, "brokers", "ours").amoLink, "AMBIGUOUS");
+  assert.equal(toCanonicalFilter(state, "brokers", "anna").amoLink, undefined);
+  assert.equal(sanitizeLoyaltyFilterState("ours", "agencies", state).amoLink, "");
+  const junk = emptyLoyaltyFilters();
+  (junk as { amoLink: string }).amoLink = "WHATEVER";
+  assert.equal(sanitizeLoyaltyFilterState("ours", "brokers", junk).amoLink, "");
+  assert.equal(emptyLoyaltyFilters().amoLink, "");
+  // сортировка по «Последнему контакту» проходит санитайзер
+  const sorted = emptyLoyaltyFilters();
+  sorted.sortBy = "lastContactAt";
+  assert.equal(
+    sanitizeLoyaltyFilterState("ours", "brokers", sorted).sortBy,
+    "lastContactAt",
+  );
+});
+
+test("привязка к контакту amo зовёт POST /ours/brokers/:id/amo-link", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    calls.push({ url: String(input), init });
+    return new Response(
+      JSON.stringify({
+        id: "b1",
+        amoContactId: "501",
+        amoLink: { status: "LINKED", contactId: "501", candidates: [] },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+  try {
+    const result = await linkOurBrokerAmoContact("b1", "501");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "/api/loyalty-base/ours/brokers/b1/amo-link");
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+      amoContactId: "501",
+    });
+    assert.equal(result.amoContactId, "501");
+    assert.equal(result.amoLink?.status, "LINKED");
+    assert.equal(result.amoLink?.contactUrl, "/go/amo/contact/501");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

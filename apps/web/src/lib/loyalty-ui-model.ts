@@ -1,6 +1,7 @@
 import { getLoyaltyCallResultOptions } from "./loyalty-base-api";
 import type {
   LoyaltyAgencyStatus,
+  LoyaltyAmoLinkFilter,
   LoyaltyBaseKey,
   LoyaltyBrokerStatus,
   LoyaltyCallResult,
@@ -125,6 +126,8 @@ export interface LoyaltyFilterFormState {
   // В базе Анны (только «Наша база»): "" — все, linked — только сцепленные с
   // записями Анны, unlinked — только без сцепки.
   linkedAnna: "" | "linked" | "unlinked";
+  // 2026-09-28: «Привязка к amo» (только «Наша база»/брокеры): "" — любая.
+  amoLink: "" | LoyaltyAmoLinkFilter;
   sortBy: LoyaltySortField;
   sortOrder: "asc" | "desc";
 }
@@ -199,6 +202,7 @@ export function emptyLoyaltyFilters(): LoyaltyFilterFormState {
     cabinetSource: "",
     linkedOurs: "",
     linkedAnna: "",
+    amoLink: "",
     sortBy: "name",
     sortOrder: "asc",
   };
@@ -265,6 +269,7 @@ export function toCanonicalFilter(
     cabinetSource: state.cabinetSource || undefined,
     linkedOurs: state.linkedOurs || undefined,
     linkedAnna: state.linkedAnna || undefined,
+    amoLink: state.amoLink || undefined,
   };
 
   if (state.meetingsMin || state.meetingsMax) {
@@ -368,6 +373,8 @@ export interface LoyaltyFilterCapabilities {
   linkedOurs: boolean;
   // В базе Анны: только «Наша база».
   linkedAnna: boolean;
+  // Привязка к amo: только «Наша база»/брокеры.
+  amoLink: boolean;
   archivedModes: ReadonlyArray<LoyaltyArchiveMode>;
   scenarios: ReadonlyArray<readonly [LoyaltyCallScenario, string]>;
   segments: ReadonlyArray<LoyaltySegment>;
@@ -440,6 +447,7 @@ const SORT_VALUES: ReadonlyArray<LoyaltySortField> = [
   "brokerCount",
   "rating",
   "updatedAt",
+  "lastContactAt",
 ];
 const SORT_ORDER_VALUES: ReadonlyArray<LoyaltyFilterFormState["sortOrder"]> = [
   "asc",
@@ -495,6 +503,7 @@ export function loyaltyFilterCapabilities(
     cabinetSource: true,
     linkedOurs: base === "anna",
     linkedAnna: base === "ours",
+    amoLink: ourBroker,
     archivedModes: ourAgency ? OUR_AGENCY_ARCHIVE_MODES : ALL_ARCHIVE_MODES,
     scenarios:
       entityType === "brokers"
@@ -630,6 +639,14 @@ export function sanitizeLoyaltyFilterState(
     !["", "linked", "unlinked"].includes(state.linkedAnna)
   ) {
     patch.linkedAnna = "";
+  }
+  if (
+    (!capabilities.amoLink && state.amoLink !== "") ||
+    !["", "LINKED", "AMBIGUOUS", "NOT_FOUND", "UNCHECKED"].includes(
+      state.amoLink,
+    )
+  ) {
+    patch.amoLink = "";
   }
 
   return Object.keys(patch).length ? { ...state, ...patch } : state;
