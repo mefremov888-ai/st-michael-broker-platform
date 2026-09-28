@@ -204,9 +204,22 @@ export function contactPhones(contact: AmoContact | null | undefined): string[] 
 }
 
 /**
+ * Брокер присутствует в контактах лида в любой роли (main или второй).
+ * Лид без сведений о контактах (нет _embedded.contacts) — считаем своим.
+ * Так выбираются лид КЦ (ответственный «как назначил Морикит» на заявке
+ * клиента, где брокер второй контакт) и лиды, откуда читаем звонки.
+ */
+export function leadHasContact(lead: AmoLead, contactId: number): boolean {
+  const contacts: Array<{ id?: unknown }> | undefined = lead?._embedded?.contacts;
+  if (!Array.isArray(contacts) || contacts.length === 0) return true;
+  return contacts.some((c) => Number(c?.id) === contactId);
+}
+
+/**
  * Лид «про этого брокера»: брокер — главный контакт (is_main), либо
  * единственный. Лиды клиентов, где брокер прикреплён вторым контактом
- * (фиксации в воронке КЦ), НЕ считаются: звонки и задачи там — про клиента.
+ * (фиксации в воронке КЦ), сюда НЕ попадают: выполненные задачи там — про
+ * клиента, и звонки без params.phone там тоже не считаем.
  * Лид без сведений о контактах (нет _embedded.contacts) — считаем своим.
  */
 export function leadIsAboutContact(lead: AmoLead, contactId: number): boolean {
@@ -230,8 +243,12 @@ export interface ContactTouchInput {
   contactTasks: AmoTask[];
   leadTasks: Map<number, AmoTask[]>;
   systemUserIds: Set<number>;
-  /** Учитывать все лиды контакта, а не только «про брокера». */
-  allLeads?: boolean;
+  /**
+   * Телефоны брокера (последние 10 цифр: Broker.phone + BrokerPhone).
+   * Примечание-звонок с params.phone считается звонком С БРОКЕРОМ, только
+   * если номер совпал; иначе это звонок его клиенту по фиксации.
+   */
+  brokerPhoneKeys: Set<string>;
 }
 
 export interface ContactTouchSnapshot {
@@ -256,7 +273,30 @@ export interface ContactTouchSnapshot {
   /** Для статистики. */
   call: AmoCallTouch | null;
   task: AmoTaskTouch | null;
-  scopedLeadIds: number[];
+  /** Лиды, где брокер main/единственный (задачи, звонки без номера). */
+  ownLeadIds: number[];
+  /** Лиды, где брокер есть в любой роли (лид КЦ, звонки с номером). */
+  linkedLeadIds: number[];
+}
+
+/** Телефон из params примечания-звонка → последние 10 цифр (или ''). */
+function notePhoneKey(note: AmoNote): string {
+  return last10((note as any)?.params?.phone);
+}
+
+/**
+ * Звонок считается звонком с брокером, если params.phone совпал с одним из
+ * его номеров; при пустом phone — только если примечание лежит на самом
+ * контакте или на лиде, где брокер main/единственный.
+ */
+function callNoteIsWithBroker(
+  note: AmoNote,
+  brokerPhoneKeys: Set<string>,
+  onOwnEntity: boolean,
+): boolean {
+  const key = notePhoneKey(note);
+  if (key.length >= 10) return brokerPhoneKeys.has(key);
+  return onOwnEntity;
 }
 
 function noteAuthor(note: AmoNote): number | null {
@@ -289,34 +329,45 @@ export function computeSourceHash(parts: unknown[]): string {
 /** Чистая сборка среза по одному контакту (без сети и БД). */
 export function buildContactTouchSnapshot(input: ContactTouchInput): ContactTouchSnapshot {
   const contactId = Number(input.contact.id);
-  const scopedLeads = input.leads.filter(
-    (lead) => input.allLeads || leadIsAboutContact(lead, contactId),
+  const brokerPhoneKeys = input.brokerPhoneKeys || new Set<string>();
+  const linkedLeads = input.leads.filter((lead) => leadHasContact(lead, contactId));
+  const ownLeadIdSet = new Set<number>(
+    linkedLeads
+      .filter((lead) => leadIsAboutContact(lead, contactId))
+      .map((l) => Number(l.id)),
   );
-  const scopedLeadIds = scopedLeads.map((l) => Number(l.id));
+  const linkedLeadIds = linkedLeads.map((l) => Number(l.id));
+  const ownLeadIds = [...ownLeadIdSet];
 
+  // Звонки: с контакта + со всех лидов, где брокер есть; чужой номер — мимо.
   const notes: AmoNote[] = [];
   for (const note of input.contactNotes || []) {
-    if (isHumanNote(note, input.systemUserIds)) notes.push(note);
+    if (!isHumanNote(note, input.systemUserIds)) continue;
+    if (callNoteIsWithBroker(note, brokerPhoneKeys, true)) notes.push(note);
   }
-  for (const leadId of scopedLeadIds) {
+  for (const leadId of linkedLeadIds) {
+    const onOwnLead = ownLeadIdSet.has(leadId);
     for (const note of input.leadNotes.get(leadId) || []) {
-      if (isHumanNote(note, input.systemUserIds)) notes.push(note);
+      if (!isHumanNote(note, input.systemUserIds)) continue;
+      if (callNoteIsWithBroker(note, brokerPhoneKeys, onOwnLead)) notes.push(note);
     }
   }
   const call = pickLatestCallNote(notes);
 
+  // Задачи: с контакта + только с лидов, где брокер main/единственный.
   const tasks: AmoTask[] = [];
   for (const task of input.contactTasks || []) {
     if (isHumanTask(task, input.systemUserIds)) tasks.push(task);
   }
-  for (const leadId of scopedLeadIds) {
+  for (const leadId of ownLeadIds) {
     for (const task of input.leadTasks.get(leadId) || []) {
       if (isHumanTask(task, input.systemUserIds)) tasks.push(task);
     }
   }
   const task = pickLatestCompletedTask(tasks);
 
-  const kcLead = pickLatestKcLead(scopedLeads, AMO_PIPELINES.KC);
+  // Лид КЦ: среди всех лидов воронки КЦ, где брокер есть в любой роли.
+  const kcLead = pickLatestKcLead(linkedLeads, AMO_PIPELINES.KC);
 
   let lastTouchAt: Date | null = null;
   let lastTouchKind: ContactTouchSnapshot['lastTouchKind'] = null;
@@ -367,7 +418,8 @@ export function buildContactTouchSnapshot(input: ContactTouchInput): ContactTouc
     sourceHash,
     call,
     task,
-    scopedLeadIds,
+    ownLeadIds,
+    linkedLeadIds,
   };
 }
 
@@ -507,6 +559,17 @@ class WriteSink {
 interface LinkedBrokerRow {
   id: string;
   amoContactId: bigint | null;
+  phone?: string | null;
+  phones?: Array<{ phone: string | null }>;
+}
+
+export function brokerPhoneKeys(broker: LinkedBrokerRow): Set<string> {
+  const out = new Set<string>();
+  for (const raw of [broker.phone, ...(broker.phones || []).map((p) => p?.phone)]) {
+    const key = last10(raw);
+    if (key.length >= 10) out.add(key);
+  }
+  return out;
 }
 
 interface SyncRowLite {
@@ -769,7 +832,12 @@ export class AmoTouchSyncService {
     const maxContacts = this.positive(opts.maxContacts, DEFAULT_MAX_CONTACTS);
     const brokers = (await this.prisma.broker.findMany({
       where: { role: 'BROKER', mergedIntoId: null, amoContactId: { not: null } },
-      select: { id: true, amoContactId: true },
+      select: {
+        id: true,
+        amoContactId: true,
+        phone: true,
+        phones: { select: { phone: true } },
+      },
       orderBy: { id: 'asc' },
     })) as LinkedBrokerRow[];
     stats.contactsTotal = brokers.length;
@@ -872,7 +940,6 @@ export class AmoTouchSyncService {
     sink: WriteSink,
     stats: AmoTouchSyncStats,
   ): Promise<void> {
-    const allLeads = /^(1|true)$/i.test(String(process.env.AMO_TOUCH_ALL_LEADS || ''));
     const noteTypes = [...AMO_CALL_NOTE_TYPES];
 
     for (let i = 0; i < changed.length; i += TOUCH_BATCH) {
@@ -893,35 +960,38 @@ export class AmoTouchSyncService {
           ? await this.amoCall(() => this.amo.getLeadsByIds(leadIds))
           : new Map<number, AmoLead>();
 
-        const scopedLeadIds = new Set<number>();
+        // Звонки читаем со всех лидов, где брокер есть (любая роль); задачи —
+        // только с лидов, где брокер main/единственный.
+        const noteLeadIds = new Set<number>();
+        const taskLeadIds = new Set<number>();
         const leadsByContact = new Map<number, AmoLead[]>();
         for (const item of batch) {
           const contactId = Number(item.contact.id);
-          const own: AmoLead[] = [];
+          const linked: AmoLead[] = [];
           for (const l of item.contact._embedded?.leads || []) {
             const lead = leads.get(Number(l?.id));
-            if (!lead) continue;
-            own.push(lead);
-            if (allLeads || leadIsAboutContact(lead, contactId)) {
-              scopedLeadIds.add(Number(lead.id));
-            }
+            if (!lead || !leadHasContact(lead, contactId)) continue;
+            linked.push(lead);
+            noteLeadIds.add(Number(lead.id));
+            if (leadIsAboutContact(lead, contactId)) taskLeadIds.add(Number(lead.id));
           }
-          leadsByContact.set(contactId, own);
+          leadsByContact.set(contactId, linked);
         }
-        const scoped = [...scopedLeadIds];
+        const noteLeads = [...noteLeadIds];
+        const taskLeads = [...taskLeadIds];
 
         const contactNotes = await this.amoCall(() =>
           this.amo.getNotesForContacts(contactIds, { noteTypes }),
         );
-        const leadNotes = scoped.length
-          ? await this.amoCall(() => this.amo.getNotesForLeads(scoped, { noteTypes }))
+        const leadNotes = noteLeads.length
+          ? await this.amoCall(() => this.amo.getNotesForLeads(noteLeads, { noteTypes }))
           : new Map<number, AmoNote[]>();
         const contactTasks = await this.amoCall(() =>
           this.amo.getTasksForEntities('contacts', contactIds, { isCompleted: true }),
         );
-        const leadTasks = scoped.length
+        const leadTasks = taskLeads.length
           ? await this.amoCall(() =>
-              this.amo.getTasksForEntities('leads', scoped, { isCompleted: true }),
+              this.amo.getTasksForEntities('leads', taskLeads, { isCompleted: true }),
             )
           : new Map<number, AmoTask[]>();
 
@@ -936,7 +1006,7 @@ export class AmoTouchSyncService {
               contactTasks: contactTasks.get(contactId) || [],
               leadTasks,
               systemUserIds,
-              allLeads,
+              brokerPhoneKeys: brokerPhoneKeys(item.broker),
             });
             if (item.existing?.sourceHash === snapshot.sourceHash) {
               stats.unchangedHash += 1;

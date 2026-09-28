@@ -2,8 +2,10 @@
 // Адаптер и prisma — моки; сети нет.
 import {
   AmoTouchSyncService,
+  brokerPhoneKeys,
   buildContactTouchSnapshot,
   classifyAmoError,
+  leadHasContact,
   leadIsAboutContact,
   maskPhone,
 } from './amo-touch-sync.service';
@@ -12,6 +14,9 @@ import { AMO_PIPELINES } from '../../../../packages/integrations/src/amo-crm.fie
 const SYSTEM_BOT = 6089620;
 const HUMAN_A = 10771754;
 const HUMAN_B = 10771800;
+const BROKER_PHONE = '+79254259619';
+const CLIENT_PHONE = '+79160000001';
+const BROKER_KEYS = new Set(['9254259619']);
 
 const callNote = (
   id: number,
@@ -71,7 +76,7 @@ const brokerContact = (id: number, phone: string, isBroker: boolean, updatedAt =
 });
 
 interface PrismaFixture {
-  linked?: Array<{ id: string; amoContactId: bigint }>;
+  linked?: Array<{ id: string; amoContactId: bigint; phone?: string; phones?: Array<{ phone: string }> }>;
   syncRows?: Array<{ brokerId: string; amoUpdatedAt: Date | null; sourceHash: string | null; syncError?: string | null }>;
   unlinked?: Array<{ id: string; phone: string }>;
   takenIds?: bigint[];
@@ -172,6 +177,7 @@ describe('buildContactTouchSnapshot (чистая логика)', () => {
       contactTasks: [],
       leadTasks: new Map(),
       systemUserIds,
+      brokerPhoneKeys: BROKER_KEYS,
     });
     expect(snapshot.lastCallAt?.getTime()).toBe(1_700_000_300 * 1000);
     expect(snapshot.lastCallDirection).toBe('IN');
@@ -199,6 +205,7 @@ describe('buildContactTouchSnapshot (чистая логика)', () => {
         task(102, 10, 1_700_000_800, HUMAN_B, false), // не выполнена
       ]]]) as any,
       systemUserIds,
+      brokerPhoneKeys: BROKER_KEYS,
     });
     expect(snapshot.lastTouchKind).toBe('TASK_COMPLETED');
     expect(snapshot.lastTouchRef).toBe('task:101');
@@ -208,29 +215,114 @@ describe('buildContactTouchSnapshot (чистая логика)', () => {
     expect(snapshot.kcLeadId).toBeNull();
   });
 
-  it('лиды клиентов (брокер вторым контактом) не учитываются, лид КЦ выбирается только среди лидов про брокера', () => {
+  it('лид КЦ выбирается среди ВСЕХ лидов КЦ с брокером — даже когда брокер не main (заявка клиента, ответственный от Морикита)', () => {
+    // Факт с живого аккаунта: контакт 47242693, лид 32323585 — заявка на уникальность
+    // клиента (contacts = [47242703 клиент main, 47242693 брокер]), отв. Корнева (КЦ).
+    const c = contact(47242693, 1_700_000_500, [32323569, 32323585]);
+    const oldOwnLead = { id: 32323569, pipeline_id: AMO_PIPELINES.KC, updated_at: 1_700_000_100, responsible_user_id: HUMAN_B, _embedded: { contacts: [{ id: 47242693, is_main: true }] } };
+    const clientLead = { id: 32323585, pipeline_id: AMO_PIPELINES.KC, updated_at: 1_700_000_400, responsible_user_id: HUMAN_A, _embedded: { contacts: [{ id: 47242703, is_main: true }, { id: 47242693, is_main: false }] } };
+    const foreignLead = { id: 32323599, pipeline_id: AMO_PIPELINES.KC, updated_at: 1_700_000_900, responsible_user_id: SYSTEM_BOT, _embedded: { contacts: [{ id: 47242703, is_main: true }] } };
+    expect(leadHasContact(clientLead as any, 47242693)).toBe(true);
+    expect(leadIsAboutContact(clientLead as any, 47242693)).toBe(false);
+    expect(leadHasContact(foreignLead as any, 47242693)).toBe(false);
+    const snapshot = buildContactTouchSnapshot({
+      contact: c as any,
+      leads: [oldOwnLead, clientLead, foreignLead] as any,
+      contactNotes: [],
+      leadNotes: new Map(),
+      contactTasks: [],
+      leadTasks: new Map(),
+      systemUserIds,
+      brokerPhoneKeys: BROKER_KEYS,
+    });
+    expect(snapshot.kcLeadId).toBe(BigInt(32323585));
+    expect(snapshot.kcResponsibleUserId).toBe(BigInt(HUMAN_A));
+    expect(snapshot.linkedLeadIds).toEqual([32323569, 32323585]);
+    expect(snapshot.ownLeadIds).toEqual([32323569]);
+  });
+
+  it('звонок на клиентском лиде: с чужим номером не считается, с номером брокера — считается; без номера — только на своих сущностях', () => {
     const c = contact(1, 1_700_000_000, [10, 11]);
     const clientLead = { id: 10, pipeline_id: AMO_PIPELINES.KC, updated_at: 1_700_000_900, responsible_user_id: HUMAN_B, _embedded: { contacts: [{ id: 2, is_main: true }, { id: 1, is_main: false }] } };
-    const ownLead = { id: 11, pipeline_id: AMO_PIPELINES.KC, updated_at: 1_700_000_100, responsible_user_id: HUMAN_A, _embedded: { contacts: [{ id: 1, is_main: true }] } };
-    expect(leadIsAboutContact(clientLead as any, 1)).toBe(false);
-    expect(leadIsAboutContact(ownLead as any, 1)).toBe(true);
+    const ownLead = { id: 11, pipeline_id: AMO_PIPELINES.BROKERS, updated_at: 1_700_000_100, responsible_user_id: HUMAN_A, _embedded: { contacts: [{ id: 1, is_main: true }] } };
+    const base = {
+      contact: c as any,
+      leads: [clientLead, ownLead] as any,
+      contactNotes: [],
+      contactTasks: [],
+      leadTasks: new Map(),
+      systemUserIds,
+      brokerPhoneKeys: BROKER_KEYS,
+    };
+    // (а) звонок клиенту по фиксации — чужой номер → не касание брокера
+    const foreign = buildContactTouchSnapshot({
+      ...base,
+      leadNotes: new Map([[10, [callNote(1, 10, 1_700_000_950, HUMAN_B, 'call_out', { phone: CLIENT_PHONE })]]]) as any,
+    });
+    expect(foreign.lastCallAt).toBeNull();
+    expect(foreign.lastTouchAt).toBeNull();
+    // (б) на том же клиентском лиде звонок на номер брокера (в другом формате) → считается
+    const mine = buildContactTouchSnapshot({
+      ...base,
+      leadNotes: new Map([[10, [
+        callNote(1, 10, 1_700_000_950, HUMAN_B, 'call_out', { phone: CLIENT_PHONE }),
+        callNote(2, 10, 1_700_000_940, HUMAN_A, 'call_in', { phone: '8 (925) 425-96-19' }),
+      ]]]) as any,
+    });
+    expect(mine.lastCallAt?.getTime()).toBe(1_700_000_940 * 1000);
+    expect(mine.lastTouchRef).toBe('note:2');
+    expect(mine.lastTouchKind).toBe('CALL_IN');
+    // (в) без phone: на клиентском лиде — мимо, на своём лиде и на контакте — считается
+    const noPhone = buildContactTouchSnapshot({
+      ...base,
+      contactNotes: [callNote(5, 1, 1_700_000_300, HUMAN_A, 'call_out', { phone: '' })] as any,
+      leadNotes: new Map([
+        [10, [callNote(3, 10, 1_700_000_960, HUMAN_B, 'call_out', { phone: undefined })]],
+        [11, [callNote(4, 11, 1_700_000_500, HUMAN_A, 'call_in', { phone: '' })]],
+      ]) as any,
+    });
+    expect(noPhone.lastCallAt?.getTime()).toBe(1_700_000_500 * 1000);
+    expect(noPhone.lastTouchRef).toBe('note:4');
+    // (г) звонок на самом контакте с чужим номером — тоже мимо
+    const contactForeign = buildContactTouchSnapshot({
+      ...base,
+      leadNotes: new Map(),
+      contactNotes: [callNote(6, 1, 1_700_000_300, HUMAN_A, 'call_out', { phone: CLIENT_PHONE })] as any,
+    });
+    expect(contactForeign.lastCallAt).toBeNull();
+  });
+
+  it('выполненная задача на клиентском лиде (брокер не main) не считается, на своём лиде — считается', () => {
+    const c = contact(1, 1_700_000_000, [10, 11]);
+    const clientLead = { id: 10, pipeline_id: AMO_PIPELINES.KC, updated_at: 1_700_000_900, responsible_user_id: HUMAN_B, _embedded: { contacts: [{ id: 2, is_main: true }, { id: 1, is_main: false }] } };
+    const ownLead = { id: 11, pipeline_id: AMO_PIPELINES.BROKERS, updated_at: 1_700_000_100, _embedded: { contacts: [{ id: 1 }] } };
     const snapshot = buildContactTouchSnapshot({
       contact: c as any,
       leads: [clientLead, ownLead] as any,
       contactNotes: [],
-      leadNotes: new Map([[10, [callNote(1, 10, 1_700_000_950, HUMAN_B)]]]) as any,
+      leadNotes: new Map(),
       contactTasks: [],
-      leadTasks: new Map(),
+      leadTasks: new Map([
+        [10, [task(100, 10, 1_700_000_950, HUMAN_B)]], // клиентская фиксация — про клиента
+        [11, [task(101, 11, 1_700_000_400, HUMAN_A)]],
+      ]) as any,
       systemUserIds,
+      brokerPhoneKeys: BROKER_KEYS,
     });
-    expect(snapshot.lastCallAt).toBeNull();
-    expect(snapshot.kcLeadId).toBe(BigInt(11));
-    expect(snapshot.scopedLeadIds).toEqual([11]);
+    expect(snapshot.lastTouchKind).toBe('TASK_COMPLETED');
+    expect(snapshot.lastTouchRef).toBe('task:101');
+    expect(snapshot.lastTouchAt?.getTime()).toBe(1_700_000_400 * 1000);
+    expect(snapshot.kcLeadId).toBe(BigInt(10)); // лид КЦ при этом — клиентский, где брокер есть
+  });
+
+  it('brokerPhoneKeys: Broker.phone + BrokerPhone, нормализация до 10 цифр', () => {
+    expect([...brokerPhoneKeys({ id: 'b', amoContactId: null, phone: '+7 (925) 425-96-19', phones: [{ phone: '89160000001' }, { phone: 'tg:123' }, { phone: null }] })]).toEqual(['9254259619', '9160000001']);
+    expect(brokerPhoneKeys({ id: 'b', amoContactId: null }).size).toBe(0);
   });
 
   it('хэш стабилен и меняется при новом касании', () => {
     const c = contact(1, 1_700_000_000, []);
-    const base = { contact: c as any, leads: [], leadNotes: new Map(), contactTasks: [], leadTasks: new Map(), systemUserIds };
+    const base = { contact: c as any, leads: [], leadNotes: new Map(), contactTasks: [], leadTasks: new Map(), systemUserIds, brokerPhoneKeys: BROKER_KEYS };
     const a = buildContactTouchSnapshot({ ...base, contactNotes: [callNote(1, 1, 1_700_000_100, HUMAN_A)] as any });
     const b = buildContactTouchSnapshot({ ...base, contactNotes: [callNote(1, 1, 1_700_000_100, HUMAN_A)] as any });
     const d = buildContactTouchSnapshot({ ...base, contactNotes: [callNote(2, 1, 1_700_000_200, HUMAN_A)] as any });
@@ -254,9 +346,9 @@ describe('AmoTouchSyncService.run', () => {
     const same = 1_700_000_000;
     const prisma = makePrisma({
       linked: [
-        { id: 'b-same', amoContactId: BigInt(101) },
-        { id: 'b-changed', amoContactId: BigInt(102) },
-        { id: 'b-new', amoContactId: BigInt(103) },
+        { id: 'b-same', amoContactId: BigInt(101), phone: BROKER_PHONE, phones: [] },
+        { id: 'b-changed', amoContactId: BigInt(102), phone: BROKER_PHONE, phones: [] },
+        { id: 'b-new', amoContactId: BigInt(103), phone: BROKER_PHONE, phones: [] },
       ],
       syncRows: [
         { brokerId: 'b-same', amoUpdatedAt: new Date(same * 1000), sourceHash: 'h1' },
@@ -270,8 +362,8 @@ describe('AmoTouchSyncService.run', () => {
         [103, contact(103, same)],
       ])),
       getNotesForContacts: jest.fn().mockResolvedValue(new Map([
-        [102, [callNote(1, 102, same - 5, HUMAN_A)]],
-        [103, [callNote(2, 103, same - 5, HUMAN_A, 'call_out')]],
+        [102, [callNote(1, 102, same - 5, HUMAN_A, 'call_in', { phone: BROKER_PHONE })]],
+        [103, [callNote(2, 103, same - 5, HUMAN_A, 'call_out', { phone: '8-925-425-96-19' })]],
       ])),
     });
     const service = makeService(prisma, amo);
@@ -283,6 +375,9 @@ describe('AmoTouchSyncService.run', () => {
     expect(r.stats.contactsSkipped).toBe(1);
     expect(r.stats.contactsChanged).toBe(2);
     expect(amo.getNotesForContacts.mock.calls[0][0]).toEqual([103, 102]);
+    expect(prisma.broker.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      select: { id: true, amoContactId: true, phone: true, phones: { select: { phone: true } } },
+    }));
     expect(upsertDataFor(prisma, 'b-same')).toHaveLength(0);
     const changed = upsertDataFor(prisma, 'b-changed')[0];
     expect(changed.lastTouchKind).toBe('CALL_IN');
@@ -326,6 +421,32 @@ describe('AmoTouchSyncService.run', () => {
     const r2 = await service2.run({ mode: 'apply', phases: [1, 2] });
     expect(r2.stats.unchangedHash).toBe(1);
     expect(prisma2.brokerAmoContactSync.upsert).not.toHaveBeenCalled();
+  });
+
+  it('фаза 2: примечания читаются со всех лидов с брокером, задачи — только с лидов, где брокер main', async () => {
+    const t = 1_700_000_000;
+    const prisma = makePrisma({
+      linked: [{ id: 'b-1', amoContactId: BigInt(1), phone: BROKER_PHONE, phones: [] }],
+    });
+    const clientLead = { id: 10, pipeline_id: AMO_PIPELINES.KC, updated_at: t, responsible_user_id: HUMAN_A, _embedded: { contacts: [{ id: 2, is_main: true }, { id: 1, is_main: false }] } };
+    const ownLead = { id: 11, pipeline_id: AMO_PIPELINES.BROKERS, updated_at: t, _embedded: { contacts: [{ id: 1, is_main: true }] } };
+    const foreignLead = { id: 12, pipeline_id: AMO_PIPELINES.KC, updated_at: t + 5, _embedded: { contacts: [{ id: 3, is_main: true }] } };
+    const amo = makeAmo({
+      getContactsByIds: jest.fn().mockResolvedValue(new Map([[1, contact(1, t, [10, 11, 12])]])),
+      getLeadsByIds: jest.fn().mockResolvedValue(new Map<number, any>([[10, clientLead], [11, ownLead], [12, foreignLead]])),
+      getNotesForLeads: jest.fn().mockResolvedValue(new Map([[10, [callNote(7, 10, t - 1, HUMAN_A, 'call_out', { phone: CLIENT_PHONE })]]])),
+    });
+    const service = makeService(prisma, amo);
+    const r = await service.run({ mode: 'apply', phases: [1, 2] });
+    expect(r.status).toBe('SUCCEEDED');
+    expect(amo.getLeadsByIds).toHaveBeenCalledWith([10, 11, 12]);
+    expect(amo.getNotesForLeads.mock.calls[0][0]).toEqual([10, 11]);
+    const taskCalls = amo.getTasksForEntities.mock.calls.filter((c: any[]) => c[0] === 'leads');
+    expect(taskCalls[0][1]).toEqual([11]);
+    const data = upsertDataFor(prisma, 'b-1')[0];
+    expect(data.kcLeadId).toBe(BigInt(10));
+    expect(data.kcResponsibleUserId).toBe(BigInt(HUMAN_A));
+    expect(data.lastCallAt).toBeNull(); // звонок клиенту по фиксации — не касание брокера
   });
 
   it('фаза 3: квота и правила LINKED / AMBIGUOUS / NOT_FOUND / NOT_BROKER / занятый id', async () => {
