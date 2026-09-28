@@ -1,7 +1,7 @@
 'use client';
 
 // 2026-09-28: новый лендинг кабинета брокера по макету Figma «Кабинет брокера»
-// (Ринат Габитов), фрейм 1920×6228. Вёрстка один в один под 1920; ниже 1440
+// (Ринат Габитов), фрейм 1920×7004 (версия от 28.09, вечер). Вёрстка один в один под 1920; ниже 1440
 // страница масштабируется целиком. Мобильная версия — после финальных правок
 // (решение владельца 28.09). Данные — те же публичные API, что у старого
 // лендинга; «Стать партнёром» = заявка «перезвоним за 1 час», которая уходит
@@ -15,6 +15,7 @@ export interface LandingV2Data {
   projects: any[];
   events: any[];
   promos: any[];
+  news: any[];
   cooperationDocs: any[];
   materials: Record<string, { photo: number; video: number; doc: number; total: number }>;
 }
@@ -27,25 +28,46 @@ const PROJECT_PHOTOS: Record<string, string> = {
   zorge9: '/v2/img/project-zorge9.webp',
   'silver-bor': '/v2/img/project-silver-bor.webp',
 };
-const PROJECT_FALLBACK: Record<string, { name: string; address: string; floors?: string; ready?: string; classType?: string }> = {
-  zorge9: { name: 'ЖК «Зорге 9»', address: 'ул. Зорге, 9А, корп. 1', floors: '23 эт.', classType: 'Бизнес-класс', ready: 'Дом готов' },
-  'silver-bor': { name: 'Квартал Серебряный Бор', address: 'ул. Берзарина, 37', floors: '16-25 эт.', classType: 'Премиум-класс', ready: 'II кв. 2027' },
+// Тексты карточек — буква в букву из макета (28.09, фрейм 7004); описание из CMS
+// имеет приоритет, константа — фолбэк.
+const PROJECT_FALLBACK: Record<string, { name: string; address: string; floors?: string; ready?: string; classType?: string; description: string }> = {
+  zorge9: {
+    name: 'ЖК «Зорге 9»', address: 'ул. Зорге, 9А, корп. 1', floors: '23 эт.', classType: 'Бизнес-класс', ready: 'Дом готов',
+    description: 'Апартаменты бизнес-класса у метро Полежаевская. Высотный корпус с авторским гранд-лобби, парком 2 га и фитнесом 3000 м² с бассейном 25 м. Архитектура — лауреат European Property Awards.',
+  },
+  'silver-bor': {
+    name: 'Квартал Серебряный Бор', address: 'ул. Берзарина, 37', floors: '16-25 эт.', classType: 'Премиум-класс', ready: 'II кв. 2027',
+    description: 'Квартиры премиум-класса рядом с природным заповедником Серебряный Бор. Архитектурное решение от Apex Project Bureau — современные формы, эстетика, гармония с природой.',
+  },
+};
+// Третья карточка макета — «Маршала Толбухина 3»: проекта в кабинете нет,
+// продажи не стартовали, поэтому карточка статическая (кнопка некликабельная).
+const TOLBUKHINA = {
+  name: 'Маршала Толбухина 3', address: 'ул. Толбухина, вл. 3', tags: ['II кв. 2029', 'МФК', '14 эт.'], photo: '/v2/img/project-tolbukhina.webp',
+  description: 'Проект станет знаковым в сохранение культурного наследия Москвы. В архитектурный ансамбль органично интегрировано историческое здание дачи маршала СССР Федора Толбухина.',
 };
 
+const MONTHS_RU = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const fmtNewsDate = (iso: string) => { const d = new Date(iso); return `${d.getDate()} ${MONTHS_RU[d.getMonth()]} ${d.getFullYear()}`; };
+
+// Переносы строк (\n) — как в макете: браузер считает текст на ~1 px уже Figma
+// и у границы блока переносил бы иначе; выводим через white-space: pre-line.
 const STEPS = [
-  { title: 'Проверка на уникальность', text: 'Проверьте клиента в кабинете перед сделкой' },
-  { title: 'Встреча в офисе продаж', text: 'Запишите клиента на встречу в офис продаж' },
-  { title: 'Фиксация клиента', text: 'После встречи клиент закреплён за вами на 30 дней' },
-  { title: 'Сделка и выплата', text: 'После оплаты клиентом, вознаграждение приходит за 7 рабочих дней' },
+  { title: 'Проверка на уникальность', text: 'Проверьте клиента в кабинете\nперед сделкой' },
+  { title: 'Встреча в офисе продаж', text: 'Запишите клиента на встречу\nв офис продаж' },
+  { title: 'Фиксация клиента', text: 'После встречи клиент закреплён\nза вами на 30 дней' },
+  { title: 'Сделка и выплата', text: 'После оплаты клиентом, вознаграждение\nприходит за 7 рабочих дней' },
 ];
 
+// icon — номер svg в /v2/svg/reason-0N.svg (порядок файлов остался от первой
+// версии макета: 02 = стрелка роста, 03 = щит, 04 = искры, 05 = кошелёк).
 const REASONS = [
-  { title: 'Выделенный отдел по работе с партнёрами', sub: 'Сопровождение на всех этапах сделки' },
-  { title: 'Не уводим ваших клиентов', sub: 'С клиентами, которые пришли через вас, мы не работаем напрямую' },
-  { title: 'Быстрые выплаты', sub: 'Вознаграждение — до 7 рабочих дней' },
-  { title: 'Высокая комиссия', sub: 'Выплаты до 6%' },
-  { title: 'Не цепляемся за формальности', sub: 'Гибкий регламент работы. Подтверждаем работу с клиентом, даже когда другие отказали бы' },
-  { title: 'Выделенный отдел по работе с партнёрами', sub: 'Сопровождение на всех этапах сделки' },
+  { title: 'Выделенный отдел по работе с партнёрами', sub: 'Сопровождение на всех этапах сделки', icon: 1 },
+  { title: 'Не уводим ваших клиентов', sub: 'С клиентами, которые пришли через вас, мы\nне работаем напрямую', icon: 3 },
+  { title: 'Быстрые выплаты', sub: 'Вознаграждение — до 7 рабочих дней', icon: 5 },
+  { title: 'Высокая комиссия', sub: 'Выплаты до 6%', icon: 2 },
+  { title: 'Не цепляемся за формальности', sub: 'Гибкий регламент работы. Подтверждаем работу\nс клиентом, даже когда другие отказали бы', icon: 4 },
+  { title: 'Выделенный отдел по работе с партнёрами', sub: 'Сопровождение на всех этапах сделки', icon: 6 },
 ];
 
 const ROMAN = ['', 'I', 'II', 'III', 'IV'];
@@ -242,6 +264,13 @@ function MonthModal({ events, onClose }: { events: any[]; onClose: () => void })
 // 2026-09-28 (обновление макета): карусель «Акции» — фото на всю ширину
 // контейнера 1360×600, заголовок белым, стрелки по бокам, точки слева внизу.
 // Данные — CMS-акции; если их нет — один слайд из макета.
+// Стрелка макета: контур 9×21, stroke 3, белая (узлы 110:759 / 110:761).
+const PromoArrow = () => (
+  <svg width="9" height="21" viewBox="0 0 9 21" fill="none" aria-hidden="true">
+    <path d="M1.5 1.5 L7.5 10.5 L1.5 19.5" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 function PromoCarousel({ promos }: { promos: any[] }) {
   const slides = promos.length ? promos : [DEFAULT_PROMO];
   const [index, setIndex] = useState(0);
@@ -262,12 +291,9 @@ function PromoCarousel({ promos }: { promos: any[] }) {
           {slide.ctaHref && (
             <a className="v2-btn v2-btn--cta v2-promo-cta" href={slide.ctaHref} target="_blank" rel="noopener noreferrer">{slide.ctaText || 'Подробнее'}</a>
           )}
-          {count > 1 && (
-            <>
-              <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => setIndex((index - 1 + count) % count)} />
-              <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => setIndex((index + 1) % count)} />
-            </>
-          )}
+          {/* стрелки есть в макете всегда; при одном слайде они просто ничего не листают */}
+          <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => setIndex((index - 1 + count) % count)}><PromoArrow /></button>
+          <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => setIndex((index + 1) % count)}><PromoArrow /></button>
           <div className="v2-promo-dots">
             {slides.map((s: any, k: number) => (
               <button key={s.id || k} className={`v2-promo-dot${k === index % count ? ' v2-promo-dot--active' : ''}`} aria-label={`Акция ${k + 1}`} onClick={() => setIndex(k)} />
@@ -301,6 +327,9 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const telegramLabel = telegram.replace(/^https?:\/\//, '');
   const manager = contact.manager || contact.managers?.[0] || { name: 'Дарья Великанова', role: 'Менеджер по работе с брокерами', phone: '+7 (930) 012-94-52' };
   const hours: string = contact.phoneHours || 'Ежедневно с 9:00 до 21:00';
+  // Заголовок горячей линии в макете — две строки; если в CMS стандартный текст, переносим как в макете.
+  const hotTitleRaw = String(contact.blockTitle || '').trim().replace(/\s+/g, ' ');
+  const hotTitle = !hotTitleRaw || hotTitleRaw === 'Горячая линия по работе с партнёрами' ? 'Горячая линия\nпо работе с партнёрами' : hotTitleRaw;
 
   const projects = useMemo(() => {
     const list = (data.projects || []).filter((p) => p.isActive !== false && PROJECT_FALLBACK[p.slug]);
@@ -315,6 +344,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
     () => (data.promos || []).filter((p) => p.isActive !== false && (!p.expiresAt || new Date(p.expiresAt) > new Date())),
     [data.promos],
   );
+  // Новости: 4 карточки 322×360 как в макете; если новостей нет — блок не показываем.
+  const news = useMemo(() => (data.news || []).filter((n) => n.isActive !== false).slice(0, 4), [data.news]);
 
   const matCount = (key: string) => {
     const g = data.materials?.[key];
@@ -337,11 +368,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
             <span>Кабинет брокера</span>
           </a>
           <div className="v2-header-right">
-            <a className="v2-header-phone" href={phoneHref}>{phone}</a>
-            <button className="v2-btn v2-btn--outline" onClick={() => setModal('tour')}>Записаться на брокер-тур</button>
-            {/* 28.09 (владелец): две кнопки — «Войти» и «Зарегистрироваться» */}
-            <Link className="v2-btn v2-btn--outline" href="/login">Войти</Link>
-            <Link className="v2-btn v2-btn--gold" href="/register">Зарегистрироваться</Link>
+            {/* Макет 28.09 (7004): справа только «Регистрация» (контур 145×38),
+                золотая «Войти в кабинет брокера» (238×38) и бургер. Телефон и
+                «Записаться на брокер-тур» из шапки ушли — запись на тур в меню. */}
+            <Link className="v2-btn v2-btn--outline v2-header-reg" href="/register">Регистрация</Link>
+            <Link className="v2-btn v2-btn--gold v2-header-login" href="/login">Войти в кабинет брокера</Link>
             <button className="v2-burger" aria-label="Меню" onClick={() => setMenu((v) => !v)}><i /><i /><i /></button>
           </div>
           {menu && (
@@ -351,9 +382,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <a href="#materials">Материалы</a>
               <a href="#events">Брокер-туры</a>
               <a href="#reasons">Почему St Michael</a>
+              {news.length > 0 && <a href="#news">Новости</a>}
               <a href="#contacts">Контакты</a>
+              <button onClick={() => setModal('tour')}>Записаться на брокер-тур</button>
               <button onClick={() => setModal('conditions')}>Условия вознаграждения</button>
-              <Link href="/register">Регистрация</Link>
+              <a href={phoneHref}>{phone}</a>
             </nav>
           )}
         </div>
@@ -369,34 +402,48 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
             <div className="v2-title-row">
               <div>
                 <h2 className="v2-title">Наши проекты</h2>
-                <p className="v2-subtitle">Два эксклюзивных адреса Москвы</p>
+                <p className="v2-subtitle">Три эксклюзивных адреса Москвы</p>
               </div>
-              <button className="v2-btn v2-btn--dark" onClick={() => setModal('conditions')}>Условия вознаграждения</button>
+              <button className="v2-btn v2-btn--dark v2-btn--w238" onClick={() => setModal('conditions')}>Условия вознаграждения</button>
             </div>
-            <div className={`v2-projects${projects.length >= 3 ? ' v2-projects--3' : ''}`}>
+            {/* Макет 28.09 (7004): три карточки 437×807 — Зорге 9, КСБ из CMS
+                и статическая «Маршала Толбухина 3». Первый тег всегда тёмный. */}
+            <div className="v2-projects">
               {projects.map((p) => {
                 const fb = PROJECT_FALLBACK[p.slug];
                 const ready = p.readyYear ? `${ROMAN[Number(p.readyQuarter) || 0] ? ROMAN[Number(p.readyQuarter)] + ' кв. ' : ''}${p.readyYear}` : fb.ready;
                 const cls = p.classType ? String(p.classType).replace(/^./, (c: string) => c.toUpperCase()) : fb.classType;
                 const floors = p.floorsTotal ? `${p.floorsTotal} эт.` : fb.floors;
                 const address = String(p.address || fb.address).replace(/^Москва,\s*/i, '');
+                const tags = [ready, cls, floors].filter(Boolean) as string[];
                 return (
                   <article className="v2-pcard" key={p.slug}>
                     <img className="v2-pcard-photo" src={PROJECT_PHOTOS[p.slug]} alt={fb.name} />
                     <div className="v2-pcard-body">
                       <div className="v2-tags">
-                        {ready && <span className={`v2-tag${/готов/i.test(ready) ? ' v2-tag--dark' : ''}`}>{ready}</span>}
-                        {cls && <span className="v2-tag">{cls}</span>}
-                        {floors && <span className="v2-tag">{floors}</span>}
+                        {tags.map((t, i) => <span key={t} className={`v2-tag${i === 0 ? ' v2-tag--dark' : ''}`}>{t}</span>)}
                       </div>
-                      <div className="v2-pcard-name">{fb.name}<span>{address}</span></div>
-                      <p className="v2-pcard-desc">{p.description}</p>
+                      <div className="v2-pcard-name"><b>{fb.name}</b><span>{address}</span></div>
+                      <p className="v2-pcard-desc">{p.description || fb.description}</p>
                       <a className="v2-pcard-more" href={PROJECT_PAGES[p.slug]} target="_blank" rel="noopener noreferrer">Подробнее →</a>
                     </div>
                     <a className="v2-btn v2-btn--dark" href={p.ctaHref || PROJECT_PAGES[p.slug]} target="_blank" rel="noopener noreferrer">Выбрать апартаменты</a>
                   </article>
                 );
               })}
+              <article className="v2-pcard v2-pcard--soon">
+                <img className="v2-pcard-photo" src={TOLBUKHINA.photo} alt={TOLBUKHINA.name} />
+                <div className="v2-pcard-body">
+                  <div className="v2-tags">
+                    {TOLBUKHINA.tags.map((t, i) => <span key={t} className={`v2-tag${i === 0 ? ' v2-tag--dark' : ''}`}>{t}</span>)}
+                  </div>
+                  <div className="v2-pcard-name"><b>{TOLBUKHINA.name}</b><span>{TOLBUKHINA.address}</span></div>
+                  <p className="v2-pcard-desc">{TOLBUKHINA.description}</p>
+                  {/* страницы проекта на stmichael.ru пока нет — «Подробнее» без ссылки */}
+                  <span className="v2-pcard-more">Подробнее →</span>
+                </div>
+                <span className="v2-btn v2-btn--soon" aria-disabled="true">Старт продаж скоро</span>
+              </article>
             </div>
           </div>
         </section>
@@ -494,8 +541,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
           <div className="v2-container">
             <div className="v2-title-row">
               <div className="v2-reasons-head">
-                <h2 className="v2-title">Шесть причин, ради которых брокеры остаются с St Michael</h2>
-                <p className="v2-subtitle">Мы выстроили сотрудничество так, чтобы вы могли начать работать сразу, с первой сделки. Без дополнительных условий.</p>
+                <h2 className="v2-title">Шесть причин, ради которых<br />брокеры остаются с St Michael</h2>
+                <p className="v2-subtitle">Мы выстроили сотрудничество так, чтобы вы могли начать работать сразу,<br />с первой сделки. Без дополнительных условий.</p>
               </div>
               <button className="v2-btn v2-btn--dark" onClick={() => setModal('callback')}>Стать партнёром</button>
             </div>
@@ -503,7 +550,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               {REASONS.map((r, i) => (
                 <div className="v2-rcard" key={i}>
                   <div className="v2-rcard-num">0{i + 1}</div>
-                  <div className="v2-rcard-icon"><img src={`/v2/svg/reason-0${i + 1}.svg`} alt="" /></div>
+                  <div className="v2-rcard-icon"><img src={`/v2/svg/reason-0${r.icon}.svg`} alt="" /></div>
                   <div className="v2-rcard-text">
                     <div className="v2-rcard-title">{r.title}</div>
                     <div className="v2-rcard-sub">{r.sub}</div>
@@ -514,7 +561,27 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
           </div>
         </section>
 
-        {/* 2026-09-28: блок «Новости» из макета убран (обновление Рината). */}
+        {/* ── новости (макет 28.09, 7004: 4 карточки 322×360; без новостей блок скрыт) ── */}
+        {news.length > 0 && (
+          <section className="v2-section" id="news">
+            <div className="v2-container">
+              <div className="v2-title-row">
+                <div>
+                  <h2 className="v2-title">Новости</h2>
+                </div>
+              </div>
+              <div className="v2-news">
+                {news.map((n) => (
+                  <a className="v2-ncard" key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer">
+                    {n.imageUrl ? <img className="v2-ncard-cover" src={n.imageUrl} alt="" /> : <div className="v2-ncard-cover" />}
+                    <div className="v2-ncard-title">{n.title}</div>
+                    <div className="v2-ncard-meta">{n.publishedAt ? fmtNewsDate(n.publishedAt) : ''}{n.source ? ` · ${n.source}` : ''}</div>
+                  </a>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
 
         {/* ── заявка + контакты ── */}
         <section id="contacts">
@@ -527,11 +594,12 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <div className="v2-cta-right">
                 <h2>Всегда<br />на связи</h2>
                 <div className="v2-contact-block" style={{ top: 294 }}>
-                  <div className="v2-contact-main">{contact.blockTitle || 'Горячая линия по работе с партнёрами'}<br /><a href={phoneHref}>{phone}</a></div>
+                  {/* телефон в макете без скобок: «+7 499 226-22-49», заголовок в две строки */}
+                  <div className="v2-contact-main v2-contact-main--hot">{hotTitle}<br /><a href={phoneHref}>{phone.replace(/[()]/g, '')}</a></div>
                   <div className="v2-contact-sub">{hours}</div>
                 </div>
                 <div className="v2-contact-block" style={{ top: 436 }}>
-                  <div className="v2-contact-main">{manager.name}<br /><a href={'tel:' + String(manager.phone || '').replace(/[^\d+]/g, '')}>{manager.phone}</a></div>
+                  <div className="v2-contact-main">{manager.name}<br /><a href={'tel:' + String(manager.phone || '').replace(/[^\d+]/g, '')}>{String(manager.phone || '').replace(/[()]/g, '')}</a></div>
                   <div className="v2-contact-sub">{manager.role}</div>
                 </div>
                 <div className="v2-divider" style={{ top: 550 }} />
@@ -558,6 +626,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 <div>Проекты</div>
                 <a href="#projects">Зорге 9</a>
                 <a href="#projects">Квартал Серебряный Бор</a>
+                <a href="#projects">Толбухина 3</a>
               </div>
               <div className="v2-footer-col v2-footer-col--3">
                 <div>Партнёрам</div>

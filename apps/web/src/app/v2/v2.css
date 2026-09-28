@@ -36,12 +36,16 @@
 /* ─── шапка ─── */
 .v2-header { height: 120px; background: var(--v2-head); border-bottom: 1px solid #b3b3b3; }
 .v2-header .v2-container { height: 120px; display: flex; align-items: center; position: relative; }
-.v2-brand { display: block; }
-.v2-brand img { width: 211px; height: 19px; margin-top: 2px; }
+/* Макет: логотип (280,42) 211×19, «Кабинет брокера» под ним с отступом 11;
+   справа «Регистрация» 145×38 (1169,41), «Войти в кабинет брокера» 238×38 (1338,41),
+   бургер 40×14 (1600,53); промежутки 24. */
+.v2-brand { display: block; align-self: flex-start; margin-top: 42px; }
+.v2-brand img { width: 211px; height: 19px; }
 .v2-brand span { display: block; font-size: 20px; line-height: 23px; margin-top: 11px; }
 .v2-header-right { margin-left: auto; display: flex; align-items: center; gap: 24px; }
-.v2-header-phone { font-size: 20px; line-height: 23px; margin-right: 0; }
-.v2-burger { width: 40px; height: 14px; display: flex; flex-direction: column; justify-content: space-between; margin-left: 17px; }
+.v2 .v2-header-reg { width: 145px; padding: 10px 0; }
+.v2 .v2-header-login { width: 238px; padding: 10px 0; }
+.v2-burger { width: 40px; height: 14px; display: flex; flex-direction: column; justify-content: space-between; }
 .v2-burger i { display: block; height: 1.5px; background: #000; }
 
 /* ─── кнопки ─── */
@@ -54,9 +58,15 @@
 .v2 a.v2-btn--dark, .v2 a.v2-btn--outline-white { color: #fff; }
 .v2-btn--outline { border: 1px solid #000; color: #000; }
 .v2-btn--outline-white { border: 1px solid #fff; color: #fff; height: 40px; }
-.v2-btn--light { background: #ffffff; color: #000; }
+/* «Стать партнёром» в подвале: тёмный градиент под белым слоем 80% (макет) → светло-серый */
+.v2-btn--light { background: linear-gradient(180deg, #dfdfdf 0%, #d4d4d4 100%); color: #000; }
 .v2-btn--ghost { background: #fff; border: 1px solid var(--v2-line); color: var(--v2-gray); height: 40px; }
-.v2-btn--cta { height: 48px; padding: 12px 30px; border-radius: 15px; font-size: 20px; line-height: 23px; background: #fff; color: #000; }
+/* `.v2 button.v2-btn { font: inherit }` перебивал 20px — поэтому специфичность выше; ширина 220 как в макете */
+.v2 .v2-btn--cta { height: 48px; width: 220px; padding: 12px 0; border-radius: 15px; font-size: 20px; line-height: 23px; background: #fff; color: #000; }
+.v2-btn--w238 { width: 238px; padding-left: 0; padding-right: 0; }
+/* «Старт продаж скоро» (Толбухина): контур #bfbfbf, чёрный текст, 40 высоты, не кликается */
+.v2 .v2-btn--soon { height: 40px; border: 1px solid var(--v2-line); color: #000; background: #fff; cursor: default; }
+.v2 .v2-btn--soon:hover { opacity: 1; }
 
 /* ─── секции ─── */
 .v2-section { padding-top: 176px; }
@@ -67,31 +77,35 @@
 .v2-title-row .v2-btn { margin-top: 0; }
 
 /* проекты */
-.v2-projects { display: grid; grid-template-columns: repeat(2, 668px); gap: 24px; margin-top: 72px; }
-.v2-projects.v2-projects--3 { grid-template-columns: repeat(3, 437px); }
-.v2-pcard { background: #fff; border-radius: 24px; overflow: hidden; height: 777px; position: relative; }
+/* Макет 28.09 (7004): три карточки 437×807 в x280/741/1203 (средняя 438), фото 437×437,
+   теги y+475, название y+529 (2 строки 16/18), описание 360×90 y+577, «Подробнее» y+679,
+   кнопка 357×38 y+729 (у Толбухиной 357×40, y+728). */
+.v2-projects { display: grid; grid-template-columns: 437px 438px 437px; gap: 24px; margin-top: 72px; }
+.v2-pcard { background: #fff; border-radius: 24px; overflow: hidden; height: 807px; position: relative; }
 .v2-pcard-photo { width: 100%; height: 437px; object-fit: cover; }
 .v2-pcard-body { padding: 38px 40px 0; }
 .v2-tags { display: flex; gap: 8px; }
 .v2-tag { display: inline-flex; align-items: center; height: 28px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--v2-line); color: var(--v2-gray); font-size: 16px; line-height: 18px; white-space: nowrap; }
 .v2-tag--dark { background: var(--v2-dark); border-color: var(--v2-dark); color: #fff; }
-.v2-pcard-name { margin-top: 26px; font-size: 16px; line-height: 21px; }
+.v2-pcard-name { margin-top: 26px; font-size: 16px; line-height: 18px; }
+.v2-pcard-name b { display: block; font-weight: 500; }
 .v2-pcard-name span { display: block; color: var(--v2-gray); }
-.v2 .v2-pcard-desc { margin-top: 12px; font-size: 16px; line-height: 18px; max-width: 588px; max-height: 54px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
-.v2-pcard-more { display: inline-block; margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
-.v2-pcard-more:hover { color: var(--v2-black); }
-.v2-pcard .v2-btn--dark { position: absolute; left: 40px; right: 40px; bottom: 40px; }
+.v2 .v2-pcard-desc { margin-top: 12px; width: 360px; height: 90px; font-size: 16px; line-height: 18px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
+.v2-pcard-more { display: inline-block; margin-top: 12px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
+a.v2-pcard-more:hover { color: var(--v2-black); }
+.v2-pcard .v2-btn { position: absolute; left: 40px; width: 357px; bottom: 40px; }
+.v2-pcard .v2-btn--soon { bottom: 39px; }
 
 /* акции (2026-09-28: карусель 1360×600 по обновлённому макету) */
 .v2-promo { position: relative; height: 600px; border-radius: 24px; overflow: hidden; background: #1f1f1f center / cover no-repeat; color: #fff; }
-.v2 .v2-promo-title { position: absolute; left: 50px; top: 50px; max-width: 560px; font-size: 44px; line-height: 51px; font-weight: 500; }
+/* заголовок 347 шириной (две строки) в (50,50); стрелки 9×21 в x50 и x1301, y289 */
+.v2 .v2-promo-title { position: absolute; left: 50px; top: 50px; width: 347px; font-size: 44px; line-height: 51px; font-weight: 500; }
 .v2 .v2-promo-sub { position: absolute; left: 50px; top: 170px; max-width: 560px; font-size: 24px; line-height: 28px; }
 .v2-promo-cta { position: absolute; left: 50px; bottom: 90px; }
-.v2-promo-arrow { position: absolute; top: 278px; width: 44px; height: 44px; }
-.v2-promo-arrow::before { content: ''; position: absolute; left: 16px; top: 12px; width: 15px; height: 15px; border-top: 3px solid #fff; border-right: 3px solid #fff; transform: rotate(45deg); }
-.v2-promo-arrow--prev { left: 32px; }
-.v2-promo-arrow--prev::before { transform: rotate(-135deg); left: 20px; }
-.v2-promo-arrow--next { right: 32px; }
+.v2 .v2-promo-arrow { position: absolute; top: 289px; width: 9px; height: 21px; display: block; line-height: 0; }
+.v2-promo-arrow svg { display: block; }
+.v2-promo-arrow--prev { left: 50px; transform: scaleX(-1); }
+.v2-promo-arrow--next { left: 1301px; }
 .v2-promo-arrow:hover { opacity: .8; }
 .v2-promo-dots { position: absolute; left: 50px; top: 535px; display: flex; gap: 12px; align-items: center; }
 .v2 .v2-promo-dot { width: 15px; height: 15px; border-radius: 50%; background: #fff; }
@@ -101,7 +115,7 @@
 .v2-steps { display: grid; grid-template-columns: repeat(4, 322px); gap: 24px; margin-top: 72px; }
 .v2-step-num { font-size: 100px; line-height: 115px; color: var(--v2-gold); letter-spacing: -1px; }
 .v2-step-title { margin-top: 40px; font-size: 16px; line-height: 18px; }
-.v2 .v2-step-text { margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
+.v2 .v2-step-text { margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); white-space: pre-line; }
 
 /* материалы */
 .v2-materials { display: grid; grid-template-columns: repeat(3, 437px); gap: 24px; margin-top: 72px; }
@@ -129,23 +143,24 @@
 
 /* шесть причин */
 .v2-reasons-head { max-width: 870px; }
-.v2-reasons-head .v2-title { max-width: 700px; }
+/* заголовок 635×102: перенос задан явно (<br>), у границы браузер и Figma считают ширину по-разному */
+.v2-reasons-head .v2-title { width: 635px; white-space: nowrap; }
 .v2-reasons-head .v2-subtitle { margin-top: 24px; }
 .v2-reasons { display: grid; grid-template-columns: repeat(3, 437px); gap: 24px; margin-top: 72px; }
 .v2-rcard { height: 211px; border-radius: 12px; background: #fefefe; padding: 20px; position: relative; }
 .v2-rcard-num { font-size: 48px; line-height: 55px; color: var(--v2-gold); }
-.v2-rcard-icon { position: absolute; right: 20px; top: 20px; width: 24px; height: 24px; display: flex; align-items: flex-start; justify-content: flex-end; }
-.v2-rcard-icon img { max-width: 24px; max-height: 20px; }
+.v2-rcard-icon { position: absolute; right: 19px; top: 19px; width: 26px; height: 24px; display: flex; align-items: flex-start; justify-content: flex-end; }
+.v2-rcard-icon img { max-width: 26px; max-height: 22px; }
 .v2-rcard-text { position: absolute; left: 20px; right: 20px; bottom: 20px; }
 .v2-rcard-title { font-size: 16px; line-height: 18px; }
-.v2 .v2-rcard-sub { margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); font-weight: 500; }
+.v2 .v2-rcard-sub { margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); font-weight: 500; white-space: pre-line; }
 
 /* новости */
 .v2-news { display: grid; grid-template-columns: repeat(4, 322px); gap: 24px; margin-top: 72px; }
 .v2-ncard { display: block; background: #fff; border-radius: 24px; overflow: hidden; height: 360px; position: relative; transition: transform .2s ease; }
 .v2-ncard:hover { transform: translateY(-2px); }
 .v2-ncard-cover { width: 100%; height: 236px; object-fit: cover; background: #e9e6e1; }
-.v2-ncard-title { position: absolute; left: 25px; right: 25px; top: 256px; font-size: 16px; line-height: 18px; max-height: 54px; overflow: hidden; }
+.v2-ncard-title { position: absolute; left: 25px; width: 272px; top: 256px; font-size: 16px; line-height: 18px; max-height: 36px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .v2-ncard-meta { position: absolute; left: 25px; right: 25px; top: 322px; font-size: 16px; line-height: 18px; color: var(--v2-gray); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* заявка + контакты */
@@ -157,6 +172,7 @@
 .v2-cta-right h2 { font-size: 44px; line-height: 51px; font-weight: 500; }
 .v2-contact-block { position: absolute; left: 50px; right: 50px; }
 .v2-contact-main { font-size: 24px; line-height: 28px; font-weight: 500; }
+.v2-contact-main--hot { width: 278px; white-space: pre-line; }
 .v2-contact-main a:hover { color: var(--v2-gold); }
 .v2-contact-sub { margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); font-weight: 500; }
 .v2-contact-links { font-size: 16px; line-height: 18px; font-weight: 500; }
@@ -169,14 +185,22 @@
 .v2-footer-brand { position: absolute; left: 115px; top: 88px; }
 .v2-footer-brand img { width: 211px; height: 19px; }
 .v2-footer-brand span { display: block; margin-top: 11px; font-size: 20px; line-height: 23px; }
+/* колонки подвала (макет): заголовок #999, под ним 16, между пунктами 8; всё 16/18 500 */
 .v2-footer-col { position: absolute; top: 88px; font-size: 16px; line-height: 18px; font-weight: 500; }
-.v2-footer-col div + div, .v2-footer-col a + a, .v2-footer-col a + div, .v2-footer-col div + a { margin-top: 8px; }
+.v2-footer-col > * + * { margin-top: 8px; }
+.v2-footer-col > div:first-child { color: var(--v2-gray); margin-bottom: 16px; }
+.v2-footer-col > div:first-child + * { margin-top: 0; }
 .v2-footer-col a, .v2-footer-col button { display: block; font-weight: 500; }
 .v2-footer-col a:hover, .v2-footer-col button:hover { color: var(--v2-gold); }
 .v2-footer-col--1 { left: 576px; }
 .v2-footer-col--2 { left: 807px; }
 .v2-footer-col--3 { left: 1038px; }
 .v2-footer-btns { position: absolute; left: 399px; top: 354px; display: flex; gap: 22px; align-items: center; }
+/* ширины кнопок подвала как в макете: 177 / 172 / 167 (итого 562) */
+.v2-footer-btns .v2-btn { padding-left: 0; padding-right: 0; }
+.v2-footer-btns .v2-btn:nth-child(1) { width: 177px; }
+.v2-footer-btns .v2-btn:nth-child(2) { width: 172px; margin-left: 2px; } /* в макете зазоры 24 и 22 */
+.v2-footer-btns .v2-btn:nth-child(3) { width: 167px; }
 .v2-footer-watermark { position: absolute; left: 115px; top: 471px; width: 1130px; height: 104px; opacity: 1; }
 
 /* модалки */
