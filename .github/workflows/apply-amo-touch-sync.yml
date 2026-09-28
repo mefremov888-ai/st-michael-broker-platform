@@ -44,6 +44,11 @@ on:
         required: false
         default: false
         type: boolean
+      unlock_minutes:
+        description: 'Снять замок: пометить FAILED зависшие RUNNING-прогоны старше N минут (пусто — не трогать)'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: apply-amo-touch-sync
@@ -66,6 +71,7 @@ jobs:
           PHASES_INPUT: ${{ inputs.phases }}
           LOOKUP_QUOTA_INPUT: ${{ inputs.lookup_quota }}
           BACKFILL_INPUT: ${{ inputs.backfill }}
+          UNLOCK_INPUT: ${{ inputs.unlock_minutes }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -73,7 +79,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 85m
-          envs: MODE_INPUT,MAX_CONTACTS_INPUT,PHASES_INPUT,LOOKUP_QUOTA_INPUT,BACKFILL_INPUT
+          envs: MODE_INPUT,MAX_CONTACTS_INPUT,PHASES_INPUT,LOOKUP_QUOTA_INPUT,BACKFILL_INPUT,UNLOCK_INPUT
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
@@ -86,6 +92,7 @@ jobs:
             case "$LOOKUP_QUOTA_INPUT" in ''|*[!0-9]*) LOOKUP_QUOTA= ;; *) LOOKUP_QUOTA=$LOOKUP_QUOTA_INPUT ;; esac
             case "$PHASES_INPUT" in ''|*[!0-9,]*) PHASES= ;; *) PHASES=$PHASES_INPUT ;; esac
             if [ "$BACKFILL_INPUT" = "true" ]; then BACKFILL=1; else BACKFILL=0; fi
+            case "$UNLOCK_INPUT" in ''|*[!0-9]*) UNLOCK= ;; *) UNLOCK=$UNLOCK_INPUT ;; esac
             if [ "$MODE" = "apply" ]; then echo "=== APPLY (запись в БД) ==="; else echo "=== DRY-RUN (без записи) ==="; fi
-            docker compose exec -T -e MODE=$MODE -e MAX_CONTACTS=$MAX_CONTACTS -e PHASES=$PHASES -e LOOKUP_QUOTA=$LOOKUP_QUOTA -e BACKFILL=$BACKFILL api node /app/scripts/apply-amo-touch-sync.js
+            docker compose exec -T -e MODE=$MODE -e MAX_CONTACTS=$MAX_CONTACTS -e PHASES=$PHASES -e LOOKUP_QUOTA=$LOOKUP_QUOTA -e BACKFILL=$BACKFILL -e UNLOCK_STALE_MIN=$UNLOCK api node /app/scripts/apply-amo-touch-sync.js
             echo "=== Готово (MODE=$MODE) ==="

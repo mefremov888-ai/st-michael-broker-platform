@@ -386,7 +386,15 @@ describe('AmoTouchSyncService.run', () => {
     expect(changed.syncError).toBeNull();
     expect(upsertDataFor(prisma, 'b-new')[0].lastTouchKind).toBe('CALL_OUT');
     expect(prisma.loyaltySyncRun.updateMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'SUCCEEDED' }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'SUCCEEDED',
+          // check-констрейнт loyalty_sync_runs_state_check: у SUCCEEDED
+          // content_hash обязателен (упало на проде 28.09)
+          contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+          completedAt: expect.any(Date),
+        }),
+      }),
     );
     expect(prisma.systemSetting.upsert).toHaveBeenCalled();
   });
