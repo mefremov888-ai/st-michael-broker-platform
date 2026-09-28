@@ -34,6 +34,7 @@ import {
   CurrentUserPayload,
 } from "../auth/current-user.decorator";
 import {
+  LoyaltyAmoLinkDto,
   LoyaltyChangesQueryDto,
   LoyaltyDisplayNameUpdateDto,
   LoyaltyEntityArchiveDto,
@@ -190,6 +191,24 @@ export class LoyaltyBaseController {
       body.displayName,
       user?.id,
     );
+  }
+
+  // 2026-09-28: ручная привязка брокера «Нашей базы» к контакту amoCRM —
+  // из блока «Контакт в amoCRM» карточки (спорные кандидаты ночного синка).
+  // Только ADMIN + READ_ALL: меняет Broker.amoContactId, от которого зависят
+  // фиксации и синки. Аудит: AuditLog action AMO_CONTACT_LINK.
+  @Post("ours/brokers/:id/amo-link")
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({
+    summary: "Link a cabinet broker (ours base) to an amoCRM contact by id",
+  })
+  async linkOurBrokerAmoContact(
+    @Param("id") id: string,
+    @Body() body: LoyaltyAmoLinkDto,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    await this.permissions.require(user, "READ_ALL");
+    return this.loyalty.linkOurBrokerAmoContact(id, body.amoContactId, user?.id);
   }
 
   @Get(":base/agencies")

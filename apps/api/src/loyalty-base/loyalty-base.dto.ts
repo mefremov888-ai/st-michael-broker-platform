@@ -209,6 +209,15 @@ const LOYALTY_SORT_FIELDS = [
   "brokerCount",
   "rating",
   "updatedAt",
+  // 2026-09-28: колонка «Последний контакт» (звонки + касания amo + лента).
+  "lastContactAt",
+] as const;
+// 2026-09-28 (владелец): фильтр «Привязка к amo» («Наша база»/брокеры).
+export const LOYALTY_AMO_LINK_FILTERS = [
+  "LINKED",
+  "AMBIGUOUS",
+  "NOT_FOUND",
+  "UNCHECKED",
 ] as const;
 const LOYALTY_COLUMN_CONTACT_FILTERS = ["HAS_PHONE", "NO_PHONE"] as const;
 const LOYALTY_COLUMN_ACTIVITY_FILTERS = [
@@ -609,6 +618,13 @@ export class LoyaltyCanonicalFilterDto {
   @IsOptional()
   @IsIn(["linked", "unlinked"])
   linkedAnna?: "linked" | "unlinked";
+
+  // 2026-09-28 (владелец): «Привязка к amo» — привязан / требует решения
+  // (несколько кандидатов) / не найден в amo / не проверялся. Только
+  // «Наша база»/брокеры (см. assertFilterAvailability).
+  @IsOptional()
+  @IsIn(LOYALTY_AMO_LINK_FILTERS)
+  amoLink?: (typeof LOYALTY_AMO_LINK_FILTERS)[number];
 
   @IsOptional()
   @ValidateNested()
@@ -1601,4 +1617,20 @@ export class LoyaltyDisplayNameUpdateDto {
   @IsString()
   @Length(0, 256)
   displayName!: string;
+}
+
+// 2026-09-28: ручная привязка брокера «Нашей базы» к контакту amoCRM
+// (кнопка «Привязать» у кандидата в карточке). Принимаем число или строку
+// цифр — id контакта amo не помещается в безопасный int только теоретически,
+// но сравнивать будем как BigInt.
+export class LoyaltyAmoLinkDto {
+  @IsDefined()
+  @Transform(({ value }) =>
+    typeof value === "number" ? String(value) : value,
+  )
+  @IsString()
+  @Matches(/^\d{1,18}$/, {
+    message: "amoContactId must be a numeric amoCRM contact id",
+  })
+  amoContactId!: string;
 }

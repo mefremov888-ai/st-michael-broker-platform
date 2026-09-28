@@ -28,8 +28,11 @@ import {
   formatRubles,
   getLoyaltyCallResultOptions,
   getAnnaLoyaltyChanges,
+  linkOurBrokerAmoContact,
+  LOYALTY_AMO_LINK_STATUS_LABELS,
   loyaltyActivityEvidenceCompleteness,
   loyaltyAvailabilityLabelRu,
+  loyaltyContactLabel,
   loyaltyExactnessLabelRu,
   loyaltyMetricSourceLabelRu,
   updateAnnaLoyaltyRecord,
@@ -137,6 +140,35 @@ const eventLabels: Record<LoyaltyEngagementEvent["type"], string> = {
   PERSONAL_COMMISSION: "Личная комиссия",
 };
 
+// 2026-09-28 (владелец): результат звонка из amoCRM, если он свежее наших —
+// русская подпись по call_status, текст результата во всплывашке, чип «amo».
+function LastCallResult({ record }: { record: LoyaltyRecord }) {
+  if (record.lastCallResultSource === "AMO" && record.lastCallResultLabel) {
+    return (
+      <span
+        className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border px-2 py-1 text-xs font-medium"
+        title={
+          record.lastCallResultText
+            ? `Результат в amoCRM: ${record.lastCallResultText}`
+            : "Результат звонка из amoCRM"
+        }
+        data-call-result-source="AMO"
+      >
+        {record.lastCallResultLabel}
+        <span className="rounded bg-accent/10 px-1 text-[10px] uppercase text-accent">
+          amo
+        </span>
+      </span>
+    );
+  }
+  return (
+    <LoyaltyCallResultBadge
+      result={record.lastCallResult}
+      entityType={record.entityType}
+    />
+  );
+}
+
 function Metric({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="rounded-xl border border-border p-3">
@@ -194,11 +226,21 @@ function BrokerProfile({ record }: { record: LoyaltyRecord }) {
         <Metric label="Дней без контакта">
           {count(record.daysWithoutContact)}
         </Metric>
+        {/* 2026-09-28 (владелец): ответственный последнего лида КЦ из amo —
+            главный; чип «amo», если сотрудник не привязан к нашему. */}
+        <Metric label="Ответственный">
+          {text(record.assignee)}
+          {record.assignee && record.assigneeSource === "AMO" && (
+            <span
+              className="ml-1 rounded bg-accent/10 px-1 text-[10px] uppercase text-accent"
+              title="Ответственный последнего лида колл-центра в amoCRM"
+            >
+              amo
+            </span>
+          )}
+        </Metric>
         <Metric label="Последний результат звонка">
-          <LoyaltyCallResultBadge
-            result={record.lastCallResult}
-            entityType={record.entityType}
-          />
+          <LastCallResult record={record} />
         </Metric>
         <Metric label="Следующая задача">{text(record.nextTask)}</Metric>
         <Metric label="Срок следующей задачи">{date(record.nextTaskAt)}</Metric>
@@ -239,6 +281,160 @@ function BrokerProfile({ record }: { record: LoyaltyRecord }) {
  * 2026-09-07: блок «Наша карточка по сцепке» в карточке базы Анны —
  * телефон, email, amoCRM, метрики кабинета и профиль нашей записи.
  */
+// 2026-09-28 (владелец): блок «Контакт в amoCRM» в карточке брокера «Нашей
+// базы». Статус привязки из ночного синка; при AMBIGUOUS — кандидаты
+// (id, имя, маска телефона, ответственный, дата изменения) и «Привязать».
+// Ссылки на amo — через /go/amo кабинета.
+function AmoLinkBlock({
+  record,
+  canLink,
+}: {
+  record: LoyaltyRecord;
+  canLink: boolean;
+}) {
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const link = record.amoLink;
+  const status = link?.status || (record.hasAmo ? "LINKED" : "UNCHECKED");
+  const contactUrl = link?.contactUrl || record.amoContactUrl;
+  const linkCandidate = async (amoContactId: string) => {
+    if (
+      !window.confirm(
+        `Привязать этого брокера к контакту amoCRM #${amoContactId}?`,
+      )
+    )
+      return;
+    setBusyId(amoContactId);
+    setError("");
+    try {
+      await linkOurBrokerAmoContact(record.id, amoContactId);
+      window.location.reload();
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Не удалось привязать контакт amoCRM",
+      );
+    } finally {
+      setBusyId("");
+    }
+  };
+  const tone =
+    status === "LINKED"
+      ? "border-border"
+      : status === "AMBIGUOUS"
+        ? "border-warning/40 bg-warning/5"
+        : "border-border bg-surface-secondary/40";
+  return (
+    <section className={`rounded-xl border p-3 ${tone}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="font-semibold">Контакт в amoCRM</h3>
+          <p className="text-sm text-text-muted">
+            {LOYALTY_AMO_LINK_STATUS_LABELS[status]}
+            {status === "LINKED" && link?.contactId ? ` · #${link.contactId}` : ""}
+            {link?.checkedAt ? ` · проверено ${date(link.checkedAt)}` : ""}
+            {link?.syncError ? " · последний синк с ошибкой" : ""}
+          </p>
+        </div>
+        {status === "LINKED" && contactUrl && (
+          <a
+            className="btn btn-secondary"
+            href={contactUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Открыть в amoCRM <ExternalLink className="h-4 w-4" />
+          </a>
+        )}
+      </div>
+      {status === "AMBIGUOUS" && (
+        <div className="mt-3 space-y-2">
+          <p className="text-sm">
+            По номеру брокера в amoCRM нашлось несколько контактов. Выберите,
+            какой из них — этот брокер.
+          </p>
+          {link?.candidates.length ? (
+            <ul className="space-y-2">
+              {link.candidates.map((candidate) => (
+                <li
+                  key={candidate.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface p-2 text-sm"
+                >
+                  <div>
+                    <b>{candidate.name || "Без имени"}</b>
+                    <span className="text-text-muted"> · #{candidate.id}</span>
+                    <div className="text-xs text-text-muted">
+                      {[
+                        candidate.phoneMasked,
+                        candidate.responsibleName
+                          ? `отв. ${candidate.responsibleName}`
+                          : "",
+                        candidate.updatedAt
+                          ? `изменён ${date(candidate.updatedAt)}`
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {candidate.url && (
+                      <a
+                        className="btn btn-secondary px-2 py-1 text-xs"
+                        href={candidate.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        amoCRM <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                    {canLink && (
+                      <button
+                        className="btn btn-primary px-2 py-1 text-xs"
+                        disabled={Boolean(busyId)}
+                        onClick={() => void linkCandidate(candidate.id)}
+                      >
+                        {busyId === candidate.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : null}
+                        Привязать
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-text-muted">
+              Список кандидатов пуст — дождитесь следующего ночного синка.
+            </p>
+          )}
+          {!canLink && (
+            <p className="text-xs text-text-muted">
+              Привязать контакт может администратор.
+            </p>
+          )}
+          {error && (
+            <p className="rounded-lg bg-error/10 p-2 text-sm text-error">{error}</p>
+          )}
+        </div>
+      )}
+      {status === "NOT_FOUND" && (
+        <p className="mt-2 text-sm text-text-muted">
+          По номеру брокера контакт с галочкой «Брокер» в amoCRM не найден.
+          Повторная проверка — через 30 дней.
+        </p>
+      )}
+      {status === "UNCHECKED" && (
+        <p className="mt-2 text-sm text-text-muted">
+          Ночной синк ещё не искал этот номер в amoCRM.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function LinkedOurRecordSummary({ linked }: { linked: LoyaltyRecord }) {
   const counts = [
     linked.fixations === null ? "—" : String(linked.fixations),
@@ -2130,9 +2326,25 @@ function DetailBody({
               <Metric label="Качество данных">{text(record.dataQuality)}</Metric>
             )}
             <Metric label="Последний контакт">
-              {date(record.lastActivityAt)}
+              {date(record.lastContactAt || record.lastActivityAt)}
+              {record.lastContactAt && (
+                <small className="block text-text-muted">
+                  {loyaltyContactLabel(
+                    record.lastContactKind,
+                    record.lastContactSource,
+                  )}
+                </small>
+              )}
             </Metric>
           </div>
+          {/* 2026-09-28 (владелец): статус привязки к контакту amoCRM; при
+              нескольких кандидатах — список с кнопкой «Привязать» (ADMIN). */}
+          {base === "ours" && record.entityType === "brokers" && (
+            <AmoLinkBlock
+              record={record}
+              canLink={effective?.role === "ADMIN"}
+            />
+          )}
           {record.entityType === "brokers" ? (
             <BrokerProfile record={record} />
           ) : (
@@ -2557,12 +2769,17 @@ function DetailBody({
       {tab === "calls" && (
         <div className="space-y-3">
           <dl className="grid gap-2 sm:grid-cols-3">
-            <Metric label="Последний звонок">{date(record.lastCallAt)}</Metric>
+            <Metric label="Последний звонок">
+              {date(record.lastCallAt)}
+              {record.lastCallSource === "AMO" && (
+                <small className="block text-text-muted">по amoCRM</small>
+              )}
+              {record.lastCallSource === "ANNA" && (
+                <small className="block text-text-muted">по базе Анны</small>
+              )}
+            </Metric>
             <Metric label="Результат">
-              <LoyaltyCallResultBadge
-                result={record.lastCallResult}
-                entityType={record.entityType}
-              />
+              <LastCallResult record={record} />
             </Metric>
             <Metric label="Дней без контакта">
               {count(record.daysWithoutContact)}
