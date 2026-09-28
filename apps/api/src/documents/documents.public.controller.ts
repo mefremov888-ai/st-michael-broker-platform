@@ -14,6 +14,12 @@ export class DocumentsPublicController {
     return { layout: data.layout };
   }
 
+  @Get('summary')
+  @ApiOperation({ summary: 'Counts of public materials by project and kind (photo/video/doc)' })
+  async materialsSummary() {
+    return this.documentsService.getMaterialsSummary();
+  }
+
   @Get()
   @ApiOperation({ summary: 'Public landing documents (only isPublic=true)' })
   async listPublic(@Query('category') category?: string, @Query('subcategory') subcategory?: string) {

@@ -17,6 +17,7 @@ import {
   isKnownUniquenessLeadStage,
   brokerLeadMarkerFields,
   AMO_BROKER_STAGE,
+  AMO_KC_STATUS,
   agencyToAmoCompanyFields,
 } from "./amo-crm.fields";
 
@@ -2361,6 +2362,10 @@ export class AmoCrmAdapter {
     // 2026-07-01: кастомное название лида. Если не передано — используется
     // старое «Заявка с лендинга — X» для обратной совместимости.
     leadName?: string;
+    // 2026-09-28: куда класть лид. По умолчанию — воронка брокеров. "KC" —
+    // воронка колл-центра (кнопка «перезвоним за 1 час» на новом лендинге):
+    // там ответственного назначает Морикит по своим правилам, задача — на час.
+    pipeline?: "BROKERS" | "KC";
   }): Promise<{ contactId?: number; leadId?: number } | null> {
     if (
       !Number.isSafeInteger(data.existingContactId) ||
@@ -2391,28 +2396,52 @@ export class AmoCrmAdapter {
 
       const fromCabinet = data.source === "FIXATION_BY_OTHER_BROKER";
       const fromTour = data.source === "LANDING_BROKER_TOUR";
+      const fromCallback = data.source === "LANDING_CALLBACK";
+      const toKc = data.pipeline === "KC";
       const headline = fromCabinet
         ? "Заявка из кабинета брокера"
-        : "Заявка с лендинга";
+        : fromCallback
+          ? "Перезвонить за 1 час"
+          : "Заявка с лендинга";
       const origin = fromCabinet
         ? "Координатор / брокер завёл нового брокера"
         : fromTour
           ? "Запись на брокер-тур"
-          : "Форма «Связаться с нами»";
+          : fromCallback
+            ? "Кнопка «Стать партнёром» на сайте — обещали перезвонить за 1 час"
+            : "Форма «Связаться с нами»";
       const taskSuffix = fromCabinet
         ? "заявка из кабинета брокера"
         : "заявка с лендинга";
 
-      // 2) Лид в пайплайне брокеров
+      // 2026-09-28: в воронке КЦ ответственного ставит Морикит по графику
+      // смен; если задан AMO_KC_CALLBACK_RESPONSIBLE_USER_ID — используем его.
+      const kcEnv = process.env.AMO_KC_CALLBACK_RESPONSIBLE_USER_ID;
+      const kcParsed = kcEnv ? Number(kcEnv) : NaN;
+      const kcResponsible =
+        Number.isFinite(kcParsed) && kcParsed > 0 ? kcParsed : undefined;
+      const leadResponsible = toKc ? kcResponsible : responsibleUserId;
+
+      // 2) Лид: воронка брокеров, либо воронка КЦ («перезвоним за 1 час»)
       const lead = await this.createLead({
         name: data.leadName || `${headline} — ${data.brokerName}`,
-        pipeline_id: 10787390, // BROKERS
-        status_id: AMO_BROKER_STAGE.NEW,
+        pipeline_id: toKc ? AMO_PIPELINES.KC : 10787390, // BROKERS
+        status_id: toKc ? AMO_KC_STATUS.NEW_REQUEST : AMO_BROKER_STAGE.NEW,
         contacts: contact?.id ? [{ id: contact.id }] : undefined,
-        ...(responsibleUserId
-          ? { responsible_user_id: responsibleUserId }
+        ...(leadResponsible
+          ? { responsible_user_id: leadResponsible }
           : {}),
       });
+
+      // В КЦ без явного ответственного ждём, пока Морикит назначит оператора,
+      // и вешаем задачу на него же — иначе задача уйдёт владельцу токена.
+      let taskResponsible = leadResponsible;
+      if (toKc && !taskResponsible && lead?.id) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const fresh = await this.getLead(lead.id);
+        const assigned = Number((fresh as any)?.responsible_user_id);
+        if (Number.isFinite(assigned) && assigned > 0) taskResponsible = assigned;
+      }
 
       // 3) Примечание и задача
       if (lead?.id) {
@@ -2429,12 +2458,16 @@ export class AmoCrmAdapter {
         } catch {}
         try {
           await this.createTask({
-            text: `Связаться с новым брокером ${data.brokerName} (${data.brokerPhone}) — ${taskSuffix}`,
+            text: fromCallback
+              ? `Перезвонить в течение часа: ${data.brokerName} (${data.brokerPhone}) — заявка с сайта «перезвоним за 1 час»`
+              : `Связаться с новым брокером ${data.brokerName} (${data.brokerPhone}) — ${taskSuffix}`,
             entityType: "leads",
             entityId: lead.id,
             taskTypeId: 1, // звонок
-            completeTillSec: Math.floor(Date.now() / 1000) + 4 * 60 * 60, // 4 часа — новый лид срочно
-            responsibleUserId,
+            // «перезвоним за 1 час» — срок задачи ровно час; иначе 4 часа
+            completeTillSec:
+              Math.floor(Date.now() / 1000) + (fromCallback ? 1 : 4) * 60 * 60,
+            responsibleUserId: taskResponsible,
           });
         } catch (e: any) {
           console.error(
