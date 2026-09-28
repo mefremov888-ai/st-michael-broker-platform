@@ -47,6 +47,8 @@ export function LoyaltyCampaignModal({
     search: string;
     city?: string;
     hasAmo?: boolean;
+    // 2026-09-28: вкладка «с номерами» / «без номеров» (только наша база брокеров)
+    phonePresence?: "WITH" | "WITHOUT";
     archived: "exclude" | "include" | "only";
     sortBy?: LoyaltySortField;
     sortOrder?: "asc" | "desc";
