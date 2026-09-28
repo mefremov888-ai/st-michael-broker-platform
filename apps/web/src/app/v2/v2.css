@@ -48,7 +48,10 @@
 .v2-btn { display: inline-flex; align-items: center; justify-content: center; height: 38px; padding: 10px 24px; border-radius: 12px; font-size: 16px; line-height: 18px; white-space: nowrap; transition: opacity .15s ease, background-color .15s ease; }
 .v2-btn:hover { opacity: .88; }
 .v2-btn--dark { background: var(--v2-btn); color: #fff; }
-.v2-btn--gold { background: var(--v2-gold); color: #fff; }
+/* 28.09: у ссылок-кнопок цвет перебивал `.v2 a { color: inherit }` — текст на золотой
+   и тёмной кнопке выходил чёрным; поднимаем специфичность для <a> и <button>. */
+.v2 .v2-btn--gold, .v2 a.v2-btn--gold { background: var(--v2-gold); color: #fff; }
+.v2 a.v2-btn--dark, .v2 a.v2-btn--outline-white { color: #fff; }
 .v2-btn--outline { border: 1px solid #000; color: #000; }
 .v2-btn--outline-white { border: 1px solid #fff; color: #fff; height: 40px; }
 .v2-btn--light { background: #ffffff; color: #000; }

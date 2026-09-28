@@ -339,7 +339,9 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
           <div className="v2-header-right">
             <a className="v2-header-phone" href={phoneHref}>{phone}</a>
             <button className="v2-btn v2-btn--outline" onClick={() => setModal('tour')}>Записаться на брокер-тур</button>
-            <Link className="v2-btn v2-btn--gold" href="/login">Войти</Link>
+            {/* 28.09 (владелец): две кнопки — «Войти» и «Зарегистрироваться» */}
+            <Link className="v2-btn v2-btn--outline" href="/login">Войти</Link>
+            <Link className="v2-btn v2-btn--gold" href="/register">Зарегистрироваться</Link>
             <button className="v2-burger" aria-label="Меню" onClick={() => setMenu((v) => !v)}><i /><i /><i /></button>
           </div>
           {menu && (
