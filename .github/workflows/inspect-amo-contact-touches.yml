@@ -1,0 +1,57 @@
+name: Inspect amoCRM contact touches (one-off, read-only)
+
+# 2026-09-28: разовый инспектор «касаний» контакта в amoCRM для проектирования
+# ночного синка: контакт (ответственный, updated_at, closest_task_at, лиды),
+# примечания-звонки контакта и лидов, выполненные задачи, лиды КЦ с
+# ответственным, список сотрудников amo. Только чтение; телефоны и ФИО в
+# логе маскируются.
+
+on:
+  workflow_dispatch:
+    inputs:
+      phone:
+        description: Телефон контакта (любой формат); пусто — берём contact_id
+        required: false
+        default: ''
+        type: string
+      contact_id:
+        description: ID контакта в amoCRM (если телефон не задан)
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: inspect-amo
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Inspect on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH and inspect
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          PHONE_INPUT: ${{ inputs.phone }}
+          CONTACT_ID_INPUT: ${{ inputs.contact_id }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 8m
+          envs: PHONE_INPUT,CONTACT_ID_INPUT
+          script: |
+            set -e
+            if [ -z "$PHONE_INPUT" ] && [ -z "$CONTACT_ID_INPUT" ]; then
+              echo "Нужен phone или contact_id"; exit 2
+            fi
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/inspect-amo-contact-touches.js > /tmp/inspect-amo-contact-touches.js
+            docker cp /tmp/inspect-amo-contact-touches.js st-michael-api:/tmp/inspect-amo-contact-touches.js
+            docker compose exec -T -e PHONE="$PHONE_INPUT" -e CONTACT_ID="$CONTACT_ID_INPUT" api node /tmp/inspect-amo-contact-touches.js
+            echo "=== Готово (только чтение) ==="
