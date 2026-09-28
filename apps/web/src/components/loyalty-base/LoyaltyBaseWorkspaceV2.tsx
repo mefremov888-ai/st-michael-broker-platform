@@ -787,6 +787,9 @@ function LoyaltyTable({
                 </td>
                 <td className="py-2 pr-3 align-top">
                   {date(item.lastCallAt)}
+                  {item.lastCallSource === "ANNA" && (
+                    <small className="block text-text-muted">по базе Анны</small>
+                  )}
                   <div className="mt-1">
                     <LoyaltyCallResultBadge
                       result={item.lastCallResult}
@@ -968,6 +971,9 @@ export function LoyaltyBaseWorkspaceV2() {
   // 2026-09-10 (владелец): при открытии и обновлении страницы показываем
   // нашу базу — с ней работают каждый день, база Анны открывается по клику.
   const [base, setBase] = useState<LoyaltyBaseKey>("ours");
+  // 2026-09-28 (владелец): «Наша база» разделена на две вкладки по наличию
+  // номера телефона. Не входит в сохранённые представления.
+  const [phoneMode, setPhoneMode] = useState<"WITH" | "WITHOUT">("WITH");
   const [entityType, setEntityType] = useState<LoyaltyEntityType>("brokers");
   const key = contextKey(base, entityType);
   const [drafts, setDrafts] = useState(contexts);
@@ -1141,6 +1147,8 @@ export function LoyaltyBaseWorkspaceV2() {
         search: filters.search,
         city: filters.city || undefined,
         hasAmo: filters.hasAmo,
+        phonePresence:
+          base === "ours" && entityType === "brokers" ? phoneMode : undefined,
         archived: filters.archived,
         segment,
         sortBy: filters.sortBy,
@@ -1169,7 +1177,7 @@ export function LoyaltyBaseWorkspaceV2() {
     } finally {
       if (request === listRequest.current) setListLoading(false);
     }
-  }, [base, canReadAll, columns, entityType, filters, page, segment, ratingRange]);
+  }, [base, canReadAll, columns, entityType, filters, page, phoneMode, segment, ratingRange]);
   useEffect(() => {
     if (mode === "base") void loadOverview();
   }, [loadOverview, mode]);
@@ -1571,6 +1579,8 @@ export function LoyaltyBaseWorkspaceV2() {
         search: filters.search,
         city: filters.city || undefined,
         hasAmo: filters.hasAmo === "" ? undefined : filters.hasAmo === "true",
+        phonePresence:
+          base === "ours" && entityType === "brokers" ? phoneMode : undefined,
         archived: filters.archived,
         segment: segment || undefined,
         sortBy: filters.sortBy,
@@ -1855,26 +1865,38 @@ export function LoyaltyBaseWorkspaceV2() {
         />
       ) : (
         <>
+          {/* 2026-09-28 (владелец): «Наша база» разделена на две вкладки по
+              наличию номера телефона; вкладка базы Анны из интерфейса убрана
+              (данные и код остаются — они питают сверку и «последний звонок»
+              по базе Анны в нашей базе). */}
           <nav className="grid gap-2 md:grid-cols-2">
-            {(["anna", "ours"] as const).map((item) => (
-              <button
-                key={item}
-                className={`rounded-xl border p-4 text-left ${base === item ? "border-accent bg-accent text-white" : "border-border bg-surface"}`}
-                onClick={() => {
-                  setBase(item);
-                  setPage(1);
-                }}
-              >
-                <b>{baseLabels[item]}</b>
-                <small
-                  className={`block ${base === item ? "text-white/75" : "text-text-muted"}`}
+            {(["WITH", "WITHOUT"] as const).map((mode) => {
+              const active = base === "ours" && phoneMode === mode;
+              return (
+                <button
+                  key={mode}
+                  className={`rounded-xl border p-4 text-left ${active ? "border-accent bg-accent text-white" : "border-border bg-surface"}`}
+                  onClick={() => {
+                    setBase("ours");
+                    setPhoneMode(mode);
+                    setPage(1);
+                  }}
                 >
-                  {item === "anna"
-                    ? "Отдельный очищенный snapshot"
-                    : "Контакты текущего кабинета"}
-                </small>
-              </button>
-            ))}
+                  <b>
+                    {mode === "WITH"
+                      ? "Наша база с номерами телефонов"
+                      : "Наша база без номеров телефонов"}
+                  </b>
+                  <small
+                    className={`block ${active ? "text-white/75" : "text-text-muted"}`}
+                  >
+                    {mode === "WITH"
+                      ? "Контакты кабинета, у которых есть телефон"
+                      : "Контакты из Telegram-чатов, телефон не известен"}
+                  </small>
+                </button>
+              );
+            })}
           </nav>
           {importOpen && canImport && base === "anna" && (
             <AnnaImportPanel
@@ -2566,6 +2588,8 @@ export function LoyaltyBaseWorkspaceV2() {
             city: filters.city || undefined,
             hasAmo:
               filters.hasAmo === "" ? undefined : filters.hasAmo === "true",
+            phonePresence:
+              base === "ours" && entityType === "brokers" ? phoneMode : undefined,
             archived: filters.archived,
             sortBy: filters.sortBy,
             sortOrder: filters.sortOrder,

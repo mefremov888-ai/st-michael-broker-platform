@@ -346,6 +346,7 @@ export interface LoyaltyListRequest {
   search: string;
   city?: string;
   hasAmo?: boolean;
+  phonePresence?: "WITH" | "WITHOUT";
   archived: "exclude" | "include" | "only";
   segment?: LoyaltySegment;
   sortBy?: LoyaltySortField;
@@ -644,6 +645,8 @@ export interface LoyaltyRecord {
   /** 2026-09-10: суммарная площадь по сделкам реестра ДДУ, м². */
   dealSqm: number | null;
   lastCallAt: string;
+  /** 2026-09-28: откуда дата последнего звонка — кабинет или база Анны по тому же номеру. */
+  lastCallSource: "CABINET" | "ANNA" | null;
   lastCallResult: string;
   lastActivityAt: string;
   daysWithoutContact: number | null;
@@ -862,6 +865,8 @@ export interface LoyaltyListFilters {
   archived?: "exclude" | "include" | "only";
   city?: string;
   hasAmo?: "" | "true" | "false";
+  // 2026-09-28: вкладки «Наша база с номерами» / «без номеров» (только ours).
+  phonePresence?: "WITH" | "WITHOUT";
   segment?: LoyaltySegment | "";
   sortBy?: LoyaltySortField;
   sortOrder?: "asc" | "desc";
@@ -2216,6 +2221,10 @@ export function normalizeLoyaltyRecord(
         stringValue(pick(sourceReportedRaw || {}, "lastCallAt"), lastCallAt),
       ),
     ),
+    lastCallSource: (() => {
+      const source = pick(item, "lastCallSource");
+      return source === "ANNA" || source === "CABINET" ? source : null;
+    })(),
     lastCallResult: stringValue(
       pick(item, "lastCallResult", "callResult"),
       stringValue(pick(attributes, "lastCallResult", "callResult")),
@@ -2869,6 +2878,7 @@ export async function getLoyaltyActivitySummary(
       sortOrder: filters.sortOrder,
       city: filters.city || undefined,
       hasAmo: hasAmoValue,
+      phonePresence: filters.phonePresence || undefined,
       segment: filters.segment || undefined,
       filter: filters.filter || {},
       columns: filters.columns,
@@ -3041,6 +3051,7 @@ export async function getLoyaltyList(
       sortOrder: filters.sortOrder,
       city: filters.city || undefined,
       hasAmo: hasAmoValue,
+      phonePresence: filters.phonePresence || undefined,
       segment: filters.segment || undefined,
       filter: filters.filter || {},
       columns: filters.columns,

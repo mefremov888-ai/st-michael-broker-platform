@@ -365,6 +365,12 @@ export class LoyaltyListFiltersDto {
   @IsBoolean()
   hasAmo?: boolean;
 
+  // 2026-09-28 (владелец): вкладки «Наша база с номерами» / «без номеров»
+  // (без номера — карточки из Telegram-чатов, phone='tg:<ник>').
+  @IsOptional()
+  @IsIn(["WITH", "WITHOUT"])
+  phonePresence?: "WITH" | "WITHOUT";
+
   // 2026-09-08: «Контрольные показатели» внутри ответа списка (одним проходом).
   @IsOptional()
   @Transform(({ value }) =>
