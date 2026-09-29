@@ -62,14 +62,6 @@ const STEPS = [
 
 // icon — номер svg в /v2/svg/reason-0N.svg (порядок файлов остался от первой
 // версии макета: 02 = стрелка роста, 03 = щит, 04 = искры, 05 = кошелёк).
-const REASONS = [
-  { title: 'Выделенный отдел по работе с партнёрами', sub: 'Сопровождение на всех этапах сделки', icon: 1 },
-  { title: 'Не уводим ваших клиентов', sub: 'С клиентами, которые пришли через вас, мы\nне работаем напрямую', icon: 3 },
-  { title: 'Быстрые выплаты', sub: 'Вознаграждение — до 7 рабочих дней', icon: 5 },
-  { title: 'Высокая комиссия', sub: 'Выплаты до 6%', icon: 2 },
-  { title: 'Не цепляемся за формальности', sub: 'Гибкий регламент работы. Подтверждаем работу\nс клиентом, даже когда другие отказали бы', icon: 4 },
-  { title: 'Выделенный отдел по работе с партнёрами', sub: 'Сопровождение на всех этапах сделки', icon: 6 },
-];
 
 const ROMAN = ['', 'I', 'II', 'III', 'IV'];
 const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
@@ -469,7 +461,6 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <a href="#how">Как начать</a>
               <a href="#materials">Материалы</a>
               <a href="#events">Брокер-туры</a>
-              <a href="#reasons">Почему St Michael</a>
               {news.length > 0 && <a href="#news">Новости</a>}
               <a href="#contacts">Контакты</a>
               <button onClick={() => openTour()}>Записаться на брокер-тур</button>
@@ -530,7 +521,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                   {/* страницы проекта на stmichael.ru пока нет — «Подробнее» без ссылки */}
                   <span className="v2-pcard-more">Подробнее →</span>
                 </div>
-                <span className="v2-btn v2-btn--soon" aria-disabled="true">Старт продаж скоро</span>
+                <span className="v2-btn v2-btn--soon" aria-disabled="true">Скоро старт продаж</span>
               </article>
             </div>
           </div>
@@ -624,30 +615,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
           </div>
         </section>
 
-        {/* ── шесть причин ── */}
-        <section className="v2-section" id="reasons">
-          <div className="v2-container">
-            <div className="v2-title-row">
-              <div className="v2-reasons-head">
-                <h2 className="v2-title">Шесть причин, ради которых<br />брокеры остаются с St Michael</h2>
-                <p className="v2-subtitle">Мы выстроили сотрудничество так, чтобы вы могли начать работать сразу,<br />с первой сделки. Без дополнительных условий.</p>
-              </div>
-              <button className="v2-btn v2-btn--dark" onClick={() => setModal('callback')}>Стать партнёром</button>
-            </div>
-            <div className="v2-reasons">
-              {REASONS.map((r, i) => (
-                <div className="v2-rcard" key={i}>
-                  <div className="v2-rcard-num">0{i + 1}</div>
-                  <div className="v2-rcard-icon"><img src={`/v2/svg/reason-0${r.icon}.svg`} alt="" /></div>
-                  <div className="v2-rcard-text">
-                    <div className="v2-rcard-title">{r.title}</div>
-                    <div className="v2-rcard-sub">{r.sub}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
+        {/* 29.09 (владелец): блок «Шесть причин» убран. */}
 
         {/* ── новости (макет 28.09, 7004: 4 карточки 322×360; без новостей блок скрыт) ── */}
         {news.length > 0 && (
