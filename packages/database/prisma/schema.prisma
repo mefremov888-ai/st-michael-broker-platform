@@ -2009,9 +2009,17 @@ model LandingNews {
   url         String // link to original article
   sortOrder   Int      @default(0) @map("sort_order")
   isActive    Boolean  @default(true) @map("is_active")
+  // 2026-09-29: новости из закрытого Telegram-канала компании (source = "Telegram").
+  // Пара (telegram_chat_id, telegram_message_id) — ключ upsert-а при приёме
+  // channel_post / edited_channel_post; media_group_id — альбом (одна новость на группу).
+  telegramChatId    String? @map("telegram_chat_id")
+  telegramMessageId Int?    @map("telegram_message_id")
+  mediaGroupId      String? @map("media_group_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
+  @@unique([telegramChatId, telegramMessageId])
+  @@index([telegramChatId, mediaGroupId])
   @@index([publishedAt, isActive])
   @@map("landing_news")
 }

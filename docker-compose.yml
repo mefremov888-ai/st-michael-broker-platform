@@ -120,6 +120,9 @@ services:
       OPS_ALERT_CHAT_IDS: ${OPS_ALERT_CHAT_IDS:-}
       OPS_TELEGRAM_TIMEOUT_MS: ${OPS_TELEGRAM_TIMEOUT_MS:-10000}
       OPS_ALERT_DEDUP_COOLDOWN_MS: ${OPS_ALERT_DEDUP_COOLDOWN_MS:-300000}
+      # 2026-09-29: id Telegram-канала новостей (запасной путь; приоритет у
+      # SystemSetting TELEGRAM_NEWS_CHAT_ID). См. docs/telegram-news.md.
+      TELEGRAM_NEWS_CHAT_ID: ${TELEGRAM_NEWS_CHAT_ID:-}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
       BROKER_SHEET_ID: ${BROKER_SHEET_ID:-}
       # 2026-06-26: Dadata Suggestions API — автодополнение ИНН в форме регистрации.
