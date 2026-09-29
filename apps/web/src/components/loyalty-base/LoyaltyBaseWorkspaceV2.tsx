@@ -1967,10 +1967,18 @@ export function LoyaltyBaseWorkspaceV2() {
                   {base === "anna"
                     ? ANNA_ENTITY_TAB_LABELS[entity]
                     : entityLabels[entity]}{" "}
-                  <span className="ml-1">
-                    {entity === "brokers"
-                      ? (overview?.brokersTotal ?? "—")
-                      : (overview?.agenciesTotal ?? "—")}
+                  {/* 2026-09-29: пока обзор пересчитывается (смена вкладки «с
+                      номерами / без»), показываем «…», а не прошлое число —
+                      владелец принимал старое значение за незакрывшийся баг. */}
+                  <span
+                    className={`ml-1${overviewLoading ? " text-text-muted" : ""}`}
+                    title={overviewLoading ? "Пересчитываем…" : undefined}
+                  >
+                    {overviewLoading
+                      ? "…"
+                      : entity === "brokers"
+                        ? (overview?.brokersTotal ?? "—")
+                        : (overview?.agenciesTotal ?? "—")}
                   </span>
                 </button>
               ))}
