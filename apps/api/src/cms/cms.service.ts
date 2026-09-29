@@ -238,6 +238,26 @@ export function pickStmNewsImage(body: string): string | null {
   return all[0] || null;
 }
 
+/** Сколько Telegram-новостей достаточно, чтобы не показывать карточки сайта. */
+export const TELEGRAM_NEWS_ENOUGH = 4;
+
+/**
+ * 2026-09-29: порядок публичных новостей — сначала посты Telegram-канала
+ * (свежие выше), затем остальные источники (парсер stmichael.ru, ручные
+ * карточки). Если Telegram-постов ≥ TELEGRAM_NEWS_ENOUGH, остальные не отдаём.
+ */
+export function orderPublicNews<T extends { source?: string | null; telegramChatId?: string | null; publishedAt: Date | string; sortOrder?: number }>(rows: T[]): T[] {
+  const isTelegram = (row: T) => Boolean(row.telegramChatId) || row.source === "Telegram";
+  const byDate = (a: T, b: T) => {
+    const diff = new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+    return diff !== 0 ? diff : (a.sortOrder || 0) - (b.sortOrder || 0);
+  };
+  const telegram = rows.filter(isTelegram).sort(byDate);
+  if (telegram.length >= TELEGRAM_NEWS_ENOUGH) return telegram;
+  const rest = rows.filter((row) => !isTelegram(row)).sort(byDate);
+  return [...telegram, ...rest];
+}
+
 @Injectable()
 export class CmsService {
   private readonly logger = new Logger(CmsService.name);
@@ -461,6 +481,15 @@ export class CmsService {
       where,
       orderBy: [{ publishedAt: "desc" }, { sortOrder: "asc" }],
     });
+  }
+
+  // 2026-09-29 (владелец): лендинг показывает новости из Telegram-канала
+  // компании. Telegram-карточки идут первыми (по дате); парсер stmichael.ru
+  // остаётся запасным: если Telegram-новостей уже хватает на блок (≥ 4),
+  // карточки сайта не отдаём вовсе, иначе дополняем ими хвост.
+  async listPublicNews() {
+    const rows = await this.listNews(true);
+    return orderPublicNews(rows);
   }
 
   async createNews(data: any) {

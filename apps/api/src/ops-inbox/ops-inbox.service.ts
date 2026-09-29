@@ -3,6 +3,7 @@ import { telegramApiBase } from '../common/telegram-api-base';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
 import { PrismaClient } from '@st-michael/database';
+import { TelegramNewsService } from '../telegram-news/telegram-news.service';
 
 // 2026-09-08 (владелец): «чтобы я мог отвечать через телеграм-бот, а ты брал
 // это в работу». Входящие сообщения в ops-бота техподдержки (ответы владельца
@@ -13,16 +14,23 @@ import { PrismaClient } from '@st-michael/database';
 //
 // Токен доступа к эндпоинту — SystemSetting OPS_INBOX_TOKEN (или env
 // OPS_INBOX_TOKEN). Без него эндпоинт закрыт (503), опрос бота всё равно идёт.
+//
+// 2026-09-29: этот же опрос — единственный потребитель getUpdates бота, поэтому
+// посты Telegram-канала компании (channel_post / edited_channel_post) тоже
+// приходят сюда и передаются в TelegramNewsService (новости лендинга). В
+// таблицу входящих посты канала не пишутся — это не сообщения владельца.
 
 const OFFSET_KEY = 'OPS_INBOX_UPDATE_OFFSET';
 const TOKEN_KEY = 'OPS_INBOX_TOKEN';
 const TELEGRAM_TIMEOUT_MS = 15_000;
+const ALLOWED_UPDATES = ['message', 'channel_post', 'edited_channel_post'];
 
 type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  edited_channel_post?: TelegramMessage;
 };
 
 type TelegramMessage = {
@@ -50,6 +58,7 @@ export class OpsInboxService {
   constructor(
     @Inject('PrismaClient') private readonly prisma: PrismaClient,
     private readonly config: ConfigService,
+    private readonly telegramNews: TelegramNewsService,
   ) {}
 
   private get inbox() {
@@ -102,7 +111,7 @@ export class OpsInboxService {
       let payload: any;
       try {
         const response = await fetch(
-          `${telegramApiBase()}/bot${token}/getUpdates?offset=${offset}&timeout=0&allowed_updates=${encodeURIComponent('["message"]')}`,
+          `${telegramApiBase()}/bot${token}/getUpdates?offset=${offset}&timeout=0&allowed_updates=${encodeURIComponent(JSON.stringify(ALLOWED_UPDATES))}`,
           { signal: controller.signal },
         );
         payload = await response.json().catch(() => null);
@@ -122,9 +131,21 @@ export class OpsInboxService {
       if (!updates.length) return;
       let maxUpdateId = offset - 1;
       let stored = 0;
+      let newsSeen = 0;
       for (const update of updates) {
         maxUpdateId = Math.max(maxUpdateId, Number(update.update_id));
-        const message = update.message || update.channel_post;
+        if (update.channel_post || update.edited_channel_post) {
+          // Пост Telegram-канала → новости лендинга; ошибка одного поста не
+          // должна останавливать ни опрос, ни сдвиг offset.
+          newsSeen += 1;
+          try {
+            await this.telegramNews.handleUpdate(update as any, token);
+          } catch (error) {
+            this.logger.warn(`[OpsInbox] пост канала (update ${update.update_id}) не обработан: ${(error as Error)?.message || error}`);
+          }
+          continue;
+        }
+        const message = update.message;
         if (!message || message.from?.is_bot) continue;
         const record = this.toRecord(update.update_id, message);
         try {
@@ -143,7 +164,7 @@ export class OpsInboxService {
         update: { value: String(maxUpdateId + 1), updatedBy: 'ops-inbox' },
         create: { key: OFFSET_KEY, value: String(maxUpdateId + 1), updatedBy: 'ops-inbox' },
       });
-      if (stored) this.logger.log(`[OpsInbox] новых сообщений: ${stored}`);
+      if (stored || newsSeen) this.logger.log(`[OpsInbox] новых сообщений: ${stored}, постов канала: ${newsSeen}`);
     } catch (error) {
       this.logger.warn(`[OpsInbox] poll failed: ${(error as Error)?.message || error}`);
     } finally {

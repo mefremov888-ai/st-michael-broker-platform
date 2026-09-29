@@ -91,10 +91,11 @@ export class PublicCmsController {
     return this.cms.listPromos(true);
   }
 
+  // 2026-09-29: сначала посты Telegram-канала компании, сайт — запасной источник.
   @Get('news')
-  @ApiOperation({ summary: 'Active news cards' })
+  @ApiOperation({ summary: 'Active news cards (Telegram first, site as fallback)' })
   async news() {
-    return this.cms.listNews(true);
+    return this.cms.listPublicNews();
   }
 
   // Активные политики комиссии по проектам — для динамической шкалы на лендинге.
