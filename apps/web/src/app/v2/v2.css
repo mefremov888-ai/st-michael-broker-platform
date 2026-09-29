@@ -34,7 +34,10 @@
 .v2-container { width: 1360px; margin: 0 auto; }
 
 /* ─── шапка ─── */
-.v2-header { height: 120px; background: var(--v2-head); border-bottom: 1px solid #b3b3b3; }
+/* 29.09 (владелец): шапка закреплена при прокрутке; отступ до слайдера вдвое меньше (176 → 88). */
+.v2-header { height: 120px; background: var(--v2-head); border-bottom: 1px solid #b3b3b3; position: sticky; top: 0; z-index: 50; }
+.v2 #promos.v2-section { padding-top: 88px; }
+.v2 .v2-events-note { margin-top: 24px; text-align: right; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
 .v2-header .v2-container { height: 120px; display: flex; align-items: center; position: relative; }
 /* Макет: логотип (280,42) 211×19, «Кабинет брокера» под ним с отступом 11;
    справа «Регистрация» 145×38 (1169,41), «Войти в кабинет брокера» 238×38 (1338,41),

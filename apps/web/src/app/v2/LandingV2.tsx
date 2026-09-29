@@ -72,7 +72,7 @@ const DEFAULT_PROMOS = [
   { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' },
   { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp', shade: true },
   { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-fixation.webp' },
-  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', subtitle: 'Индивидуальный тур — по договорённости с менеджером', imageUrl: '/v2/img/promo-tours.webp', shade: true },
+  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-tours.webp', shade: true },
 ];
 
 function plural(n: number, one: string, few: string, many: string) {
@@ -623,6 +623,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 );
               })}
             </div>
+            {/* 29.09 (владелец): подпись под расписанием вместо подзаголовка слайда */}
+            <p className="v2-events-note">Индивидуальный брокер-тур — по договорённости с менеджером</p>
           </div>
         </section>
 
