@@ -78,7 +78,7 @@ const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 // shade — затемнение слева под белый текст на светлом фото. Кадры 2720×1200.
 const DEFAULT_PROMOS = [
   { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' },
-  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp' },
+  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp', shade: true },
   { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-fixation.webp' },
   { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', subtitle: 'Индивидуальный тур — по договорённости с менеджером', imageUrl: '/v2/img/promo-tours.webp', shade: true },
 ];
