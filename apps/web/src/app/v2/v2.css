@@ -186,15 +186,14 @@
 .v2-divider { position: absolute; left: 50px; width: 337px; height: 1px; background: var(--v2-line); }
 
 /* подвал */
-.v2-footer { margin-top: 24px; height: 572px; border-radius: 24px 24px 0 0; background: linear-gradient(180deg, #3c3c3c 0%, #282828 100%); color: #fff; position: relative; overflow: hidden; }
-.v2-footer-brand { position: absolute; left: 115px; top: 88px; }
+.v2-footer { margin-top: 24px; height: 420px; border-radius: 24px 24px 0 0; background: linear-gradient(180deg, #3c3c3c 0%, #282828 100%); color: #fff; position: relative; overflow: hidden; }
+/* 29.09 (владелец): кнопки подняты на строку логотипа, подвал ниже (572 → 420). */
+.v2-footer-brand { position: absolute; left: 115px; top: 72px; }
 .v2-footer-brand img { width: 211px; height: 19px; }
 .v2-footer-brand span { display: block; margin-top: 11px; font-size: 20px; line-height: 23px; }
-/* 29.09 (правка владельца): колонки меню убраны, ряд кнопок по центру на той же
-   высоте (top 354); ширина кнопок — по тексту, зазор 24. */
-.v2-footer-btns { position: absolute; left: 0; right: 0; top: 354px; display: flex; justify-content: center; gap: 24px; align-items: center; }
+.v2-footer-btns { position: absolute; right: 115px; top: 78px; display: flex; justify-content: flex-end; gap: 24px; align-items: center; }
 .v2-footer-btns .v2-btn { padding-left: 24px; padding-right: 24px; height: 40px; }
-.v2-footer-watermark { position: absolute; left: 115px; top: 471px; width: 1130px; height: 104px; opacity: 1; }
+.v2-footer-watermark { position: absolute; left: 115px; top: 319px; width: 1130px; height: 104px; opacity: 1; }
 
 /* модалки */
 .v2-overlay { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; padding: 20px; }
