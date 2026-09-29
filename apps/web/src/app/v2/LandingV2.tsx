@@ -357,6 +357,17 @@ function PromoCarousel({ promos }: { promos: any[] }) {
     const timer = setInterval(() => setIndex((v) => (v + 1) % count), 6000);
     return () => clearInterval(timer);
   }, [count]);
+  // 29.09: подгружаем фото всех слайдов заранее — иначе при автопрокрутке
+  // следующий слайд показывал тёмный фон, пока картинка качалась.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    for (const s of slides) {
+      if (!s.imageUrl) continue;
+      const img = new window.Image();
+      img.src = s.imageUrl;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [count]);
   const slide = slides[index % count] || slides[0];
   const image = slide.imageUrl || DEFAULT_PROMOS[0].imageUrl;
   return (
