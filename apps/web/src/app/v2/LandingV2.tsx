@@ -29,14 +29,15 @@ const PROJECT_PHOTOS: Record<string, string> = {
   'silver-bor': '/v2/img/project-silver-bor.webp',
 };
 // Тексты карточек — буква в букву из макета (28.09, фрейм 7004); описание из CMS
-// имеет приоритет, константа — фолбэк.
-const PROJECT_FALLBACK: Record<string, { name: string; address: string; floors?: string; ready?: string; classType?: string; description: string }> = {
+// имеет приоритет, константа — фолбэк. cta — текст кнопки: в Зорге 9 продаются
+// апартаменты, в Серебряном Бору — квартиры (правка владельца 29.09).
+const PROJECT_FALLBACK: Record<string, { name: string; address: string; floors?: string; ready?: string; classType?: string; description: string; cta: string }> = {
   zorge9: {
-    name: 'ЖК «Зорге 9»', address: 'ул. Зорге, 9А, корп. 1', floors: '23 эт.', classType: 'Бизнес-класс', ready: 'Дом готов',
+    name: 'ЖК «Зорге 9»', address: 'ул. Зорге, 9А, корп. 1', floors: '23 эт.', classType: 'Бизнес-класс', ready: 'Дом готов', cta: 'Выбрать апартаменты',
     description: 'Апартаменты бизнес-класса у метро Полежаевская. Высотный корпус с авторским гранд-лобби, парком 2 га и фитнесом 3000 м² с бассейном 25 м. Архитектура — лауреат European Property Awards.',
   },
   'silver-bor': {
-    name: 'Квартал Серебряный Бор', address: 'ул. Берзарина, 37', floors: '16-25 эт.', classType: 'Премиум-класс', ready: 'II кв. 2027',
+    name: 'Квартал Серебряный Бор', address: 'ул. Берзарина, 37', floors: '16-25 эт.', classType: 'Премиум-класс', ready: 'II кв. 2027', cta: 'Выбрать квартиры',
     description: 'Квартиры премиум-класса рядом с природным заповедником Серебряный Бор. Архитектурное решение от Apex Project Bureau — современные формы, эстетика, гармония с природой.',
   },
 };
@@ -72,7 +73,15 @@ const REASONS = [
 
 const ROMAN = ['', 'I', 'II', 'III', 'IV'];
 const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-const DEFAULT_PROMO = { id: 'default', title: 'Комиссия за сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' };
+// Слайды «Акций» по умолчанию (тексты утверждены владельцем 29.09) — показываются,
+// когда в CMS нет активных акций с картинкой. Перенос заголовка задан явно (\n).
+// shade — затемнение слева под белый текст на светлом фото. Кадры 2720×1200.
+const DEFAULT_PROMOS = [
+  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' },
+  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp' },
+  { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-fixation.webp' },
+  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', subtitle: 'Индивидуальный тур — по договорённости с менеджером', imageUrl: '/v2/img/promo-tours.webp', shade: true },
+];
 
 function plural(n: number, one: string, few: string, many: string) {
   const m10 = n % 10, m100 = n % 100;
@@ -142,7 +151,7 @@ function normalizePhone(v: string): string {
 
 // ─── модалки ────────────────────────────────────────────────────────────────
 
-function Modal({ onClose, wide, children }: { onClose: () => void; wide?: boolean; children: React.ReactNode }) {
+function Modal({ onClose, className, children }: { onClose: () => void; className?: string; children: React.ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
@@ -150,7 +159,7 @@ function Modal({ onClose, wide, children }: { onClose: () => void; wide?: boolea
   }, [onClose]);
   return (
     <div className="v2-overlay" onClick={onClose}>
-      <div className={`v2-modal${wide ? ' v2-modal--wide' : ''}`} onClick={(e) => e.stopPropagation()}>
+      <div className={`v2-modal${className ? ' ' + className : ''}`} onClick={(e) => e.stopPropagation()}>
         <button className="v2-modal-close" aria-label="Закрыть" onClick={onClose}>×</button>
         {children}
       </div>
@@ -158,10 +167,12 @@ function Modal({ onClose, wide, children }: { onClose: () => void; wide?: boolea
   );
 }
 
-function LeadForm({ source, title, subtitle, buttonText, withMessage, onClose }: { source: 'landing-callback' | 'broker-tour'; title: string; subtitle: string; buttonText: string; withMessage?: boolean; onClose: () => void }) {
+// initialMessage — предзаполненный комментарий (дата и время слота из календаря
+// брокер-туров); уходит в amoCRM примечанием к лиду (поле message → note).
+function LeadForm({ source, title, subtitle, buttonText, withMessage, initialMessage, onClose }: { source: 'landing-callback' | 'broker-tour'; title: string; subtitle: string; buttonText: string; withMessage?: boolean; initialMessage?: string; onClose: () => void }) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState(initialMessage || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sent, setSent] = useState(false);
@@ -234,29 +245,101 @@ function ConditionsModal({ docs, onClose }: { docs: any[]; onClose: () => void }
   );
 }
 
-function MonthModal({ events, onClose }: { events: any[]; onClose: () => void }) {
-  const weeks = [0, 1, 2, 3].map((w) => workWeek(w));
-  const todayKey = dayKey(new Date());
+// ─── календарь брокер-туров (правка владельца 29.09) ────────────────────────
+// Настоящий календарь месяца: шапка с названием и стрелками (текущий месяц и
+// два следующих), сетка Пн–Вс, выходные и прошедшие дни приглушены, сегодня —
+// золотая ячейка. В ячейке до двух строк слотов «11:00 · КСБ»; клик по слоту
+// или по дню открывает форму записи с предзаполненными датой и временем.
+
+const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const DOW_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+const MONTHS_AHEAD = 2;
+const PROJECT_ABBR: Record<string, string> = { 'Квартал Серебряный Бор': 'КСБ', 'Коммерция Зорге 9': 'Коммерция З9' };
+const abbrProjects = (list: string[]) => list.map((p) => PROJECT_ABBR[p] || p).join(' + ');
+
+/** Сетка месяца: недели с понедельника, дни соседних месяцев — null. */
+function monthGrid(year: number, month: number): Array<Date | null> {
+  const first = new Date(year, month, 1);
+  const lead = (first.getDay() + 6) % 7;
+  const total = new Date(year, month + 1, 0).getDate();
+  const cells: Array<Date | null> = Array.from({ length: lead }, () => null);
+  for (let d = 1; d <= total; d++) cells.push(new Date(year, month, d));
+  while (cells.length % 7) cells.push(null);
+  return cells;
+}
+
+/** Текст комментария в форму записи: «Брокер-тур 30.09.2026 в 11:00 — Квартал Серебряный Бор». */
+function tourPresetText(day: Date, slot?: { time: string; projects: string[] }): string {
+  const date = `${String(day.getDate()).padStart(2, '0')}.${String(day.getMonth() + 1).padStart(2, '0')}.${day.getFullYear()}`;
+  if (!slot) return `Брокер-тур ${date}`;
+  return `Брокер-тур ${date} в ${slot.time} — ${slot.projects.join(', ')}`;
+}
+
+const CalArrow = () => (
+  <svg width="8" height="14" viewBox="0 0 8 14" fill="none" aria-hidden="true">
+    <path d="M1.5 1.5 L6.5 7 L1.5 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+function MonthModal({ events, onClose, onBook }: { events: any[]; onClose: () => void; onBook: (preset?: string) => void }) {
+  const today = new Date();
+  const todayKey = dayKey(today);
+  const [offset, setOffset] = useState(0);
+  const year = today.getFullYear();
+  const month = today.getMonth() + offset;
+  const shown = new Date(year, month, 1);
+  const cells = monthGrid(shown.getFullYear(), shown.getMonth());
+
   return (
-    <Modal onClose={onClose} wide>
-      <h3>Расписание брокер-туров на месяц</h3>
-      <p className="v2-modal-sub">Запись — по кнопке «Записаться на брокер-тур» или по телефону</p>
-      {weeks.map((week, wi) => (
-        <div className="v2-month" key={wi}>
-          {week.map((day) => {
-            const slots = slotsForDay(day, events);
-            const isToday = dayKey(day) === todayKey;
-            return (
-              <div key={dayKey(day)} className={`v2-month-day${slots.length ? ' v2-month-day--has' : ''}${isToday ? ' v2-month-day--today' : ''}`}>
-                <div className="v2-month-date">{fmtDay(day)}</div>
-                {slots.map((s) => (
-                  <div className="v2-month-slot" key={s.time}><b>{s.time}</b> · {s.projects.join(' · ')}</div>
-                ))}
-              </div>
-            );
-          })}
+    <Modal onClose={onClose} className="v2-modal--calendar">
+      <div className="v2-cal-head">
+        <div>
+          <h3>Расписание брокер-туров на месяц</h3>
+          <p className="v2-modal-sub">Нажмите на день или время, чтобы записаться</p>
         </div>
-      ))}
+        <div className="v2-cal-nav">
+          <button className="v2-cal-arrow v2-cal-arrow--prev" aria-label="Предыдущий месяц" disabled={offset <= 0} onClick={() => setOffset((v) => Math.max(0, v - 1))}><CalArrow /></button>
+          <div className="v2-cal-month">{MONTHS_NOM[shown.getMonth()]} {shown.getFullYear()}</div>
+          <button className="v2-cal-arrow" aria-label="Следующий месяц" disabled={offset >= MONTHS_AHEAD} onClick={() => setOffset((v) => Math.min(MONTHS_AHEAD, v + 1))}><CalArrow /></button>
+        </div>
+      </div>
+      <div className="v2-cal-dow">
+        {DOW_SHORT.map((d, i) => <div key={d} className={i >= 5 ? 'v2-cal-dow--weekend' : ''}>{d}</div>)}
+      </div>
+      <div className="v2-cal-grid">
+        {cells.map((day, i) => {
+          if (!day) return <div key={'e' + i} className="v2-cal-cell v2-cal-cell--empty" />;
+          const key = dayKey(day);
+          const slots = slotsForDay(day, events);
+          const isToday = key === todayKey;
+          const isPast = key < todayKey;
+          const isWeekend = day.getDay() === 0 || day.getDay() === 6;
+          const clickable = !isPast && slots.length > 0;
+          const cls = ['v2-cal-cell', isToday && 'v2-cal-cell--today', isPast && 'v2-cal-cell--past', isWeekend && 'v2-cal-cell--weekend', clickable && 'v2-cal-cell--active']
+            .filter(Boolean).join(' ');
+          const openDay = () => { if (clickable) onBook(tourPresetText(day, slots[0])); };
+          return (
+            <div key={key} className={cls} onClick={openDay} role={clickable ? 'button' : undefined} tabIndex={clickable ? 0 : undefined}
+              onKeyDown={(e) => { if (clickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDay(); } }}>
+              <div className="v2-cal-num">{day.getDate()}</div>
+              {!isPast && slots.slice(0, 2).map((s) => {
+                const full = `${s.time} · ${s.projects.join(' + ')}`;
+                return (
+                  <button key={s.time} type="button" className="v2-cal-slot" title={full}
+                    onClick={(e) => { e.stopPropagation(); onBook(tourPresetText(day, s)); }}>
+                    <b>{s.time}</b> · {abbrProjects(s.projects)}
+                  </button>
+                );
+              })}
+              {!isPast && slots.length > 2 && <div className="v2-cal-more">ещё {slots.length - 2}</div>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="v2-cal-foot">
+        <p className="v2-modal-sub">Запись — по кнопке «Записаться на брокер-тур» или по телефону</p>
+        <button className="v2-btn v2-btn--dark" onClick={() => onBook()}>Записаться на брокер-тур</button>
+      </div>
     </Modal>
   );
 }
@@ -272,7 +355,9 @@ const PromoArrow = () => (
 );
 
 function PromoCarousel({ promos }: { promos: any[] }) {
-  const slides = promos.length ? promos : [DEFAULT_PROMO];
+  // CMS-акции с фото имеют приоритет; без них — четыре типовых слайда
+  const withImage = promos.filter((p) => p.imageUrl);
+  const slides: any[] = withImage.length ? withImage : DEFAULT_PROMOS;
   const [index, setIndex] = useState(0);
   const count = slides.length;
   useEffect(() => {
@@ -281,11 +366,11 @@ function PromoCarousel({ promos }: { promos: any[] }) {
     return () => clearInterval(timer);
   }, [count]);
   const slide = slides[index % count] || slides[0];
-  const image = slide.imageUrl || DEFAULT_PROMO.imageUrl;
+  const image = slide.imageUrl || DEFAULT_PROMOS[0].imageUrl;
   return (
     <section className="v2-section" id="promos">
       <div className="v2-container">
-        <div className="v2-promo" style={{ backgroundImage: `url(${image})` }}>
+        <div className={`v2-promo${slide.shade ? ' v2-promo--shade' : ''}`} style={{ backgroundImage: `url(${image})` }}>
           <h2 className="v2-promo-title">{slide.title}</h2>
           {slide.subtitle && <p className="v2-promo-sub">{slide.subtitle}</p>}
           {slide.ctaHref && (
@@ -309,6 +394,9 @@ function PromoCarousel({ promos }: { promos: any[] }) {
 
 export default function LandingV2({ data }: { data: LandingV2Data }) {
   const [modal, setModal] = useState<null | 'callback' | 'tour' | 'conditions' | 'month'>(null);
+  // предзаполненный комментарий формы записи на тур (из календаря: дата и время слота)
+  const [tourPreset, setTourPreset] = useState('');
+  const openTour = (preset?: string) => { setTourPreset(preset || ''); setModal('tour'); };
   const [menu, setMenu] = useState(false);
   const [zoom, setZoom] = useState(1);
 
@@ -384,7 +472,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <a href="#reasons">Почему St Michael</a>
               {news.length > 0 && <a href="#news">Новости</a>}
               <a href="#contacts">Контакты</a>
-              <button onClick={() => setModal('tour')}>Записаться на брокер-тур</button>
+              <button onClick={() => openTour()}>Записаться на брокер-тур</button>
               <button onClick={() => setModal('conditions')}>Условия вознаграждения</button>
               <a href={phoneHref}>{phone}</a>
             </nav>
@@ -427,7 +515,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                       <p className="v2-pcard-desc">{p.description || fb.description}</p>
                       <a className="v2-pcard-more" href={PROJECT_PAGES[p.slug]} target="_blank" rel="noopener noreferrer">Подробнее →</a>
                     </div>
-                    <a className="v2-btn v2-btn--dark" href={p.ctaHref || PROJECT_PAGES[p.slug]} target="_blank" rel="noopener noreferrer">Выбрать апартаменты</a>
+                    <a className="v2-btn v2-btn--dark" href={p.ctaHref || PROJECT_PAGES[p.slug]} target="_blank" rel="noopener noreferrer">{fb.cta}</a>
                   </article>
                 );
               })}
@@ -616,26 +704,10 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 <img src="/v2/svg/logo.svg" alt="St Michael" />
                 <span>Кабинет брокера</span>
               </div>
-              <div className="v2-footer-col v2-footer-col--1">
-                <div>Условия</div>
-                <button onClick={() => setModal('conditions')}>Условия сотрудничества</button>
-                <a href="#events">Календарь событий</a>
-                <button onClick={() => setModal('conditions')}>Комиссия</button>
-              </div>
-              <div className="v2-footer-col v2-footer-col--2">
-                <div>Проекты</div>
-                <a href="#projects">Зорге 9</a>
-                <a href="#projects">Квартал Серебряный Бор</a>
-                <a href="#projects">Толбухина 3</a>
-              </div>
-              <div className="v2-footer-col v2-footer-col--3">
-                <div>Партнёрам</div>
-                <a href={phoneHref}>{phone.replace(/[()]/g, '')}</a>
-                <a href={'mailto:' + email}>{email}</a>
-                <a href={telegram} target="_blank" rel="noopener noreferrer">{telegramLabel}</a>
-              </div>
+              {/* 29.09 (правка владельца): три колонки меню убраны; ряд кнопок по центру —
+                  «Записаться на брокер-тур» (светлая), «Войти в кабинет», «Telegram-канал». */}
               <div className="v2-footer-btns">
-                <button className="v2-btn v2-btn--light" onClick={() => setModal('callback')}>Стать партнёром</button>
+                <button className="v2-btn v2-btn--light" onClick={() => openTour()}>Записаться на брокер-тур</button>
                 <Link className="v2-btn v2-btn--outline-white" href="/login">Войти в кабинет</Link>
                 <a className="v2-btn v2-btn--outline-white" href={telegram} target="_blank" rel="noopener noreferrer">Telegram-канал</a>
               </div>
@@ -649,10 +721,10 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         <LeadForm source="landing-callback" title="Стать партнёром" subtitle="Оставьте номер — перезвоним в течение часа" buttonText="Жду звонка" onClose={() => setModal(null)} />
       )}
       {modal === 'tour' && (
-        <LeadForm source="broker-tour" title="Записаться на брокер-тур" subtitle="Менеджер подтвердит дату и время" buttonText="Записаться" withMessage onClose={() => setModal(null)} />
+        <LeadForm source="broker-tour" title="Записаться на брокер-тур" subtitle="Менеджер подтвердит дату и время" buttonText="Записаться" withMessage initialMessage={tourPreset} onClose={() => { setTourPreset(''); setModal(null); }} />
       )}
       {modal === 'conditions' && <ConditionsModal docs={data.cooperationDocs} onClose={() => setModal(null)} />}
-      {modal === 'month' && <MonthModal events={activeEvents} onClose={() => setModal(null)} />}
+      {modal === 'month' && <MonthModal events={activeEvents} onClose={() => setModal(null)} onBook={openTour} />}
     </div>
   );
 }
