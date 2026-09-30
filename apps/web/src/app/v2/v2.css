@@ -60,6 +60,10 @@
    flex-центровка, padding только по бокам, line-height 1, без UA-стилей. Проверка — Playwright. */
 .v2-btn { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; height: 38px; margin: 0; padding: 0 24px; border: 0; border-radius: 12px; background: none; font-family: inherit; font-size: 16px; font-weight: 400; line-height: 1; color: inherit; white-space: nowrap; text-decoration: none; cursor: pointer; -webkit-appearance: none; appearance: none; transition: opacity .15s ease, background-color .15s ease; }
 .v2-btn:hover { opacity: .88; }
+/* 30.09 (Ринат): кнопки без заливки при наведении получают лёгкую полупрозрачную заливку */
+.v2 .v2-btn--outline:hover, .v2 .v2-btn--ghost:hover { opacity: 1; background: rgba(0,0,0,.06); }
+.v2 .v2-btn--outline-white:hover { opacity: 1; background: rgba(255,255,255,.14); }
+.v2 .v2-btn--light:hover { opacity: 1; background: #ededed; }
 .v2-btn--dark { background: var(--v2-btn); color: #fff; }
 /* 28.09: у ссылок-кнопок цвет перебивал `.v2 a { color: inherit }` — текст на золотой
    и тёмной кнопке выходил чёрным; поднимаем специфичность для <a> и <button>. */
@@ -122,10 +126,11 @@
 /* 30.09 (владелец): стрелки — белые полупрозрачные круги 44 с тёмным шевроном, по центру
    по вертикали (300), центры по x те же, что раньше (334.5 / 1585.5 на 1920) */
 /* специфичность (0,3,0): сброс `.v2 button:not(.v2-btn)` иначе убирает фон круга */
-.v2 .v2-promo .v2-promo-arrow { position: absolute; top: 178px; z-index: 2; width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.85); color: #282828; display: inline-flex; align-items: center; justify-content: center; line-height: 0; transition: background-color .15s ease; }
+/* 30.09 (Ринат): стрелки в правом нижнем углу — bottom 40, right 50, между ними 12 */
+.v2 .v2-promo .v2-promo-arrow { position: absolute; bottom: 40px; z-index: 2; width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.85); color: #282828; display: inline-flex; align-items: center; justify-content: center; line-height: 0; transition: background-color .15s ease; }
 .v2-promo-arrow svg { display: block; }
-.v2-promo-arrow--prev { left: 32px; transform: scaleX(-1); }
-.v2-promo-arrow--next { right: 32px; }
+.v2-promo-arrow--prev { right: 106px; transform: scaleX(-1); }
+.v2-promo-arrow--next { right: 50px; }
 .v2 .v2-promo .v2-promo-arrow:hover { background: #fff; }
 /* точки: заметнее — белые 11px с прозрачностью .6 на полупрозрачной подложке, активная — золотая пилюля 46×15 */
 .v2-promo-dots { position: absolute; left: 50px; bottom: 40px; display: flex; gap: 12px; align-items: center; z-index: 2; }
