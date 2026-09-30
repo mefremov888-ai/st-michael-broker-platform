@@ -47,6 +47,13 @@ import {
 // как callback_query: первое решение меняет статус и правит сообщения у обоих
 // модераторов (кнопки убираются, дописывается «Опубликовано/Отклонено: имя»),
 // повторное — «Уже обработано». Те же действия доступны админу в /admin/news.
+//
+// 2026-09-30 (решение владельца): новости с сайта stmichael.ru согласуются так
+// же — парсер (CmsService.syncNewsFromStm) создаёт их PENDING и через
+// requestModeration шлёт модераторам то же сообщение с кнопками (обложка —
+// по https-ссылке сайта). Обработка кнопок общая, по id новости. Из админки
+// решение можно менять и после (APPROVED ↔ REJECTED, moderate с allowChange),
+// из бота — только первое решение.
 
 export const TELEGRAM_NEWS_CHAT_ID_KEY = 'TELEGRAM_NEWS_CHAT_ID';
 export const TELEGRAM_NEWS_LAST_CHAT_KEY = 'TELEGRAM_NEWS_LAST_CHAT';
@@ -236,15 +243,29 @@ export class TelegramNewsService {
    * Решение по новости (из Telegram или из админки). Первое решение
    * фиксируется, повторное — 'already'. У обоих модераторов в сообщении
    * убираются кнопки и дописывается итог.
+   *
+   * `allowChange` (админка, 2026-09-30): уже принятое решение можно поменять —
+   * скрыть опубликованную (APPROVED → REJECTED) или вернуть скрытую/отклонённую
+   * (REJECTED → APPROVED). Тот же статус повторно — 'already'. Кнопки в боте
+   * так не умеют: там только первое решение.
    */
-  async moderate(newsId: string, status: ModerationStatus, byName: string, botToken?: string): Promise<ModerateResult> {
+  async moderate(
+    newsId: string,
+    status: ModerationStatus,
+    byName: string,
+    botToken?: string,
+    options: { allowChange?: boolean } = {},
+  ): Promise<ModerateResult> {
     if (status !== 'APPROVED' && status !== 'REJECTED') return { result: 'not_found', status: null, news: null };
     const row = await this.news.findUnique({ where: { id: newsId } });
     if (!row) return { result: 'not_found', status: null, news: null };
-    if (row.moderationStatus !== 'PENDING') return { result: 'already', status: row.moderationStatus, news: row };
-    // Условие по статусу в where — защита от двух одновременных нажатий.
+    if (row.moderationStatus !== 'PENDING') {
+      if (!options.allowChange || row.moderationStatus === status) return { result: 'already', status: row.moderationStatus, news: row };
+    }
+    // Условие по статусу в where — защита от двух одновременных нажатий
+    // (и от смены решения, которое кто-то уже успел поменять).
     const changed = await this.news.updateMany({
-      where: { id: newsId, moderationStatus: 'PENDING' },
+      where: { id: newsId, moderationStatus: row.moderationStatus },
       data: { moderationStatus: status, moderatedAt: new Date(), moderatedBy: byName.slice(0, 120) },
     });
     if (!changed?.count) {
@@ -252,7 +273,7 @@ export class TelegramNewsService {
       return { result: 'already', status: fresh?.moderationStatus || null, news: fresh };
     }
     const updated = { ...row, moderationStatus: status, moderatedBy: byName, moderatedAt: new Date() };
-    this.logger.log(`[TelegramNews] новость ${newsId}: ${status} (${byName})`);
+    this.logger.log(`[TelegramNews] новость ${newsId}: ${row.moderationStatus} → ${status} (${byName})`);
     await this.finishModerationNotices(updated, botToken || this.botToken());
     return { result: 'done', status, news: updated };
   }
@@ -263,7 +284,26 @@ export class TelegramNewsService {
 
   // ─── уведомления модераторам ───────────────────────────────────────────────
 
-  private async sendModerationNotices(news: any, photoFileId: string | null, botToken: string | undefined): Promise<void> {
+  /**
+   * «На согласование» для новости, созданной не из Telegram (парсер сайта
+   * stmichael.ru, CmsService.syncNewsFromStm). `photo` — https-ссылка на
+   * обложку (Telegram скачает её сам) или null. Новость уже должна быть
+   * PENDING; кнопки те же, обработка общая по id.
+   */
+  async requestModeration(news: { id: string; title: string; excerpt?: string | null; url?: string | null; imageUrl?: string | null; moderationStatus?: string | null }, photo?: string | null): Promise<void> {
+    if (news?.moderationStatus && news.moderationStatus !== 'PENDING') return;
+    const cover = photo ?? news.imageUrl ?? null;
+    await this.sendModerationNotices(news, cover && /^https?:\/\//i.test(cover) ? cover : null, undefined);
+  }
+
+  /** Заголовок/обложка новости на согласовании изменились — обновить текст у модераторов. */
+  async refreshModeration(news: any): Promise<void> {
+    if (news?.moderationStatus !== 'PENDING') return;
+    await this.refreshModerationNotices(news, undefined);
+  }
+
+  /** `photo` — file_id (пост канала) или https-ссылка (сайт); null — текстом. */
+  private async sendModerationNotices(news: any, photo: string | null, botToken: string | undefined): Promise<void> {
     const token = botToken || this.botToken();
     const moderators = await this.moderatorChatIds();
     if (!token || !moderators.length) {
@@ -276,10 +316,11 @@ export class TelegramNewsService {
     for (const chatId of moderators) {
       let sent: { ok: boolean; payload: any } | null = null;
       let hasPhoto = false;
-      if (photoFileId) {
-        // Фото пересылаем по file_id — бот получил его из канала, повторно
-        // скачивать/загружать не нужно; caption ограничен 1024 символами.
-        sent = await callTelegramApi(token, 'sendPhoto', { chat_id: chatId, photo: photoFileId, caption: text.slice(0, 1024), reply_markup: replyMarkup }, this.logger);
+      if (photo) {
+        // Фото пересылаем по file_id (бот получил его из канала, повторно
+        // скачивать/загружать не нужно) или по https-ссылке (обложка с сайта —
+        // Telegram скачает сам); caption ограничен 1024 символами.
+        sent = await callTelegramApi(token, 'sendPhoto', { chat_id: chatId, photo, caption: text.slice(0, 1024), reply_markup: replyMarkup }, this.logger);
         hasPhoto = sent.ok;
         if (!sent.ok) this.logger.warn(`[TelegramNews] sendPhoto модератору ${chatId} не удался: ${JSON.stringify(sent.payload).slice(0, 200)} — шлю текстом`);
       }

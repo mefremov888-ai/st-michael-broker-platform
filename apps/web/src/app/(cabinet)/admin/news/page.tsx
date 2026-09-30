@@ -3,14 +3,16 @@
 // 2026-05-26: админка для LandingNews (новости/публикации на лендинге).
 // CRUD: список + редактор записи (заголовок, источник, дата, превью, ссылка,
 // картинка, активность, sortOrder).
-// 2026-09-30: согласование Telegram-новостей — фильтр по статусу, бейдж,
-// кнопки «Опубликовать/Отклонить» (ADMIN) для карточек «на согласовании».
-// Те же кнопки есть у владельца и Анны в боте; первое решение — окончательное.
+// 2026-09-30: согласование новостей (Telegram-посты и карточки сайта) — фильтр
+// по статусу, бейдж, кнопки «Опубликовать/Отклонить» (ADMIN) для карточек «на
+// согласовании». Те же кнопки есть у владельца и Анны в боте — там первое
+// решение окончательное; здесь решение можно менять: «Скрыть» опубликованную
+// (REJECTED) и «Опубликовать» скрытую/отклонённую (APPROVED).
 
 import { useEffect, useState } from 'react';
 import { api, apiGet } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Newspaper, Plus, Trash2, Save, X, ExternalLink, RefreshCw, Check, Ban, Send } from 'lucide-react';
+import { Newspaper, Plus, Trash2, Save, X, ExternalLink, RefreshCw, Check, Ban, Send, EyeOff } from 'lucide-react';
 
 type ModerationStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
@@ -75,7 +77,7 @@ export default function AdminNewsPage() {
     try {
       const res = await api('/admin/cms/news/sync-stm', { method: 'POST' });
       const data = res as any;
-      setMsg(`Синхронизировано: добавлено ${data?.created ?? 0}, обновлено ${data?.updated ?? 0}`);
+      setMsg(`Синхронизировано: добавлено ${data?.created ?? 0} (новые — на согласовании), обновлено ${data?.updated ?? 0}`);
       load();
       setTimeout(() => setMsg(''), 4000);
     } catch (e: any) {
@@ -101,7 +103,7 @@ export default function AdminNewsPage() {
   useEffect(load, [statusFilter]);
 
   const moderate = async (item: NewsItem, status: 'APPROVED' | 'REJECTED') => {
-    const verb = status === 'APPROVED' ? 'Опубликовать' : 'Отклонить';
+    const verb = status === 'APPROVED' ? 'Опубликовать' : item.moderationStatus === 'APPROVED' ? 'Скрыть с лендинга' : 'Отклонить';
     if (!confirm(`${verb} новость «${item.title}»?`)) return;
     setModeratingId(item.id);
     setMsg('');
@@ -110,7 +112,7 @@ export default function AdminNewsPage() {
       if (res?.result === 'already') {
         setMsg(`Уже обработано: ${STATUS_LABEL[(res.status as ModerationStatus) || 'APPROVED'].toLowerCase()}`);
       } else {
-        setMsg(status === 'APPROVED' ? 'Опубликовано' : 'Отклонено');
+        setMsg(status === 'APPROVED' ? 'Опубликовано' : item.moderationStatus === 'APPROVED' ? 'Скрыто с лендинга' : 'Отклонено');
       }
       load();
       setTimeout(() => setMsg(''), 3000);
@@ -170,8 +172,8 @@ export default function AdminNewsPage() {
       </h1>
       <p className="text-sm text-text-muted mb-4">
         Новости внизу лендинга: посты Telegram-канала компании и stmichael.ru/news (синк ежедневно в 08:00 или кнопкой ниже) —
-        единая лента по дате. Пост из Telegram попадает на лендинг только после согласования: кнопки в боте у владельца и Анны
-        или кнопки здесь.
+        единая лента по дате. Новая новость (из Telegram и с сайта) попадает на лендинг только после согласования: кнопки в боте у
+        владельца и Анны или кнопки здесь. Решение можно поменять: «Скрыть» у опубликованной, «Опубликовать» у скрытой.
       </p>
 
       {msg && <div className="mb-4 p-3 bg-info/20 text-info rounded text-sm">{msg}</div>}
@@ -301,23 +303,33 @@ export default function AdminNewsPage() {
               </div>
               {canEdit && (
                 <div className="flex gap-1 flex-shrink-0 flex-wrap justify-end">
+                  {n.moderationStatus !== 'APPROVED' && (
+                    <button
+                      className="btn btn-primary text-xs px-2 py-1 inline-flex items-center gap-1"
+                      disabled={moderatingId === n.id}
+                      onClick={() => moderate(n, 'APPROVED')}
+                    >
+                      <Check className="w-3 h-3" /> Опубликовать
+                    </button>
+                  )}
                   {n.moderationStatus === 'PENDING' && (
-                    <>
-                      <button
-                        className="btn btn-primary text-xs px-2 py-1 inline-flex items-center gap-1"
-                        disabled={moderatingId === n.id}
-                        onClick={() => moderate(n, 'APPROVED')}
-                      >
-                        <Check className="w-3 h-3" /> Опубликовать
-                      </button>
-                      <button
-                        className="btn btn-secondary text-xs px-2 py-1 inline-flex items-center gap-1 text-error"
-                        disabled={moderatingId === n.id}
-                        onClick={() => moderate(n, 'REJECTED')}
-                      >
-                        <Ban className="w-3 h-3" /> Отклонить
-                      </button>
-                    </>
+                    <button
+                      className="btn btn-secondary text-xs px-2 py-1 inline-flex items-center gap-1 text-error"
+                      disabled={moderatingId === n.id}
+                      onClick={() => moderate(n, 'REJECTED')}
+                    >
+                      <Ban className="w-3 h-3" /> Отклонить
+                    </button>
+                  )}
+                  {n.moderationStatus === 'APPROVED' && (
+                    <button
+                      className="btn btn-secondary text-xs px-2 py-1 inline-flex items-center gap-1 text-error"
+                      disabled={moderatingId === n.id}
+                      onClick={() => moderate(n, 'REJECTED')}
+                      title="Снять с лендинга (статус «Отклонена»); вернуть можно кнопкой «Опубликовать»"
+                    >
+                      <EyeOff className="w-3 h-3" /> Скрыть
+                    </button>
                   )}
                   <button className="btn btn-secondary text-xs px-2 py-1" onClick={() => setEditing({ ...n, publishedAt: n.publishedAt.slice(0, 10) })}>
                     Изменить
