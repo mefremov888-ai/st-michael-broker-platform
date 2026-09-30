@@ -13,7 +13,8 @@ export function TopBar({ onMenuToggle, onHelp }: { onMenuToggle?: () => void; on
   return (
     <header className="bg-surface border-b border-border px-4 sm:px-6 py-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-3">
+        {/* 30.09: gap вместо space-x — у скрытого (lg:hidden) бургера space-x всё равно давал заголовку отступ 12px */}
+        <div className="flex items-center gap-3">
           {onMenuToggle && (
             <button
               onClick={onMenuToggle}
