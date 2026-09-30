@@ -219,6 +219,12 @@
 .v2 .v2-contact-photo { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; flex: none; }
 .v2-cta-right h2 { font-size: 44px; line-height: 51px; font-weight: 500; }
 .v2-contact-block { position: absolute; left: 50px; right: 50px; }
+.v2 .v2-contact-block--person { top: 300px; }
+.v2 .v2-contact-block--hot { bottom: 50px; }
+.v2 .v2-contact-icons { position: absolute; top: 50px; right: 50px; display: flex; gap: 14px; }
+.v2 .v2-contact-icons a { display: block; width: 36px; height: 36px; opacity: .95; transition: opacity .2s ease, transform .2s ease; }
+.v2 .v2-contact-icons a:hover { opacity: 1; transform: translateY(-1px); }
+.v2 .v2-contact-icons img { width: 36px; height: 36px; display: block; }
 .v2-contact-main { font-size: 24px; line-height: 28px; font-weight: 500; }
 .v2-contact-main--hot { width: 278px; white-space: pre-line; }
 .v2-contact-main a:hover { color: var(--v2-gold); }

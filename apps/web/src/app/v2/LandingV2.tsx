@@ -755,23 +755,22 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               </div>
               <div className="v2-cta-right" data-reveal style={{ '--i': 1 } as React.CSSProperties}>
                 <h2>Всегда<br />на связи</h2>
-                <div className="v2-contact-block" style={{ top: 294 }}>
-                  {/* телефон в макете без скобок: «+7 499 226-22-49», заголовок в две строки */}
-                  <div className="v2-contact-main v2-contact-main--hot">{hotTitle}<br /><a href={phoneHref}>{phone.replace(/[()]/g, '')}</a></div>
-                  <div className="v2-contact-sub">{hours}</div>
+                {/* 30.09 (макет Рината): иконки почты и Telegram в правом верхнем углу
+                    вместо текстовых ссылок внизу; менеджер посередине, горячая линия внизу */}
+                <div className="v2-contact-icons">
+                  <a href={'mailto:' + email} aria-label="Написать на почту" title={email}><img src="/v2/svg/icon-mail.svg" alt="" /></a>
+                  <a href={telegram} target="_blank" rel="noopener noreferrer" aria-label="Telegram" title={telegramLabel}><img src="/v2/svg/icon-telegram.svg" alt="" /></a>
                 </div>
-                {/* 30.09 (владелец): фото менеджера рядом с контактами */}
-                <div className="v2-contact-block v2-contact-block--person" style={{ top: 424 }}>
+                <div className="v2-contact-block v2-contact-block--person">
                   <img className="v2-contact-photo" src="/v2/img/manager-daria.webp" alt="" />
                   <div>
-                  <div className="v2-contact-main">{manager.name}<br /><a href={'tel:' + String(manager.phone || '').replace(/[^\d+]/g, '')}>{String(manager.phone || '').replace(/[()]/g, '')}</a></div>
-                  <div className="v2-contact-sub">{manager.role}</div>
+                    <div className="v2-contact-main">{manager.name}<br /><a href={'tel:' + String(manager.phone || '').replace(/[^\d+]/g, '')}>{String(manager.phone || '').replace(/[()]/g, '')}</a></div>
+                    <div className="v2-contact-sub">{manager.role}</div>
                   </div>
                 </div>
-                <div className="v2-divider" style={{ top: 550 }} />
-                <div className="v2-contact-block v2-contact-links" style={{ top: 582 }}>
-                  <a href={'mailto:' + email}>{email}</a>
-                  <a href={telegram} target="_blank" rel="noopener noreferrer">{telegramLabel}</a>
+                <div className="v2-contact-block v2-contact-block--hot">
+                  <div className="v2-contact-main v2-contact-main--hot">{hotTitle}<br /><a href={phoneHref}>{phone.replace(/[()]/g, '')}</a></div>
+                  <div className="v2-contact-sub">{hours}</div>
                 </div>
               </div>
             </div>
