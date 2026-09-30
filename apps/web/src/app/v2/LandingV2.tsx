@@ -69,7 +69,7 @@ const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 // когда в CMS нет активных акций с картинкой. Перенос заголовка задан явно (\n).
 // 30.09 (владелец): затемнение фото (shade) убрано — под текстом мягкая тень. Кадры 2720×1200.
 const DEFAULT_PROMOS = [
-  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' },
+  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-commission-2.webp' },
   { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp' },
   { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-fixation.webp' },
   { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-tours.webp' },
@@ -693,9 +693,13 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                   <div className="v2-contact-main v2-contact-main--hot">{hotTitle}<br /><a href={phoneHref}>{phone.replace(/[()]/g, '')}</a></div>
                   <div className="v2-contact-sub">{hours}</div>
                 </div>
-                <div className="v2-contact-block" style={{ top: 436 }}>
+                {/* 30.09 (владелец): фото менеджера рядом с контактами */}
+                <div className="v2-contact-block v2-contact-block--person" style={{ top: 424 }}>
+                  <img className="v2-contact-photo" src="/v2/img/manager-daria.webp" alt="" />
+                  <div>
                   <div className="v2-contact-main">{manager.name}<br /><a href={'tel:' + String(manager.phone || '').replace(/[^\d+]/g, '')}>{String(manager.phone || '').replace(/[()]/g, '')}</a></div>
                   <div className="v2-contact-sub">{manager.role}</div>
+                  </div>
                 </div>
                 <div className="v2-divider" style={{ top: 550 }} />
                 <div className="v2-contact-block v2-contact-links" style={{ top: 582 }}>

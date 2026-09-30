@@ -194,12 +194,14 @@
 
 /* заявка + контакты */
 .v2-cta { display: grid; grid-template-columns: 899px 437px; gap: 24px; margin-top: 176px; }
-.v2-cta-left { height: 668px; border-radius: 24px; position: relative; overflow: hidden; background: #1f1f1f url('/v2/img/cta-facade.webp') center / cover no-repeat; color: #fff; }
+.v2-cta-left { height: 668px; border-radius: 24px; position: relative; overflow: hidden; background: #1f1f1f url('/v2/img/cta-building.webp') center / cover no-repeat; color: #fff; }
 /* 30.09: фото фасада (ночь) — небо тёмное, заголовок читается; лёгкий градиент сверху-слева на всякий случай */
 .v2-cta-left::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(0,0,0,.28) 0%, rgba(0,0,0,.08) 40%, rgba(0,0,0,0) 65%); pointer-events: none; }
 .v2-cta-left h2 { position: absolute; left: 50px; top: 50px; width: 424px; font-size: 44px; line-height: 51px; font-weight: 500; }
 .v2-cta-left .v2-btn--cta { position: absolute; left: 50px; bottom: 49px; }
 .v2-cta-right { height: 668px; border-radius: 24px; background: var(--v2-dark); color: #fff; padding: 50px; position: relative; }
+.v2 .v2-contact-block--person { display: flex; align-items: center; gap: 20px; }
+.v2 .v2-contact-photo { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; flex: none; }
 .v2-cta-right h2 { font-size: 44px; line-height: 51px; font-weight: 500; }
 .v2-contact-block { position: absolute; left: 50px; right: 50px; }
 .v2-contact-main { font-size: 24px; line-height: 28px; font-weight: 500; }
