@@ -416,7 +416,7 @@ function PromoCarousel({ promos }: { promos: any[] }) {
               style={{ backgroundImage: `url(${s.imageUrl || DEFAULT_PROMOS[0].imageUrl})` }}
               aria-hidden={k !== active}
             >
-              <h2 className="v2-promo-title">{s.title}</h2>
+              <h2 className="v2-promo-title">{String(s.title || '').split('\n').map((line: string, li: number) => <span key={li}><i>{line}</i></span>)}</h2>
               {s.subtitle && <p className="v2-promo-sub">{s.subtitle}</p>}
               {s.ctaHref && (
                 <a className="v2-btn v2-btn--cta v2-promo-cta" href={s.ctaHref} target="_blank" rel="noopener noreferrer" tabIndex={k === active ? 0 : -1}>{s.ctaText || 'Подробнее'}</a>
@@ -446,6 +446,10 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const openTour = (preset?: string) => { setTourPreset(preset || ''); setModal('tour'); };
   const [menu, setMenu] = useState(false);
   const [zoom, setZoom] = useState(1);
+  // 30.09 (владелец, по демо): анимации появления блоков. Включаются только
+  // после гидрации и только без prefers-reduced-motion — без JS страница
+  // отрисована полностью (скрытые состояния живут под .v2--motion).
+  const [motion, setMotion] = useState(false);
 
   useEffect(() => {
     const apply = () => setZoom(window.innerWidth < 1440 ? Math.max(0.5, window.innerWidth / 1440) : 1);
@@ -453,6 +457,56 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
     window.addEventListener('resize', apply);
     return () => window.removeEventListener('resize', apply);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    setMotion(true);
+  }, []);
+
+  useEffect(() => {
+    if (!motion) return;
+    const root = document.querySelector('.v2');
+    if (!root) return;
+    const header = root.querySelector('.v2-header');
+    const raf = requestAnimationFrame(() => header?.classList.add('is-in'));
+    const animateCounters = (scope: Element) => {
+      scope.querySelectorAll<HTMLElement>('.v2-mcard-meta').forEach((el) => {
+        if (el.dataset.counted) return;
+        el.dataset.counted = '1';
+        const text = el.textContent || '';
+        const parts = text.split(/(\d+)/);
+        const t0 = performance.now();
+        const tick = (t: number) => {
+          const k = Math.min(1, (t - t0) / 1000);
+          const e = 1 - Math.pow(1 - k, 3);
+          el.textContent = parts.map((x) => (/^\d+$/.test(x) ? String(Math.round(Number(x) * e)) : x)).join('');
+          if (k < 1) requestAnimationFrame(tick);
+          else el.textContent = text;
+        };
+        requestAnimationFrame(tick);
+      });
+    };
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        e.target.classList.add('is-in');
+        io.unobserve(e.target);
+        if ((e.target as HTMLElement).classList.contains('v2-materials')) animateCounters(e.target);
+      }
+    }, { threshold: 0.15 });
+    root.querySelectorAll('[data-reveal]').forEach((el) => io.observe(el));
+    // параллакс фото в блоке заявки
+    const cta = root.querySelector<HTMLElement>('.v2-cta-left');
+    const onScroll = () => {
+      if (!cta) return;
+      const r = cta.getBoundingClientRect();
+      const c = (r.top + r.height / 2 - window.innerHeight / 2) / window.innerHeight;
+      cta.style.backgroundPositionY = `${50 - c * 8}%`;
+    };
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => { cancelAnimationFrame(raf); io.disconnect(); window.removeEventListener('scroll', onScroll); };
+  }, [motion]);
 
   const contact = data.content?.contact || {};
   const phone: string = contact.phone || '+7 (499) 226-22-49';
@@ -494,7 +548,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const condCount = data.cooperationDocs.length;
 
   return (
-    <div className="v2" style={{ zoom } as React.CSSProperties}>
+    <div className={`v2${motion ? ' v2--motion' : ''}`} style={{ zoom } as React.CSSProperties}>
       {/* ── шапка ── */}
       <header className="v2-header">
         <div className="v2-container">
@@ -533,7 +587,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         {/* ── наши проекты ── */}
         <section className="v2-section" id="projects">
           <div className="v2-container">
-            <div className="v2-title-row">
+            <div className="v2-title-row" data-reveal>
               <div>
                 <h2 className="v2-title">Наши проекты</h2>
                 <p className="v2-subtitle">Три эксклюзивных адреса Москвы</p>
@@ -543,7 +597,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
             {/* Макет 28.09 (7004): три карточки 437×807 — Зорге 9, КСБ из CMS
                 и статическая «Маршала Толбухина 3». Первый тег всегда тёмный. */}
             <div className="v2-projects">
-              {projects.map((p) => {
+              {projects.map((p, pi) => {
                 const fb = PROJECT_FALLBACK[p.slug];
                 const ready = p.readyYear ? `${ROMAN[Number(p.readyQuarter) || 0] ? ROMAN[Number(p.readyQuarter)] + ' кв. ' : ''}${p.readyYear}` : fb.ready;
                 const cls = p.classType ? String(p.classType).replace(/^./, (c: string) => c.toUpperCase()) : fb.classType;
@@ -551,7 +605,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 const address = String(p.address || fb.address).replace(/^Москва,\s*/i, '');
                 const tags = [ready, cls, floors].filter(Boolean) as string[];
                 return (
-                  <article className="v2-pcard" key={p.slug}>
+                  <article className="v2-pcard" key={p.slug} data-reveal="scale" style={{ '--i': pi } as React.CSSProperties}>
                     <img className="v2-pcard-photo" src={PROJECT_PHOTOS[p.slug]} alt={fb.name} />
                     <div className="v2-pcard-body">
                       <div className="v2-tags">
@@ -585,19 +639,22 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         {/* ── как начать ── */}
         <section className="v2-section" id="how">
           <div className="v2-container">
-            <div className="v2-title-row">
+            <div className="v2-title-row" data-reveal>
               <div>
                 <h2 className="v2-title">Как начать сотрудничать с St Michael</h2>
                 <p className="v2-subtitle">Начать можно с первой же сделки — даже если ваше ИП открыто вчера</p>
               </div>
               <button className="v2-btn v2-btn--dark" onClick={() => setModal('callback')}>Стать партнёром</button>
             </div>
-            <div className="v2-steps">
+            <div className="v2-steps" data-reveal="steps">
               {STEPS.map((s, i) => (
-                <div key={i}>
-                  <div className="v2-step-num">0{i + 1}</div>
-                  <div className="v2-step-title">{s.title}</div>
-                  <div className="v2-step-text">{s.text}</div>
+                <div key={i} className="v2-step" style={{ '--i': i } as React.CSSProperties}>
+                  <div className="v2-step-num"><i>0{i + 1}</i></div>
+                  <div className="v2-step-line"><b /></div>
+                  <div className="v2-step-body">
+                    <div className="v2-step-title">{s.title}</div>
+                    <div className="v2-step-text">{s.text}</div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -607,26 +664,26 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         {/* ── материалы ── */}
         <section className="v2-section" id="materials">
           <div className="v2-container">
-            <div className="v2-title-row">
+            <div className="v2-title-row" data-reveal>
               <div>
                 <h2 className="v2-title">Материалы для продвижения</h2>
                 <p className="v2-subtitle">Фото и видео — внутри ЖК Зорге 9 и Квартала Серебряный Бор</p>
               </div>
             </div>
-            <div className="v2-materials">
-              <Link className="v2-mcard" href="/materials/Фотографии">
+            <div className="v2-materials" data-reveal="group">
+              <Link className="v2-mcard" href="/materials/Фотографии" data-reveal="left" style={{ '--i': 0 } as React.CSSProperties}>
                 <img className="v2-mcard-photo" src="/v2/img/materials-zorge9.webp" alt="Зорге 9" />
                 <div className="v2-mcard-name">Зорге 9</div>
                 <div className="v2-mcard-meta">{matCount('zorge9')}</div>
                 <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
               </Link>
-              <Link className="v2-mcard" href="/materials/Рендеры">
+              <Link className="v2-mcard" href="/materials/Рендеры" data-reveal="left" style={{ '--i': 1 } as React.CSSProperties}>
                 <img className="v2-mcard-photo" src="/v2/img/materials-silver-bor.webp" alt="Квартал Серебряный Бор" />
                 <div className="v2-mcard-name">Квартал Серебряный Бор</div>
                 <div className="v2-mcard-meta">{matCount('silver-bor')}</div>
                 <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
               </Link>
-              <a className="v2-mcard" href="#conditions" onClick={(e) => { e.preventDefault(); setModal('conditions'); }}>
+              <a className="v2-mcard" href="#conditions" data-reveal="left" style={{ '--i': 2 } as React.CSSProperties} onClick={(e) => { e.preventDefault(); setModal('conditions'); }}>
                 <img className="v2-mcard-photo" src="/v2/img/materials-conditions.webp" alt="Актуальные условия" />
                 <div className="v2-mcard-name">Актуальные условия</div>
                 <div className="v2-mcard-meta">{condCount ? `${condCount} ${plural(condCount, 'файл', 'файла', 'файлов')}` : 'Условия сотрудничества'}</div>
@@ -639,7 +696,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         {/* ── мероприятия ── */}
         <section className="v2-section" id="events">
           <div className="v2-container">
-            <div className="v2-title-row">
+            <div className="v2-title-row" data-reveal>
               <div>
                 <h2 className="v2-title">Ближайшие мероприятия</h2>
                 <p className="v2-subtitle">Расписание брокер-туров</p>
@@ -650,11 +707,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               </div>
             </div>
             <div className="v2-days">
-              {week.map((day) => {
+              {week.map((day, di) => {
                 const slots = slotsForDay(day, activeEvents);
                 const isToday = dayKey(day) === todayKey;
                 return (
-                  <div key={dayKey(day)} className={`v2-day${isToday ? ' v2-day--today' : ''}`}>
+                  <div key={dayKey(day)} className={`v2-day${isToday ? ' v2-day--today' : ''}`} data-reveal="scale" style={{ '--i': di } as React.CSSProperties}>
                     <div className="v2-day-date">{fmtDay(day)}</div>
                     {slots.length === 0 && <div className="v2-day-empty">Туров нет</div>}
                     {slots.slice(0, 2).map((s) => (
@@ -678,7 +735,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         {news.length > 0 && (
           <section className="v2-section" id="news">
             <div className="v2-container">
-              <div className="v2-title-row">
+              <div className="v2-title-row" data-reveal>
                 <div>
                   <h2 className="v2-title">Новости</h2>
                 </div>
@@ -692,11 +749,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
         <section id="contacts">
           <div className="v2-container">
             <div className="v2-cta">
-              <div className="v2-cta-left">
+              <div className="v2-cta-left" data-reveal style={{ '--i': 0 } as React.CSSProperties}>
                 <h2>Оставьте заявку перезвоним за 1 час</h2>
                 <button className="v2-btn v2-btn--cta" onClick={() => setModal('callback')}>Стать партнёром</button>
               </div>
-              <div className="v2-cta-right">
+              <div className="v2-cta-right" data-reveal style={{ '--i': 1 } as React.CSSProperties}>
                 <h2>Всегда<br />на связи</h2>
                 <div className="v2-contact-block" style={{ top: 294 }}>
                   {/* телефон в макете без скобок: «+7 499 226-22-49», заголовок в две строки */}
