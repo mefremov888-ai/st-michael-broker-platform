@@ -7,6 +7,16 @@ import {
   morekitLeadDate,
 } from "@st-michael/integrations";
 import { getSystemSetting } from "../common/system-setting";
+import { createHash } from "node:crypto";
+import { promises as fsp } from "node:fs";
+import { join } from "node:path";
+import {
+  CoverCandidate,
+  checkCoverFile,
+  collectStmCoverCandidates,
+  pickStmCoverUrl,
+  resolveStmCover,
+} from "./stm-news-cover";
 import { TelegramNewsService } from "../telegram-news/telegram-news.service";
 import {
   acquireAmoBrokerContactAdvisoryXactLock,
@@ -210,33 +220,37 @@ const DEFAULT_CONTENT: Record<string, any> = {
 /**
  * 2026-09-14: выбирает НАСТОЯЩУЮ фотографию новости из разметки
  * stmichael.ru. Возвращает null, если картинки нет вовсе.
+ *
+ * 2026-09-30: логика вынесена в ./stm-news-cover (og:image → самый широкий
+ * srcset → src; заглушки bl:NN/placeholder/логотип — в самом конце).
  */
 export function pickStmNewsImage(body: string): string | null {
-  const proxy = "https://stmichael.ru/proxy/";
-  const isBlurred = (url: string) => /\/bl:\d+\//.test(url);
+  return pickStmCoverUrl(body);
+}
 
-  // 1) ленивый набор — там лежит полноразмерный кадр
-  const srcsetMatch = body.match(/data-lazy-srcset="([^"]+)"/);
-  if (srcsetMatch) {
-    const candidates = srcsetMatch[1]
-      .split(",")
-      .map((part) => part.trim().split(/\s+/)[0])
-      .filter((url) => url.startsWith(proxy) && !isBlurred(url));
-    if (candidates.length) {
-      // самый широкий вариант: w:960 лучше, чем w:320
-      const widthOf = (url: string) => Number(url.match(/\/w:(\d+)\//)?.[1] || 0);
-      return candidates.sort((a, b) => widthOf(b) - widthOf(a))[0];
-    }
-  }
+/** RSA-цепочка для обхода просроченного ECDSA-сертификата stmichael.ru (см. fetchStmNewsHtml). */
+const STM_RSA_SIGALGS =
+  "rsa_pss_rsae_sha256:rsa_pkcs1_sha256:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
 
-  // 2) обычные src/data-src, но только не размытая заглушка
-  const all = [...body.matchAll(/(?:data-src|src)="(https:\/\/stmichael\.ru\/proxy\/[^"]+)"/g)]
-    .map((m) => m[1]);
-  const sharp = all.find((url) => !isBlurred(url));
-  if (sharp) return sharp;
+/** Папка загрузок (читается при вызове, чтобы тесты могли подменить). */
+export function uploadsRoot(): string {
+  return process.env.UPLOADS_DIR || "/app/uploads";
+}
+/** Обложки новостей сайта лежат в /app/uploads/landing и раздаются как /files/landing/… */
+export const LANDING_COVER_DIR = "landing";
+export const LANDING_COVER_PUBLIC_PREFIX = "/files/landing";
 
-  // 3) совсем ничего лучше нет — пусть будет заглушка, чем пустое место
-  return all[0] || null;
+/** Локальный путь к файлу обложки по публичной ссылке; null — ссылка не наша. */
+export function localCoverPath(imageUrl: string | null | undefined): string | null {
+  if (!imageUrl) return null;
+  const m = String(imageUrl).match(/^\/(?:files|uploads)\/landing\/([^/?#]+)$/);
+  if (!m) return null;
+  return join(uploadsRoot(), LANDING_COVER_DIR, m[1]);
+}
+
+/** Имя файла по содержимому — одинаковая картинка не скачивается дважды. */
+export function coverFileName(buf: Buffer, ext: string): string {
+  return createHash("sha1").update(buf).digest("hex").slice(0, 16) + ext;
 }
 
 /** Сколько новостей отдаёт публичный endpoint по умолчанию и максимум (?limit=). */
@@ -603,20 +617,25 @@ export class CmsService {
     total: number;
   }> {
     const html = await this.fetchStmNewsHtml();
-    const items = this.parseStmNewsHtml(html);
+    const parsed = this.parseStmNewsHtml(html);
     let created = 0;
     let updated = 0;
-    for (const item of items) {
+    for (const { imageCandidates, ...item } of parsed) {
       const existing = await this.prisma.landingNews.findFirst({
         where: { url: item.url },
       });
+      // 2026-09-30: обложку скачиваем к себе и проверяем (файлы < 8 КБ или
+      // шириной < 600 отбрасываем); в базе — /files/landing/<hash>.<ext>. Если
+      // у существующей карточки наш файл уже хороший — не перекачиваем.
+      const cover = await this.prepareStmNewsCover(imageCandidates, existing?.imageUrl ?? null, item.title);
+      item.imageUrl = cover.imageUrl;
       if (!existing) {
         const row = await this.prisma.landingNews.create({
           data: { ...item, moderationStatus: "PENDING" },
         });
         created++;
         this.logger.log(`[stm-news] новость создана (на согласовании): ${row.id} ← ${row.url}`);
-        await this.requestNewsModeration(row);
+        await this.requestNewsModeration(row, cover.photo);
       } else if (
         existing.title !== item.title ||
         existing.imageUrl !== item.imageUrl
@@ -637,39 +656,125 @@ export class CmsService {
         }
       }
     }
-    return { created, updated, total: items.length };
+    return { created, updated, total: parsed.length };
   }
 
-  /** Уведомление модераторам о новой карточке сайта; ошибка Telegram синк не роняет. */
-  private async requestNewsModeration(row: any): Promise<void> {
+  /**
+   * Уведомление модераторам о новой карточке сайта; ошибка Telegram синк не
+   * роняет. `photo` — https-ссылка на кадр с сайта (наш /files/… Telegram по
+   * ссылке не заберёт — сервис отправит текстом).
+   */
+  private async requestNewsModeration(row: any, photo: string | null = null): Promise<void> {
     if (!this.telegramNews) {
       this.logger.warn(`[stm-news] TelegramNewsService недоступен — новость ${row?.id} ждёт решения в /admin/news`);
       return;
     }
     try {
-      await this.telegramNews.requestModeration(row, row?.imageUrl || null);
+      await this.telegramNews.requestModeration(row, photo || row?.imageUrl || null);
     } catch (e: any) {
       this.logger.warn(`[stm-news] «На согласование» для ${row?.id} не отправлено: ${e?.message || e}`);
     }
   }
 
+  /**
+   * 2026-09-30: обложка для карточки сайта. Кандидаты (см. stm-news-cover)
+   * качаются по очереди и проверяются; первый хороший сохраняется в
+   * /app/uploads/landing/<hash>.<ext>, в базу идёт /files/landing/<hash>.<ext>.
+   * Если у карточки уже есть наш файл и он хороший — оставляем как есть.
+   * Если ни один кандидат не прошёл — оставляем ссылку на сайт (как раньше),
+   * чтобы карточка не осталась без картинки.
+   */
+  async prepareStmNewsCover(
+    candidates: CoverCandidate[],
+    currentImageUrl: string | null,
+    label = "",
+  ): Promise<{ imageUrl: string | null; photo: string | null }> {
+    const remote = candidates.find((c) => !c.placeholder)?.url || candidates[0]?.url || null;
+    const photo = remote && /^https?:\/\//i.test(remote) ? remote : null;
+    if (await this.localCoverIsGood(currentImageUrl)) {
+      return { imageUrl: currentImageUrl, photo };
+    }
+    if (!candidates.length) return { imageUrl: null, photo: null };
+    try {
+      const resolved = await resolveStmCover(candidates, (url) => this.fetchStmBinary(url));
+      if (resolved) {
+        const imageUrl = await this.saveStmCover(resolved.buf, resolved.ext);
+        if (resolved.tried.length) {
+          this.logger.log(
+            `[stm-news] обложка «${label}»: взят ${resolved.origin} ${resolved.check.width}×${resolved.check.height}, отвергнуто ${resolved.tried.length}`,
+          );
+        }
+        return { imageUrl, photo: resolved.url };
+      }
+      this.logger.warn(`[stm-news] обложка «${label}»: ни один из ${candidates.length} кандидатов не прошёл проверку — оставляю ссылку на сайт`);
+    } catch (e: any) {
+      this.logger.warn(`[stm-news] обложка «${label}»: не удалось скачать (${e?.message || e}) — оставляю ссылку на сайт`);
+    }
+    return { imageUrl: remote, photo };
+  }
+
+  /** Наш файл обложки на месте и проходит проверку (≥ 8 КБ, ширина ≥ 600). */
+  async localCoverIsGood(imageUrl: string | null | undefined): Promise<boolean> {
+    const file = localCoverPath(imageUrl);
+    if (!file) return false;
+    try {
+      const buf = await fsp.readFile(file);
+      return checkCoverFile(buf).ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Кладёт файл в uploads/landing (имя — по содержимому) и возвращает публичную ссылку. */
+  async saveStmCover(buf: Buffer, ext: string): Promise<string> {
+    const name = coverFileName(buf, ext);
+    const dir = join(uploadsRoot(), LANDING_COVER_DIR);
+    await fsp.mkdir(dir, { recursive: true });
+    const file = join(dir, name);
+    try {
+      await fsp.access(file);
+    } catch {
+      await fsp.writeFile(file, buf);
+    }
+    return `${LANDING_COVER_PUBLIC_PREFIX}/${name}`;
+  }
+
+  /** Скачивает картинку с stmichael.ru (с тем же обходом просроченного ECDSA-сертификата). */
+  async fetchStmBinary(url: string): Promise<Buffer> {
+    try {
+      return await this.requestStm(url);
+    } catch (error: any) {
+      if (error?.code !== "CERT_HAS_EXPIRED") throw error;
+      return this.requestStm(url, { sigalgs: STM_RSA_SIGALGS });
+    }
+  }
+
   private requestStmNewsHtml(extraOptions: Record<string, unknown> = {}): Promise<string> {
+    return this.requestStm("https://stmichael.ru/news", extraOptions).then((buf) => buf.toString("utf-8"));
+  }
+
+  private requestStm(url: string, extraOptions: Record<string, unknown> = {}): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const https = require("https");
       const req = https.get(
-        "https://stmichael.ru/news",
+        url,
         {
           headers: {
             "User-Agent": "Mozilla/5.0 (compatible; STMBrokerBot/1.0)",
           },
-          timeout: 15000,
+          timeout: 20000,
           ...extraOptions,
         },
         (res: any) => {
+          if (res.statusCode && res.statusCode >= 400) {
+            res.resume();
+            reject(new Error(`stm: HTTP ${res.statusCode} ${url.slice(0, 120)}`));
+            return;
+          }
           const chunks: Buffer[] = [];
           res.on("data", (c: Buffer) => chunks.push(c));
-          res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+          res.on("end", () => resolve(Buffer.concat(chunks)));
           res.on("error", reject);
         },
       );
@@ -701,10 +806,7 @@ export class CmsService {
       this.logger.warn(
         "[stm-news] сайт отдал просроченный сертификат (ECDSA истёк 03.09.2026) — повторяю запрос по RSA-цепочке; корень надо починить на стороне stmichael.ru",
       );
-      return this.requestStmNewsHtml({
-        sigalgs:
-          "rsa_pss_rsae_sha256:rsa_pkcs1_sha256:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha512",
-      });
+      return this.requestStmNewsHtml({ sigalgs: STM_RSA_SIGALGS });
     }
   }
 
@@ -739,7 +841,9 @@ export class CmsService {
       // попавшийся адрес, то есть заглушку: у первых карточек ленивой
       // загрузки нет и они выглядели нормально, остальные — размытыми.
       // Порядок: сначала настоящий кадр, заглушка — только на крайний случай.
-      const imageUrl = pickStmNewsImage(body);
+      // 2026-09-30: все кандидаты сохраняем — синк скачает и проверит их по очереди.
+      const imageCandidates = collectStmCoverCandidates(body);
+      const imageUrl = imageCandidates[0]?.url ?? null;
       const dateM = body.match(
         /class="date_\w+"[^>]*>\s*(\d{1,2})\s+([а-яёА-ЯЁ]+)\s+(\d{4})/u,
       );
@@ -760,6 +864,7 @@ export class CmsService {
         source: "stmichael.ru",
         publishedAt,
         imageUrl,
+        imageCandidates,
         url,
         isActive: true,
         sortOrder: 0,

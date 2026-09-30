@@ -40,7 +40,12 @@ function createService(initial: any[] = []) {
   };
   const service = new CmsService({ landingNews } as any, telegramNews as any);
   jest.spyOn(service as any, "fetchStmNewsHtml").mockResolvedValue(HTML);
-  return { service, rows, landingNews, telegramNews };
+  // 2026-09-30: обложка скачивается и проверяется; в этих тестах сайт «недоступен»
+  // → в базе остаётся ссылка на сайт (как раньше). Скачивание — отдельный describe ниже.
+  const fetchStmBinary = jest.spyOn(service as any, "fetchStmBinary").mockRejectedValue(new Error("offline"));
+  const saveStmCover = jest.spyOn(service as any, "saveStmCover").mockImplementation(async (_buf: any, ext: any) => `/files/landing/saved${ext}`);
+  const localCoverIsGood = jest.spyOn(service as any, "localCoverIsGood").mockResolvedValue(false);
+  return { service, rows, landingNews, telegramNews, fetchStmBinary, saveStmCover, localCoverIsGood };
 }
 
 describe("синк новостей с stmichael.ru: согласование", () => {
@@ -93,6 +98,71 @@ describe("синк новостей с stmichael.ru: согласование", 
 
     const bare = new CmsService({ landingNews: createService().landingNews } as any);
     jest.spyOn(bare as any, "fetchStmNewsHtml").mockResolvedValue(HTML);
+    jest.spyOn(bare as any, "fetchStmBinary").mockRejectedValue(new Error("offline"));
     await expect(bare.syncNewsFromStm()).resolves.toMatchObject({ created: 2 });
+  });
+});
+
+/**
+ * 2026-09-30 (владелец: «у части новостей обложки — размытые заглушки»):
+ * обложка скачивается к нам и проверяется (≥ 8 КБ, ширина ≥ 600); в базе —
+ * /files/landing/<hash>.<ext>, модераторам в Telegram уходит https-ссылка на
+ * кадр с сайта. Заглушка → следующий кандидат; хороший наш файл не перекачиваем.
+ */
+describe("синк новостей с stmichael.ru: обложка скачивается и проверяется", () => {
+  const BIG = "https://stmichael.ru/proxy/w:1023/q:80/a.jpg";
+  const MID = "https://stmichael.ru/proxy/w:960/q:80/a.jpg";
+  const BLUR = "https://stmichael.ru/proxy/w:400/q:60/bl:40/a.jpg";
+  const LAZY = `<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-src="${BLUR}" data-lazy-srcset="${MID} 960w, ${BIG} 1023w">`;
+  const HTML_LAZY =
+    "<ul>" +
+    `<a href="/news/lazy" class="NewsCard_abc12"><div class="VImage_x">${LAZY}</div><div><div class="date_WVZRc">\n 28 сентября 2026\n</div><div class="title_ElGSk">Ленивая карточка</div></div></a>` +
+    "</ul>";
+
+  function webp(width: number, bytes: number): Buffer {
+    const buf = Buffer.alloc(bytes, 0x33);
+    buf.write("RIFF", 0, "latin1");
+    buf.writeUInt32LE(buf.length - 8, 4);
+    buf.write("WEBP", 8, "latin1");
+    buf.write("VP8X", 12, "latin1");
+    buf.writeUIntLE(width - 1, 24, 3);
+    buf.writeUIntLE(639, 27, 3);
+    return buf;
+  }
+
+  it("самый широкий кадр оказался заглушкой → берём следующий, в базе наш файл, модераторам — ссылка на сайт", async () => {
+    const { service, rows, telegramNews, fetchStmBinary, saveStmCover } = createService();
+    (service as any).fetchStmNewsHtml.mockResolvedValue(HTML_LAZY);
+    fetchStmBinary.mockImplementation(async (url: any) => (url === BIG ? webp(400, 1500) : webp(960, 100_000)));
+    await expect(service.syncNewsFromStm()).resolves.toEqual({ created: 1, updated: 0, total: 1 });
+    expect(fetchStmBinary.mock.calls.map((c) => c[0])).toEqual([BIG, MID]);
+    expect(saveStmCover).toHaveBeenCalledTimes(1);
+    expect(saveStmCover.mock.calls[0][1]).toBe(".webp");
+    const row = [...rows.values()][0];
+    expect(row.imageUrl).toBe("/files/landing/saved.webp");
+    expect(row).not.toHaveProperty("imageCandidates");
+    expect(telegramNews.requestModeration.mock.calls[0][1]).toBe(MID);
+  });
+
+  it("у существующей карточки наш файл уже хороший → не перекачиваем и не трогаем", async () => {
+    const { service, rows, landingNews, fetchStmBinary, localCoverIsGood } = createService([
+      { id: "old-1", url: "https://stmichael.ru/news/lazy", title: "Ленивая карточка", imageUrl: "/files/landing/ok.webp", moderationStatus: "APPROVED" },
+    ]);
+    (service as any).fetchStmNewsHtml.mockResolvedValue(HTML_LAZY);
+    localCoverIsGood.mockResolvedValue(true);
+    await expect(service.syncNewsFromStm()).resolves.toEqual({ created: 0, updated: 0, total: 1 });
+    expect(localCoverIsGood).toHaveBeenCalledWith("/files/landing/ok.webp");
+    expect(fetchStmBinary).not.toHaveBeenCalled();
+    expect(landingNews.update).not.toHaveBeenCalled();
+    expect(rows.get("old-1").imageUrl).toBe("/files/landing/ok.webp");
+  });
+
+  it("все кандидаты — заглушки или не скачались → в базе остаётся ссылка на сайт, синк не падает", async () => {
+    const { service, rows, fetchStmBinary, saveStmCover } = createService();
+    (service as any).fetchStmNewsHtml.mockResolvedValue(HTML_LAZY);
+    fetchStmBinary.mockResolvedValue(webp(400, 1500));
+    await expect(service.syncNewsFromStm()).resolves.toMatchObject({ created: 1 });
+    expect(saveStmCover).not.toHaveBeenCalled();
+    expect([...rows.values()][0].imageUrl).toBe(BIG);
   });
 });
