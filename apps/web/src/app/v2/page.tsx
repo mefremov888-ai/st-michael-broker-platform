@@ -7,6 +7,9 @@ import type { Metadata } from 'next';
 import LandingV2, { type LandingV2Data } from './LandingV2';
 import './v2.css';
 
+// 30.09.2026: новый лендинг живёт на «/» (см. app/page.tsx), «/v2» оставлен
+// как синоним, чтобы старые ссылки не ломались.
+
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {

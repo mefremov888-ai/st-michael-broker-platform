@@ -71,7 +71,7 @@ const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 const DEFAULT_PROMOS = [
   { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-1b.webp' },
   { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-2.webp' },
-  { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-3.webp' },
+  { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-3b.webp' },
   { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-4.webp' },
 ];
 
@@ -642,7 +642,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                   </article>
                 );
               })}
-              <article className="v2-pcard v2-pcard--soon">
+              <article className="v2-pcard v2-pcard--soon" data-reveal="scale" style={{ '--i': projects.length } as React.CSSProperties}>
                 <img className="v2-pcard-photo" src={TOLBUKHINA.photo} alt={TOLBUKHINA.name} />
                 <div className="v2-pcard-body">
                   <div className="v2-tags">

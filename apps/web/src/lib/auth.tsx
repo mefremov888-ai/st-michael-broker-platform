@@ -90,6 +90,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       pathname === '/privacy' ||
       // 2026-09-28: предпросмотр нового лендинга по макету Figma
       pathname === '/v2' ||
+      // 30.09: прежний лендинг на /v1 (новый теперь на «/»)
+      pathname === '/v1' ||
       pathname.startsWith('/materials');
 
     // Unauthenticated users can only see landing / public legal & auth-helper pages
