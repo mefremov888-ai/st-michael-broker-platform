@@ -124,3 +124,99 @@ export function parseChannelPost(update: TelegramNewsUpdate): ParsedChannelPost 
     url: buildTelegramPostUrl(chatId, message.message_id),
   };
 }
+
+// ─── 2026-09-30: согласование поста перед публикацией ───────────────────────
+
+export type ModerationStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+export type ModerationAction = 'approve' | 'reject';
+
+/** Сколько символов текста показываем модератору в сообщении «На согласование». */
+export const MODERATION_PREVIEW_MAX = 300;
+export const MODERATION_HEADER = 'На согласование: новость для кабинета брокера';
+
+export type TelegramCallbackQuery = {
+  id: string;
+  from: { id: number; is_bot?: boolean; first_name?: string; last_name?: string; username?: string };
+  message?: { message_id: number; chat: { id: number; type: string; title?: string }; caption?: string; text?: string };
+  data?: string;
+};
+
+/** Сообщение «На согласование», отправленное одному модератору. */
+export type ModerationNotice = { chatId: string; messageId: number; hasPhoto: boolean };
+
+/** callback_data кнопок: news:approve:<id> / news:reject:<id>. */
+export function buildModerationCallbackData(action: ModerationAction, newsId: string): string {
+  return `news:${action}:${newsId}`;
+}
+
+export function parseModerationCallback(data: string | null | undefined): { action: ModerationAction; newsId: string } | null {
+  const match = String(data || '').trim().match(/^news:(approve|reject):([A-Za-z0-9-]{1,64})$/);
+  if (!match) return null;
+  return { action: match[1] as ModerationAction, newsId: match[2] };
+}
+
+export function moderationKeyboard(newsId: string) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Опубликовать', callback_data: buildModerationCallbackData('approve', newsId) },
+        { text: '❌ Отклонить', callback_data: buildModerationCallbackData('reject', newsId) },
+      ],
+    ],
+  };
+}
+
+/** Список chat id модераторов из настройки (через запятую/точку с запятой/пробел). */
+export function parseModeratorChatIds(...values: Array<string | null | undefined>): string[] {
+  return [
+    ...new Set(
+      values
+        .flatMap((value) => String(value || '').split(/[\s,;]+/))
+        .map((value) => value.trim())
+        .filter((value) => /^-?\d+$/.test(value)),
+    ),
+  ];
+}
+
+/** Модератор — тот, чей user id или чат (личка/группа ops) есть в списке. */
+export function isModeratorCallback(query: TelegramCallbackQuery, moderators: string[]): boolean {
+  if (!moderators.length) return false;
+  const fromId = query?.from?.id != null ? String(query.from.id) : null;
+  const chatId = query?.message?.chat?.id != null ? String(query.message.chat.id) : null;
+  return Boolean((fromId && moderators.includes(fromId)) || (chatId && moderators.includes(chatId)));
+}
+
+export function telegramUserName(from: TelegramCallbackQuery['from'] | undefined): string {
+  const name = [from?.first_name, from?.last_name].filter(Boolean).join(' ').trim();
+  if (name) return name;
+  if (from?.username) return `@${from.username}`;
+  return from?.id != null ? `id ${from.id}` : 'модератор';
+}
+
+export function moderationPreview(text: string | null | undefined, max = MODERATION_PREVIEW_MAX): string {
+  const clean = String(text || '').trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max - 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > max / 2 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+}
+
+/**
+ * Текст сообщения модератору: шапка, заголовок, первые 300 символов поста,
+ * ссылка на пост; после решения — строка «✅ Опубликовано: <имя>».
+ */
+export function buildModerationText(news: {
+  title: string;
+  excerpt?: string | null;
+  url?: string | null;
+  moderationStatus?: string | null;
+  moderatedBy?: string | null;
+}): string {
+  const lines = [MODERATION_HEADER, '', news.title.trim()];
+  const preview = moderationPreview(news.excerpt);
+  if (preview && preview !== news.title.trim()) lines.push('', preview);
+  if (news.url) lines.push('', news.url);
+  if (news.moderationStatus === 'APPROVED') lines.push('', `✅ Опубликовано: ${news.moderatedBy || 'модератор'}`);
+  if (news.moderationStatus === 'REJECTED') lines.push('', `❌ Отклонено: ${news.moderatedBy || 'модератор'}`);
+  return lines.join('\n');
+}

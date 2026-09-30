@@ -91,11 +91,12 @@ export class PublicCmsController {
     return this.cms.listPromos(true);
   }
 
-  // 2026-09-29: сначала посты Telegram-канала компании, сайт — запасной источник.
+  // 2026-09-30: единая лента Telegram + сайт по дате, только согласованные
+  // (APPROVED), до 20 карточек; ?limit= (1..20, по умолчанию 20).
   @Get('news')
-  @ApiOperation({ summary: 'Active news cards (Telegram first, site as fallback)' })
-  async news() {
-    return this.cms.listPublicNews();
+  @ApiOperation({ summary: 'Approved active news cards (Telegram + site, by date, up to 20)' })
+  async news(@Query('limit') limit?: string) {
+    return this.cms.listPublicNews(limit);
   }
 
   // Активные политики комиссии по проектам — для динамической шкалы на лендинге.

@@ -1,8 +1,13 @@
-import { orderPublicNews, TELEGRAM_NEWS_ENOUGH } from '../cms/cms.service';
+import { clampPublicNewsLimit, orderPublicNews, PUBLIC_NEWS_LIMIT } from '../cms/cms.service';
 import {
+  buildModerationText,
   buildTelegramPostUrl,
   isAllowedNewsChat,
+  isModeratorCallback,
+  moderationPreview,
   parseChannelPost,
+  parseModerationCallback,
+  parseModeratorChatIds,
   pickLargestPhoto,
   pickTitle,
 } from './telegram-news.parser';
@@ -129,8 +134,15 @@ describe('TelegramNewsService.handleUpdate', () => {
     const rows = new Map<string, any>();
     const news = {
       findUnique: jest.fn(async ({ where }: any) => {
+        if (where.id) return rows.get(where.id) || null;
         const key = where.telegramChatId_telegramMessageId;
         return [...rows.values()].find((r) => r.telegramChatId === key.telegramChatId && r.telegramMessageId === key.telegramMessageId) || null;
+      }),
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const row = rows.get(where.id);
+        if (!row || (where.moderationStatus && row.moderationStatus !== where.moderationStatus)) return { count: 0 };
+        rows.set(where.id, { ...row, ...data });
+        return { count: 1 };
       }),
       findFirst: jest.fn(async ({ where }: any) =>
         [...rows.values()]
@@ -182,6 +194,7 @@ describe('TelegramNewsService.handleUpdate', () => {
       telegramMessageId: 42,
       isActive: true,
       imageUrl: null,
+      moderationStatus: 'PENDING',
     });
     expect(data.excerpt).toContain('Подробности у менеджеров.');
     expect(JSON.parse(settings.TELEGRAM_NEWS_LAST_CHAT)).toMatchObject({ chatId: '-1001234567890', title: CHAT.title });
@@ -255,22 +268,241 @@ describe('TelegramNewsService.handleUpdate', () => {
   });
 });
 
-describe('порядок публичных новостей', () => {
-  const tg = (n: number, day: number) => ({ id: `tg${n}`, source: 'Telegram', telegramChatId: '-100', publishedAt: new Date(2026, 8, day), sortOrder: 0 });
-  const site = (n: number, day: number) => ({ id: `s${n}`, source: 'stmichael.ru', telegramChatId: null, publishedAt: new Date(2026, 8, day), sortOrder: 0 });
+describe('порядок публичных новостей (единая лента)', () => {
+  const tg = (n: number, day: number, hour = 12) => ({ id: `tg${n}`, source: 'Telegram', telegramChatId: '-100', publishedAt: new Date(2026, 8, day, hour), sortOrder: 0 });
+  const site = (n: number, day: number, sortOrder = 0) => ({ id: `s${n}`, source: 'stmichael.ru', telegramChatId: null, publishedAt: new Date(2026, 8, day), sortOrder });
 
-  it('Telegram первыми по дате, сайт хвостом, если Telegram-новостей мало', () => {
+  it('Telegram и сайт вместе по дате, свежие выше', () => {
     const out = orderPublicNews([site(1, 30), tg(1, 1), site(2, 29), tg(2, 5)]);
-    expect(out.map((r) => r.id)).toEqual(['tg2', 'tg1', 's1', 's2']);
+    expect(out.map((r) => r.id)).toEqual(['s1', 's2', 'tg2', 'tg1']);
   });
 
-  it(`при ≥ ${TELEGRAM_NEWS_ENOUGH} Telegram-новостях сайт не отдаём`, () => {
+  it('в один день Telegram первым, дальше по времени, затем sortOrder', () => {
+    const out = orderPublicNews([site(1, 30, 2), site(2, 30, 1), tg(1, 30, 9), tg(2, 30, 18)]);
+    expect(out.map((r) => r.id)).toEqual(['tg2', 'tg1', 's2', 's1']);
+  });
+
+  it('правило «≥ 4 Telegram → сайт не показываем» больше не действует', () => {
     const out = orderPublicNews([site(1, 30), tg(1, 1), tg(2, 2), tg(3, 3), tg(4, 4)]);
-    expect(out.map((r) => r.id)).toEqual(['tg4', 'tg3', 'tg2', 'tg1']);
+    expect(out.map((r) => r.id)).toEqual(['s1', 'tg4', 'tg3', 'tg2', 'tg1']);
   });
 
   it('без Telegram-новостей порядок сайта по дате сохраняется', () => {
     const out = orderPublicNews([site(1, 1), site(2, 9)]);
     expect(out.map((r) => r.id)).toEqual(['s2', 's1']);
+  });
+
+  it('лимит публичного endpoint: по умолчанию 20, не больше 20, мусор → 20', () => {
+    expect(PUBLIC_NEWS_LIMIT).toBe(20);
+    expect(clampPublicNewsLimit(undefined)).toBe(20);
+    expect(clampPublicNewsLimit('5')).toBe(5);
+    expect(clampPublicNewsLimit('99')).toBe(20);
+    expect(clampPublicNewsLimit('abc')).toBe(20);
+    expect(clampPublicNewsLimit(0)).toBe(20);
+  });
+});
+
+describe('согласование: разбор callback и права модератора', () => {
+  it('news:approve:<id> / news:reject:<id>; чужие данные → null', () => {
+    expect(parseModerationCallback('news:approve:3f1c-uuid')).toEqual({ action: 'approve', newsId: '3f1c-uuid' });
+    expect(parseModerationCallback('news:reject:abc')).toEqual({ action: 'reject', newsId: 'abc' });
+    expect(parseModerationCallback('news:publish:abc')).toBeNull();
+    expect(parseModerationCallback('news:approve:')).toBeNull();
+    expect(parseModerationCallback('news:approve:a b')).toBeNull();
+    expect(parseModerationCallback(undefined)).toBeNull();
+  });
+
+  it('список модераторов: запятые/пробелы, только числа, без дублей', () => {
+    expect(parseModeratorChatIds('111, 222;333 111', undefined, '-100444')).toEqual(['111', '222', '333', '-100444']);
+    expect(parseModeratorChatIds('', null)).toEqual([]);
+    expect(parseModeratorChatIds('abc')).toEqual([]);
+  });
+
+  it('модератор — по from.id или по чату сообщения; пустой список — никто', () => {
+    const query = { id: 'q', from: { id: 111 }, message: { message_id: 1, chat: { id: -100999, type: 'group' } }, data: 'news:approve:x' };
+    expect(isModeratorCallback(query, ['111'])).toBe(true);
+    expect(isModeratorCallback(query, ['-100999'])).toBe(true);
+    expect(isModeratorCallback(query, ['222'])).toBe(false);
+    expect(isModeratorCallback(query, [])).toBe(false);
+  });
+
+  it('текст «На согласование»: шапка, заголовок, первые 300 символов, ссылка, итог', () => {
+    const long = 'Заголовок\n' + 'слово '.repeat(120);
+    const text = buildModerationText({ title: 'Заголовок', excerpt: long, url: 'https://t.me/c/1/2' });
+    expect(text.startsWith('На согласование: новость для кабинета брокера\n\nЗаголовок\n\n')).toBe(true);
+    expect(text).toContain('https://t.me/c/1/2');
+    expect(text).not.toContain('Опубликовано');
+    expect(moderationPreview(long).length).toBeLessThanOrEqual(300);
+    expect(moderationPreview(long).endsWith('…')).toBe(true);
+    expect(buildModerationText({ title: 'Т', moderationStatus: 'APPROVED', moderatedBy: 'Анна' })).toContain('✅ Опубликовано: Анна');
+    expect(buildModerationText({ title: 'Т', moderationStatus: 'REJECTED', moderatedBy: 'Михаил' })).toContain('❌ Отклонено: Михаил');
+  });
+});
+
+describe('согласование: уведомления модераторам и кнопки', () => {
+  let fetchMock: jest.SpyInstance;
+  const calls = () => fetchMock.mock.calls.map((c) => ({ method: String(c[0]).split('/').pop(), body: c[1]?.body ? JSON.parse(c[1].body) : null }));
+
+  function createService(env: Record<string, string | undefined> = {}, settings: Record<string, string> = {}) {
+    const rows = new Map<string, any>();
+    const news = {
+      findUnique: jest.fn(async ({ where }: any) => {
+        if (where.id) return rows.get(where.id) || null;
+        const key = where.telegramChatId_telegramMessageId;
+        return [...rows.values()].find((r) => r.telegramChatId === key.telegramChatId && r.telegramMessageId === key.telegramMessageId) || null;
+      }),
+      findFirst: jest.fn(async () => null),
+      create: jest.fn(async ({ data }: any) => {
+        const row = { id: `id-${rows.size + 1}`, moderationNotices: null, ...data };
+        rows.set(row.id, row);
+        return row;
+      }),
+      update: jest.fn(async ({ where, data }: any) => {
+        const row = { ...rows.get(where.id), ...data };
+        rows.set(where.id, row);
+        return row;
+      }),
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const row = rows.get(where.id);
+        if (!row || (where.moderationStatus && row.moderationStatus !== where.moderationStatus)) return { count: 0 };
+        rows.set(where.id, { ...row, ...data });
+        return { count: 1 };
+      }),
+    };
+    const systemSetting = {
+      findUnique: jest.fn(async ({ where }: any) => (settings[where.key] ? { key: where.key, value: settings[where.key] } : null)),
+      upsert: jest.fn(async () => ({})),
+    };
+    const config = { get: jest.fn((key: string) => env[key]) };
+    const service = new TelegramNewsService({ landingNews: news, systemSetting } as any, config as any);
+    return { service, news, rows };
+  }
+
+  beforeEach(() => {
+    let messageId = 100;
+    fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, result: { message_id: ++messageId } }),
+    }) as any);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('новый пост → PENDING, «На согласование» с кнопками обоим модераторам, message_id сохранены', async () => {
+    const { service, rows } = createService({ OPS_TELEGRAM_BOT_TOKEN: 'token' }, { TELEGRAM_NEWS_MODERATOR_CHAT_IDS: '111, 222' });
+    await expect(service.handleUpdate(channelPost() as any, 'token')).resolves.toBe('created');
+    const sent = calls().filter((c) => c.method === 'sendMessage');
+    expect(sent.map((c) => c.body.chat_id)).toEqual(['111', '222']);
+    expect(sent[0].body.text).toContain('На согласование: новость для кабинета брокера');
+    expect(sent[0].body.text).toContain('Открыли продажи в «Зорге 9»!');
+    expect(sent[0].body.reply_markup.inline_keyboard[0].map((b: any) => b.callback_data)).toEqual(['news:approve:id-1', 'news:reject:id-1']);
+    const row = rows.get('id-1');
+    expect(row.moderationStatus).toBe('PENDING');
+    expect(row.moderationNotices).toEqual([
+      { chatId: '111', messageId: 101, hasPhoto: false },
+      { chatId: '222', messageId: 102, hasPhoto: false },
+    ]);
+  });
+
+  it('пост с фото → sendPhoto по file_id с подписью; без модераторов — ничего не шлём', async () => {
+    fetchMock.mockImplementation(async (url: any) => {
+      if (String(url).includes('/getFile')) return { ok: false, status: 500, json: async () => ({ ok: false }) } as any;
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 7 } }) } as any;
+    });
+    const withPhoto = channelPost({ text: undefined, caption: 'Ход строительства', photo: [{ file_id: 'big', width: 100, height: 100 }] });
+    const { service, rows } = createService({ OPS_ALERT_CHAT_IDS: '333' });
+    await expect(service.handleUpdate(withPhoto as any, 'token')).resolves.toBe('created');
+    const photo = calls().find((c) => c.method === 'sendPhoto')!;
+    expect(photo.body).toMatchObject({ chat_id: '333', photo: 'big' });
+    expect(photo.body.caption).toContain('Ход строительства');
+    expect(rows.get('id-1').moderationNotices).toEqual([{ chatId: '333', messageId: 7, hasPhoto: true }]);
+
+    fetchMock.mockClear();
+    const nobody = createService({});
+    await expect(nobody.service.handleUpdate(channelPost() as any, 'token')).resolves.toBe('created');
+    expect(calls().some((c) => c.method === 'sendMessage' || c.method === 'sendPhoto')).toBe(false);
+    expect(nobody.rows.get('id-1').moderationStatus).toBe('PENDING');
+  });
+
+  it('✅ модератор → APPROVED, ответ «Опубликовано», у обоих убраны кнопки и дописан итог; повтор → «Уже обработано»', async () => {
+    const { service, rows } = createService({ OPS_TELEGRAM_BOT_TOKEN: 'token' }, { TELEGRAM_NEWS_MODERATOR_CHAT_IDS: '111,222' });
+    await service.handleUpdate(channelPost() as any, 'token');
+    fetchMock.mockClear();
+
+    const query = { id: 'cb1', from: { id: 222, first_name: 'Анна', last_name: 'Скибицкая' }, message: { message_id: 102, chat: { id: 222, type: 'private' } }, data: 'news:approve:id-1' };
+    await expect(service.handleCallback(query as any, 'token')).resolves.toBe('approved');
+    const row = rows.get('id-1');
+    expect(row.moderationStatus).toBe('APPROVED');
+    expect(row.moderatedBy).toBe('Анна Скибицкая');
+    expect(row.moderatedAt).toBeInstanceOf(Date);
+
+    const answer = calls().find((c) => c.method === 'answerCallbackQuery')!;
+    expect(answer.body).toMatchObject({ callback_query_id: 'cb1', text: 'Опубликовано' });
+    const edits = calls().filter((c) => c.method === 'editMessageText');
+    expect(edits.map((c) => [c.body.chat_id, c.body.message_id])).toEqual([['111', 101], ['222', 102]]);
+    for (const edit of edits) {
+      expect(edit.body.reply_markup).toEqual({ inline_keyboard: [] });
+      expect(edit.body.text).toContain('✅ Опубликовано: Анна Скибицкая');
+    }
+
+    fetchMock.mockClear();
+    await expect(service.handleCallback({ ...query, id: 'cb2', from: { id: 111, first_name: 'Михаил' } } as any, 'token')).resolves.toBe('already');
+    expect(calls().map((c) => c.method)).toEqual(['answerCallbackQuery']);
+    expect(calls()[0].body.text).toMatch(/^Уже обработано/);
+    expect(rows.get('id-1').moderatedBy).toBe('Анна Скибицкая');
+  });
+
+  it('❌ → REJECTED и «Отклонено»; не модератор → «Нет прав», статус не меняется; чужой callback игнорируется', async () => {
+    const { service, rows } = createService({ OPS_TELEGRAM_BOT_TOKEN: 'token' }, { TELEGRAM_NEWS_MODERATOR_CHAT_IDS: '111' });
+    await service.handleUpdate(channelPost() as any, 'token');
+    fetchMock.mockClear();
+
+    const stranger = { id: 'cb9', from: { id: 999, first_name: 'Гость' }, message: { message_id: 5, chat: { id: 999, type: 'private' } }, data: 'news:reject:id-1' };
+    await expect(service.handleCallback(stranger as any, 'token')).resolves.toBe('forbidden');
+    expect(rows.get('id-1').moderationStatus).toBe('PENDING');
+    expect(calls().map((c) => c.method)).toEqual(['answerCallbackQuery']);
+    expect(calls()[0].body.text).toBe('Нет прав на согласование');
+
+    fetchMock.mockClear();
+    await expect(service.handleCallback({ id: 'cb0', from: { id: 111 }, data: 'something:else' } as any, 'token')).resolves.toBe('ignored');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const owner = { id: 'cb3', from: { id: 111, first_name: 'Михаил' }, message: { message_id: 101, chat: { id: 111, type: 'private' } }, data: 'news:reject:id-1' };
+    await expect(service.handleCallback(owner as any, 'token')).resolves.toBe('rejected');
+    expect(rows.get('id-1').moderationStatus).toBe('REJECTED');
+    expect(calls().find((c) => c.method === 'answerCallbackQuery')!.body.text).toBe('Отклонено');
+    expect(calls().find((c) => c.method === 'editMessageText')!.body.text).toContain('❌ Отклонено: Михаил');
+
+    await expect(service.handleCallback({ ...owner, id: 'cb4', data: 'news:approve:no-such' } as any, 'token')).resolves.toBe('not_found');
+  });
+
+  it('правка поста: PENDING → текст обновлён и у модераторов тоже; APPROVED → текст обновлён, статус остаётся', async () => {
+    const { service, rows } = createService({ OPS_TELEGRAM_BOT_TOKEN: 'token' }, { TELEGRAM_NEWS_MODERATOR_CHAT_IDS: '111' });
+    await service.handleUpdate(channelPost() as any, 'token');
+    fetchMock.mockClear();
+
+    await expect(service.handleUpdate(channelPost({ text: 'Новый текст поста' }, true) as any, 'token')).resolves.toBe('updated');
+    expect(rows.get('id-1')).toMatchObject({ moderationStatus: 'PENDING', title: 'Новый текст поста' });
+    const edit = calls().find((c) => c.method === 'editMessageText')!;
+    expect(edit.body).toMatchObject({ chat_id: '111', message_id: 101 });
+    expect(edit.body.text).toContain('Новый текст поста');
+    expect(edit.body.reply_markup.inline_keyboard[0]).toHaveLength(2);
+
+    await service.moderate('id-1', 'APPROVED', 'Админ');
+    fetchMock.mockClear();
+    await expect(service.handleUpdate(channelPost({ text: 'Ещё одна правка' }, true) as any, 'token')).resolves.toBe('updated');
+    expect(rows.get('id-1')).toMatchObject({ moderationStatus: 'APPROVED', title: 'Ещё одна правка', moderatedBy: 'Админ' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('moderate из админки: первое решение done, второе already', async () => {
+    const { service } = createService({}, {});
+    await service.handleUpdate(channelPost() as any, 'token');
+    await expect(service.moderate('id-1', 'REJECTED', 'Михаил (админка)')).resolves.toMatchObject({ result: 'done', status: 'REJECTED' });
+    await expect(service.moderate('id-1', 'APPROVED', 'Кто-то ещё')).resolves.toMatchObject({ result: 'already', status: 'REJECTED' });
+    await expect(service.moderate('nope', 'APPROVED', 'x')).resolves.toMatchObject({ result: 'not_found' });
   });
 });

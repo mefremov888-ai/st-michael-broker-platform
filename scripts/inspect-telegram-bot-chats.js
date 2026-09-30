@@ -108,11 +108,25 @@ async function inspectDatabase() {
     const { PrismaClient } = require("@st-michael/database");
     prisma = new PrismaClient();
     const settings = await prisma.systemSetting.findMany({
-      where: { key: { in: ["TELEGRAM_NEWS_CHAT_ID", "TELEGRAM_NEWS_LAST_CHAT", "OPS_INBOX_UPDATE_OFFSET"] } },
+      where: { key: { in: ["TELEGRAM_NEWS_CHAT_ID", "TELEGRAM_NEWS_LAST_CHAT", "OPS_INBOX_UPDATE_OFFSET", "TELEGRAM_NEWS_MODERATOR_CHAT_IDS"] } },
     });
     const byKey = Object.fromEntries(settings.map((s) => [s.key, s]));
     const configured = (byKey.TELEGRAM_NEWS_CHAT_ID && byKey.TELEGRAM_NEWS_CHAT_ID.value) || process.env.TELEGRAM_NEWS_CHAT_ID || "";
     console.log(`  TELEGRAM_NEWS_CHAT_ID: ${configured ? configured : "(не задан — принимаются посты из любого канала, куда добавлен бот)"}`);
+    // 2026-09-30: кому уходит «На согласование» (SystemSetting → env → чаты ops-алертов).
+    const moderators =
+      (byKey.TELEGRAM_NEWS_MODERATOR_CHAT_IDS && byKey.TELEGRAM_NEWS_MODERATOR_CHAT_IDS.value) ||
+      process.env.TELEGRAM_NEWS_MODERATOR_CHAT_IDS ||
+      [process.env.OPS_ALERT_CHAT_IDS, process.env.OPS_ALERT_CHAT_ID].filter(Boolean).join(",") ||
+      "";
+    const moderatorSource = byKey.TELEGRAM_NEWS_MODERATOR_CHAT_IDS
+      ? "SystemSetting"
+      : process.env.TELEGRAM_NEWS_MODERATOR_CHAT_IDS
+        ? "env"
+        : moderators
+          ? "запасной вариант: OPS_ALERT_CHAT_IDS/OPS_ALERT_CHAT_ID"
+          : "";
+    console.log(`  TELEGRAM_NEWS_MODERATOR_CHAT_IDS (модераторы новостей): ${moderators ? `${moderators} (${moderatorSource})` : "(не задан — «На согласование» никому не уходит, решение только в /admin/news)"}`);
     if (byKey.TELEGRAM_NEWS_LAST_CHAT) {
       console.log(`  последний канал, увиденный приёмом: ${byKey.TELEGRAM_NEWS_LAST_CHAT.value} (обновлено ${byKey.TELEGRAM_NEWS_LAST_CHAT.updatedAt.toISOString()})`);
     } else {

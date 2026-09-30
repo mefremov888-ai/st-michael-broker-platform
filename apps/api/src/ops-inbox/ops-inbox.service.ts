@@ -23,7 +23,9 @@ import { TelegramNewsService } from '../telegram-news/telegram-news.service';
 const OFFSET_KEY = 'OPS_INBOX_UPDATE_OFFSET';
 const TOKEN_KEY = 'OPS_INBOX_TOKEN';
 const TELEGRAM_TIMEOUT_MS = 15_000;
-const ALLOWED_UPDATES = ['message', 'channel_post', 'edited_channel_post'];
+// 2026-09-30: callback_query — нажатия кнопок «Опубликовать/Отклонить» в
+// сообщениях «На согласование» (TelegramNewsService.handleCallback).
+export const ALLOWED_UPDATES = ['message', 'channel_post', 'edited_channel_post', 'callback_query'];
 
 type TelegramUpdate = {
   update_id: number;
@@ -31,6 +33,7 @@ type TelegramUpdate = {
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
   edited_channel_post?: TelegramMessage;
+  callback_query?: { id: string; from: { id: number; first_name?: string; last_name?: string; username?: string }; message?: any; data?: string };
 };
 
 type TelegramMessage = {
@@ -132,8 +135,19 @@ export class OpsInboxService {
       let maxUpdateId = offset - 1;
       let stored = 0;
       let newsSeen = 0;
+      let callbacks = 0;
       for (const update of updates) {
         maxUpdateId = Math.max(maxUpdateId, Number(update.update_id));
+        if (update.callback_query) {
+          // Кнопка согласования новости; чужие callback-и сервис игнорирует.
+          callbacks += 1;
+          try {
+            await this.telegramNews.handleCallback(update.callback_query as any, token);
+          } catch (error) {
+            this.logger.warn(`[OpsInbox] callback (update ${update.update_id}) не обработан: ${(error as Error)?.message || error}`);
+          }
+          continue;
+        }
         if (update.channel_post || update.edited_channel_post) {
           // Пост Telegram-канала → новости лендинга; ошибка одного поста не
           // должна останавливать ни опрос, ни сдвиг offset.
@@ -164,7 +178,7 @@ export class OpsInboxService {
         update: { value: String(maxUpdateId + 1), updatedBy: 'ops-inbox' },
         create: { key: OFFSET_KEY, value: String(maxUpdateId + 1), updatedBy: 'ops-inbox' },
       });
-      if (stored || newsSeen) this.logger.log(`[OpsInbox] новых сообщений: ${stored}, постов канала: ${newsSeen}`);
+      if (stored || newsSeen || callbacks) this.logger.log(`[OpsInbox] новых сообщений: ${stored}, постов канала: ${newsSeen}, нажатий кнопок: ${callbacks}`);
     } catch (error) {
       this.logger.warn(`[OpsInbox] poll failed: ${(error as Error)?.message || error}`);
     } finally {

@@ -136,9 +136,24 @@ export class AdminCmsController {
 
   // ─── News ─────────────────────────────
 
+  // 2026-09-30: ?status=PENDING|APPROVED|REJECTED — фильтр по согласованию.
   @Get('news')
-  async listNews() {
-    return this.cms.listNews(false);
+  async listNews(@Query('status') status?: string) {
+    return this.cms.listNews(false, status || null);
+  }
+
+  // 2026-09-30: решение админа по Telegram-новости на согласовании — то же,
+  // что кнопки «Опубликовать/Отклонить» в боте (статус + правка сообщений
+  // модераторам). Повторное решение не перезаписывает первое (result: already).
+  @Post('news/:id/moderate')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Approve or reject a pending news item' })
+  async moderateNews(
+    @Param('id') id: string,
+    @Body() body: { status: 'APPROVED' | 'REJECTED' },
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    return this.cms.moderateNews(id, body?.status, user?.fullName || user?.phone || 'админ');
   }
 
   @Post('news')
