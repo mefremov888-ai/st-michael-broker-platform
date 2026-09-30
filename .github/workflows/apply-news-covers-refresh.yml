@@ -1,0 +1,78 @@
+name: Apply news covers refresh (пересъёмка заглушек обложек новостей сайта)
+
+# 2026-09-30 (владелец): у части новостей сайта stmichael.ru на лендинге
+# обложки — размытые заглушки (400×267, ~1 КБ) или логотип (537×240, 4 КБ).
+# Скрипт проходит по всем новостям сайта, проверяет настоящий файл обложки
+# в /app/uploads/landing (нет файла / < 8 КБ / ширина < 600 / внешняя ссылка),
+# заново берёт кадр со страницы новости (самый широкий, заглушки отбрасывает,
+# скачанное проверяет) и заменяет ссылку на /files/landing/<hash>.<ext>.
+#
+# Что происходит на сервере:
+#   1. скрипт берётся из origin/master (git show) — то, что прошло ревью;
+#   2. копируется в контейнер api (docker cp);
+#   3. dry-run: всё до записи — страницы открываются, файлы качаются во
+#      временную папку, печатается таблица «заголовок → было → стало»,
+#      запись идёт в транзакции с откатом; apply — файлы в uploads, запись в БД.
+#
+# Боевой режим требует mode=apply И confirm_apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run — план, скачивание во временную папку и проверка в транзакции с откатом; apply — запись'
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      confirm_apply:
+        description: 'Подтверждаю запись в прод-БД и файлы в uploads (нужно вместе с mode=apply)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-news-covers-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          MODE_INPUT: ${{ inputs.mode }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 20m
+          envs: MODE_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/apply-news-covers-refresh.js > /tmp/apply-news-covers-refresh.js
+            docker cp /tmp/apply-news-covers-refresh.js st-michael-api:/app/scripts/apply-news-covers-refresh.js
+            MODE=1
+            CONFIRM=0
+            if [ "$MODE_INPUT" = "apply" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; CONFIRM=1; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (скачивание во временную папку, транзакция с откатом) ==="; else echo "=== APPLY (файлы в uploads, запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE -e CONFIRM=$CONFIRM api node /app/scripts/apply-news-covers-refresh.js
+            if [ "$MODE" = "0" ]; then
+              echo "=== Обложки в публичной выдаче /api/public/cms/news (ссылка → размер файла) ==="
+              docker compose exec -T api node -e "const fs=require('fs');fetch('http://localhost:4000/api/public/cms/news').then(r=>r.json()).then(d=>{const a=Array.isArray(d)?d:[];a.forEach(x=>{const u=x.imageUrl||'';let sz='';const m=u.match(/^\/files\/landing\/(.+)$/);if(m){try{sz=Math.round(fs.statSync('/app/uploads/landing/'+m[1]).size/1024)+' КБ';}catch{sz='ФАЙЛА НЕТ';}}console.log(' - '+(x.source||'')+' · '+x.title.slice(0,50)+' → '+u.slice(0,60)+' '+sz);});}).catch(e=>console.log('не удалось опросить API: '+e.message))"
+            fi
+            echo "=== Готово (DRY_RUN=$MODE) ==="
