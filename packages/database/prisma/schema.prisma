@@ -2015,12 +2015,23 @@ model LandingNews {
   telegramChatId    String? @map("telegram_chat_id")
   telegramMessageId Int?    @map("telegram_message_id")
   mediaGroupId      String? @map("media_group_id")
+  // 2026-09-30: согласование Telegram-новостей перед публикацией.
+  // PENDING | APPROVED | REJECTED. Новости сайта и ручные карточки — сразу
+  // APPROVED; пост канала создаётся как PENDING, публичный endpoint отдаёт
+  // только APPROVED. moderation_notices — куда ушли сообщения «На согласование»
+  // (chat_id + message_id обоих модераторов), чтобы после решения убрать кнопки
+  // и дописать «Опубликовано/Отклонено: <имя>» в каждом.
+  moderationStatus  String   @default("APPROVED") @map("moderation_status")
+  moderationNotices Json?    @map("moderation_notices")
+  moderatedAt       DateTime? @map("moderated_at")
+  moderatedBy       String?  @map("moderated_by")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@unique([telegramChatId, telegramMessageId])
   @@index([telegramChatId, mediaGroupId])
   @@index([publishedAt, isActive])
+  @@index([moderationStatus])
   @@map("landing_news")
 }
 

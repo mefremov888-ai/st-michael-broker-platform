@@ -3,9 +3,11 @@ import { CmsService } from './cms.service';
 import { PublicCmsController } from './cms.public.controller';
 import { AdminCmsController } from './cms.admin.controller';
 import { AuthModule } from '../auth/auth.module';
+import { TelegramNewsModule } from '../telegram-news/telegram-news.module';
 
 @Module({
-  imports: [AuthModule],
+  // 2026-09-30: TelegramNewsModule — согласование Telegram-новостей из админки.
+  imports: [AuthModule, TelegramNewsModule],
   controllers: [PublicCmsController, AdminCmsController],
   providers: [CmsService],
   exports: [CmsService],

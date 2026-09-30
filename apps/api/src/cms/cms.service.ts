@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Inject, Logger, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
 import { PrismaClient } from "@st-michael/database";
 import {
   AmoCrmAdapter,
@@ -7,6 +7,7 @@ import {
   morekitLeadDate,
 } from "@st-michael/integrations";
 import { getSystemSetting } from "../common/system-setting";
+import { TelegramNewsService } from "../telegram-news/telegram-news.service";
 import {
   acquireAmoBrokerContactAdvisoryXactLock,
   armDurableAmoBrokerContactCreateGate,
@@ -238,24 +239,41 @@ export function pickStmNewsImage(body: string): string | null {
   return all[0] || null;
 }
 
-/** Сколько Telegram-новостей достаточно, чтобы не показывать карточки сайта. */
-export const TELEGRAM_NEWS_ENOUGH = 4;
+/** Сколько новостей отдаёт публичный endpoint по умолчанию и максимум (?limit=). */
+export const PUBLIC_NEWS_LIMIT = 20;
+/** Сколько карточек снимаем со страницы stmichael.ru/news за один синк. */
+export const STM_NEWS_PARSE_LIMIT = 20;
+
+export function clampPublicNewsLimit(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return PUBLIC_NEWS_LIMIT;
+  return Math.min(Math.floor(n), PUBLIC_NEWS_LIMIT);
+}
+
+export const NEWS_MODERATION_STATUSES = ["PENDING", "APPROVED", "REJECTED"] as const;
+export type NewsModerationStatus = (typeof NEWS_MODERATION_STATUSES)[number];
 
 /**
- * 2026-09-29: порядок публичных новостей — сначала посты Telegram-канала
- * (свежие выше), затем остальные источники (парсер stmichael.ru, ручные
- * карточки). Если Telegram-постов ≥ TELEGRAM_NEWS_ENOUGH, остальные не отдаём.
+ * 2026-09-30: единая лента публичных новостей — Telegram-посты и карточки
+ * сайта вместе, по дате (свежие выше). В один и тот же день Telegram идёт
+ * первым, дальше — по точному времени, затем sortOrder. Правило «≥ 4 Telegram
+ * → сайт не показываем» (29.09) убрано по решению владельца.
  */
 export function orderPublicNews<T extends { source?: string | null; telegramChatId?: string | null; publishedAt: Date | string; sortOrder?: number }>(rows: T[]): T[] {
   const isTelegram = (row: T) => Boolean(row.telegramChatId) || row.source === "Telegram";
-  const byDate = (a: T, b: T) => {
-    const diff = new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
-    return diff !== 0 ? diff : (a.sortOrder || 0) - (b.sortOrder || 0);
+  const dayKey = (value: Date | string) => {
+    const d = new Date(value);
+    return d.getFullYear() * 10_000 + (d.getMonth() + 1) * 100 + d.getDate();
   };
-  const telegram = rows.filter(isTelegram).sort(byDate);
-  if (telegram.length >= TELEGRAM_NEWS_ENOUGH) return telegram;
-  const rest = rows.filter((row) => !isTelegram(row)).sort(byDate);
-  return [...telegram, ...rest];
+  return [...rows].sort((a, b) => {
+    const dayDiff = dayKey(b.publishedAt) - dayKey(a.publishedAt);
+    if (dayDiff !== 0) return dayDiff;
+    const tgDiff = Number(isTelegram(b)) - Number(isTelegram(a));
+    if (tgDiff !== 0) return tgDiff;
+    const timeDiff = new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
+    if (timeDiff !== 0) return timeDiff;
+    return (a.sortOrder || 0) - (b.sortOrder || 0);
+  });
 }
 
 @Injectable()
@@ -265,7 +283,13 @@ export class CmsService {
   // напрямую. Использует env AMO_ACCESS_TOKEN.
   private amo = new AmoCrmAdapter();
   private morekit = new MorekitAdapter();
-  constructor(@Inject("PrismaClient") private prisma: PrismaClient) {}
+  // 2026-09-30: TelegramNewsService — решение по Telegram-новости из админки
+  // (тот же путь, что кнопки в боте: статус + правка сообщений модераторам).
+  // @Optional — часть spec-ов создаёт CmsService(prisma) без него.
+  constructor(
+    @Inject("PrismaClient") private prisma: PrismaClient,
+    @Optional() private readonly telegramNews?: TelegramNewsService,
+  ) {}
 
   async getAllContent() {
     const rows = await this.prisma.siteContent.findMany();
@@ -474,22 +498,50 @@ export class CmsService {
 
   // ─── News (нижний блок страницы — медиа/упоминания) ────────────
 
-  async listNews(onlyActive = false) {
+  async listNews(onlyActive = false, moderationStatus?: string | null) {
     const where: any = {};
     if (onlyActive) where.isActive = true;
+    // 2026-09-30: фильтр админки по статусу согласования (PENDING/APPROVED/REJECTED).
+    if (moderationStatus && (NEWS_MODERATION_STATUSES as readonly string[]).includes(moderationStatus)) {
+      where.moderationStatus = moderationStatus;
+    }
     return this.prisma.landingNews.findMany({
       where,
       orderBy: [{ publishedAt: "desc" }, { sortOrder: "asc" }],
     });
   }
 
-  // 2026-09-29 (владелец): лендинг показывает новости из Telegram-канала
-  // компании. Telegram-карточки идут первыми (по дате); парсер stmichael.ru
-  // остаётся запасным: если Telegram-новостей уже хватает на блок (≥ 4),
-  // карточки сайта не отдаём вовсе, иначе дополняем ими хвост.
-  async listPublicNews() {
-    const rows = await this.listNews(true);
-    return orderPublicNews(rows);
+  // 2026-09-30 (владелец): единая лента — Telegram-посты и карточки сайта
+  // вместе по дате (Telegram первым в один день), до 20 штук (?limit=).
+  // На лендинг попадают только активные и согласованные (APPROVED): пост
+  // канала до решения модераторов (PENDING) и отклонённый (REJECTED) не отдаём.
+  async listPublicNews(limit?: unknown) {
+    const take = clampPublicNewsLimit(limit);
+    const rows = await this.prisma.landingNews.findMany({
+      where: { isActive: true, moderationStatus: "APPROVED" },
+      orderBy: [{ publishedAt: "desc" }, { sortOrder: "asc" }],
+      // Берём с запасом: порядок внутри одного дня (Telegram первым)
+      // определяется в orderPublicNews, а не в SQL.
+      take: take * 3,
+    });
+    return orderPublicNews(rows).slice(0, take);
+  }
+
+  /**
+   * 2026-09-30: решение админа по новости на согласовании. Делегируем в
+   * TelegramNewsService — он меняет статус (идемпотентно) и правит сообщения
+   * «На согласование» у модераторов в боте.
+   */
+  async moderateNews(id: string, status: string, byName: string) {
+    const wanted = String(status || "").toUpperCase();
+    if (wanted !== "APPROVED" && wanted !== "REJECTED") {
+      throw new BadRequestException("status должен быть APPROVED или REJECTED");
+    }
+    if (!this.telegramNews) throw new ServiceUnavailableException("Согласование новостей недоступно");
+    const outcome = await this.telegramNews.moderate(id, wanted, byName || "админ");
+    if (outcome.result === "not_found") throw new NotFoundException("Новость не найдена");
+    const fresh = await this.prisma.landingNews.findUnique({ where: { id } });
+    return { result: outcome.result, status: outcome.status, news: fresh };
   }
 
   async createNews(data: any) {
@@ -644,7 +696,7 @@ export class CmsService {
       /<a\s[^>]*href="(\/news\/[^"]+)"[^>]*class="NewsCard_\w+">([\s\S]*?)(?=<a\s[^>]*href="\/news\/|<\/ul>|<\/section>|$)/g;
     const items: any[] = [];
     let m: RegExpExecArray | null;
-    while ((m = cardRe.exec(html)) !== null && items.length < 12) {
+    while ((m = cardRe.exec(html)) !== null && items.length < STM_NEWS_PARSE_LIMIT) {
       const slug = m[1];
       const body = m[2];
       const url = `https://stmichael.ru${slug}`;
