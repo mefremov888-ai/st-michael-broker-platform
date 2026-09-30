@@ -178,7 +178,9 @@
 /* 30.09 (владелец): карусель — видно 4 карточки, листаем по одной с плавным сдвигом (322+24=346);
    стрелки — белые круги 40 на краю крайней карточки (наполовину поверх), по центру обложки (118) */
 .v2-news-wrap { position: relative; margin-top: 72px; }
-.v2-news-viewport { clip-path: inset(-8px 0); }
+/* 30.09: clip-path только обрезал картинку, а дорожка из 20 карточек раздвигала документ —
+   на экранах уже 1920 появлялась горизонтальная прокрутка. overflow:hidden убирает её. */
+.v2-news-viewport { overflow: hidden; margin: -8px 0; padding: 8px 0; }
 .v2-news { display: flex; gap: 24px; transition: transform .3s ease; will-change: transform; }
 .v2-ncard { display: block; flex: 0 0 322px; width: 322px; background: #fff; border-radius: 24px; overflow: hidden; height: 360px; position: relative; transition: transform .2s ease; }
 .v2 .v2-news-wrap .v2-news-arrow { position: absolute; top: 98px; width: 40px; height: 40px; border-radius: 50%; background: #fff; color: #282828; box-shadow: 0 2px 10px rgba(0,0,0,.18); display: inline-flex; align-items: center; justify-content: center; line-height: 0; z-index: 2; transition: box-shadow .15s ease; }
