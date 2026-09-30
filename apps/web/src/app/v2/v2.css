@@ -107,28 +107,31 @@
 .v2-pcard .v2-btn--soon { bottom: 39px; }
 
 /* акции (2026-09-28: карусель 1360×600 по обновлённому макету) */
-.v2-promo { position: relative; height: 600px; border-radius: 24px; overflow: hidden; background: #1f1f1f center / cover no-repeat; color: #fff; }
+.v2-promo { position: relative; height: 400px; border-radius: 24px; overflow: hidden; background: #1f1f1f; color: #fff; }
+/* 30.09: слайды стопкой, смена через прозрачность */
+.v2-promo-slide { position: absolute; inset: 0; background: center / cover no-repeat; opacity: 0; transition: opacity .45s ease; pointer-events: none; }
+.v2-promo-slide.is-active { opacity: 1; pointer-events: auto; }
 /* заголовок 347 шириной (две строки) в (50,50); стрелки 9×21 в x50 и x1301, y289 */
 /* 29.09: заголовок до 600 в ширину, перенос строки явный (pre-line); подзаголовок под
    двумя строками заголовка (top 170); до стрелок (top 289) остаётся запас */
 .v2 .v2-promo-title { position: absolute; left: 50px; top: 50px; width: 600px; font-size: 44px; line-height: 51px; font-weight: 500; white-space: pre-line; }
 .v2 .v2-promo-sub { position: absolute; left: 50px; top: 170px; max-width: 600px; font-size: 24px; line-height: 28px; }
 /* 30.09 (владелец): затемнение фото убрано, вместо него мягкая тень у текста */
-.v2 .v2-promo-title, .v2 .v2-promo-sub { text-shadow: 0 1px 8px rgba(0,0,0,.35); }
-.v2-promo-cta { position: absolute; left: 50px; bottom: 90px; }
+
+.v2-promo-cta { position: absolute; left: 50px; bottom: 40px; }
 /* 30.09 (владелец): стрелки — белые полупрозрачные круги 44 с тёмным шевроном, по центру
    по вертикали (300), центры по x те же, что раньше (334.5 / 1585.5 на 1920) */
 /* специфичность (0,3,0): сброс `.v2 button:not(.v2-btn)` иначе убирает фон круга */
-.v2 .v2-promo .v2-promo-arrow { position: absolute; top: 278px; width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.85); color: #282828; display: inline-flex; align-items: center; justify-content: center; line-height: 0; transition: background-color .15s ease; }
+.v2 .v2-promo .v2-promo-arrow { position: absolute; top: 178px; z-index: 2; width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.85); color: #282828; display: inline-flex; align-items: center; justify-content: center; line-height: 0; transition: background-color .15s ease; }
 .v2-promo-arrow svg { display: block; }
 .v2-promo-arrow--prev { left: 32px; transform: scaleX(-1); }
 .v2-promo-arrow--next { right: 32px; }
 .v2 .v2-promo .v2-promo-arrow:hover { background: #fff; }
 /* точки: заметнее — белые 11px с прозрачностью .6 на полупрозрачной подложке, активная — золотая пилюля 46×15 */
-.v2-promo-dots { position: absolute; left: 40px; bottom: 40px; display: flex; gap: 12px; align-items: center; padding: 8px 10px; border-radius: 999px; background: rgba(0,0,0,.22); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
-.v2 .v2-promo-dots .v2-promo-dot { width: 11px; height: 11px; border-radius: 50%; background: rgba(255,255,255,.6); transition: background-color .15s ease; }
+.v2-promo-dots { position: absolute; left: 50px; bottom: 40px; display: flex; gap: 12px; align-items: center; z-index: 2; }
+.v2 .v2-promo-dots .v2-promo-dot { width: 15px; height: 15px; border-radius: 7.5px; background: rgba(255,255,255,.85); transition: width .4s cubic-bezier(.4,0,.2,1), background-color .4s ease; }
 .v2 .v2-promo-dots .v2-promo-dot:hover { background: rgba(255,255,255,.9); }
-.v2 .v2-promo-dots .v2-promo-dot--active, .v2 .v2-promo-dots .v2-promo-dot--active:hover { width: 46px; height: 15px; border-radius: 7.5px; background: var(--v2-gold); }
+.v2 .v2-promo-dots .v2-promo-dot--active, .v2 .v2-promo-dots .v2-promo-dot--active:hover { width: 46px; background: var(--v2-gold); }
 
 /* шаги */
 .v2-steps { display: grid; grid-template-columns: repeat(4, 322px); gap: 24px; margin-top: 72px; }

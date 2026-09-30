@@ -402,23 +402,33 @@ function PromoCarousel({ promos }: { promos: any[] }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [count]);
-  const slide = slides[index % count] || slides[0];
-  const image = slide.imageUrl || DEFAULT_PROMOS[0].imageUrl;
+  const active = index % count;
+  // 30.09 (владелец): слайды лежат стопкой и сменяются через прозрачность
+  // (fade in / fade out), точки «морфятся» из круга в пилюлю через CSS-transition.
   return (
     <section className="v2-section" id="promos">
       <div className="v2-container">
-        <div className="v2-promo" style={{ backgroundImage: `url(${image})` }}>
-          <h2 className="v2-promo-title">{slide.title}</h2>
-          {slide.subtitle && <p className="v2-promo-sub">{slide.subtitle}</p>}
-          {slide.ctaHref && (
-            <a className="v2-btn v2-btn--cta v2-promo-cta" href={slide.ctaHref} target="_blank" rel="noopener noreferrer">{slide.ctaText || 'Подробнее'}</a>
-          )}
+        <div className="v2-promo">
+          {slides.map((s: any, k: number) => (
+            <div
+              key={s.id || k}
+              className={`v2-promo-slide${k === active ? ' is-active' : ''}`}
+              style={{ backgroundImage: `url(${s.imageUrl || DEFAULT_PROMOS[0].imageUrl})` }}
+              aria-hidden={k !== active}
+            >
+              <h2 className="v2-promo-title">{s.title}</h2>
+              {s.subtitle && <p className="v2-promo-sub">{s.subtitle}</p>}
+              {s.ctaHref && (
+                <a className="v2-btn v2-btn--cta v2-promo-cta" href={s.ctaHref} target="_blank" rel="noopener noreferrer" tabIndex={k === active ? 0 : -1}>{s.ctaText || 'Подробнее'}</a>
+              )}
+            </div>
+          ))}
           {/* стрелки есть в макете всегда; при одном слайде они просто ничего не листают */}
           <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => setIndex((index - 1 + count) % count)}><PromoArrow /></button>
           <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => setIndex((index + 1) % count)}><PromoArrow /></button>
           <div className="v2-promo-dots">
             {slides.map((s: any, k: number) => (
-              <button key={s.id || k} className={`v2-promo-dot${k === index % count ? ' v2-promo-dot--active' : ''}`} aria-label={`Акция ${k + 1}`} onClick={() => setIndex(k)} />
+              <button key={s.id || k} className={`v2-promo-dot${k === active ? ' v2-promo-dot--active' : ''}`} aria-label={`Акция ${k + 1}`} onClick={() => setIndex(k)} />
             ))}
           </div>
         </div>
