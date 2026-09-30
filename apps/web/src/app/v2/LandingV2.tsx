@@ -69,7 +69,7 @@ const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 // когда в CMS нет активных акций с картинкой. Перенос заголовка задан явно (\n).
 // 30.09 (владелец): затемнение фото (shade) убрано — под текстом мягкая тень. Кадры 2720×1200.
 const DEFAULT_PROMOS = [
-  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-1.webp' },
+  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-1b.webp' },
   { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-2.webp' },
   { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-3.webp' },
   { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-4.webp' },
