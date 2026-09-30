@@ -142,12 +142,14 @@ export class AdminCmsController {
     return this.cms.listNews(false, status || null);
   }
 
-  // 2026-09-30: решение админа по Telegram-новости на согласовании — то же,
-  // что кнопки «Опубликовать/Отклонить» в боте (статус + правка сообщений
-  // модераторам). Повторное решение не перезаписывает первое (result: already).
+  // 2026-09-30: решение админа по новости (Telegram-пост или карточка сайта) —
+  // то же, что кнопки «Опубликовать/Отклонить» в боте (статус + правка
+  // сообщений модераторам). В отличие от бота решение можно менять:
+  // «Скрыть» опубликованную (REJECTED) и «Опубликовать» скрытую (APPROVED);
+  // тот же статус повторно → result: already.
   @Post('news/:id/moderate')
   @Roles(UserRole.ADMIN)
-  @ApiOperation({ summary: 'Approve or reject a pending news item' })
+  @ApiOperation({ summary: 'Approve, reject or change decision on a news item' })
   async moderateNews(
     @Param('id') id: string,
     @Body() body: { status: 'APPROVED' | 'REJECTED' },

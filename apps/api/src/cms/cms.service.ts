@@ -528,9 +528,11 @@ export class CmsService {
   }
 
   /**
-   * 2026-09-30: решение админа по новости на согласовании. Делегируем в
-   * TelegramNewsService — он меняет статус (идемпотентно) и правит сообщения
-   * «На согласование» у модераторов в боте.
+   * 2026-09-30: решение админа по новости. Делегируем в TelegramNewsService —
+   * он меняет статус (идемпотентно) и правит сообщения «На согласование» у
+   * модераторов в боте. Из админки решение можно менять и после: «Скрыть»
+   * опубликованную (→ REJECTED) или «Опубликовать» скрытую (→ APPROVED);
+   * тот же статус повторно — result: already.
    */
   async moderateNews(id: string, status: string, byName: string) {
     const wanted = String(status || "").toUpperCase();
@@ -538,7 +540,7 @@ export class CmsService {
       throw new BadRequestException("status должен быть APPROVED или REJECTED");
     }
     if (!this.telegramNews) throw new ServiceUnavailableException("Согласование новостей недоступно");
-    const outcome = await this.telegramNews.moderate(id, wanted, byName || "админ");
+    const outcome = await this.telegramNews.moderate(id, wanted, byName || "админ", undefined, { allowChange: true });
     if (outcome.result === "not_found") throw new NotFoundException("Новость не найдена");
     const fresh = await this.prisma.landingNews.findUnique({ where: { id } });
     return { result: outcome.result, status: outcome.status, news: fresh };
@@ -588,6 +590,13 @@ export class CmsService {
   // 2026-08-12: ручной/плановый синк новостей с stmichael.ru/news.
   // Та же логика, что в SchedulerService.handleStmNewsSync, вынесена сюда
   // чтобы не создавать циклическую зависимость CmsModule ↔ SchedulerModule.
+  //
+  // 2026-09-30 (решение владельца): новости сайта тоже согласуются. Новая
+  // карточка создаётся PENDING (на лендинг не попадает) и модераторам уходит
+  // то же «На согласование» с кнопками, что и для Telegram-постов (заголовок,
+  // обложка по ссылке сайта, ссылка на новость; анонса у карточек сайта нет).
+  // Повторный парсинг статус существующих карточек не трогает: обновляются
+  // только заголовок/обложка/дата, у PENDING — ещё и текст у модераторов.
   async syncNewsFromStm(): Promise<{
     created: number;
     updated: number;
@@ -602,13 +611,17 @@ export class CmsService {
         where: { url: item.url },
       });
       if (!existing) {
-        await this.prisma.landingNews.create({ data: item });
+        const row = await this.prisma.landingNews.create({
+          data: { ...item, moderationStatus: "PENDING" },
+        });
         created++;
+        this.logger.log(`[stm-news] новость создана (на согласовании): ${row.id} ← ${row.url}`);
+        await this.requestNewsModeration(row);
       } else if (
         existing.title !== item.title ||
         existing.imageUrl !== item.imageUrl
       ) {
-        await this.prisma.landingNews.update({
+        const row = await this.prisma.landingNews.update({
           where: { id: existing.id },
           data: {
             title: item.title,
@@ -617,9 +630,27 @@ export class CmsService {
           },
         });
         updated++;
+        if (row?.moderationStatus === "PENDING" && this.telegramNews) {
+          await this.telegramNews.refreshModeration(row).catch((e: any) =>
+            this.logger.warn(`[stm-news] не удалось обновить «На согласование» для ${row.id}: ${e?.message || e}`),
+          );
+        }
       }
     }
     return { created, updated, total: items.length };
+  }
+
+  /** Уведомление модераторам о новой карточке сайта; ошибка Telegram синк не роняет. */
+  private async requestNewsModeration(row: any): Promise<void> {
+    if (!this.telegramNews) {
+      this.logger.warn(`[stm-news] TelegramNewsService недоступен — новость ${row?.id} ждёт решения в /admin/news`);
+      return;
+    }
+    try {
+      await this.telegramNews.requestModeration(row, row?.imageUrl || null);
+    } catch (e: any) {
+      this.logger.warn(`[stm-news] «На согласование» для ${row?.id} не отправлено: ${e?.message || e}`);
+    }
   }
 
   private requestStmNewsHtml(extraOptions: Record<string, unknown> = {}): Promise<string> {

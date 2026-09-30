@@ -505,4 +505,64 @@ describe('согласование: уведомления модератора�
     await expect(service.moderate('id-1', 'APPROVED', 'Кто-то ещё')).resolves.toMatchObject({ result: 'already', status: 'REJECTED' });
     await expect(service.moderate('nope', 'APPROVED', 'x')).resolves.toMatchObject({ result: 'not_found' });
   });
+
+  // 2026-09-30: из админки решение можно менять — «Скрыть» опубликованную и
+  // «Опубликовать» скрытую; из бота (без allowChange) — только первое решение.
+  it('allowChange (админка): APPROVED → REJECTED («Скрыть») → APPROVED; тот же статус → already; бот менять не может', async () => {
+    const { service, rows } = createService({ OPS_TELEGRAM_BOT_TOKEN: 'token' }, { TELEGRAM_NEWS_MODERATOR_CHAT_IDS: '111' });
+    await service.handleUpdate(channelPost() as any, 'token');
+    await expect(service.moderate('id-1', 'APPROVED', 'Анна')).resolves.toMatchObject({ result: 'done', status: 'APPROVED' });
+
+    await expect(service.moderate('id-1', 'REJECTED', 'Михаил', undefined, { allowChange: true })).resolves.toMatchObject({ result: 'done', status: 'REJECTED' });
+    expect(rows.get('id-1')).toMatchObject({ moderationStatus: 'REJECTED', moderatedBy: 'Михаил' });
+    const edits = calls().filter((c) => c.method === 'editMessageText');
+    expect(edits[edits.length - 1].body.text).toContain('❌ Отклонено: Михаил');
+    expect(edits[edits.length - 1].body.reply_markup).toEqual({ inline_keyboard: [] });
+
+    await expect(service.moderate('id-1', 'REJECTED', 'Михаил', undefined, { allowChange: true })).resolves.toMatchObject({ result: 'already', status: 'REJECTED' });
+    await expect(service.moderate('id-1', 'APPROVED', 'Михаил', undefined, { allowChange: true })).resolves.toMatchObject({ result: 'done', status: 'APPROVED' });
+    expect(rows.get('id-1').moderationStatus).toBe('APPROVED');
+
+    // Кнопка в боте по уже решённой новости — «Уже обработано», статус не меняется.
+    const query = { id: 'cb', from: { id: 111, first_name: 'Анна' }, message: { message_id: 101, chat: { id: 111, type: 'private' } }, data: 'news:reject:id-1' };
+    await expect(service.handleCallback(query as any, 'token')).resolves.toBe('already');
+    expect(rows.get('id-1').moderationStatus).toBe('APPROVED');
+  });
+
+  // 2026-09-30: новость с сайта stmichael.ru (парсер) — то же уведомление с
+  // кнопками; обложка уходит по https-ссылке сайта, кнопки общие по id.
+  it('requestModeration (сайт): sendPhoto по https-ссылке обложки, кнопки news:approve/reject:<id>; без обложки — текстом; не PENDING — молчим', async () => {
+    const { service, rows, news } = createService({ OPS_TELEGRAM_BOT_TOKEN: 'token' }, { TELEGRAM_NEWS_MODERATOR_CHAT_IDS: '111, 222' });
+    const site = await news.create({
+      data: { title: 'Новая школа на 1 000 мест появится рядом с «Зорге 9»', source: 'stmichael.ru', url: 'https://stmichael.ru/news/novaya-shkola', imageUrl: 'https://stmichael.ru/proxy/w:960/q:80/abc.jpg', excerpt: null, moderationStatus: 'PENDING' },
+    });
+    await service.requestModeration(site, site.imageUrl);
+    const photos = calls().filter((c) => c.method === 'sendPhoto');
+    expect(photos.map((c) => c.body.chat_id)).toEqual(['111', '222']);
+    expect(photos[0].body.photo).toBe('https://stmichael.ru/proxy/w:960/q:80/abc.jpg');
+    expect(photos[0].body.caption).toContain('На согласование: новость для кабинета брокера');
+    expect(photos[0].body.caption).toContain('Новая школа на 1 000 мест появится рядом с «Зорге 9»');
+    expect(photos[0].body.caption).toContain('https://stmichael.ru/news/novaya-shkola');
+    expect(photos[0].body.reply_markup.inline_keyboard[0].map((b: any) => b.callback_data)).toEqual([`news:approve:${site.id}`, `news:reject:${site.id}`]);
+    expect(rows.get(site.id).moderationNotices).toEqual([
+      { chatId: '111', messageId: 101, hasPhoto: true },
+      { chatId: '222', messageId: 102, hasPhoto: true },
+    ]);
+
+    // Кнопка модератора по сайтовой новости — та же обработка.
+    const query = { id: 'cb', from: { id: 222, first_name: 'Анна' }, message: { message_id: 102, chat: { id: 222, type: 'private' } }, data: `news:approve:${site.id}` };
+    await expect(service.handleCallback(query as any, 'token')).resolves.toBe('approved');
+    expect(rows.get(site.id)).toMatchObject({ moderationStatus: 'APPROVED', moderatedBy: 'Анна' });
+    expect(calls().filter((c) => c.method === 'editMessageCaption').map((c) => c.body.chat_id)).toEqual(['111', '222']);
+
+    fetchMock.mockClear();
+    const noCover = await news.create({ data: { title: 'Без обложки', source: 'stmichael.ru', url: 'https://stmichael.ru/news/x', imageUrl: null, moderationStatus: 'PENDING' } });
+    await service.requestModeration(noCover);
+    expect(calls().map((c) => c.method)).toEqual(['sendMessage', 'sendMessage']);
+
+    fetchMock.mockClear();
+    const approved = await news.create({ data: { title: 'Старая', source: 'stmichael.ru', url: 'https://stmichael.ru/news/y', imageUrl: null, moderationStatus: 'APPROVED' } });
+    await service.requestModeration(approved);
+    expect(calls()).toEqual([]);
+  });
 });
