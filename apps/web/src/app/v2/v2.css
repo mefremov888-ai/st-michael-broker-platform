@@ -63,7 +63,7 @@
 /* 30.09 (Ринат): кнопки без заливки при наведении получают лёгкую полупрозрачную заливку */
 .v2 .v2-btn--outline:hover, .v2 .v2-btn--ghost:hover { opacity: 1; background: rgba(0,0,0,.06); }
 .v2 .v2-btn--outline-white:hover { opacity: 1; background: rgba(255,255,255,.14); }
-.v2 .v2-btn--light:hover { opacity: 1; background: #ededed; }
+.v2 .v2-btn--light:hover { opacity: 1; filter: brightness(.95); }
 .v2-btn--dark { background: var(--v2-btn); color: #fff; }
 /* 28.09: у ссылок-кнопок цвет перебивал `.v2 a { color: inherit }` — текст на золотой
    и тёмной кнопке выходил чёрным; поднимаем специфичность для <a> и <button>. */
@@ -135,10 +135,10 @@
 .v2-promo-arrow--next { right: 50px; }
 .v2 .v2-promo .v2-promo-arrow:hover { background: #fff; }
 /* точки: заметнее — белые 11px с прозрачностью .6 на полупрозрачной подложке, активная — золотая пилюля 46×15 */
-.v2-promo-dots { position: absolute; left: 50px; bottom: 40px; display: flex; gap: 12px; align-items: center; z-index: 2; }
-.v2 .v2-promo-dots .v2-promo-dot { width: 15px; height: 15px; border-radius: 7.5px; background: rgba(255,255,255,.85); transition: width .4s cubic-bezier(.4,0,.2,1), background-color .4s ease; will-change: width; transform: translateZ(0); backface-visibility: hidden; overflow: hidden; }
-.v2 .v2-promo-dots .v2-promo-dot:hover { background: rgba(255,255,255,.9); }
-.v2 .v2-promo-dots .v2-promo-dot--active, .v2 .v2-promo-dots .v2-promo-dot--active:hover { width: 46px; background: var(--v2-gold); }
+.v2-promo-dots { position: absolute; left: 50px; bottom: 40px; z-index: 2; display: block; overflow: visible; }
+.v2 .v2-promo-dots .v2-promo-dot { fill: rgba(255,255,255,.85); cursor: pointer; transition: x .4s cubic-bezier(.4,0,.2,1), width .4s cubic-bezier(.4,0,.2,1), fill .4s ease; outline: none; }
+.v2 .v2-promo-dots .v2-promo-dot:hover { fill: #fff; }
+.v2 .v2-promo-dots .v2-promo-dot--active, .v2 .v2-promo-dots .v2-promo-dot--active:hover { fill: var(--v2-gold); }
 
 /* шаги */
 .v2-steps { display: grid; grid-template-columns: repeat(4, 322px); gap: 24px; margin-top: 72px; }
@@ -306,9 +306,11 @@
 .v2-cal-cell--today .v2-cal-more { color: rgba(255,255,255,.8); }
 .v2-cal-foot { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--v2-line); }
 .v2-modal .v2-cal-foot p.v2-modal-sub { margin-top: 0; }
-.v2-menu { position: absolute; right: 0; top: 100px; background: #fff; border: 1px solid var(--v2-line); border-radius: 0 0 16px 16px; padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; z-index: 50; font-size: 16px; }
-.v2-menu a:hover, .v2-menu button:hover { color: var(--v2-gold); }
-.v2-menu button { text-align: left; }
+/* 30.09 (владелец): меню как в старом лендинге — белая карточка с тенью под бургером */
+@keyframes v2-menu-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.v2-menu { position: absolute; right: 0; top: 84px; min-width: 240px; background: #fff; border: 1px solid var(--v2-line); border-radius: 16px; box-shadow: 0 16px 40px rgba(0,0,0,.10); padding: 8px 0; display: flex; flex-direction: column; z-index: 60; font-size: 16px; animation: v2-menu-in .25s ease both; }
+.v2 .v2-menu a, .v2 .v2-menu button { display: block; width: 100%; padding: 12px 24px; text-align: left; font-weight: 500; color: #000; transition: background-color .15s ease, color .15s ease; }
+.v2 .v2-menu a:hover, .v2 .v2-menu button:hover { background: var(--v2-bg); color: var(--v2-gold); }
 
 
 /* ─── анимации появления (30.09, по согласованному демо) ───

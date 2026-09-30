@@ -426,11 +426,25 @@ function PromoCarousel({ promos }: { promos: any[] }) {
           {/* стрелки есть в макете всегда; при одном слайде они просто ничего не листают */}
           <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => setIndex((index - 1 + count) % count)}><PromoArrow /></button>
           <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => setIndex((index + 1) % count)}><PromoArrow /></button>
-          <div className="v2-promo-dots">
-            {slides.map((s: any, k: number) => (
-              <button key={s.id || k} className={`v2-promo-dot${k === active ? ' v2-promo-dot--active' : ''}`} aria-label={`Акция ${k + 1}`} onClick={() => setIndex(k)} />
-            ))}
-          </div>
+          {/* 30.09: точки — один SVG, а не кнопки: на Windows/Chrome кнопки-точки
+              рисовались дважды (задвоение при масштабировании). Морфинг — переход
+              x/width у rect. */}
+          <svg className="v2-promo-dots" width={count * 15 + (count - 1) * 12 + 31} height="15" viewBox={`0 0 ${count * 15 + (count - 1) * 12 + 31} 15`} role="tablist" aria-label="Акции">
+            {slides.map((s: any, k: number) => {
+              const x = k * 27 + (k > active ? 31 : 0);
+              const w = k === active ? 46 : 15;
+              return (
+                <rect
+                  key={s.id || k}
+                  className={`v2-promo-dot${k === active ? ' v2-promo-dot--active' : ''}`}
+                  x={x} y={0} width={w} height={15} rx={7.5}
+                  role="tab" aria-selected={k === active} aria-label={`Акция ${k + 1}`} tabIndex={0}
+                  onClick={() => setIndex(k)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIndex(k); } }}
+                />
+              );
+            })}
+          </svg>
         </div>
       </div>
     </section>
@@ -445,6 +459,18 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const [tourPreset, setTourPreset] = useState('');
   const openTour = (preset?: string) => { setTourPreset(preset || ''); setModal('tour'); };
   const [menu, setMenu] = useState(false);
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (t && t.closest('.v2-menu, .v2-burger')) return;
+      setMenu(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [menu]);
   const [zoom, setZoom] = useState(1);
   // 30.09 (владелец, по демо): анимации появления блоков. Включаются только
   // после гидрации и только без prefers-reduced-motion — без JS страница
@@ -565,16 +591,13 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
             <button className="v2-burger" aria-label="Меню" onClick={() => setMenu((v) => !v)}><img src="/v2/svg/burger.svg" alt="" width={40} height={16} /></button>
           </div>
           {menu && (
+            /* 30.09 (владелец): пункты как в старом лендинге; закрывается кликом вне меню */
             <nav className="v2-menu" onClick={() => setMenu(false)}>
-              <a href="#projects">Наши проекты</a>
-              <a href="#how">Как начать</a>
+              <a href="#projects">Проекты</a>
+              <a href="#events">Мероприятия</a>
+              <button onClick={() => setModal('conditions')}>Документы</button>
               <a href="#materials">Материалы</a>
-              <a href="#events">Брокер-туры</a>
-              {news.length > 0 && <a href="#news">Новости</a>}
               <a href="#contacts">Контакты</a>
-              <button onClick={() => openTour()}>Записаться на брокер-тур</button>
-              <button onClick={() => setModal('conditions')}>Условия вознаграждения</button>
-              <a href={phoneHref}>{phone}</a>
             </nav>
           )}
         </div>
@@ -702,6 +725,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 <p className="v2-subtitle">Расписание брокер-туров</p>
               </div>
               <div className="v2-filter">
+                <button className="v2-btn v2-btn--gold" onClick={() => openTour()}>Записаться на брокер-тур</button>
                 <span className="v2-btn v2-btn--dark">Неделя</span>
                 <button className="v2-btn v2-btn--ghost" onClick={() => setModal('month')}>Месяц</button>
               </div>
