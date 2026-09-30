@@ -1,0 +1,84 @@
+name: Apply cooperation documents (калькулятор рассрочки)
+
+# 2026-09-30, решение владельца: в разделе «Условия сотрудничества» остаются
+# ровно два документа — «Условия сотрудничества сентябрь» и новый HTML-калькулятор
+# рассрочки (Серебряный Бор, Зорге 9, машино-места). «Условия рассрочки Квартал
+# Серебряный бор» и оба документа про вознаграждение снимаются с публикации
+# (строки и файлы остаются, вернуть можно из админки).
+#
+# Что происходит на сервере:
+#   1. скрипт и HTML берутся из origin/master (git show) — то, что прошло ревью;
+#   2. HTML кладётся в контейнер api рядом со скриптом (не в загрузки!);
+#   3. скрипт проверяет HTML, в боевом режиме копирует его в /app/uploads/cooperation/
+#      и в одной транзакции правит строки documents; в сухом прогоне транзакция
+#      откатывается после проверок.
+#
+# Запускать ПОСЛЕ деплоя PR с docker/nginx.conf: без него HTML тоже откроется,
+# но без защитных заголовков (CSP/nosniff).
+#
+# Боевой режим требует mode=apply И confirm_apply=true.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry-run — только план и проверка в транзакции с откатом; apply — запись'
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      confirm_apply:
+        description: 'Подтверждаю запись файла и прод-БД (нужно вместе с mode=apply)'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: apply-cooperation-documents
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Run on production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: SSH and run
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          MODE_INPUT: ${{ inputs.mode }}
+          CONFIRM_APPLY: ${{ inputs.confirm_apply }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script_stop: true
+          command_timeout: 15m
+          envs: MODE_INPUT,CONFIRM_APPLY
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git fetch origin master
+            echo "=== Скрипт и HTML из origin/master: $(git rev-parse --short origin/master) ==="
+            git show origin/master:scripts/apply-cooperation-documents-2026-09-30.js > /tmp/apply-cooperation-documents-2026-09-30.js
+            git show origin/master:seed-data/documents/calculator-rassrochki-2026-09.html > /tmp/calculator-rassrochki-2026-09.html
+            echo "HTML: $(wc -c < /tmp/calculator-rassrochki-2026-09.html) байт, sha256 $(sha256sum /tmp/calculator-rassrochki-2026-09.html | cut -c1-16)…"
+            docker cp /tmp/apply-cooperation-documents-2026-09-30.js st-michael-api:/app/scripts/apply-cooperation-documents-2026-09-30.js
+            docker exec st-michael-api mkdir -p /app/scripts/seed-documents
+            docker cp /tmp/calculator-rassrochki-2026-09.html st-michael-api:/app/scripts/seed-documents/calculator-rassrochki-2026-09.html
+            MODE=1
+            CONFIRM=0
+            if [ "$MODE_INPUT" = "apply" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; CONFIRM=1; fi
+            if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (транзакция с откатом, файл не пишется) ==="; else echo "=== APPLY (файл + запись в БД) ==="; fi
+            docker compose exec -T -e DRY_RUN=$MODE -e CONFIRM=$CONFIRM api node /app/scripts/apply-cooperation-documents-2026-09-30.js
+            if [ "$MODE" = "0" ]; then
+              echo "=== Публичная выдача /api/public/documents?category=cooperation ==="
+              docker compose exec -T api node -e "fetch('http://localhost:4000/api/public/documents?category=cooperation').then(r=>r.json()).then(d=>{const a=Array.isArray(d)?d:(d.documents||[]);console.log(a.length+' документ(ов)');a.forEach(x=>console.log(' - '+x.name+' · '+x.type+' · '+x.fileUrl));}).catch(e=>console.log('не удалось опросить API: '+e.message))"
+            fi
+            echo "=== Готово (DRY_RUN=$MODE) ==="
