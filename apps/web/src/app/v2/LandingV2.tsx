@@ -67,12 +67,12 @@ const ROMAN = ['', 'I', 'II', 'III', 'IV'];
 const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 // Слайды «Акций» по умолчанию (тексты утверждены владельцем 29.09) — показываются,
 // когда в CMS нет активных акций с картинкой. Перенос заголовка задан явно (\n).
-// shade — затемнение слева под белый текст на светлом фото. Кадры 2720×1200.
+// 30.09 (владелец): затемнение фото (shade) убрано — под текстом мягкая тень. Кадры 2720×1200.
 const DEFAULT_PROMOS = [
   { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-commission.webp' },
-  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp', shade: true },
+  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-payout.webp' },
   { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-fixation.webp' },
-  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-tours.webp', shade: true },
+  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-tours.webp' },
 ];
 
 function plural(n: number, one: string, few: string, many: string) {
@@ -339,12 +339,46 @@ function MonthModal({ events, onClose, onBook }: { events: any[]; onClose: () =>
 // 2026-09-28 (обновление макета): карусель «Акции» — фото на всю ширину
 // контейнера 1360×600, заголовок белым, стрелки по бокам, точки слева внизу.
 // Данные — CMS-акции; если их нет — один слайд из макета.
-// Стрелка макета: контур 9×21, stroke 3, белая (узлы 110:759 / 110:761).
+// 30.09 (владелец): стрелки — белые полупрозрачные круги с тёмным шевроном (как на примере).
 const PromoArrow = () => (
-  <svg width="9" height="21" viewBox="0 0 9 21" fill="none" aria-hidden="true">
-    <path d="M1.5 1.5 L7.5 10.5 L1.5 19.5" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+  <svg width="10" height="18" viewBox="0 0 10 18" fill="none" aria-hidden="true">
+    <path d="M1.5 1.5 L8.5 9 L1.5 16.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
+
+// ─── карусель новостей (правка владельца 30.09) ─────────────────────────────
+// Видно 4 карточки 322×360; листаем по одной с плавным сдвигом трека (300 мс).
+// Стрелки — белые круги 40 на краю крайней карточки, по центру обложки;
+// левая появляется, когда есть куда вернуться, правая — пока есть скрытые карточки.
+const NEWS_VISIBLE = 4;
+const NEWS_STEP = 322 + 24;
+
+function NewsCarousel({ items }: { items: any[] }) {
+  const [start, setStart] = useState(0);
+  const maxStart = Math.max(0, items.length - NEWS_VISIBLE);
+  const at = Math.min(start, maxStart);
+  return (
+    <div className="v2-news-wrap">
+      <div className="v2-news-viewport">
+        <div className="v2-news" style={{ transform: `translateX(${-at * NEWS_STEP}px)` }}>
+          {items.map((n) => (
+            <a className="v2-ncard" key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer">
+              {n.imageUrl ? <img className="v2-ncard-cover" src={n.imageUrl} alt="" /> : <div className="v2-ncard-cover" />}
+              <div className="v2-ncard-title">{n.title}</div>
+              <div className="v2-ncard-meta">{n.publishedAt ? fmtNewsDate(n.publishedAt) : ''}{n.source ? ` · ${n.source}` : ''}</div>
+            </a>
+          ))}
+        </div>
+      </div>
+      {at > 0 && (
+        <button type="button" className="v2-news-arrow v2-news-arrow--prev" aria-label="Предыдущие новости" onClick={() => setStart(Math.max(0, at - 1))}><CalArrow /></button>
+      )}
+      {at < maxStart && (
+        <button type="button" className="v2-news-arrow v2-news-arrow--next" aria-label="Следующие новости" onClick={() => setStart(Math.min(maxStart, at + 1))}><CalArrow /></button>
+      )}
+    </div>
+  );
+}
 
 function PromoCarousel({ promos }: { promos: any[] }) {
   // CMS-акции с фото имеют приоритет; без них — четыре типовых слайда
@@ -373,7 +407,7 @@ function PromoCarousel({ promos }: { promos: any[] }) {
   return (
     <section className="v2-section" id="promos">
       <div className="v2-container">
-        <div className={`v2-promo${slide.shade ? ' v2-promo--shade' : ''}`} style={{ backgroundImage: `url(${image})` }}>
+        <div className="v2-promo" style={{ backgroundImage: `url(${image})` }}>
           <h2 className="v2-promo-title">{slide.title}</h2>
           {slide.subtitle && <p className="v2-promo-sub">{slide.subtitle}</p>}
           {slide.ctaHref && (
@@ -435,8 +469,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
     () => (data.promos || []).filter((p) => p.isActive !== false && (!p.expiresAt || new Date(p.expiresAt) > new Date())),
     [data.promos],
   );
-  // Новости: 4 карточки 322×360 как в макете; если новостей нет — блок не показываем.
-  const news = useMemo(() => (data.news || []).filter((n) => n.isActive !== false).slice(0, 4), [data.news]);
+  // Новости: карточки 322×360 как в макете, карусель по 4 (30.09), API отдаёт до 20; без новостей блок скрыт.
+  const news = useMemo(() => (data.news || []).filter((n) => n.isActive !== false).slice(0, 20), [data.news]);
 
   const matCount = (key: string) => {
     const g = data.materials?.[key];
@@ -464,7 +498,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 «Записаться на брокер-тур» из шапки ушли — запись на тур в меню. */}
             <Link className="v2-btn v2-btn--outline v2-header-reg" href="/register">Регистрация</Link>
             <Link className="v2-btn v2-btn--gold v2-header-login" href="/login">Войти в кабинет брокера</Link>
-            <button className="v2-burger" aria-label="Меню" onClick={() => setMenu((v) => !v)}><i /><i /><i /></button>
+            <button className="v2-burger" aria-label="Меню" onClick={() => setMenu((v) => !v)}><img src="/v2/svg/burger.svg" alt="" width={40} height={16} /></button>
           </div>
           {menu && (
             <nav className="v2-menu" onClick={() => setMenu(false)}>
@@ -639,15 +673,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                   <h2 className="v2-title">Новости</h2>
                 </div>
               </div>
-              <div className="v2-news">
-                {news.map((n) => (
-                  <a className="v2-ncard" key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer">
-                    {n.imageUrl ? <img className="v2-ncard-cover" src={n.imageUrl} alt="" /> : <div className="v2-ncard-cover" />}
-                    <div className="v2-ncard-title">{n.title}</div>
-                    <div className="v2-ncard-meta">{n.publishedAt ? fmtNewsDate(n.publishedAt) : ''}{n.source ? ` · ${n.source}` : ''}</div>
-                  </a>
-                ))}
-              </div>
+              <NewsCarousel items={news} />
             </div>
           </section>
         )}
@@ -685,8 +711,26 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 <img src="/v2/svg/logo.svg" alt="St Michael" />
                 <span>Кабинет брокера</span>
               </div>
-              {/* 29.09 (правка владельца): три колонки меню убраны; ряд кнопок по центру —
-                  «Записаться на брокер-тур» (светлая), «Войти в кабинет», «Telegram-канал». */}
+              {/* 30.09 (правка владельца): три колонки меню вернулись; ряд кнопок снова внизу по центру. */}
+              <div className="v2-footer-col v2-footer-col--1">
+                <div>Условия</div>
+                <button type="button" onClick={() => setModal('conditions')}>Условия сотрудничества</button>
+                <a href="#events">Календарь событий</a>
+                <button type="button" onClick={() => setModal('conditions')}>Комиссия</button>
+              </div>
+              <div className="v2-footer-col v2-footer-col--2">
+                <div>Проекты</div>
+                <a href={PROJECT_PAGES.zorge9} target="_blank" rel="noopener noreferrer">Зорге 9</a>
+                <a href={PROJECT_PAGES['silver-bor']} target="_blank" rel="noopener noreferrer">Квартал Серебряный Бор</a>
+                {/* страницы Толбухиной на stmichael.ru пока нет — без ссылки */}
+                <span>Толбухина 3</span>
+              </div>
+              <div className="v2-footer-col v2-footer-col--3">
+                <div>Партнёрам</div>
+                <a href={phoneHref}>{phone.replace(/[()]/g, '')}</a>
+                <a href={'mailto:' + email}>{email}</a>
+                <a href={telegram} target="_blank" rel="noopener noreferrer">{telegramLabel}</a>
+              </div>
               <div className="v2-footer-btns">
                 <button className="v2-btn v2-btn--light" onClick={() => openTour()}>Записаться на брокер-тур</button>
                 <Link className="v2-btn v2-btn--outline-white" href="/login">Войти в кабинет</Link>

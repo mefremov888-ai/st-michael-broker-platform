@@ -40,7 +40,7 @@ export default async function Page() {
     safeFetch<any[]>(`${base}/api/public/cms/projects`),
     safeFetch<any[]>(`${base}/api/public/cms/events`),
     safeFetch<any[]>(`${base}/api/public/cms/promos`),
-    safeFetch<any[]>(`${base}/api/public/cms/news`),
+    safeFetch<any[]>(`${base}/api/public/cms/news?limit=20`), // 30.09: карусель новостей, API отдаёт до 20
     safeFetch<any>(`${base}/api/public/documents?category=cooperation`),
     safeFetch<any>(`${base}/api/public/documents/summary`),
   ]);
