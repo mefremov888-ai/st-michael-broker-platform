@@ -118,7 +118,9 @@
 /* заголовок 347 шириной (две строки) в (50,50); стрелки 9×21 в x50 и x1301, y289 */
 /* 29.09: заголовок до 600 в ширину, перенос строки явный (pre-line); подзаголовок под
    двумя строками заголовка (top 170); до стрелок (top 289) остаётся запас */
-.v2 .v2-promo-title { position: absolute; left: 50px; top: 50px; width: 600px; font-size: 44px; line-height: 51px; font-weight: 500; white-space: pre-line; }
+.v2 .v2-promo-title { position: absolute; left: 50px; top: 50px; width: 600px; font-size: 44px; line-height: 51px; font-weight: 500; }
+.v2 .v2-promo-title span { display: block; overflow: hidden; }
+.v2 .v2-promo-title i { display: block; font-style: normal; }
 .v2 .v2-promo-sub { position: absolute; left: 50px; top: 170px; max-width: 600px; font-size: 24px; line-height: 28px; }
 /* 30.09 (владелец): затемнение фото убрано, вместо него мягкая тень у текста */
 
@@ -141,6 +143,11 @@
 /* шаги */
 .v2-steps { display: grid; grid-template-columns: repeat(4, 322px); gap: 24px; margin-top: 72px; }
 .v2-step-num { font-size: 100px; line-height: 115px; color: var(--v2-gold); letter-spacing: -1px; }
+.v2-step { position: relative; }
+.v2-step-num i { display: block; font-style: normal; }
+/* линия под номером живёт в зазоре между номером и заголовком (абсолютно, сетку не двигает) */
+.v2-step-line { position: absolute; left: 0; right: 0; top: 135px; height: 1px; background: var(--v2-line); }
+.v2-step-line b { display: block; width: 40px; height: 1px; background: var(--v2-gold); }
 .v2-step-title { margin-top: 40px; font-size: 16px; line-height: 18px; }
 .v2 .v2-step-text { margin-top: 8px; font-size: 16px; line-height: 18px; color: var(--v2-gray); white-space: pre-line; }
 
@@ -296,3 +303,35 @@
 .v2-menu { position: absolute; right: 0; top: 100px; background: #fff; border: 1px solid var(--v2-line); border-radius: 0 0 16px 16px; padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; z-index: 50; font-size: 16px; }
 .v2-menu a:hover, .v2-menu button:hover { color: var(--v2-gold); }
 .v2-menu button { text-align: left; }
+
+
+/* ─── анимации появления (30.09, по согласованному демо) ───
+   Все скрытые состояния только под .v2--motion (класс ставится после гидрации
+   и не ставится при prefers-reduced-motion) — без JS страница видна целиком. */
+.v2--motion .v2-header { transform: translateY(-100%); transition: transform .7s cubic-bezier(.2,.7,.2,1); }
+.v2--motion .v2-header.is-in { transform: none; }
+.v2--motion [data-reveal] { opacity: 0; transform: translateY(28px); transition: opacity .7s ease, transform .8s cubic-bezier(.2,.7,.2,1); transition-delay: calc(var(--i, 0) * .12s); }
+.v2--motion [data-reveal="left"] { transform: translateX(-40px); }
+.v2--motion [data-reveal="scale"] { transform: translateY(20px) scale(.96); }
+.v2--motion [data-reveal="group"], .v2--motion [data-reveal="steps"] { opacity: 1; transform: none; transition: none; }
+.v2--motion [data-reveal].is-in { opacity: 1; transform: none; }
+/* слайдер: заголовок выезжает построчно */
+.v2--motion .v2-promo-slide .v2-promo-title i { transform: translateY(110%); transition: transform .7s cubic-bezier(.2,.7,.2,1); }
+.v2--motion .v2-promo-slide .v2-promo-title span:nth-child(2) i { transition-delay: .12s; }
+.v2--motion .v2-promo-slide.is-active .v2-promo-title i { transform: none; }
+/* шаги: номер снизу, линия прочерчивается, текст проявляется */
+.v2--motion .v2-step-num { overflow: hidden; }
+.v2--motion .v2-step-num i { transform: translateY(100%); transition: transform .9s cubic-bezier(.2,.7,.2,1); transition-delay: calc(var(--i) * .15s); }
+.v2--motion .v2-step-line { transform-origin: left; transform: scaleX(0); transition: transform .9s cubic-bezier(.2,.7,.2,1); transition-delay: calc(.3s + var(--i) * .15s); }
+.v2--motion .v2-step-body { opacity: 0; transform: translateY(12px); transition: opacity .6s ease, transform .6s ease; transition-delay: calc(.45s + var(--i) * .15s); }
+.v2--motion .v2-steps.is-in .v2-step-num i, .v2--motion .v2-steps.is-in .v2-step-line, .v2--motion .v2-steps.is-in .v2-step-body { transform: none; opacity: 1; }
+/* сегодня: световой блик */
+.v2--motion .v2-day--today { overflow: hidden; }
+.v2--motion .v2-day--today::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.35) 50%, transparent 70%); transform: translateX(-120%); transition: transform 1.4s ease; transition-delay: .6s; }
+.v2--motion .v2-day--today.is-in::after { transform: translateX(120%); }
+/* заявка: кнопка дважды мягко пульсирует после появления */
+@keyframes v2-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,.55); } 50% { box-shadow: 0 0 0 14px rgba(255,255,255,0); } }
+.v2--motion .v2-cta-left.is-in .v2-btn--cta { animation: v2-pulse 1.6s ease 1.2s 2; }
+@media (prefers-reduced-motion: reduce) {
+  .v2--motion [data-reveal], .v2--motion .v2-header, .v2--motion .v2-step-num i, .v2--motion .v2-step-line, .v2--motion .v2-step-body, .v2--motion .v2-promo-slide .v2-promo-title i { opacity: 1 !important; transform: none !important; transition: none !important; animation: none !important; }
+}
