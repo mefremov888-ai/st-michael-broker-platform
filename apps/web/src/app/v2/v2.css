@@ -134,7 +134,7 @@
 .v2 .v2-promo .v2-promo-arrow:hover { background: #fff; }
 /* точки: заметнее — белые 11px с прозрачностью .6 на полупрозрачной подложке, активная — золотая пилюля 46×15 */
 .v2-promo-dots { position: absolute; left: 50px; bottom: 40px; display: flex; gap: 12px; align-items: center; z-index: 2; }
-.v2 .v2-promo-dots .v2-promo-dot { width: 15px; height: 15px; border-radius: 7.5px; background: rgba(255,255,255,.85); transition: width .4s cubic-bezier(.4,0,.2,1), background-color .4s ease; }
+.v2 .v2-promo-dots .v2-promo-dot { width: 15px; height: 15px; border-radius: 7.5px; background: rgba(255,255,255,.85); transition: width .4s cubic-bezier(.4,0,.2,1), background-color .4s ease; will-change: width; transform: translateZ(0); backface-visibility: hidden; overflow: hidden; }
 .v2 .v2-promo-dots .v2-promo-dot:hover { background: rgba(255,255,255,.9); }
 .v2 .v2-promo-dots .v2-promo-dot--active, .v2 .v2-promo-dots .v2-promo-dot--active:hover { width: 46px; background: var(--v2-gold); }
 
@@ -202,7 +202,7 @@
 
 /* заявка + контакты */
 .v2-cta { display: grid; grid-template-columns: 899px 437px; gap: 24px; margin-top: 176px; }
-.v2-cta-left { height: 668px; border-radius: 24px; position: relative; overflow: hidden; background: #1f1f1f url('/v2/img/cta-building.webp') center / cover no-repeat; color: #fff; }
+.v2-cta-left { height: 668px; border-radius: 24px; position: relative; overflow: hidden; background: #1f1f1f url('/v2/img/cta-facade.webp') center / cover no-repeat; color: #fff; }
 /* 30.09: фото фасада (ночь) — небо тёмное, заголовок читается; лёгкий градиент сверху-слева на всякий случай */
 .v2-cta-left::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(0,0,0,.28) 0%, rgba(0,0,0,.08) 40%, rgba(0,0,0,0) 65%); pointer-events: none; }
 .v2-cta-left h2 { position: absolute; left: 50px; top: 50px; width: 424px; font-size: 44px; line-height: 51px; font-weight: 500; }
