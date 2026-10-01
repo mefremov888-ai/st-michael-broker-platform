@@ -113,7 +113,10 @@
 /* акции (2026-09-28: карусель 1360×600 по обновлённому макету) */
 .v2-promo { position: relative; height: 400px; border-radius: 24px; overflow: hidden; background: #1f1f1f; color: #fff; }
 /* 30.09: слайды стопкой, смена через прозрачность */
-.v2-promo-slide { position: absolute; inset: 0; background: center / cover no-repeat; opacity: 0; transition: opacity .45s ease; pointer-events: none; }
+/* 01.10: картинка слайда — из CSS-переменной (--v2-slide; на ≤768 — --v2-slide-m, вертикальный кадр) */
+.v2-promo-slide { position: absolute; inset: 0; background: center / cover no-repeat; background-image: var(--v2-slide); opacity: 0; transition: opacity .45s ease; pointer-events: none; }
+/* 01.10 (мобильная версия): кнопка под слайдером и «‹ ›» недель существуют только на ≤768 */
+.v2 .v2-promo-mcta, .v2 .v2-week-nav { display: none; }
 .v2-promo-slide.is-active { opacity: 1; pointer-events: auto; }
 /* заголовок 347 шириной (две строки) в (50,50); стрелки 9×21 в x50 и x1301, y289 */
 /* 29.09: заголовок до 600 в ширину, перенос строки явный (pre-line); подзаголовок под
@@ -334,6 +337,8 @@
 .v2-menu { position: absolute; right: 0; top: 84px; min-width: 240px; background: #fff; border: 1px solid var(--v2-line); border-radius: 16px; box-shadow: 0 16px 40px rgba(0,0,0,.10); padding: 8px 0; display: flex; flex-direction: column; z-index: 60; font-size: 16px; animation: v2-menu-in .25s ease both; }
 .v2 .v2-menu a, .v2 .v2-menu button { display: block; width: 100%; padding: 12px 24px; text-align: left; font-weight: 500; color: #000; transition: background-color .15s ease, color .15s ease; }
 .v2 .v2-menu a:hover, .v2 .v2-menu button:hover { background: var(--v2-bg); color: var(--v2-gold); }
+/* 01.10 (мобильная версия): крестик и кнопки «Регистрация»/«Войти» внутри меню — только на ≤768 */
+.v2 .v2-menu .v2-menu-close, .v2 .v2-menu .v2-menu-actions { display: none; }
 
 
 /* ─── анимации появления (30.09, по согласованному демо) ───
@@ -365,4 +370,164 @@
 .v2--motion .v2-cta-left.is-in .v2-btn--cta { animation: v2-pulse 1.6s ease 1.2s 2; }
 @media (prefers-reduced-motion: reduce) {
   .v2--motion [data-reveal], .v2--motion .v2-header, .v2--motion .v2-step-num i, .v2--motion .v2-step-line, .v2--motion .v2-step-body, .v2--motion .v2-promo-slide .v2-promo-title i { opacity: 1 !important; transform: none !important; transition: none !important; animation: none !important; }
+}
+
+/* ─── мобильная версия: ширина ≤ 768 (решения владельца 01.10) ───
+   Все переопределения только здесь; десктоп (1920, замер против Figma) не трогаем.
+   На этих ширинах zoom = 1 (LandingV2), ленты листаются свайпом внутри своих
+   контейнеров (overflow-x: auto + scroll-snap), горизонтального скролла страницы нет. */
+@media (max-width: 768px) {
+  .v2 { overflow-x: clip; }
+  .v2-container { width: auto; padding: 0 16px; }
+  .v2 .v2-section { padding-top: 56px; }
+  .v2 #promos.v2-section { padding-top: 16px; }
+  .v2 .v2-title { font-size: 28px; line-height: 32px; }
+  .v2 .v2-subtitle { font-size: 16px; line-height: 20px; margin-top: 8px; }
+  .v2-title-row { flex-direction: column; align-items: stretch; gap: 16px; }
+  .v2-title-row > .v2-btn, .v2 .v2-btn--w238 { width: 100%; }
+
+  /* шапка 64: логотип 160 + «Кабинет брокера» 14 слева, бургер справа; кнопки — в меню */
+  .v2-header, .v2-header .v2-container { height: 64px; }
+  .v2-brand { align-self: center; margin-top: 0; }
+  .v2-brand img { width: 160px; height: 14px; margin-left: -3px; }
+  .v2-brand span { font-size: 14px; line-height: 16px; margin-top: 4px; }
+  .v2 .v2-header-reg, .v2 .v2-header-login { display: none; }
+  .v2-header-right { gap: 0; }
+  .v2 .v2-burger, .v2-burger img { width: 32px; height: 13px; }
+
+  /* меню — полноэкранная белая панель сверху вниз, пункты 20px, кнопки внизу */
+  @keyframes v2-menu-in-m { from { opacity: 0; transform: translateY(-16px); } to { opacity: 1; transform: none; } }
+  .v2-menu { position: fixed; inset: 0; top: 0; right: 0; min-width: 0; min-height: 100%; border: 0; border-radius: 0; box-shadow: none; padding: 64px 16px 24px; z-index: 70; font-size: 20px; overflow: auto; animation: v2-menu-in-m .25s ease both; }
+  .v2 .v2-menu > a, .v2 .v2-menu > button { padding: 18px 0; font-size: 20px; line-height: 24px; border-bottom: 1px solid #ececec; }
+  .v2 .v2-menu > a:hover, .v2 .v2-menu > button:hover { background: none; }
+  .v2 .v2-menu .v2-menu-close { display: block; position: absolute; right: 8px; top: 8px; width: 48px; height: 48px; padding: 0; border: 0; font-size: 34px; line-height: 48px; text-align: center; color: #000; }
+  .v2 .v2-menu .v2-menu-actions { display: flex; flex-direction: column; gap: 12px; margin-top: auto; padding-top: 32px; }
+  .v2 .v2-menu .v2-menu-actions .v2-btn { display: inline-flex; width: 100%; height: 48px; padding: 0 24px; font-size: 16px; font-weight: 400; text-align: center; }
+
+  /* слайдер: вертикальные кадры 3:4, текст снизу слева на градиенте, точки слева, стрелки 36 справа */
+  .v2-promo { height: auto; aspect-ratio: 3 / 4; border-radius: 16px; }
+  .v2 .v2-promo-slide { background-image: var(--v2-slide-m, var(--v2-slide)); }
+  .v2 .v2-promo-slide::after { content: ''; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,0) 55%); pointer-events: none; }
+  .v2 .v2-promo-title { left: 16px; top: auto; bottom: 72px; width: calc(100% - 32px); font-size: 28px; line-height: 32px; z-index: 1; }
+  .v2 .v2-promo-sub { left: 16px; top: auto; bottom: 72px; max-width: calc(100% - 32px); font-size: 16px; line-height: 20px; z-index: 1; }
+  .v2 .v2-promo-slide:has(.v2-promo-sub) .v2-promo-title { bottom: 112px; }
+  .v2 .v2-promo-cta { left: 16px; right: 16px; bottom: 72px; width: auto; z-index: 1; }
+  .v2 .v2-promo-slide:has(.v2-promo-cta) .v2-promo-sub { bottom: 136px; }
+  .v2 .v2-promo-slide:has(.v2-promo-cta) .v2-promo-title { bottom: 136px; }
+  .v2 .v2-promo-slide:has(.v2-promo-cta):has(.v2-promo-sub) .v2-promo-title { bottom: 176px; }
+  .v2 .v2-promo .v2-promo-arrow { bottom: 16px; width: 36px; height: 36px; }
+  .v2-promo-arrow--prev { right: 60px; }
+  .v2-promo-arrow--next { right: 16px; }
+  .v2-promo-dots { left: 16px; bottom: 26px; }
+  /* кнопка «Записаться на брокер-тур» на всю ширину сразу под слайдером */
+  .v2 .v2-promo-mcta { display: block; margin-top: 12px; }
+  .v2 .v2-promo-mcta .v2-btn { width: 100%; height: 48px; border-radius: 12px; }
+
+  /* ленты со свайпом: проекты, материалы, дни недели (внутри своих контейнеров, до краёв экрана) */
+  .v2-projects, .v2-materials, .v2-days { display: flex; gap: 12px; margin: 32px -16px 0; padding: 8px 16px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .v2-projects::-webkit-scrollbar, .v2-materials::-webkit-scrollbar, .v2-days::-webkit-scrollbar, .v2-news-viewport::-webkit-scrollbar { display: none; }
+
+  /* проекты: карточка 300×auto, фото 300×300, кнопка на всю ширину карточки */
+  .v2-pcard { flex: 0 0 300px; width: 300px; height: auto; display: flex; flex-direction: column; scroll-snap-align: start; border-radius: 16px; }
+  .v2-pcard-photo { height: 300px; }
+  .v2-pcard-body { padding: 20px 20px 0; flex: 1; }
+  .v2-tags { flex-wrap: wrap; }
+  .v2-tag { font-size: 14px; }
+  .v2-pcard-name { margin-top: 16px; }
+  .v2 .v2-pcard-desc { width: auto; height: auto; }
+  .v2-pcard .v2-btn, .v2-pcard .v2-btn--soon { position: static; width: auto; margin: 16px 20px 20px; }
+
+  /* как начать: четыре шага в столбец, номер 64 слева, разделитель между шагами */
+  .v2-steps { display: flex; flex-direction: column; gap: 0; margin-top: 24px; }
+  .v2-step { display: flex; align-items: flex-start; gap: 16px; padding: 20px 0; border-bottom: 1px solid var(--v2-line); }
+  .v2-step:last-child { border-bottom: 0; }
+  .v2-step-num { flex: 0 0 76px; font-size: 64px; line-height: 64px; letter-spacing: -1px; }
+  .v2-step-line { display: none; }
+  .v2-step-body { flex: 1; min-width: 0; padding-top: 4px; }
+  .v2-step-title { margin-top: 0; font-size: 16px; line-height: 20px; font-weight: 500; }
+  .v2 .v2-step-text { font-size: 16px; line-height: 20px; white-space: normal; }
+
+  /* материалы: лента, карточка 280×320, фото 280×220 */
+  .v2-mcard-wrap { flex: 0 0 280px; width: 280px; scroll-snap-align: start; }
+  .v2-mcard { height: 320px; border-radius: 16px; }
+  .v2-mcard img.v2-mcard-photo { height: 220px; }
+  .v2-mcard-name { left: 20px; right: 20px; top: 238px; font-size: 18px; line-height: 22px; }
+  .v2-mcard-meta { left: 20px; right: 48px; top: 266px; font-size: 14px; line-height: 18px; }
+  .v2-mcard-arrow { right: 20px; top: 268px; }
+
+  /* мероприятия: «‹ ›» недель у заголовка, кнопки под ним, один день на экран */
+  #events .v2-title-row { flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
+  #events .v2-title-row > div:first-child { flex: 1 1 0; min-width: 0; }
+  .v2 .v2-week-nav { display: flex; gap: 8px; flex: none; margin-top: 2px; }
+  .v2 .v2-week-arrow { width: 32px; height: 32px; border-radius: 10px; border: 1px solid var(--v2-line); background: #fff; color: #000; display: inline-flex; align-items: center; justify-content: center; }
+  .v2 .v2-week-arrow--prev { transform: scaleX(-1); }
+  .v2 .v2-week-arrow:disabled { color: var(--v2-line); cursor: default; }
+  .v2-filter { flex: 0 0 100%; flex-wrap: wrap; gap: 8px; }
+  .v2-filter .v2-btn { flex: 1 1 auto; height: 44px; }
+  .v2-filter .v2-btn--gold { flex: 0 0 100%; }
+  .v2-days-wrap { margin-top: 24px; }
+  .v2 .v2-days-wrap .v2-days-arrow { display: none; }
+  .v2-days { margin-top: 0; }
+  .v2-day { flex: 0 0 100%; height: auto; min-height: 200px; scroll-snap-align: start; border-radius: 16px; }
+  .v2 .v2-events-note { margin-top: 16px; text-align: left; font-size: 14px; line-height: 18px; }
+
+  /* новости: лента со свайпом, карточка 280×auto, без стрелок */
+  .v2-news-wrap { margin-top: 24px; }
+  .v2-news-viewport { overflow-x: auto; margin: -8px -16px; padding: 8px 16px; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .v2-news { gap: 12px; transform: none !important; transition: none; }
+  .v2-ncard { flex: 0 0 280px; width: 280px; height: auto; scroll-snap-align: start; border-radius: 16px; }
+  .v2-ncard-cover { height: 200px; }
+  .v2-ncard-title { position: static; width: auto; margin: 16px 20px 0; }
+  .v2-ncard-meta { position: static; margin: 8px 20px 20px; font-size: 14px; }
+  .v2 .v2-news-wrap .v2-news-arrow { display: none; }
+
+  /* заявка + контакты */
+  .v2-cta { grid-template-columns: 1fr; gap: 12px; margin-top: 56px; }
+  .v2-cta-left { height: 360px; border-radius: 16px; }
+  .v2-cta-left h2 { left: 20px; right: 20px; top: 20px; width: auto; font-size: 28px; line-height: 32px; }
+  .v2-cta-left .v2-btn--cta { left: 20px; bottom: 20px; }
+  .v2-cta-right { height: auto; padding: 24px 20px; border-radius: 16px; }
+  .v2-cta-right h2 { font-size: 28px; line-height: 32px; padding-right: 84px; }
+  .v2-contact-block { position: static; }
+  .v2 .v2-contact-block--person { margin-top: 24px; }
+  .v2 .v2-contact-photo { width: 72px; height: 72px; }
+  .v2 .v2-divider--contacts { position: static; width: auto; margin: 20px 0; }
+  .v2 .v2-contact-icons { top: 24px; right: 20px; gap: 10px; }
+  .v2 .v2-contact-icons a, .v2 .v2-contact-icons img { width: 32px; height: 32px; }
+  .v2-contact-main { font-size: 20px; line-height: 24px; }
+  .v2-contact-main--hot { width: auto; }
+
+  /* подвал: логотип, три колонки в столбец, кнопки в столбец, высота авто, без водяного знака */
+  .v2-footer { height: auto; margin-top: 12px; padding: 40px 20px 32px; border-radius: 16px 16px 0 0; }
+  .v2-footer-brand { position: static; }
+  .v2-footer-brand img { width: 160px; height: 14px; margin-left: -3px; }
+  .v2-footer-brand span { font-size: 14px; line-height: 16px; margin-top: 6px; }
+  .v2-footer-col { position: static; margin-top: 28px; }
+  .v2-footer-btns { position: static; flex-direction: column; align-items: stretch; gap: 12px; margin-top: 32px; }
+  .v2-footer-btns .v2-btn { width: 100%; height: 48px; }
+  .v2 .v2-footer-watermark { display: none; } /* выше `.v2 img { display: block }` */
+
+  /* модалки — на весь экран с крестиком; формы на всю ширину */
+  .v2-overlay { display: block; padding: 0; overflow: auto; }
+  .v2-modal, .v2 .v2-modal--calendar { width: 100%; max-width: 100%; max-height: none; min-height: 100%; border-radius: 0; padding: 64px 16px 24px; }
+  .v2-modal-close { right: 8px; top: 8px; width: 48px; height: 48px; font-size: 34px; line-height: 48px; text-align: center; }
+  .v2-form .v2-btn { width: 100%; }
+  /* календарь месяца: список дней (дата + слоты) вместо сетки 7 колонок */
+  .v2-cal-head { flex-direction: column; gap: 16px; padding-right: 0; }
+  .v2-cal-nav { margin-top: 0; }
+  .v2-cal-month { flex: 1; min-width: 0; }
+  .v2-cal-list { display: flex; flex-direction: column; margin-top: 24px; }
+  .v2-cal-row { display: flex; flex-direction: column; gap: 8px; padding: 14px 0; border-top: 1px solid var(--v2-line); }
+  .v2-cal-row:last-child { border-bottom: 1px solid var(--v2-line); }
+  .v2-cal-row-date { font-size: 16px; line-height: 20px; font-weight: 500; }
+  .v2-cal-row--today .v2-cal-row-date { color: var(--v2-gold); }
+  .v2-cal-row-slots { display: flex; flex-direction: column; gap: 6px; }
+  .v2 .v2-cal-list .v2-cal-slot { display: block; font-size: 16px; line-height: 20px; overflow: visible; -webkit-line-clamp: unset; }
+  .v2-cal-foot { flex-direction: column; align-items: stretch; }
+  .v2-cal-foot .v2-btn { width: 100%; height: 48px; }
+
+  /* анимации появления: без сдвигов по X — только fade + 8px */
+  .v2--motion [data-reveal], .v2--motion [data-reveal="left"], .v2--motion [data-reveal="scale"] { transform: translateY(8px); }
+  .v2--motion [data-reveal="group"], .v2--motion [data-reveal="steps"] { opacity: 1; transform: none; }
+  .v2--motion [data-reveal].is-in { transform: none; }
 }

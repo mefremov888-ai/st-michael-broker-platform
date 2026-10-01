@@ -68,12 +68,50 @@ const DOW_RU = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 // Слайды «Акций» по умолчанию (тексты утверждены владельцем 29.09) — показываются,
 // когда в CMS нет активных акций с картинкой. Перенос заголовка задан явно (\n).
 // 30.09 (владелец): затемнение фото (shade) убрано — под текстом мягкая тень. Кадры 2720×1200.
+// 01.10 (мобильная версия): imageUrlMobile — вертикальный кадр 3:4 (600×800) из той же полосы.
 const DEFAULT_PROMOS = [
-  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-1b.webp' },
-  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-2.webp' },
-  { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-3b.webp' },
-  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-4.webp' },
+  { id: 'default-commission', title: 'Комиссия\nза сделку до 6%', imageUrl: '/v2/img/promo-1b.webp', imageUrlMobile: '/v2/img/promo-m-1.webp' },
+  { id: 'default-payout', title: 'Выплата\nза 7 рабочих дней', imageUrl: '/v2/img/promo-2.webp', imageUrlMobile: '/v2/img/promo-m-2.webp' },
+  { id: 'default-fixation', title: 'Клиент закреплён\nза вами на 30 дней', imageUrl: '/v2/img/promo-3b.webp', imageUrlMobile: '/v2/img/promo-m-3.webp' },
+  { id: 'default-tours', title: 'Брокер-туры\nкаждый будний день', imageUrl: '/v2/img/promo-4.webp', imageUrlMobile: '/v2/img/promo-m-4.webp' },
 ];
+
+// ─── мобильная версия (решения владельца 01.10) ─────────────────────────────
+// Ширина ≤ 768: отдельная раскладка медиа-запросами в v2.css (zoom выключен),
+// в разметке отличаются только меню (полноэкранная панель), календарь месяца
+// (список дней вместо сетки) и свайпы. До гидрации считаем, что это десктоп —
+// внешний вид задаёт CSS, поэтому «прыжка» раскладки нет.
+const MOBILE_MQ = '(max-width: 768px)';
+
+function useIsMobile(): boolean {
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_MQ);
+    const apply = () => setMobile(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+  return mobile;
+}
+
+/** Свайп по горизонтали (touch): dx > 40px → onLeft/onRight. Вертикальный жест не трогаем. */
+function useSwipe(onLeft: () => void, onRight: () => void) {
+  const start = useRef<{ x: number; y: number } | null>(null);
+  return {
+    onTouchStart: (e: React.TouchEvent) => { const t = e.touches[0]; start.current = t ? { x: t.clientX, y: t.clientY } : null; },
+    onTouchEnd: (e: React.TouchEvent) => {
+      const s = start.current;
+      start.current = null;
+      const t = e.changedTouches[0];
+      if (!s || !t) return;
+      const dx = t.clientX - s.x;
+      const dy = t.clientY - s.y;
+      if (Math.abs(dx) <= 40 || Math.abs(dx) < Math.abs(dy)) return;
+      if (dx < 0) onLeft(); else onRight();
+    },
+  };
+}
 
 function plural(n: number, one: string, few: string, many: string) {
   const m10 = n % 10, m100 = n % 100;
@@ -371,6 +409,11 @@ function MonthModal({ events, onClose, onBook }: { events: any[]; onClose: () =>
   const month = today.getMonth() + offset;
   const shown = new Date(year, month, 1);
   const cells = monthGrid(shown.getFullYear(), shown.getMonth());
+  // 01.10 (мобильная версия): вместо сетки 7 колонок — список дней с турами (прошедшие и пустые дни не показываем)
+  const mobile = useIsMobile();
+  const listDays = mobile
+    ? cells.filter((d): d is Date => !!d && dayKey(d) >= todayKey && slotsForDay(d, events).length > 0)
+    : [];
 
   return (
     <Modal onClose={onClose} className="v2-modal--calendar">
@@ -385,6 +428,27 @@ function MonthModal({ events, onClose, onBook }: { events: any[]; onClose: () =>
           <button className="v2-cal-arrow" aria-label="Следующий месяц" disabled={offset >= MONTHS_AHEAD} onClick={() => setOffset((v) => Math.min(MONTHS_AHEAD, v + 1))}><CalArrow /></button>
         </div>
       </div>
+      {mobile ? (
+        <div className="v2-cal-list">
+          {listDays.length === 0 && <div className="v2-day-empty">В этом месяце туров нет</div>}
+          {listDays.map((day) => {
+            const key = dayKey(day);
+            const slots = slotsForDay(day, events);
+            return (
+              <div key={key} className={`v2-cal-row${key === todayKey ? ' v2-cal-row--today' : ''}`}>
+                <div className="v2-cal-row-date">{fmtDay(day)}</div>
+                <div className="v2-cal-row-slots">
+                  {slots.map((s) => (
+                    <button key={s.time} type="button" className="v2-cal-slot" onClick={() => onBook(tourPresetText(day, s))}>
+                      <b>{s.time}</b> · {s.projects.join(' + ')}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (<>
       <div className="v2-cal-dow">
         {DOW_SHORT.map((d, i) => <div key={d} className={i >= 5 ? 'v2-cal-dow--weekend' : ''}>{d}</div>)}
       </div>
@@ -418,6 +482,7 @@ function MonthModal({ events, onClose, onBook }: { events: any[]; onClose: () =>
           );
         })}
       </div>
+      </>)}
       <div className="v2-cal-foot">
         <p className="v2-modal-sub">Запись — по кнопке «Записаться на брокер-тур» или по телефону</p>
         <button className="v2-btn v2-btn--dark" onClick={() => onBook()}>Записаться на брокер-тур</button>
@@ -470,7 +535,8 @@ function NewsCarousel({ items }: { items: any[] }) {
   );
 }
 
-function PromoCarousel({ promos }: { promos: any[] }) {
+// onTour — мобильная кнопка «Записаться на брокер-тур» сразу под слайдером (01.10); на десктопе скрыта CSS.
+function PromoCarousel({ promos, onTour }: { promos: any[]; onTour: () => void }) {
   // CMS-акции с фото имеют приоритет; без них — четыре типовых слайда
   const withImage = promos.filter((p) => p.imageUrl);
   const slides: any[] = withImage.length ? withImage : DEFAULT_PROMOS;
@@ -490,29 +556,36 @@ function PromoCarousel({ promos }: { promos: any[] }) {
     return () => { if (pause) clearTimeout(pause); if (interval) clearInterval(interval); };
   }, [count, manualTick]);
   const goTo = (k: number) => { setIndex(((k % count) + count) % count); setManualTick((t) => t + 1); };
+  // 01.10 (мобильная версия): свайп влево/вправо листает так же, как стрелки (с паузой автопрокрутки)
+  const swipe = useSwipe(() => goTo(index + 1), () => goTo(index - 1));
   // 29.09: подгружаем фото всех слайдов заранее — иначе при автопрокрутке
   // следующий слайд показывал тёмный фон, пока картинка качалась.
+  // 01.10: на мобильном грузим вертикальные кадры (imageUrlMobile), если они есть.
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    const mobile = window.matchMedia(MOBILE_MQ).matches;
     for (const s of slides) {
-      if (!s.imageUrl) continue;
+      const src = (mobile && s.imageUrlMobile) || s.imageUrl;
+      if (!src) continue;
       const img = new window.Image();
-      img.src = s.imageUrl;
+      img.src = src;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [count]);
   const active = index % count;
   // 30.09 (владелец): слайды лежат стопкой и сменяются через прозрачность
   // (fade in / fade out), точки «морфятся» из круга в пилюлю через CSS-transition.
+  // Фон слайда — через CSS-переменные: --v2-slide (десктоп) и --v2-slide-m (вертикальный
+  // кадр для ≤768, см. медиа-блок в v2.css); так картинка выбирается без JS и без «прыжка».
   return (
     <section className="v2-section" id="promos">
       <div className="v2-container">
-        <div className="v2-promo">
+        <div className="v2-promo" {...swipe}>
           {slides.map((s: any, k: number) => (
             <div
               key={s.id || k}
               className={`v2-promo-slide${k === active ? ' is-active' : ''}`}
-              style={{ backgroundImage: `url(${s.imageUrl || DEFAULT_PROMOS[0].imageUrl})` }}
+              style={{ '--v2-slide': `url(${s.imageUrl || DEFAULT_PROMOS[0].imageUrl})`, '--v2-slide-m': `url(${s.imageUrlMobile || s.imageUrl || DEFAULT_PROMOS[0].imageUrl})` } as React.CSSProperties}
               aria-hidden={k !== active}
             >
               <h2 className="v2-promo-title">{String(s.title || '').split('\n').map((line: string, li: number) => <span key={li}><i>{line}</i></span>)}</h2>
@@ -545,6 +618,10 @@ function PromoCarousel({ promos }: { promos: any[] }) {
             })}
           </svg>
         </div>
+        {/* 01.10 (мобильная версия): золотая кнопка на всю ширину сразу под слайдером; на десктопе скрыта */}
+        <div className="v2-promo-mcta">
+          <button type="button" className="v2-btn v2-btn--gold" onClick={onTour}>Записаться на брокер-тур</button>
+        </div>
       </div>
     </section>
   );
@@ -558,6 +635,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const [tourPreset, setTourPreset] = useState('');
   const openTour = (preset?: string) => { setTourPreset(preset || ''); setModal('tour'); };
   const [menu, setMenu] = useState(false);
+  const isMobile = useIsMobile();
   useEffect(() => {
     if (!menu) return;
     const onDown = (e: MouseEvent) => {
@@ -568,8 +646,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(false); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
-    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
-  }, [menu]);
+    // 01.10 (мобильная версия): пока открыта полноэкранная панель меню, страница под ней не прокручивается
+    const prevOverflow = document.body.style.overflow;
+    if (isMobile) document.body.style.overflow = 'hidden';
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); document.body.style.overflow = prevOverflow; };
+  }, [menu, isMobile]);
   const [zoom, setZoom] = useState(1);
   // 30.09 (владелец, по демо): анимации появления блоков. Включаются только
   // после гидрации и только без prefers-reduced-motion — без JS страница
@@ -577,7 +658,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   const [motion, setMotion] = useState(false);
 
   useEffect(() => {
-    const apply = () => setZoom(window.innerWidth < 1440 ? Math.max(0.5, window.innerWidth / 1440) : 1);
+    // 01.10 (владелец): ≤768 — своя раскладка без масштабирования (zoom 1); 768–1440 — как раньше
+    const apply = () => { const w = window.innerWidth; setZoom(w > 768 && w < 1440 ? Math.max(0.5, w / 1440) : 1); };
     apply();
     window.addEventListener('resize', apply);
     return () => window.removeEventListener('resize', apply);
@@ -666,6 +748,15 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   };
   const todayKey = dayKey(new Date());
   const activeEvents = useMemo(() => (data.events || []).filter((e) => e.isActive !== false), [data.events]);
+  // 01.10 (мобильная версия): дни недели — лента со свайпом, один день на экран;
+  // на текущей неделе лента открывается на сегодняшнем дне.
+  const daysRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isMobile || weekOffset !== 0) return;
+    const lane = daysRef.current;
+    const today = lane?.querySelector<HTMLElement>('.v2-day--today');
+    if (lane && today) lane.scrollLeft = today.offsetLeft - 16;
+  }, [isMobile, weekOffset]);
   const promos = useMemo(
     () => (data.promos || []).filter((p) => p.isActive !== false && (!p.expiresAt || new Date(p.expiresAt) > new Date())),
     [data.promos],
@@ -692,11 +783,14 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 «Записаться на брокер-тур» из шапки ушли — запись на тур в меню. */}
             <Link className="v2-btn v2-btn--outline v2-header-reg" href="/register">Регистрация</Link>
             <Link className="v2-btn v2-btn--gold v2-header-login" href="/login">Войти в кабинет брокера</Link>
-            <button className="v2-burger" aria-label="Меню" onClick={() => setMenu((v) => !v)}><img src="/v2/svg/burger.svg" alt="" width={40} height={16} /></button>
+            <button className="v2-burger" aria-label="Меню" aria-expanded={menu} onClick={() => setMenu((v) => !v)}><img src="/v2/svg/burger.svg" alt="" width={40} height={16} /></button>
           </div>
           {menu && (
-            /* 30.09 (владелец): пункты как в старом лендинге; закрывается кликом вне меню */
+            /* 30.09 (владелец): пункты как в старом лендинге; закрывается кликом вне меню.
+               01.10 (мобильная версия): на ≤768 это полноэкранная белая панель сверху вниз —
+               крестик и кнопки «Регистрация»/«Войти» внизу видны только там (на десктопе скрыты CSS). */
             <nav className="v2-menu" onClick={() => setMenu(false)}>
+              <button type="button" className="v2-menu-close" aria-label="Закрыть меню">×</button>
               <a href="#projects">Проекты</a>
               <a href="#events">Мероприятия</a>
               {/* 01.10: запись на тур из меню (в шапке кнопки нет с макета 28.09) */}
@@ -704,6 +798,10 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <button onClick={() => setModal('conditions')}>Документы</button>
               <a href="#materials">Материалы</a>
               <a href="#contacts">Контакты</a>
+              <div className="v2-menu-actions">
+                <Link className="v2-btn v2-btn--outline" href="/register">Регистрация</Link>
+                <Link className="v2-btn v2-btn--gold" href="/login">Войти в кабинет брокера</Link>
+              </div>
             </nav>
           )}
         </div>
@@ -711,7 +809,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
 
       <main id="top">
         {/* ── акции ── */}
-        <PromoCarousel promos={promos} />
+        <PromoCarousel promos={promos} onTour={() => openTour()} />
 
         {/* ── наши проекты ── */}
         <section className="v2-section" id="projects">
@@ -838,6 +936,11 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 <h2 className="v2-title">Ближайшие мероприятия</h2>
                 <p className="v2-subtitle">Расписание брокер-туров</p>
               </div>
+              {/* 01.10 (мобильная версия): маленькие «‹ ›» листания недель в строке заголовка; на десктопе скрыты */}
+              <div className="v2-week-nav">
+                <button type="button" className="v2-week-arrow v2-week-arrow--prev" aria-label="Предыдущая неделя" disabled={weekOffset <= 0} onClick={() => goWeek(weekOffset - 1)}><CalArrow /></button>
+                <button type="button" className="v2-week-arrow" aria-label="Следующая неделя" disabled={weekOffset >= WEEKS_AHEAD} onClick={() => goWeek(weekOffset + 1)}><CalArrow /></button>
+              </div>
               <div className="v2-filter">
                 <button className="v2-btn v2-btn--gold" onClick={() => openTour()}>Записаться на брокер-тур</button>
                 <button className="v2-btn v2-btn--dark" onClick={() => goWeek(0)}>Неделя</button>
@@ -845,7 +948,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               </div>
             </div>
             <div className="v2-days-wrap">
-              <div className={`v2-days${weekDir ? ' v2-days--anim' : ''}`} key={weekOffset} style={{ '--dir': weekDir } as React.CSSProperties}>
+              <div ref={daysRef} className={`v2-days${weekDir ? ' v2-days--anim' : ''}`} key={weekOffset} style={{ '--dir': weekDir } as React.CSSProperties}>
                 {week.map((day, di) => {
                   const slots = slotsForDay(day, activeEvents);
                   const isToday = dayKey(day) === todayKey;
