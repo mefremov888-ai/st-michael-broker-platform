@@ -424,12 +424,14 @@
   .v2 .v2-promo-mcta .v2-btn { width: 100%; height: 48px; border-radius: 12px; }
 
   /* ленты со свайпом: проекты, материалы, дни недели (внутри своих контейнеров, до краёв экрана) */
-  .v2-projects, .v2-materials, .v2-days { display: flex; gap: 12px; margin: 32px -16px 0; padding: 8px 16px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-  .v2-projects::-webkit-scrollbar, .v2-materials::-webkit-scrollbar, .v2-days::-webkit-scrollbar, .v2-news-viewport::-webkit-scrollbar { display: none; }
+  .v2-days { display: flex; gap: 12px; margin: 32px -16px 0; padding: 8px 16px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .v2-days::-webkit-scrollbar, .v2-news-viewport::-webkit-scrollbar { display: none; }
 
-  /* проекты: карточка 300×auto, фото 300×300, кнопка на всю ширину карточки */
-  .v2-pcard { flex: 0 0 300px; width: 300px; height: auto; display: flex; flex-direction: column; scroll-snap-align: start; border-radius: 16px; }
-  .v2-pcard-photo { height: 300px; }
+  /* проекты (правка владельца по демо 01.10): карточки друг под другом на всю ширину,
+     фото квадратное на ширину карточки, промежуток 16; кнопка на всю ширину карточки */
+  .v2-projects { display: flex; flex-direction: column; gap: 16px; margin-top: 32px; }
+  .v2-pcard { width: 100%; height: auto; display: flex; flex-direction: column; border-radius: 16px; }
+  .v2-pcard-photo { height: auto; aspect-ratio: 1 / 1; }
   .v2-pcard-body { padding: 20px 20px 0; flex: 1; }
   .v2-tags { flex-wrap: wrap; }
   .v2-tag { font-size: 14px; }
@@ -447,13 +449,15 @@
   .v2-step-title { margin-top: 0; font-size: 16px; line-height: 20px; font-weight: 500; }
   .v2 .v2-step-text { font-size: 16px; line-height: 20px; white-space: normal; }
 
-  /* материалы: лента, карточка 280×320, фото 280×220 */
-  .v2-mcard-wrap { flex: 0 0 280px; width: 280px; scroll-snap-align: start; }
-  .v2-mcard { height: 320px; border-radius: 16px; }
-  .v2-mcard img.v2-mcard-photo { height: 220px; }
-  .v2-mcard-name { left: 20px; right: 20px; top: 238px; font-size: 18px; line-height: 22px; }
-  .v2-mcard-meta { left: 20px; right: 48px; top: 266px; font-size: 14px; line-height: 18px; }
-  .v2-mcard-arrow { right: 20px; top: 268px; }
+  /* материалы (правка владельца по демо 01.10): три карточки друг под другом на всю ширину,
+     фото 230 высотой, подпись и стрелка как раньше */
+  .v2-materials { display: flex; flex-direction: column; gap: 16px; margin-top: 32px; }
+  .v2-mcard-wrap { width: 100%; }
+  .v2-mcard { height: 330px; border-radius: 16px; }
+  .v2-mcard img.v2-mcard-photo { height: 230px; }
+  .v2-mcard-name { left: 20px; right: 20px; top: 248px; font-size: 18px; line-height: 22px; }
+  .v2-mcard-meta { left: 20px; right: 48px; top: 276px; font-size: 14px; line-height: 18px; }
+  .v2-mcard-arrow { right: 20px; top: 278px; }
 
   /* мероприятия: «‹ ›» недель у заголовка, кнопки под ним, один день на экран */
   #events .v2-title-row { flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
