@@ -562,16 +562,9 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
   // Новости: карточки 322×360 как в макете, карусель по 4 (30.09), API отдаёт до 20; без новостей блок скрыт.
   const news = useMemo(() => (data.news || []).filter((n) => n.isActive !== false).slice(0, 20), [data.news]);
 
-  const matCount = (key: string) => {
-    const g = data.materials?.[key];
-    if (!g || !g.total) return 'Фото, видео и документы';
-    const parts: string[] = [];
-    if (g.photo) parts.push(`${g.photo} фото`);
-    if (g.video) parts.push(`${g.video} видео`);
-    if (g.doc) parts.push(`${g.doc} док.`);
-    return parts.join(' · ');
-  };
-  const condCount = data.cooperationDocs.length;
+  // 01.10 (владелец): без цифр — просто перечень видов материалов
+  const matCount = (_key: string) => 'Фото · Видео · Презентации';
+  const condCount = data.cooperationDocs.length; void condCount;
 
   return (
     <div className={`v2${motion ? ' v2--motion' : ''}`} style={{ zoom } as React.CSSProperties}>
@@ -709,7 +702,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               <a className="v2-mcard" href="#conditions" data-reveal="left" style={{ '--i': 2 } as React.CSSProperties} onClick={(e) => { e.preventDefault(); setModal('conditions'); }}>
                 <img className="v2-mcard-photo" src="/v2/img/materials-conditions.webp" alt="Актуальные условия" />
                 <div className="v2-mcard-name">Актуальные условия</div>
-                <div className="v2-mcard-meta">{condCount ? `${condCount} ${plural(condCount, 'файл', 'файла', 'файлов')}` : 'Условия сотрудничества'}</div>
+                <div className="v2-mcard-meta">Условия сотрудничества · Калькулятор рассрочки</div>
                 <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
               </a>
             </div>
