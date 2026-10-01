@@ -756,8 +756,7 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                   </div>
                   <div className="v2-pcard-name"><b>{TOLBUKHINA.name}</b><span>{TOLBUKHINA.address}</span></div>
                   <p className="v2-pcard-desc">{TOLBUKHINA.description}</p>
-                  {/* страницы проекта на stmichael.ru пока нет — «Подробнее» без ссылки */}
-                  <span className="v2-pcard-more">Подробнее →</span>
+                  {/* 01.10 (владелец): «Подробнее» убрано — страницы проекта пока нет */}
                 </div>
                 <span className="v2-btn v2-btn--soon" aria-disabled="true">Скоро старт продаж</span>
               </article>
