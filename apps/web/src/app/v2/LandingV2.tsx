@@ -7,7 +7,7 @@
 // лендинга; «Стать партнёром» = заявка «перезвоним за 1 час», которая уходит
 // в amoCRM задачей в воронку КЦ (source landing-callback).
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 
 export interface LandingV2Data {
@@ -134,11 +134,96 @@ function slotsForDay(day: Date, events: any[]): Array<{ time: string; projects: 
   ];
 }
 
+// ─── телефон с маской (правка владельца 01.10) ──────────────────────────────
+// Храним только 10 цифр после +7; показываем «+7 (912) 455-72-74». Разделители
+// ставятся сразу, как только группа заполнена, — тогда Backspace по разделителю
+// удаляет предыдущую цифру (см. onChange в PhoneInput). Вставка из буфера в любом
+// формате (8…, 7…, +7…, 9…, с пробелами/скобками) сводится к тем же 10 цифрам.
+
+/** Цифры номера из того, что лежит в поле: префикс «+7» отбрасываем, лишнюю ведущую 7/8 — тоже. */
+function parsePhoneDigits(raw: string): string {
+  const s = raw.startsWith('+7') ? raw.slice(2) : raw;
+  let d = s.replace(/\D/g, '');
+  if (d.length > 10 && (d[0] === '7' || d[0] === '8')) d = d.slice(1);
+  return d.slice(0, 10);
+}
+
+function formatPhone(d: string, focused: boolean): string {
+  if (!d) return focused ? '+7 ' : '';
+  let s = '+7 (' + d.slice(0, 3);
+  if (d.length >= 3) s += ') ' + d.slice(3, 6);
+  if (d.length >= 6) s += '-' + d.slice(6, 8);
+  if (d.length >= 8) s += '-' + d.slice(8, 10);
+  return s;
+}
+
+/** Позиция каретки в отформатированной строке после n-й цифры номера
+ *  (и после идущих следом разделителей — чтобы каретка стояла перед следующей цифрой). */
+function caretAfterDigits(formatted: string, n: number): number {
+  let seen = 0;
+  let pos = formatted.length >= 4 ? 4 : formatted.length; // после «+7 (»
+  if (n > 0) {
+    for (let i = 2; i < formatted.length; i++) {
+      if (/\d/.test(formatted[i])) { seen++; if (seen === n) { pos = i + 1; break; } }
+    }
+    if (seen < n) return formatted.length;
+  }
+  while (pos < formatted.length && !/\d/.test(formatted[pos])) pos++;
+  return pos;
+}
+
+/** Нормализация «как раньше» — для значений не из PhoneInput (на всякий случай). */
 function normalizePhone(v: string): string {
-  const d = v.replace(/\D/g, '').slice(0, 11);
-  if (!d) return '';
-  if (d.length === 10) return '+7' + d;
-  return (d.startsWith('7') || d.startsWith('8')) ? '+7' + d.slice(1) : '+' + d;
+  const d = parsePhoneDigits(v);
+  return d ? '+7' + d : '';
+}
+
+function PhoneInput({ digits, onChange, invalid, onEnter }: { digits: string; onChange: (digits: string) => void; invalid?: boolean; onEnter?: () => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+  const caretRef = useRef<number | null>(null);
+  const display = formatPhone(digits, focused);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || caretRef.current == null) return;
+    const pos = Math.min(caretRef.current, el.value.length);
+    caretRef.current = null;
+    if (document.activeElement === el) el.setSelectionRange(pos, pos);
+  }, [display]);
+
+  const handle = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const el = e.target;
+    const raw = el.value;
+    const caret = el.selectionStart ?? raw.length;
+    let d = parsePhoneDigits(raw);
+    let n = parsePhoneDigits(raw.slice(0, caret)).length;
+    // удалили только разделитель (цифры те же, строка короче) — убираем цифру перед кареткой
+    if (raw.length < display.length && d === digits && n > 0) {
+      d = d.slice(0, n - 1) + d.slice(n);
+      n -= 1;
+    }
+    const next = formatPhone(d, true);
+    caretRef.current = caret >= raw.length || n >= d.length ? next.length : caretAfterDigits(next, n);
+    onChange(d);
+  };
+
+  return (
+    <input
+      ref={ref}
+      className={`v2-input${invalid ? ' v2-input--invalid' : ''}`}
+      type="tel"
+      inputMode="numeric"
+      autoComplete="tel"
+      placeholder="Телефон"
+      value={display}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onChange={handle}
+      onKeyDown={(e) => { if (e.key === 'Enter' && onEnter) onEnter(); }}
+      aria-invalid={invalid || undefined}
+    />
+  );
 }
 
 // ─── модалки ────────────────────────────────────────────────────────────────
@@ -163,7 +248,9 @@ function Modal({ onClose, className, children }: { onClose: () => void; classNam
 // брокер-туров); уходит в amoCRM примечанием к лиду (поле message → note).
 function LeadForm({ source, title, subtitle, buttonText, withMessage, initialMessage, onClose }: { source: 'landing-callback' | 'broker-tour'; title: string; subtitle: string; buttonText: string; withMessage?: boolean; initialMessage?: string; onClose: () => void }) {
   const [name, setName] = useState('');
+  // 01.10: телефон — только 10 цифр после +7 (маска в PhoneInput); на сервер уходит +7XXXXXXXXXX
   const [phone, setPhone] = useState('');
+  const [phoneError, setPhoneError] = useState('');
   const [message, setMessage] = useState(initialMessage || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -171,9 +258,10 @@ function LeadForm({ source, title, subtitle, buttonText, withMessage, initialMes
 
   const submit = async () => {
     setError('');
+    setPhoneError('');
     if (name.trim().length < 2) return setError('Введите имя');
-    const p = normalizePhone(phone);
-    if (!/^\+7\d{10}$/.test(p)) return setError('Введите телефон — 10 цифр после +7');
+    const p = '+7' + phone;
+    if (!/^\+7\d{10}$/.test(p)) return setPhoneError('Введите 10 цифр номера');
     setLoading(true);
     try {
       const res = await fetch('/api/public/cms/contact', {
@@ -205,7 +293,8 @@ function LeadForm({ source, title, subtitle, buttonText, withMessage, initialMes
         <div className="v2-form">
           {error && <div className="v2-error">{error}</div>}
           <input className="v2-input" placeholder="Ваше имя" value={name} onChange={(e) => setName(e.target.value)} />
-          <input className="v2-input" type="tel" placeholder="Телефон, +7…" value={phone} onChange={(e) => setPhone(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} />
+          <PhoneInput digits={phone} invalid={!!phoneError} onChange={(d) => { setPhone(d); if (phoneError) setPhoneError(''); }} onEnter={submit} />
+          {phoneError && <div className="v2-field-hint">{phoneError}</div>}
           {withMessage && (
             <textarea className="v2-input v2-textarea" placeholder="Какой проект и удобная дата" value={message} onChange={(e) => setMessage(e.target.value)} />
           )}
@@ -246,6 +335,7 @@ function ConditionsModal({ docs, onClose }: { docs: any[]; onClose: () => void }
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const DOW_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 const MONTHS_AHEAD = 2;
+const WEEKS_AHEAD = 8; // листание недель на главной (01.10)
 const PROJECT_ABBR: Record<string, string> = { 'Квартал Серебряный Бор': 'КСБ', 'Коммерция Зорге 9': 'Коммерция З9' };
 const abbrProjects = (list: string[]) => list.map((p) => PROJECT_ABBR[p] || p).join(' + ');
 
@@ -362,7 +452,7 @@ function NewsCarousel({ items }: { items: any[] }) {
       <div className="v2-news-viewport">
         <div className="v2-news" style={{ transform: `translateX(${-at * NEWS_STEP}px)` }}>
           {items.map((n) => (
-            <a className="v2-ncard" key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer">
+            <a className="v2-ncard v2-hcard" key={n.id} href={n.url || '#'} target="_blank" rel="noopener noreferrer">
               {n.imageUrl ? <img className="v2-ncard-cover" src={n.imageUrl} alt="" /> : <div className="v2-ncard-cover" />}
               <div className="v2-ncard-title">{n.title}</div>
               <div className="v2-ncard-meta">{n.publishedAt ? fmtNewsDate(n.publishedAt) : ''}{n.source ? ` · ${n.source}` : ''}</div>
@@ -385,12 +475,21 @@ function PromoCarousel({ promos }: { promos: any[] }) {
   const withImage = promos.filter((p) => p.imageUrl);
   const slides: any[] = withImage.length ? withImage : DEFAULT_PROMOS;
   const [index, setIndex] = useState(0);
+  // 01.10 (владелец): ручной клик по стрелке/точке останавливает автопрокрутку;
+  // через 4 с паузы она возобновляется с обычным интервалом 6 с. Каждый клик
+  // увеличивает manualTick — эффект перезапускает таймеры заново.
+  const [manualTick, setManualTick] = useState(0);
   const count = slides.length;
   useEffect(() => {
     if (count < 2) return;
-    const timer = setInterval(() => setIndex((v) => (v + 1) % count), 6000);
-    return () => clearInterval(timer);
-  }, [count]);
+    let interval: ReturnType<typeof setInterval> | undefined;
+    let pause: ReturnType<typeof setTimeout> | undefined;
+    const start = () => { interval = setInterval(() => setIndex((v) => (v + 1) % count), 6000); };
+    if (manualTick > 0) pause = setTimeout(start, 4000);
+    else start();
+    return () => { if (pause) clearTimeout(pause); if (interval) clearInterval(interval); };
+  }, [count, manualTick]);
+  const goTo = (k: number) => { setIndex(((k % count) + count) % count); setManualTick((t) => t + 1); };
   // 29.09: подгружаем фото всех слайдов заранее — иначе при автопрокрутке
   // следующий слайд показывал тёмный фон, пока картинка качалась.
   useEffect(() => {
@@ -424,8 +523,8 @@ function PromoCarousel({ promos }: { promos: any[] }) {
             </div>
           ))}
           {/* стрелки есть в макете всегда; при одном слайде они просто ничего не листают */}
-          <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => setIndex((index - 1 + count) % count)}><PromoArrow /></button>
-          <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => setIndex((index + 1) % count)}><PromoArrow /></button>
+          <button className="v2-promo-arrow v2-promo-arrow--prev" aria-label="Предыдущая акция" onClick={() => goTo(index - 1)}><PromoArrow /></button>
+          <button className="v2-promo-arrow v2-promo-arrow--next" aria-label="Следующая акция" onClick={() => goTo(index + 1)}><PromoArrow /></button>
           {/* 30.09: точки — один SVG, а не кнопки: на Windows/Chrome кнопки-точки
               рисовались дважды (задвоение при масштабировании). Морфинг — переход
               x/width у rect. */}
@@ -439,8 +538,8 @@ function PromoCarousel({ promos }: { promos: any[] }) {
                   className={`v2-promo-dot${k === active ? ' v2-promo-dot--active' : ''}`}
                   x={x} y={0} width={w} height={15} rx={7.5}
                   role="tab" aria-selected={k === active} aria-label={`Акция ${k + 1}`} tabIndex={0}
-                  onClick={() => setIndex(k)}
-                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIndex(k); } }}
+                  onClick={() => goTo(k)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goTo(k); } }}
                 />
               );
             })}
@@ -552,7 +651,19 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
     return list.sort((a, b) => order.indexOf(a.slug) - order.indexOf(b.slug));
   }, [data.projects]);
 
-  const week = useMemo(() => workWeek(0), []);
+  // 01.10 (владелец): листание недель стрелками — вперёд до WEEKS_AHEAD, назад
+  // только до текущей недели; «Неделя» возвращает к текущей. После первого
+  // листания карточки дней рисуются без data-reveal (наблюдатель появления
+  // к новым узлам не привязан) — смена недели идёт с лёгким затуханием.
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [weekDir, setWeekDir] = useState(0); // -1 назад, 1 вперёд, 0 — без анимации
+  const week = useMemo(() => workWeek(weekOffset), [weekOffset]);
+  const goWeek = (next: number) => {
+    const clamped = Math.max(0, Math.min(WEEKS_AHEAD, next));
+    if (clamped === weekOffset) return;
+    setWeekDir(clamped > weekOffset ? 1 : -1);
+    setWeekOffset(clamped);
+  };
   const todayKey = dayKey(new Date());
   const activeEvents = useMemo(() => (data.events || []).filter((e) => e.isActive !== false), [data.events]);
   const promos = useMemo(
@@ -588,6 +699,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
             <nav className="v2-menu" onClick={() => setMenu(false)}>
               <a href="#projects">Проекты</a>
               <a href="#events">Мероприятия</a>
+              {/* 01.10: запись на тур из меню (в шапке кнопки нет с макета 28.09) */}
+              <button onClick={() => openTour()}>Записаться на брокер-тур</button>
               <button onClick={() => setModal('conditions')}>Документы</button>
               <a href="#materials">Материалы</a>
               <a href="#contacts">Контакты</a>
@@ -686,25 +799,34 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                 <p className="v2-subtitle">Фото и видео — внутри ЖК Зорге 9 и Квартала Серебряный Бор</p>
               </div>
             </div>
+            {/* 01.10 (владелец): hover карточки как у новостей. Анимация появления
+                (data-reveal) живёт на обёртке — раньше её `transform: none` после
+                появления перебивал подъём карточки при наведении. */}
             <div className="v2-materials" data-reveal="group">
-              <Link className="v2-mcard" href="/materials/Фотографии" data-reveal="left" style={{ '--i': 0 } as React.CSSProperties}>
-                <img className="v2-mcard-photo" src="/v2/img/materials-zorge9.webp" alt="Зорге 9" />
-                <div className="v2-mcard-name">Зорге 9</div>
-                <div className="v2-mcard-meta">{matCount('zorge9')}</div>
-                <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
-              </Link>
-              <Link className="v2-mcard" href="/materials/Рендеры" data-reveal="left" style={{ '--i': 1 } as React.CSSProperties}>
-                <img className="v2-mcard-photo" src="/v2/img/materials-silver-bor.webp" alt="Квартал Серебряный Бор" />
-                <div className="v2-mcard-name">Квартал Серебряный Бор</div>
-                <div className="v2-mcard-meta">{matCount('silver-bor')}</div>
-                <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
-              </Link>
-              <a className="v2-mcard" href="#conditions" data-reveal="left" style={{ '--i': 2 } as React.CSSProperties} onClick={(e) => { e.preventDefault(); setModal('conditions'); }}>
-                <img className="v2-mcard-photo" src="/v2/img/materials-conditions.webp" alt="Актуальные условия" />
-                <div className="v2-mcard-name">Актуальные условия</div>
-                <div className="v2-mcard-meta">Условия сотрудничества · Калькулятор рассрочки</div>
-                <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
-              </a>
+              <div className="v2-mcard-wrap" data-reveal="left" style={{ '--i': 0 } as React.CSSProperties}>
+                <Link className="v2-mcard v2-hcard" href="/materials/Фотографии">
+                  <img className="v2-mcard-photo" src="/v2/img/materials-zorge9.webp" alt="Зорге 9" />
+                  <div className="v2-mcard-name">Зорге 9</div>
+                  <div className="v2-mcard-meta">{matCount('zorge9')}</div>
+                  <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
+                </Link>
+              </div>
+              <div className="v2-mcard-wrap" data-reveal="left" style={{ '--i': 1 } as React.CSSProperties}>
+                <Link className="v2-mcard v2-hcard" href="/materials/Рендеры">
+                  <img className="v2-mcard-photo" src="/v2/img/materials-silver-bor.webp" alt="Квартал Серебряный Бор" />
+                  <div className="v2-mcard-name">Квартал Серебряный Бор</div>
+                  <div className="v2-mcard-meta">{matCount('silver-bor')}</div>
+                  <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
+                </Link>
+              </div>
+              <div className="v2-mcard-wrap" data-reveal="left" style={{ '--i': 2 } as React.CSSProperties}>
+                <a className="v2-mcard v2-hcard" href="#conditions" onClick={(e) => { e.preventDefault(); setModal('conditions'); }}>
+                  <img className="v2-mcard-photo" src="/v2/img/materials-conditions.webp" alt="Актуальные условия" />
+                  <div className="v2-mcard-name">Актуальные условия</div>
+                  <div className="v2-mcard-meta">Условия сотрудничества · Калькулятор рассрочки</div>
+                  <img className="v2-mcard-arrow" src="/v2/svg/arrow-card.svg" alt="" />
+                </a>
+              </div>
             </div>
           </div>
         </section>
@@ -719,27 +841,35 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
               </div>
               <div className="v2-filter">
                 <button className="v2-btn v2-btn--gold" onClick={() => openTour()}>Записаться на брокер-тур</button>
-                <span className="v2-btn v2-btn--dark">Неделя</span>
+                <button className="v2-btn v2-btn--dark" onClick={() => goWeek(0)}>Неделя</button>
                 <button className="v2-btn v2-btn--ghost" onClick={() => setModal('month')}>Месяц</button>
               </div>
             </div>
-            <div className="v2-days">
-              {week.map((day, di) => {
-                const slots = slotsForDay(day, activeEvents);
-                const isToday = dayKey(day) === todayKey;
-                return (
-                  <div key={dayKey(day)} className={`v2-day${isToday ? ' v2-day--today' : ''}`} data-reveal="scale" style={{ '--i': di } as React.CSSProperties}>
-                    <div className="v2-day-date">{fmtDay(day)}</div>
-                    {slots.length === 0 && <div className="v2-day-empty">Туров нет</div>}
-                    {slots.slice(0, 2).map((s) => (
-                      <div className="v2-slot" key={s.time}>
-                        <div className="v2-slot-time">{s.time}</div>
-                        <div className="v2-slot-list">{s.projects.map((p) => <div key={p}>{p}</div>)}</div>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })}
+            <div className="v2-days-wrap">
+              <div className={`v2-days${weekDir ? ' v2-days--anim' : ''}`} key={weekOffset} style={{ '--dir': weekDir } as React.CSSProperties}>
+                {week.map((day, di) => {
+                  const slots = slotsForDay(day, activeEvents);
+                  const isToday = dayKey(day) === todayKey;
+                  return (
+                    <div key={dayKey(day)} className={`v2-day${isToday ? ' v2-day--today' : ''}`} data-reveal={weekDir ? undefined : 'scale'} style={{ '--i': di } as React.CSSProperties}>
+                      <div className="v2-day-date">{fmtDay(day)}</div>
+                      {slots.length === 0 && <div className="v2-day-empty">Туров нет</div>}
+                      {slots.slice(0, 2).map((s) => (
+                        <div className="v2-slot" key={s.time}>
+                          <div className="v2-slot-time">{s.time}</div>
+                          <div className="v2-slot-list">{s.projects.map((p) => <div key={p}>{p}</div>)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+              {weekOffset > 0 && (
+                <button type="button" className="v2-days-arrow v2-days-arrow--prev" aria-label="Предыдущая неделя" onClick={() => goWeek(weekOffset - 1)}><CalArrow /></button>
+              )}
+              {weekOffset < WEEKS_AHEAD && (
+                <button type="button" className="v2-days-arrow v2-days-arrow--next" aria-label="Следующая неделя" onClick={() => goWeek(weekOffset + 1)}><CalArrow /></button>
+              )}
             </div>
             {/* 29.09 (владелец): подпись под расписанием вместо подзаголовка слайда */}
             <p className="v2-events-note">Индивидуальный брокер-тур — по договорённости с менеджером</p>
@@ -785,6 +915,8 @@ export default function LandingV2({ data }: { data: LandingV2Data }) {
                     <div className="v2-contact-sub">{manager.role}</div>
                   </div>
                 </div>
+                {/* 01.10 (владелец, по макету Рината): менеджер ниже, под ним разделитель, горячая линия у низа */}
+                <div className="v2-divider v2-divider--contacts" aria-hidden="true" />
                 <div className="v2-contact-block v2-contact-block--hot">
                   <div className="v2-contact-main v2-contact-main--hot">{hotTitle}<br /><a href={phoneHref}>{phone.replace(/[()]/g, '')}</a></div>
                   <div className="v2-contact-sub">{hours}</div>
