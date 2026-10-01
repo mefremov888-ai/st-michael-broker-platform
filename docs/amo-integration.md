@@ -276,6 +276,21 @@ Email: ivanov@example.ru
 
 → Создаём в нашей БД запись `UNDER_REVIEW` + note в amo лид «попытка повторной фиксации».
 
+### 7.4. Заявки с лендинга (`POST /api/public/cms/contact`) — новый и известный брокер
+
+Источники формы: `broker-tour` (запись на брокер-тур, в `message` — «Брокер-тур 09.10.2026 в 11:00 — Квартал Серебряный Бор»), `landing-callback` («Стать партнёром / перезвоним за 1 час»), `landing-contact` (старая форма «Связаться с нами»). Каждая заявка сохраняется в `ContactRequest` всегда, независимо от amo.
+
+- **Номера нет в базе брокеров** → создаём `Broker` (PENDING, WARM, в очередь КЦ) и в amoCRM под общим замком: контакт с IS_BROKER → лид (`broker-tour`/`landing-contact` — воронка БРОКЕРЫ, `landing-callback` — воронка КЦ) → заметка на лиде → задача «звонок» (1 час для callback, 4 часа иначе). Ответственный лида: `AMO_BROKER_MEETINGS_MANAGER_ID` (БРОКЕРЫ) или `AMO_KC_CALLBACK_RESPONSIBLE_USER_ID` / Морикит (КЦ).
+- **Номер уже есть в базе** (решение владельца 01.10.2026; код `notifyAmoAboutKnownBrokerLanding` в `cms.service.ts`, `createLandingFollowUpForKnownBroker` в адаптере). Раньше в amo не создавалось ничего — менеджер не видел повторную запись на тур. Теперь для `broker-tour` и `landing-callback`:
+  - лид **не** создаём; на контакте брокера ставим задачу «звонок» (`task_type_id` 1, `entity_type` contacts) и заметку «📅 Запись на брокер-тур с лендинга: <message>. Источник: landing/broker-tour, <дата МСК>» (для callback — «📞 Заявка «перезвоним за 1 час» с лендинга…»);
+  - текст задачи: «Брокер-тур: <message>. Подтвердить запись. Имя: <имя>, тел.: <телефон>» или «Перезвонить в течение часа: <имя> (<телефон>) — заявка с сайта «перезвоним за 1 час»»;
+  - срок задачи — ближайший рабочий час: через 1 час, но в окне 10:00–20:00 МСК (позже 20:00 → 10:00 следующего дня, раньше 10:00 → 10:00 того же дня);
+  - ответственный: `BrokerAmoContactSync.kcResponsibleUserId` (ответственный последнего лида КЦ) → amo-пользователь закреплённого менеджера (`Broker.assignedManager` → `AmoUser`) → env `AMO_KC_CALLBACK_RESPONSIBLE_USER_ID` → `AMO_ADMIN_USER_ID` → владелец OAuth-токена;
+  - контакт: `Broker.amoContactId`; если пуст — строгий поиск контакта-брокера по телефону (`findBrokerContactByPhone`, однозначное совпадение) и привязка к карточке; если контакта нет — заводим контакт + лид как для нового брокера, чтобы заявка точно дошла;
+  - идемпотентность: та же форма (телефон + источник + текст) повторно в течение 10 минут — вторую задачу не ставим (проверка по `ContactRequest`);
+  - `landing-contact` для известного брокера по-прежнему только пробуждает карточку в очереди КЦ (в amo ничего).
+- **Ошибки amo** не ломают ответ пользователю: заявка остаётся в «Админка → Заявки с лендинга», ошибка в логе; при втором сбое за 30 минут — алерт в ops-чат Telegram (без имён и телефонов, дедуп 15 минут по источнику).
+
 ---
 
 ## 8. Используемые ID amoCRM
@@ -363,6 +378,7 @@ Email: ivanov@example.ru
 | Адаптер amoCRM (все запросы) | `packages/integrations/src/amo-crm.adapter.ts` |
 | Константы (ID полей, статусов) | `packages/integrations/src/amo-crm.fields.ts` |
 | Webhook handlers | `apps/api/src/webhooks/webhooks.service.ts` |
+| Заявки с лендинга → Broker + amoCRM (новый/известный брокер) | `apps/api/src/cms/cms.service.ts` (`createContactRequest`, `upsertBrokerFromLandingLead`, `notifyAmoAboutKnownBrokerLanding`) |
 | UI формы фиксации | `apps/web/src/app/(cabinet)/fixation/page.tsx` |
 | Inspect скрипт для дампа полей/воронок | `scripts/inspect-amo-fields.js` |
 
