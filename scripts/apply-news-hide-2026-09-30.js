@@ -22,7 +22,9 @@ const WRITE = !DRY_RUN && CONFIRMED;
 const MODERATED_BY = "apply-news-hide-2026-09-30 (решение владельца 30.09)";
 
 /** Заголовки к скрытию — как на сайте stmichael.ru/news на 30.09.2026. */
-const TITLES_TO_HIDE = [
+// 01.10: список можно переопределить через env TITLES (заголовки через «;»)
+const TITLES_FROM_ENV = String(process.env.TITLES || "").split(";").map((t) => t.trim()).filter(Boolean);
+const TITLES_TO_HIDE = TITLES_FROM_ENV.length ? TITLES_FROM_ENV : [
   "На Ходынке открылась Детская Академия падела",
   "Джазовый вечер под открытым небом в «Зорге 9»",
   "Время открытий: как в «Зорге 9» встретили новый учебный год",

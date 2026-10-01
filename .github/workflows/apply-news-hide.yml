@@ -30,6 +30,11 @@ on:
         required: true
         default: false
         type: boolean
+      titles:
+        description: 'Заголовки к скрытию через «;» (пусто — список из скрипта)'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: apply-news-hide
@@ -48,6 +53,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           MODE_INPUT: ${{ inputs.mode }}
+          TITLES_INPUT: ${{ inputs.titles }}
           CONFIRM_APPLY: ${{ inputs.confirm_apply }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -56,7 +62,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 10m
-          envs: MODE_INPUT,CONFIRM_APPLY
+          envs: MODE_INPUT,CONFIRM_APPLY,TITLES_INPUT
           script: |
             set -e
             cd ${{ secrets.DEPLOY_PATH }}
@@ -68,7 +74,7 @@ jobs:
             CONFIRM=0
             if [ "$MODE_INPUT" = "apply" ] && [ "$CONFIRM_APPLY" = "true" ]; then MODE=0; CONFIRM=1; fi
             if [ "$MODE" = "1" ]; then echo "=== DRY-RUN (транзакция с откатом) ==="; else echo "=== APPLY (запись в БД) ==="; fi
-            docker compose exec -T -e DRY_RUN=$MODE -e CONFIRM=$CONFIRM api node /app/scripts/apply-news-hide-2026-09-30.js
+            docker compose exec -T -e DRY_RUN=$MODE -e CONFIRM=$CONFIRM -e TITLES="$TITLES_INPUT" api node /app/scripts/apply-news-hide-2026-09-30.js
             if [ "$MODE" = "0" ]; then
               echo "=== Публичная выдача /api/public/cms/news (должно быть без скрытых) ==="
               docker compose exec -T api node -e "fetch('http://localhost:4000/api/public/cms/news').then(r=>r.json()).then(d=>{const a=Array.isArray(d)?d:[];console.log(a.length+' новост(ей)');a.forEach(x=>console.log(' - '+(x.publishedAt||'').slice(0,10)+' · '+(x.source||'')+' · '+x.title));}).catch(e=>console.log('не удалось опросить API: '+e.message))"
