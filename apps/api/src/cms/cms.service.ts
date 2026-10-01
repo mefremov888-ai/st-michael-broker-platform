@@ -18,6 +18,7 @@ import {
   resolveStmCover,
 } from "./stm-news-cover";
 import { TelegramNewsService } from "../telegram-news/telegram-news.service";
+import { OpsAlertService, opsAlertTime } from "../ops-alert/ops-alert.service";
 import {
   acquireAmoBrokerContactAdvisoryXactLock,
   armDurableAmoBrokerContactCreateGate,
@@ -290,6 +291,31 @@ export function orderPublicNews<T extends { source?: string | null; telegramChat
   });
 }
 
+// 2026-10-01: входные данные заявки с лендинга для карточки брокера / amoCRM.
+type LandingLeadInput = {
+  fullName: string;
+  phone: string;
+  email: string | null;
+  note: string | null;
+  source: string;
+  // id только что сохранённой ContactRequest — исключаем её из проверки дублей
+  contactRequestId?: string;
+};
+
+// Источники лендинга, по которым известному брокеру ставим задачу + заметку
+// на контакте в amoCRM (без лида). 'landing-contact' (старая форма «Связаться
+// с нами») сюда намеренно не входит — решение владельца 01.10 касается
+// записи на брокер-тур и «перезвоним за 1 час».
+const LANDING_KNOWN_BROKER_SOURCES: Record<
+  string,
+  "LANDING_BROKER_TOUR" | "LANDING_CALLBACK" | undefined
+> = {
+  "broker-tour": "LANDING_BROKER_TOUR",
+  "landing-callback": "LANDING_CALLBACK",
+};
+const LANDING_DUPLICATE_WINDOW_MIN = 10;
+const LANDING_AMO_FAILURE_WINDOW_MS = 30 * 60_000;
+
 @Injectable()
 export class CmsService {
   private readonly logger = new Logger(CmsService.name);
@@ -300,10 +326,17 @@ export class CmsService {
   // 2026-09-30: TelegramNewsService — решение по Telegram-новости из админки
   // (тот же путь, что кнопки в боте: статус + правка сообщений модераторам).
   // @Optional — часть spec-ов создаёт CmsService(prisma) без него.
+  // 2026-10-01: OpsAlertService (глобальный модуль) — алерт в ops-чат, когда
+  // заявки с лендинга повторно не доходят до amoCRM.
   constructor(
     @Inject("PrismaClient") private prisma: PrismaClient,
     @Optional() private readonly telegramNews?: TelegramNewsService,
+    @Optional() private readonly opsAlerts?: OpsAlertService,
   ) {}
+
+  // Метки времени последних сбоев передачи заявок лендинга в amoCRM —
+  // алерт шлём только при повторной ошибке за окно (см. recordLandingAmoFailure).
+  private landingAmoFailureTimes: number[] = [];
 
   async getAllContent() {
     const rows = await this.prisma.siteContent.findMany();
@@ -983,6 +1016,7 @@ export class CmsService {
           email: data.email?.trim() || null,
           note: data.message?.trim() || null,
           source: data.source || "landing-contact",
+          contactRequestId: created.id,
         });
       } catch (e: any) {
         console.error(
@@ -999,13 +1033,7 @@ export class CmsService {
   // Лояльно к существующему: если phone уже есть — обновляет category/isInBase
   // и не трогает password/auth-поля. Новых ставит в очередь КЦ (isInBase=true,
   // status=PENDING, category=WARM, funnelStage=NEW_BROKER).
-  private async upsertBrokerFromLandingLead(data: {
-    fullName: string;
-    phone: string;
-    email: string | null;
-    note: string | null;
-    source: string;
-  }) {
+  private async upsertBrokerFromLandingLead(data: LandingLeadInput) {
     // Нормализуем телефон до +7XXXXXXXXXX (как в основной БД).
     const digits = (data.phone || "").replace(/\D/g, "");
     let phone = data.phone;
@@ -1028,6 +1056,17 @@ export class CmsService {
           nextCallAt: null,
         },
       });
+      // 2026-10-01: раньше на этом всё заканчивалось — в amoCRM ничего не
+      // появлялось, менеджер не видел повторную запись на тур. Теперь —
+      // задача + заметка на контакте брокера (решение владельца 01.10).
+      try {
+        await this.notifyAmoAboutKnownBrokerLanding(existing, phone, data);
+      } catch (e: any) {
+        console.error(
+          "[upsertBrokerFromLandingLead] known-broker amo notify failed:",
+          e?.message || e,
+        );
+      }
       return existing.id;
     }
 
@@ -1050,9 +1089,20 @@ export class CmsService {
       },
     });
 
-    // 2026-05-26: параллельно создаём карточку в amoCRM (пайплайн БРОКЕРЫ)
-    // — контакт с IS_BROKER + лид + задача КЦ. Если amo упал — не валим:
-    // brokerId в нашей БД создан, синк может пройти позже.
+    await this.pushLandingLeadToAmo(created.id, phone, data);
+    return created.id;
+  }
+
+  // 2026-05-26: параллельно создаём карточку в amoCRM (пайплайн БРОКЕРЫ)
+  // — контакт с IS_BROKER + лид + задача КЦ. Если amo упал — не валим:
+  // brokerId в нашей БД создан, синк может пройти позже.
+  // 2026-10-01: вынесено из upsertBrokerFromLandingLead — тот же путь нужен
+  // известному брокеру, у которого в amoCRM не нашли контакт.
+  private async pushLandingLeadToAmo(
+    brokerId: string,
+    phone: string,
+    data: LandingLeadInput,
+  ): Promise<void> {
     let amoLeadId: number | undefined;
     let amoContactId: number | undefined;
     let durableCreateGateId: string | null = null;
@@ -1060,9 +1110,9 @@ export class CmsService {
     try {
       amoContactId = await this.prisma.$transaction(
         async (tx) => {
-          await acquireAmoBrokerContactAdvisoryXactLock(tx, created.id, phone);
+          await acquireAmoBrokerContactAdvisoryXactLock(tx, brokerId, phone);
           const lockedBroker = await tx.broker.findUnique({
-            where: { id: created.id },
+            where: { id: brokerId },
             select: { amoContactId: true, phone: true, mergedIntoId: true },
           });
           if (!lockedBroker)
@@ -1180,7 +1230,7 @@ export class CmsService {
           if (!lockedBroker.amoContactId) {
             const linked = await tx.broker.updateMany({
               where: {
-                id: created.id,
+                id: brokerId,
                 amoContactId: null,
                 mergedIntoId: null,
               },
@@ -1233,6 +1283,7 @@ export class CmsService {
         "[upsertBrokerFromLandingLead] amo create failed:",
         e?.message || e,
       );
+      await this.recordLandingAmoFailure(data.source, "контакт и лид");
     }
 
     // 2026-06-17: дублируем уведомление в Морикит — он создаст вторую задачу
@@ -1283,7 +1334,197 @@ export class CmsService {
       }
     }
 
-    return created.id;
+  }
+
+  // 2026-10-01: заявка с лендинга от известного брокера (решение владельца
+  // 01.10). Лид НЕ создаём: задача «звонок» ответственному + заметка на
+  // контакте брокера в amoCRM. Контакт — Broker.amoContactId, иначе строгий
+  // поиск по телефону (и привязка при однозначном совпадении); если контакта
+  // нет — создаём лид как для нового брокера, чтобы заявка точно дошла.
+  private async notifyAmoAboutKnownBrokerLanding(
+    existing: {
+      id: string;
+      amoContactId: bigint | number | null;
+      assignedManagerId?: string | null;
+    },
+    phone: string,
+    data: LandingLeadInput,
+  ): Promise<void> {
+    const amoSource = LANDING_KNOWN_BROKER_SOURCES[data.source];
+    if (!amoSource) return;
+
+    if (await this.isRecentDuplicateLandingRequest(phone, data)) {
+      console.log(
+        `[upsertBrokerFromLandingLead] duplicate landing request within ${LANDING_DUPLICATE_WINDOW_MIN} min, amo task skipped (broker ${existing.id}, source ${data.source})`,
+      );
+      return;
+    }
+
+    let contactId = Number(existing.amoContactId) || null;
+    if (!contactId) {
+      try {
+        const found = await this.amo.findBrokerContactByPhone(phone, {
+          strict: true,
+        });
+        const foundId = Number(found?.id);
+        if (Number.isSafeInteger(foundId) && foundId > 0) {
+          contactId = foundId;
+          try {
+            await this.prisma.broker.updateMany({
+              where: { id: existing.id, amoContactId: null, mergedIntoId: null },
+              data: { amoContactId: BigInt(foundId) as any },
+            });
+          } catch (e: any) {
+            // Контакт может быть уже привязан к другой карточке (unique) —
+            // задачу всё равно ставим на найденный контакт.
+            console.error(
+              "[upsertBrokerFromLandingLead] amoContactId link failed:",
+              e?.message || e,
+            );
+          }
+        }
+      } catch (e: any) {
+        console.error(
+          "[upsertBrokerFromLandingLead] broker contact lookup failed:",
+          e?.message || e,
+        );
+      }
+    }
+
+    if (!contactId) {
+      // Контакта в amo нет (или поиск неоднозначен) — идём путём нового
+      // брокера: контакт + лид + задача, под общим замком.
+      await this.pushLandingLeadToAmo(existing.id, phone, data);
+      return;
+    }
+
+    const responsibleUserId =
+      await this.resolveKnownBrokerTaskResponsible(existing);
+    try {
+      const result = await this.amo.createLandingFollowUpForKnownBroker({
+        contactId,
+        brokerName: data.fullName,
+        brokerPhone: phone,
+        source: amoSource,
+        note: data.note,
+        responsibleUserId,
+      });
+      console.log(
+        `[upsertBrokerFromLandingLead] known broker ${existing.id}: amo task on contact ${contactId}, responsible ${result.responsibleUserId ?? "token owner"}, note ${result.noteCreated ? "ok" : "failed"}`,
+      );
+    } catch (e: any) {
+      console.error(
+        "[upsertBrokerFromLandingLead] known-broker amo task failed:",
+        e?.message || e,
+      );
+      await this.recordLandingAmoFailure(data.source, "задача на контакте брокера");
+    }
+  }
+
+  // Идемпотентность: та же форма (телефон + источник + текст) за последние
+  // 10 минут — вторую задачу в amo не ставим. Сравниваем и сырой, и
+  // нормализованный телефон: ContactRequest хранит номер как прислала форма.
+  private async isRecentDuplicateLandingRequest(
+    normalizedPhone: string,
+    data: LandingLeadInput,
+  ): Promise<boolean> {
+    const since = new Date(Date.now() - LANDING_DUPLICATE_WINDOW_MIN * 60_000);
+    const phones = [...new Set([data.phone, normalizedPhone].filter(Boolean))];
+    try {
+      const dup = await this.prisma.contactRequest.findFirst({
+        where: {
+          ...(data.contactRequestId
+            ? { id: { not: data.contactRequestId } }
+            : {}),
+          source: data.source,
+          phone: { in: phones },
+          message: data.note,
+          createdAt: { gte: since },
+        },
+        select: { id: true },
+      });
+      return !!dup;
+    } catch (e: any) {
+      console.error(
+        "[upsertBrokerFromLandingLead] duplicate check failed:",
+        e?.message || e,
+      );
+      return false;
+    }
+  }
+
+  // Ответственный за задачу: ответственный последнего лида КЦ
+  // (BrokerAmoContactSync.kcResponsibleUserId) → amo-пользователь
+  // закреплённого менеджера (Broker.assignedManager → AmoUser) → undefined
+  // (адаптер возьмёт env AMO_KC_CALLBACK_RESPONSIBLE_USER_ID / AMO_ADMIN_USER_ID).
+  private async resolveKnownBrokerTaskResponsible(existing: {
+    id: string;
+    assignedManagerId?: string | null;
+  }): Promise<number | undefined> {
+    try {
+      const sync = await this.prisma.brokerAmoContactSync.findUnique({
+        where: { brokerId: existing.id },
+        select: { kcResponsibleUserId: true },
+      });
+      const kc = Number(sync?.kcResponsibleUserId);
+      if (Number.isSafeInteger(kc) && kc > 0) return kc;
+    } catch (e: any) {
+      console.error(
+        "[upsertBrokerFromLandingLead] kc responsible lookup failed:",
+        e?.message || e,
+      );
+    }
+    if (existing.assignedManagerId) {
+      try {
+        const amoUser = await this.prisma.amoUser.findUnique({
+          where: { brokerId: existing.assignedManagerId },
+          select: { id: true, isActive: true },
+        });
+        const id = Number(amoUser?.id);
+        if (amoUser?.isActive !== false && Number.isSafeInteger(id) && id > 0)
+          return id;
+      } catch (e: any) {
+        console.error(
+          "[upsertBrokerFromLandingLead] assigned manager amo user lookup failed:",
+          e?.message || e,
+        );
+      }
+    }
+    return undefined;
+  }
+
+  // Ops-алерт при ПОВТОРНЫХ сбоях передачи заявок лендинга в amoCRM: второй
+  // сбой за 30 минут → сообщение в ops-чат (дедуп 15 минут по источнику).
+  // Без имён и телефонов — только источник и время.
+  private async recordLandingAmoFailure(source: string, step: string) {
+    const now = Date.now();
+    this.landingAmoFailureTimes = this.landingAmoFailureTimes.filter(
+      (t) => now - t < LANDING_AMO_FAILURE_WINDOW_MS,
+    );
+    this.landingAmoFailureTimes.push(now);
+    if (this.landingAmoFailureTimes.length < 2 || !this.opsAlerts) return;
+    const safeSource = String(source || "unknown").replace(/[^a-z0-9_-]/gi, "");
+    try {
+      await this.opsAlerts.sendSafely(
+        [
+          "🔴 Рабочий сайт: заявка с лендинга не передана в amoCRM",
+          `Источник: ${safeSource}`,
+          `Шаг: ${step}`,
+          `Повторных сбоев за 30 минут: ${this.landingAmoFailureTimes.length}`,
+          `Время: ${opsAlertTime()}`,
+          "Заявка сохранена в кабинете («Админка → Заявки с лендинга»), в amoCRM её нужно завести вручную.",
+        ].join("\n"),
+        {
+          dedupKey: `landing-amo:${safeSource}`,
+          cooldownMs: 15 * 60_000,
+        },
+      );
+    } catch (e: any) {
+      console.error(
+        "[recordLandingAmoFailure] ops alert failed:",
+        e?.message || e,
+      );
+    }
   }
 
   async listContactRequests(query: {

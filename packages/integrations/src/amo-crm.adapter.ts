@@ -34,6 +34,35 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// 2026-10-01: срок задачи по заявке с лендинга от известного брокера —
+// «ближайший рабочий час»: через 1 час от заявки, но в окне 10:00–20:00 МСК.
+// Раньше 10:00 → 10:00 того же дня; позже 20:00 → 10:00 следующего дня.
+// Europe/Moscow = UTC+3 без перехода на летнее время, считаем сдвигом.
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+const LANDING_FOLLOW_UP_DELAY_MS = 60 * 60 * 1000;
+const LANDING_FOLLOW_UP_DAY_START_H = 10;
+const LANDING_FOLLOW_UP_DAY_END_H = 20;
+
+export function landingFollowUpCompleteTillSec(now: Date = new Date()): number {
+  const dueMsk = new Date(
+    now.getTime() + LANDING_FOLLOW_UP_DELAY_MS + MSK_OFFSET_MS,
+  );
+  const h = dueMsk.getUTCHours();
+  const afterDayEnd =
+    h > LANDING_FOLLOW_UP_DAY_END_H ||
+    (h === LANDING_FOLLOW_UP_DAY_END_H &&
+      (dueMsk.getUTCMinutes() > 0 ||
+        dueMsk.getUTCSeconds() > 0 ||
+        dueMsk.getUTCMilliseconds() > 0));
+  if (afterDayEnd) {
+    dueMsk.setUTCDate(dueMsk.getUTCDate() + 1);
+    dueMsk.setUTCHours(LANDING_FOLLOW_UP_DAY_START_H, 0, 0, 0);
+  } else if (h < LANDING_FOLLOW_UP_DAY_START_H) {
+    dueMsk.setUTCHours(LANDING_FOLLOW_UP_DAY_START_H, 0, 0, 0);
+  }
+  return Math.floor((dueMsk.getTime() - MSK_OFFSET_MS) / 1000);
+}
+
 // 2026-08-19: без таймаута зависший amoCRM держит fetch() открытым
 // бесконечно — вместе с overlap-guard'ом в handleAmoFailedRetry это
 // раньше позволяло двум прогонам крона параллельно слать один и тот же
@@ -2872,6 +2901,81 @@ export class AmoCrmAdapter {
       console.error("[createBrokerLeadFromLanding] failed:", e?.message || e);
       return contact?.id ? { contactId: contact.id } : null;
     }
+  }
+
+  // 2026-10-01: заявка с лендинга от УЖЕ известного брокера (телефон есть в
+  // базе). Решение владельца: лид не создаём — только задача «звонок» на
+  // ответственного + заметка на контакте брокера, чтобы менеджер увидел
+  // повторную запись на брокер-тур / «перезвоним за 1 час».
+  // Ответственный: передан вызывающим (ответственный последнего лида КЦ или
+  // amo-пользователь закреплённого менеджера); иначе env
+  // AMO_KC_CALLBACK_RESPONSIBLE_USER_ID → AMO_ADMIN_USER_ID → владелец токена.
+  // Срок задачи — ближайший рабочий час (см. landingFollowUpCompleteTillSec).
+  // Задача создаётся первой: это главное, что должен увидеть менеджер; если
+  // упала заметка — только лог. Ошибка задачи пробрасывается вызывающему.
+  async createLandingFollowUpForKnownBroker(data: {
+    contactId: number;
+    brokerName: string;
+    brokerPhone: string;
+    source: "LANDING_BROKER_TOUR" | "LANDING_CALLBACK";
+    note?: string | null;
+    responsibleUserId?: number;
+    now?: Date;
+  }): Promise<{
+    taskCreated: true;
+    noteCreated: boolean;
+    responsibleUserId?: number;
+    completeTillSec: number;
+  }> {
+    if (!Number.isSafeInteger(data.contactId) || data.contactId <= 0) {
+      throw new Error("AMO_BROKER_CONTACT_ID_REQUIRED");
+    }
+    const now = data.now ?? new Date();
+    const envResponsible = [
+      process.env.AMO_KC_CALLBACK_RESPONSIBLE_USER_ID,
+      process.env.AMO_ADMIN_USER_ID,
+    ]
+      .map((raw) => (raw ? Number(raw) : NaN))
+      .find((n) => Number.isFinite(n) && n > 0);
+    const responsibleUserId =
+      Number.isFinite(data.responsibleUserId) &&
+      (data.responsibleUserId as number) > 0
+        ? data.responsibleUserId
+        : envResponsible;
+    const fromTour = data.source === "LANDING_BROKER_TOUR";
+    const comment = (data.note || "").trim();
+    const taskText = fromTour
+      ? `Брокер-тур: ${comment || "дата и время не указаны"}. Подтвердить запись. Имя: ${data.brokerName}, тел.: ${data.brokerPhone}`
+      : `Перезвонить в течение часа: ${data.brokerName} (${data.brokerPhone}) — заявка с сайта «перезвоним за 1 час»${comment ? `. Комментарий: ${comment}` : ""}`;
+    const completeTillSec = landingFollowUpCompleteTillSec(now);
+    await this.createTask({
+      text: taskText,
+      entityType: "contacts",
+      entityId: data.contactId,
+      taskTypeId: 1, // звонок
+      completeTillSec,
+      responsibleUserId,
+    });
+
+    const stamp = `${new Intl.DateTimeFormat("ru-RU", {
+      timeZone: "Europe/Moscow",
+      dateStyle: "short",
+      timeStyle: "short",
+    }).format(now)} МСК`;
+    const noteText = fromTour
+      ? `📅 Запись на брокер-тур с лендинга: ${comment || "без комментария"}. Источник: landing/broker-tour, ${stamp}`
+      : `📞 Заявка «перезвоним за 1 час» с лендинга${comment ? `: ${comment}` : ""}. Источник: landing/landing-callback, ${stamp}`;
+    let noteCreated = false;
+    try {
+      await this.addNoteToContact(data.contactId, noteText);
+      noteCreated = true;
+    } catch (e: any) {
+      console.error(
+        "[createLandingFollowUpForKnownBroker] note failed:",
+        e?.message || e,
+      );
+    }
+    return { taskCreated: true, noteCreated, responsibleUserId, completeTillSec };
   }
 
   // 2026-05-26: добавляет примечание о попытке повторной фиксации в
