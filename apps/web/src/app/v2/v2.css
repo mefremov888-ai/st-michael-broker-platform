@@ -153,16 +153,27 @@
 
 /* материалы */
 .v2-materials { display: grid; grid-template-columns: repeat(3, 437px); gap: 24px; margin-top: 72px; }
-.v2-mcard { display: block; background: #fff; border-radius: 24px; overflow: hidden; height: 500px; position: relative; transition: transform .2s ease; }
-.v2-mcard:hover { transform: translateY(-2px); }
+/* 01.10 (владелец): hover у материалов такой же, как у новостей — общий класс .v2-hcard (ниже, в «новостях»).
+   data-reveal переехал на обёртку .v2-mcard-wrap: его `transform: none` после появления перебивал :hover. */
+.v2-mcard-wrap { display: block; }
+.v2-mcard { display: block; background: #fff; border-radius: 24px; overflow: hidden; height: 500px; position: relative; }
 .v2-mcard img.v2-mcard-photo { width: 100%; height: 400px; object-fit: cover; }
 .v2-mcard-name { position: absolute; left: 30px; top: 424px; font-size: 20px; line-height: 23px; }
 .v2-mcard-meta { position: absolute; left: 30px; top: 455px; font-size: 16px; line-height: 18px; color: var(--v2-gray); }
-.v2-mcard-arrow { position: absolute; right: 30px; top: 456px; width: 14px; height: 14px; }
+.v2-mcard-arrow { position: absolute; right: 30px; top: 456px; width: 14px; height: 14px; transition: transform .2s ease; }
+.v2-mcard:hover .v2-mcard-arrow { transform: translateX(3px); }
 
 /* мероприятия */
 .v2-filter { display: flex; gap: 12px; align-items: center; }
-.v2-days { display: grid; grid-template-columns: repeat(5, 253px); gap: 24px; margin-top: 72px; }
+/* 01.10 (владелец): листание недель — круглые стрелки как у новостей (на краю крайних
+   карточек, по центру по вертикали: (253-40)/2 = 106); смена недели с лёгким затуханием. */
+.v2-days-wrap { position: relative; margin-top: 72px; }
+.v2-days { display: grid; grid-template-columns: repeat(5, 253px); gap: 24px; }
+@keyframes v2-days-in { from { opacity: 0; transform: translateX(calc(var(--dir, 0) * 24px)); } to { opacity: 1; transform: none; } }
+.v2-days--anim { animation: v2-days-in .3s ease both; }
+.v2 .v2-days-wrap .v2-days-arrow { top: 106px; }
+.v2-days-arrow--prev { left: -20px; transform: scaleX(-1); }
+.v2-days-arrow--next { right: -20px; }
 .v2-day { height: 253px; border-radius: 24px; background: #fff; padding: 20px; position: relative; }
 .v2-day--today { background: linear-gradient(180deg, #b4936f 0%, #a3794b 100%); color: #fff; }
 .v2-day-date { font-size: 16px; line-height: 18px; color: var(--v2-gray); }
@@ -197,12 +208,16 @@
    на экранах уже 1920 появлялась горизонтальная прокрутка. overflow:hidden убирает её. */
 .v2-news-viewport { overflow: hidden; margin: -8px 0; padding: 8px 0; }
 .v2-news { display: flex; gap: 24px; transition: transform .3s ease; will-change: transform; }
-.v2-ncard { display: block; flex: 0 0 322px; width: 322px; background: #fff; border-radius: 24px; overflow: hidden; height: 360px; position: relative; transition: transform .2s ease; }
-.v2 .v2-news-wrap .v2-news-arrow { position: absolute; top: 98px; width: 40px; height: 40px; border-radius: 50%; background: #fff; color: #282828; box-shadow: 0 2px 10px rgba(0,0,0,.18); display: inline-flex; align-items: center; justify-content: center; line-height: 0; z-index: 2; transition: box-shadow .15s ease; }
-.v2 .v2-news-wrap .v2-news-arrow:hover { box-shadow: 0 4px 14px rgba(0,0,0,.24); }
+.v2-ncard { display: block; flex: 0 0 322px; width: 322px; background: #fff; border-radius: 24px; overflow: hidden; height: 360px; position: relative; }
+/* 01.10 (владелец): один hover для карточек новостей и материалов — подъём и мягкая тень */
+.v2 .v2-hcard { transition: transform .2s ease, box-shadow .2s ease; }
+.v2 .v2-hcard:hover { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(0,0,0,.10); }
+/* круглые стрелки-листалки (новости и недели мероприятий); специфичность (0,3,0) —
+   иначе `.v2 button:not(.v2-btn)` снимает фон круга */
+.v2 .v2-news-wrap .v2-news-arrow, .v2 .v2-days-wrap .v2-days-arrow { position: absolute; top: 98px; width: 40px; height: 40px; border-radius: 50%; background: #fff; color: #282828; box-shadow: 0 2px 10px rgba(0,0,0,.18); display: inline-flex; align-items: center; justify-content: center; line-height: 0; z-index: 2; transition: box-shadow .15s ease; }
+.v2 .v2-news-wrap .v2-news-arrow:hover, .v2 .v2-days-wrap .v2-days-arrow:hover { box-shadow: 0 4px 14px rgba(0,0,0,.24); }
 .v2-news-arrow--prev { left: -20px; transform: scaleX(-1); }
 .v2-news-arrow--next { right: -20px; }
-.v2-ncard:hover { transform: translateY(-2px); }
 .v2-ncard-cover { width: 100%; height: 236px; object-fit: cover; background: #e9e6e1; }
 .v2-ncard-title { position: absolute; left: 25px; width: 272px; top: 256px; font-size: 16px; line-height: 18px; max-height: 36px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .v2-ncard-meta { position: absolute; left: 25px; right: 25px; top: 322px; font-size: 16px; line-height: 18px; color: var(--v2-gray); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -219,7 +234,12 @@
 .v2 .v2-contact-photo { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; flex: none; }
 .v2-cta-right h2 { font-size: 44px; line-height: 51px; font-weight: 500; }
 .v2-contact-block { position: absolute; left: 50px; right: 50px; }
-.v2 .v2-contact-block--person { top: 300px; }
+/* 01.10 (владелец, по макету Рината): снизу вверх — горячая линия (110 высоты, низ на 50 → верх 508),
+   разделитель на 24 выше (484), блок менеджера (100 по замеру) на 24 выше разделителя (360–460). Так
+   промежутки равные; «верх менеджера ≈420 / линия ≈560» из референса с двухстрочным заголовком горячей
+   линии физически не помещаются (блок горячей линии сам начинается на 508). */
+.v2 .v2-contact-block--person { top: 360px; }
+.v2 .v2-divider--contacts { top: 484px; width: auto; right: 50px; }
 .v2 .v2-contact-block--hot { bottom: 50px; }
 .v2 .v2-contact-icons { position: absolute; top: 50px; right: 50px; display: flex; gap: 14px; }
 .v2 .v2-contact-icons a { display: block; width: 36px; height: 36px; opacity: .95; transition: opacity .2s ease, transform .2s ease; }
@@ -264,6 +284,9 @@
 .v2-form { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; }
 .v2-input { height: 48px; border: 1px solid var(--v2-line); border-radius: 12px; padding: 0 16px; font: inherit; font-size: 16px; outline: none; width: 100%; background: #fff; }
 .v2-input:focus { border-color: #000; }
+/* 01.10: телефон не прошёл проверку — красная рамка и подсказка под полем */
+.v2 .v2-input--invalid, .v2 .v2-input--invalid:focus { border-color: #c33; }
+.v2-field-hint { margin-top: -6px; font-size: 14px; line-height: 18px; color: #c33; }
 .v2-textarea { min-height: 90px; padding: 12px 16px; resize: vertical; }
 .v2-form .v2-btn { height: 48px; border-radius: 12px; }
 .v2-error { padding: 10px 14px; background: rgba(220,60,60,.1); color: #c33; border-radius: 8px; font-size: 14px; }
