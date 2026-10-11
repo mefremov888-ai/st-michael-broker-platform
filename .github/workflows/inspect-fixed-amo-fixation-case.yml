@@ -149,7 +149,7 @@ jobs:
           unset security_options
           project=$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' st-michael-postgres 2>/dev/null)
           [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || exit 1
-          for service in api postgres; do
+          for service in api postgres redis; do
             test "$(timeout 15 docker inspect --format '{{.State.Running}}' "st-michael-$service" 2>/dev/null)" = true || exit 1
             test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "st-michael-$service" 2>/dev/null)" = "$project" || exit 1
             test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "st-michael-$service" 2>/dev/null)" = "$service" || exit 1
