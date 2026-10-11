@@ -1528,7 +1528,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             <div className="h-burger-menu" onClick={() => setBurgerOpen(false)}>
               <a href="#projects">Проекты</a>
               <a href="#events">Мероприятия</a>
-              <a href="#cooperation">Документы</a>
+              <a href="/materials/conditions">Документы</a>
               <a href="#materials">Материалы</a>
               <a href="#contact">Контакты</a>
             </div>
@@ -1579,15 +1579,15 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               <p className="hero-desc">{resolveLandingCopy(hero.description, activePolicies)}</p>
               {(() => {
                 // Явное назначение из админки (кнопка «На кнопку главной», маркер
-                // [landing-rewards-button] в description) — приоритет; иначе
-                // легаси-подбор по названию.
+                // [landing-rewards-button] в description). Without an explicit current
+                // assignment, show the published catalogue rather than an old monthly PDF.
                 const condDoc =
-                  cooperationDocs.find((d: any) => String(d.description || '').includes('[landing-rewards-button]')) ||
-                  cooperationDocs.find((d: any) => /август 2026/i.test(d.name) || /вознаграждения для брокеров/i.test(d.name));
+                  cooperationDocs.find((d: any) => String(d.description || '').includes('[landing-rewards-button]'));
                 return condDoc
                   ? <a href={condDoc.fileUrl} target="_blank" rel="noopener noreferrer" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>
-                  : <a href="#cooperation" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>;
+                  : <a href="/materials/conditions" className="btn-outline btn-lg" style={{borderRadius:10}}>Условия вознаграждения</a>;
               })()}
+              <a href="/materials/conditions" className="btn-outline" style={{borderRadius:10,textAlign:'center'}}>Все актуальные документы и рекламный регламент</a>
             </div>
           </div>
         </div>
@@ -2261,7 +2261,7 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
               />
               <div className="foot-logo-sub">Кабинет брокера</div>
             </div>
-            <div><div className="foot-col-title">Условия</div><a className="foot-link" href="#cooperation">Условия сотрудничества</a><a className="foot-link" href="#events">Календарь событий</a><a className="foot-link" href="#commission">Комиссия</a></div>
+            <div><div className="foot-col-title">Условия</div><a className="foot-link" href="/materials/conditions">Условия сотрудничества</a><a className="foot-link" href="#events">Календарь событий</a><a className="foot-link" href="#commission">Комиссия</a></div>
             <div><div className="foot-col-title">Проекты</div>{projects.map((p: any) => (<span key={p.id} className="foot-link" onClick={() => handleProjectClick(p)} style={{cursor:'pointer'}}>{p.name}{p.subtitle ? ` ${p.subtitle}` : ''}</span>))}</div>
             <div><div className="foot-col-title">Партнёрам</div>{contact.phone && <a className="foot-link" href={`tel:${contact.phone.replace(/\D/g,'')}`}>{contact.phone}</a>}{contact.email && <a className="foot-link" href={`mailto:${contact.email}`}>{contact.email}</a>}{contact.telegram && <a className="foot-link" href={contact.telegram}>Telegram</a>}</div>
           </div>

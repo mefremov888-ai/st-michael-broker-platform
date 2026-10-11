@@ -13,6 +13,10 @@ const EXPECTED_BROKER_ID = "6e414141-f2ca-4c71-8402-2032c9186568";
 const IS_BROKER_FIELD_ID = 835415;
 const KC_PIPELINE_ID = 7600542;
 const REVIEW_LEAD_ID = 32372907;
+const REVIEW_EVENT_PAGE_LIMIT = 100;
+const REVIEW_EVENT_MAX_PAGES = 5;
+const REVIEW_MAX_HISTORICAL_CONTACTS = 10;
+const REVIEW_HISTORY_MAX_BODY_BYTES = 1024 * 1024;
 const WINDOW_PAGE_LIMIT = 250;
 const WINDOW_MAX_PAGES = 10;
 const BROKER_MAX_LINKED_LEADS = 250;
@@ -182,7 +186,7 @@ function normalizedName(value) {
 }
 function textPhoneMatches(value, phone) {
   if (typeof value !== "string") return false;
-  return (value.match(/(?:\+?7|8)[\s()\-]*\d(?:[\s()\-]*\d){9}/g) || []).some((entry) => helpers.normalizePhone(entry) === phone);
+  return (value.match(/(?<!\d)(?:\+?7|8)[\s()\-]*\d(?:[\s()\-]*\d){9}(?!\d)/g) || []).some((entry) => helpers.normalizePhone(entry) === phone);
 }
 function createReviewNotesRequester(accessToken, fetchImpl = globalThis.fetch) {
   if (typeof accessToken !== "string" || !accessToken.trim() || typeof fetchImpl !== "function") refused("REVIEW_REQUEST_CONFIGURATION_INVALID");
@@ -232,6 +236,166 @@ async function collectReviewLeadComparison(row, expanded, request, requestNotes)
     nonEffectiveBrokerContactsRead: contacts.length, contacts,
     notes: { read: notes.length, complete: payload === null || (!payload._links?.next && notes.length < 100), requestUuidMentioned: texts.some((text) => text.includes(CLIENT_ID)), exactClientPhoneMentioned: texts.some((text) => textPhoneMatches(text, phone)), clientNameMentioned: texts.some((text) => (` ${normalizedName(text)} `).includes(` ${name} `)) },
     advisoryOnly: true, identityConfirmed: false,
+  };
+}
+async function readReviewHistoryJson(response, controller) {
+  const declared = response.headers?.get?.("content-length");
+  if (declared !== null && declared !== undefined && /^[0-9]+$/.test(declared) && Number(declared) > REVIEW_HISTORY_MAX_BODY_BYTES) throw new Error("Review history response bound exceeded");
+  const reader = response.body?.getReader?.();
+  if (!reader) throw new Error("Review history stream unavailable");
+  let bytes = 0;
+  const limitedReader = {
+    async read() {
+      const item = await reader.read();
+      if (!item?.done && item?.value instanceof Uint8Array) {
+        bytes += item.value.byteLength;
+        if (bytes > REVIEW_HISTORY_MAX_BODY_BYTES) { controller.abort(); throw new Error("Review history response bound exceeded"); }
+      }
+      return item;
+    },
+    cancel: () => reader.cancel(), releaseLock: () => reader.releaseLock(),
+  };
+  return helpers.readBoundedJsonResponse({ headers: response.headers, body: { getReader: () => limitedReader } }, controller);
+}
+function createReviewHistoryRequester(accessToken, fetchImpl = globalThis.fetch) {
+  if (typeof accessToken !== "string" || !accessToken.trim() || typeof fetchImpl !== "function") refused("REVIEW_REQUEST_CONFIGURATION_INVALID");
+  let lastStarted = 0;
+  return async (kind, args) => {
+    let url;
+    if (kind === "events" && record(args) && Object.keys(args).sort().join() === "from,page,to" && unixTime(args.from) && unixTime(args.to) && args.to >= args.from && args.to - args.from <= WINDOW_MAX_AGE_SECONDS + 2 * WINDOW_SKEW_SECONDS && Number.isInteger(args.page) && args.page >= 1 && args.page <= REVIEW_EVENT_MAX_PAGES) {
+      url = new URL("https://stmichael.amocrm.ru/api/v4/events");
+      url.searchParams.set("filter[entity]", "lead");
+      url.searchParams.set("filter[entity_id][]", String(REVIEW_LEAD_ID));
+      url.searchParams.set("filter[created_at][from]", String(args.from));
+      url.searchParams.set("filter[created_at][to]", String(args.to));
+      url.searchParams.set("limit", String(REVIEW_EVENT_PAGE_LIMIT)); url.searchParams.set("page", String(args.page));
+    } else if (kind === "historicalContact" && record(args) && Object.keys(args).sort().join() === "allowedIds,id" && positiveId(args.id) && Array.isArray(args.allowedIds) && args.allowedIds.length <= REVIEW_MAX_HISTORICAL_CONTACTS && args.allowedIds.includes(args.id) && args.allowedIds.every((id) => positiveId(id))) {
+      url = new URL(`https://stmichael.amocrm.ru/api/v4/contacts/${args.id}?with=leads`);
+    } else refused("REVIEW_HISTORY_SCOPE_INVALID");
+    const wait = lastStarted + 400 - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastStarted = Date.now();
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetchImpl(url, { method: "GET", redirect: "error", signal: controller.signal, headers: { Accept: "application/json", Authorization: `Bearer ${accessToken.trim()}` } });
+      if (response?.status === 204) return { coverage: "observed", payload: null };
+      if (response?.status === 404) return { coverage: "deleted_or_unavailable", payload: null };
+      if (response?.status === 403) return { coverage: "forbidden", payload: null };
+      if (response?.ok !== true) return { coverage: "unavailable", payload: null };
+      return { coverage: "observed", payload: await readReviewHistoryJson(response, controller) };
+    } catch { return { coverage: "request_failed", payload: null }; }
+    finally { controller.abort(); clearTimeout(timeout); }
+  };
+}
+function stableReviewEntity(raw) {
+  return raw === null ? null : { id: raw.id, name: raw.name, created_at: raw.created_at, updated_at: raw.updated_at, pipeline_id: raw.pipeline_id, status_id: raw.status_id, custom_fields_values: raw.custom_fields_values, contacts: raw._embedded?.contacts, leads: raw._embedded?.leads };
+}
+async function collectReviewEvents(requestHistory, from, to) {
+  const events = [], seen = new Set();
+  let complete = false, pagesRead = 0, coverage = "observed";
+  for (let page = 1; page <= REVIEW_EVENT_MAX_PAGES; page += 1) {
+    const result = await requestHistory("events", { from, to, page }); pagesRead += 1;
+    if (result.coverage !== "observed") { coverage = result.coverage; break; }
+    if (result.payload === null) { complete = true; break; }
+    const payload = result.payload, batch = payload?._embedded?.events;
+    if (!record(payload) || !Array.isArray(batch) || batch.length > REVIEW_EVENT_PAGE_LIMIT || (payload._links !== undefined && !record(payload._links))) refused("REVIEW_EVENTS_INVALID");
+    for (const raw of batch) {
+      if (!record(raw) || typeof raw.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(raw.id) || seen.has(raw.id) || raw.entity_type !== "lead" || raw.entity_id !== REVIEW_LEAD_ID || raw.account_id !== 28552900 || typeof raw.type !== "string" || !/^[a-z0-9_]{1,100}$/.test(raw.type) || !unixTime(raw.created_at) || raw.created_at < from || raw.created_at > to || !Array.isArray(raw.value_before) || !Array.isArray(raw.value_after) || raw.value_before.length > 100 || raw.value_after.length > 100) refused("REVIEW_EVENTS_INVALID");
+      seen.add(raw.id);
+      events.push({ id: raw.id, entity_id: raw.entity_id, entity_type: raw.entity_type, account_id: raw.account_id, type: raw.type, created_at: raw.created_at, value_before: raw.value_before, value_after: raw.value_after });
+    }
+    const next = payload._links?.next;
+    if (next !== undefined && next !== null && !record(next)) refused("REVIEW_EVENTS_INVALID");
+    if (!next) { complete = batch.length < REVIEW_EVENT_PAGE_LIMIT; break; }
+    if (batch.length === 0) refused("REVIEW_EVENTS_INVALID");
+  }
+  return { events, complete, pagesRead, coverage };
+}
+function stringsInEventValue(value, depth = 0) {
+  if (depth > 8) refused("REVIEW_EVENTS_INVALID");
+  if (typeof value === "string") { if (Buffer.byteLength(value, "utf8") > 64000) refused("REVIEW_EVENTS_INVALID"); return [value]; }
+  if (Array.isArray(value)) return value.flatMap((entry) => stringsInEventValue(entry, depth + 1));
+  if (record(value)) return Object.values(value).flatMap((entry) => stringsInEventValue(entry, depth + 1));
+  return [];
+}
+function reviewContactEvidence(raw, row, leadName, id) {
+  if (!record(raw) || raw.id !== id || typeof raw.name !== "string" || Buffer.byteLength(raw.name, "utf8") > 4000 || !Array.isArray(raw._embedded?.leads) || raw._embedded.leads.length > 250 || raw._embedded.leads.some((lead) => !positiveId(lead?.id))) refused("REVIEW_CONTACT_INVALID");
+  if (raw.custom_fields_values !== null && raw.custom_fields_values !== undefined && (!Array.isArray(raw.custom_fields_values) || raw.custom_fields_values.length > 1000)) refused("REVIEW_CONTACT_INVALID");
+  const fields = (raw.custom_fields_values || []).filter((field) => field?.field_id === 557903 || field?.field_code === "PHONE");
+  const values = fields.flatMap((field) => Array.isArray(field.values) ? field.values : []);
+  if (values.length > 100) refused("REVIEW_CONTACT_INVALID");
+  const phones = values.map((entry) => helpers.normalizePhone(entry?.value)).filter(Boolean), phone = helpers.normalizePhone(row.phone);
+  const flag = brokerFlagEvidence(raw);
+  return {
+    contactId: id, coverage: "observed",
+    phoneCoverage: fields.length === 0 ? "missing" : phones.length === 0 ? "invalid_or_missing" : "valid",
+    validPhoneCount: phones.length, exactClientPhoneMatches: phones.includes(phone),
+    allObservedPhonesDifferentFromClient: phones.length > 0 && !phones.includes(phone),
+    normalizedClientNameMatches: normalizedName(raw.name) === normalizedName(row.fullName),
+    leadNameMatchesContactName: !!normalizedName(raw.name) && normalizedName(leadName) === normalizedName(raw.name),
+    brokerFlagEvidence: flag.coverage, isBroker: flag.value,
+    currentlyLinkedToReviewLead: raw._embedded.leads.some((lead) => lead.id === REVIEW_LEAD_ID),
+    historicalPhoneValuesCoverage: "not_read", nonBrokerFlagConfirmed: flag.value === false,
+    // A false/missing checkbox is not a verified client role.
+    clientRoleConfirmed: false,
+  };
+}
+async function collectReviewLeadHistory(row, expanded, request, requestHistory) {
+  if (!expanded.possibleCandidates.some((candidate) => candidate.leadId === REVIEW_LEAD_ID)) return { performed: false, reason: "fixed_review_lead_not_in_candidate_scope" };
+  const rawLead = await request(`/api/v4/leads/${REVIEW_LEAD_ID}`, { with: "contacts" });
+  const lead = validatedLead(rawLead, REVIEW_LEAD_ID, row, expanded.window, false);
+  const prior = expanded.possibleCandidates.find((candidate) => candidate.leadId === REVIEW_LEAD_ID).privateLead;
+  if (JSON.stringify(lead) !== JSON.stringify(prior)) refused("EXPANDED_LEAD_CHANGED_DURING_SCAN");
+  const from = rawLead.created_at, to = expanded.window.to;
+  const first = await collectReviewEvents(requestHistory, from, to);
+  const brokerId = positiveId(validateCase(row, true).broker.amoContactId), ids = new Set();
+  for (const event of first.events) {
+    if (!["contact_linked", "contact_unlinked", "entity_linked", "entity_unlinked"].includes(event.type)) continue;
+    for (const change of [...event.value_before, ...event.value_after]) {
+      const entity = change?.link?.entity || change?.unlink?.entity;
+      if (entity?.type === "contact") { if (!positiveId(entity.id)) refused("REVIEW_EVENTS_INVALID"); if (entity.id !== brokerId) ids.add(entity.id); }
+    }
+  }
+  if (ids.size > REVIEW_MAX_HISTORICAL_CONTACTS) refused("REVIEW_CONTACT_SCOPE_EXCEEDED");
+  const allowedIds = [...ids].sort((a, b) => a - b), contacts = [], contactFingerprints = new Map();
+  for (const id of allowedIds) {
+    const result = await requestHistory("historicalContact", { id, allowedIds });
+    contacts.push(result.coverage === "observed" && result.payload !== null ? reviewContactEvidence(result.payload, row, rawLead.name, id) : { contactId: id, coverage: result.payload === null && result.coverage === "observed" ? "deleted_or_unavailable" : result.coverage, clientRoleConfirmed: false });
+    contactFingerprints.set(id, privateFingerprint({ coverage: result.coverage, entity: stableReviewEntity(result.payload) }));
+  }
+  const second = await collectReviewEvents(requestHistory, from, to);
+  const after = await request(`/api/v4/leads/${REVIEW_LEAD_ID}`, { with: "contacts" });
+  validatedLead(after, REVIEW_LEAD_ID, row, expanded.window, false);
+  let contactsStable = true;
+  for (const id of allowedIds) {
+    const readback = await requestHistory("historicalContact", { id, allowedIds });
+    if (readback.coverage === "observed" && readback.payload !== null) reviewContactEvidence(readback.payload, row, after.name, id);
+    if (contactFingerprints.get(id) !== privateFingerprint({ coverage: readback.coverage, entity: stableReviewEntity(readback.payload) })) contactsStable = false;
+  }
+  const order = (events) => [...events].sort((a, b) => a.id.localeCompare(b.id));
+  const stableReadback = contactsStable && privateFingerprint(stableReviewEntity(rawLead)) === privateFingerprint(stableReviewEntity(after)) && privateFingerprint(order(first.events)) === privateFingerprint(order(second.events)) && first.coverage === second.coverage && first.complete === second.complete;
+  const texts = first.events.flatMap((event) => stringsInEventValue([event.value_before, event.value_after]));
+  const nameValues = first.events.filter((event) => event.type === "name_field_changed").flatMap((event) => stringsInEventValue([event.value_before, event.value_after]));
+  const missingHistoricalEntities = contacts.some((contact) => contact.coverage !== "observed");
+  const noteDeleted = first.events.some((event) => event.type === "common_note_deleted");
+  return {
+    performed: true, leadId: REVIEW_LEAD_ID,
+    pagesRead: first.pagesRead, eventsRead: first.events.length, secondPagesRead: second.pagesRead,
+    coverage: first.coverage, eventWindowComplete: first.complete && second.complete, stableReadback,
+    leadCreatedEventObserved: first.events.some((event) => event.type === "lead_added"),
+    scope: "lead_events_and_current_historical_contacts_only",
+    // Event pagination completeness cannot prove deleted data or prior contact
+    // phone values are available. Never publish global identity/absence proof.
+    historyComplete: false,
+    historicalContacts: contacts, historicalContactsRead: contacts.length,
+    contactLinkEvents: first.events.filter((event) => event.type === "contact_linked").length,
+    contactUnlinkEvents: first.events.filter((event) => event.type === "contact_unlinked").length,
+    deletedNoteObserved: noteDeleted, missingHistoricalEntityObserved: missingHistoricalEntities,
+    historicalClientNameMentioned: nameValues.some((text) => (` ${normalizedName(text)} `).includes(` ${normalizedName(row.fullName)} `)),
+    requestUuidMentionedInEvents: texts.some((text) => text.includes(CLIENT_ID)),
+    exactClientPhoneMentionedInEvents: texts.some((text) => textPhoneMatches(text, helpers.normalizePhone(row.phone))),
+    eventSummary: first.events.map((event) => ({ type: event.type, at: new Date(event.created_at * 1000).toISOString() })),
+    advisoryOnly: true, identityConfirmed: false, historicalPhoneChangesInspected: false, absenceProof: false,
   };
 }
 function validatedLead(raw, expectedId, row, window, requireWindow) {
@@ -505,17 +669,18 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   const contactEvidence = () => helpers.collectAmoEvidence([initial.row], request);
   const expanded = await collectExpandedEvidence({ row: initial.row, brokerContact, contactEvidence, request, requestWindow, scanNow });
   const reviewLeadComparison = await collectReviewLeadComparison(initial.row, expanded, request, createReviewNotesRequester(token, fetchImpl));
+  const reviewLeadHistory = await collectReviewLeadHistory(initial.row, expanded, request, createReviewHistoryRequester(token, fetchImpl));
   const evidence = expanded.contactEvidence;
   const storedId = helpers.optionalStoredAmoLeadId(initial.row.amoLeadId);
   const storedRaw = storedId ? await request(`/api/v4/leads/${storedId}`, { with: "contacts" }) : null;
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
   const final = await snapshot(prisma, environment, false);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
-  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison };
+  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory };
 }
 function failureCode(error) {
   const allowed = ["INVALID_CASE_TIMESTAMP", "INVALID_CASE_STATE", "RESPONSIBLE_BROKER_UNRESOLVED", "OWNER_BROKER_UNRESOLVED", "FIXED_CLIENT_MISSING", "EXPECTED_BROKER_MISMATCH", "EXPECTED_BROKER_NOT_CANONICAL", "INVALID_CLIENT_PHONE", "PROJECT_MAPPING_UNSUPPORTED", "INVALID_SYNC_ATTEMPTS", "INVALID_BROKER_CONTACT_ID", "AGENCY_SCOPE_TOO_LARGE", "SOURCE_ATTESTATION_INVALID", "DATABASE_ATTESTATION_INVALID", "UNSAFE_TLS_CONFIGURATION", "DATABASE_IDENTITY_MISMATCH", "BROKER_CONTACT_ID_MISMATCH", "CASE_CHANGED_DURING_SCAN", "INVALID_CASE_NAME", "CASE_SCAN_WINDOW_UNSAFE", "WINDOW_REQUEST_CONFIGURATION_INVALID", "WINDOW_PAGE_BOUND_EXCEEDED", "WINDOW_REQUEST_REJECTED", "WINDOW_REQUEST_FAILED", "EXPANDED_LEAD_INVALID", "WINDOW_LEAD_OUT_OF_SCOPE", "WINDOW_PAGE_INVALID", "WINDOW_LEAD_DUPLICATED", "WINDOW_PAGINATION_INCOMPLETE", "BROKER_LINK_SCAN_UNAVAILABLE", "BROKER_LINK_SCAN_INVALID", "EXPANDED_CONTACT_EVIDENCE_INVALID", "EXPANDED_LEAD_CHANGED_DURING_SCAN", "EXPANDED_EVIDENCE_INCOMPLETE", "EXPANDED_POSSIBLE_LEAD_PRESENT"];
-  allowed.push("REVIEW_REQUEST_CONFIGURATION_INVALID", "REVIEW_NOTES_REQUEST_REJECTED", "REVIEW_NOTES_REQUEST_FAILED", "REVIEW_CONTACT_INVALID", "REVIEW_NOTES_INVALID");
+  allowed.push("REVIEW_REQUEST_CONFIGURATION_INVALID", "REVIEW_NOTES_REQUEST_REJECTED", "REVIEW_NOTES_REQUEST_FAILED", "REVIEW_CONTACT_INVALID", "REVIEW_NOTES_INVALID", "REVIEW_HISTORY_SCOPE_INVALID", "REVIEW_EVENTS_INVALID", "REVIEW_CONTACT_SCOPE_EXCEEDED");
   try { return allowed.includes(error?.safeCode) ? error.safeCode : helpers.classifyFailure(error); } catch { return "UNKNOWN_FAILURE"; }
 }
 async function main() {
@@ -528,4 +693,5 @@ async function main() {
 }
 module.exports = { CLIENT_ID, EXPECTED_BROKER_ID, IS_BROKER_FIELD_ID, CLIENT_SELECT, KC_PIPELINE_ID, WINDOW_PAGE_LIMIT, WINDOW_MAX_PAGES, BROKER_MAX_LINKED_LEADS, privateFingerprint, expectedGeneratedName, makeEvidenceWindow, createKcWindowRequester, collectWindowLeads, collectBrokerLeads, collectExpandedEvidence, assertCompleteNegativeEvidence, validateCase, canInspectEffectiveBroker, brokerFlagEvidence, runtimeMetadata, snapshot, buildReport, buildOwnershipReport, run, failureCode, main };
 Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches, createReviewNotesRequester, collectReviewLeadComparison, validatedLead });
+Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });

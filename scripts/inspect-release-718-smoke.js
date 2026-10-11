@@ -6,6 +6,25 @@ const assert = require('node:assert/strict');
 const BASE = 'https://broker.stmichael.ru';
 const OLD = ['Условия рассрочки Квартал Серебряный бор', 'Условия вознаграждения для брокеров на август 2026 г.', 'Условия вознаграждения партнёром St Michael'];
 const SAFE_FAILURE = 'RELEASE_SMOKE_FAILED';
+const STAGES = new Set(['inputs', 'compiled_contract', 'public_health', 'public_documents', 'public_offer', 'database_client', 'database_transaction', 'database_identity', 'catalog_metadata', 'agency_sql_counts', 'agency_period', 'service_import', 'service_with_fixations', 'parity_with_fixations', 'service_with_meetings', 'parity_with_meetings', 'service_with_both', 'parity_with_both', 'readonly_report', 'freshness_setup', 'freshness_check', 'freshness_delivery', 'database_disconnect', 'complete']);
+let failureStage = 'inputs';
+function stage(value) {
+  assert.ok(STAGES.has(value));
+  failureStage = value;
+  console.log(JSON.stringify({ releaseSmokeStage: value }));
+}
+function reportFailure(error) {
+  // Only allowlisted classifications, never message/stack/SQL/entity details.
+  const code = typeof error?.code === 'string' && /^P\d{4}$/.test(error.code) ? error.code
+    : error?.code === 'ERR_ASSERTION' ? 'ASSERTION'
+    : error?.code === 'MODULE_NOT_FOUND' ? 'MODULE_NOT_FOUND'
+    : ['TimeoutError', 'AbortError'].includes(error?.name) ? 'TIMEOUT'
+    : 'UNCLASSIFIED';
+  const SQL_FAILURES = { '57014': 'STATEMENT_TIMEOUT_OR_CANCELED', '25006': 'READ_ONLY_VIOLATION', '42703': 'UNKNOWN_COLUMN', '42P01': 'MISSING_TABLE', '22P02': 'INVALID_ENUM_OR_VALUE' };
+  const sqlCode = error?.meta?.code;
+  const sqlFailure = code === 'P2010' && typeof sqlCode === 'string' && Object.hasOwn(SQL_FAILURES, sqlCode) ? SQL_FAILURES[sqlCode] : undefined;
+  console.error(JSON.stringify({ failure: SAFE_FAILURE, stage: STAGES.has(failureStage) ? failureStage : 'inputs', code, ...(sqlFailure ? { sqlFailure } : {}) }));
+}
 function validateInputs(env) {
   assert.match(env.SMOKE_EXPECTED_SHA || '', /^[0-9a-f]{40}$/);
   assert.equal(env.GIT_SHA, env.SMOKE_EXPECTED_SHA);
@@ -47,14 +66,19 @@ async function publicJson(suffix) {
   assert.equal(response.status, 200);
   return boundedJson(response);
 }
-async function verifyAgencyCounts(service, period, expected) {
+async function verifyAgencyCounts(service, period, expected, markStage = () => {}) {
   const actual = {};
   for (const [kind, filter, fields] of [
     ['with_fixations', { fixationPeriod: period }, ['fixations']],
     ['with_meetings', { meetingPeriod: period }, ['meetings']],
     ['with_both', { fixationPeriod: period, meetingPeriod: period }, ['fixations', 'meetings']],
   ]) {
+    markStage('service_' + kind);
     const response = await service.list('ours', 'AGENCY', { page: 1, pageSize: 1 }, undefined, { includeLowSignal: true, ...filter });
+    markStage('parity_' + kind);
+    // Counts are not entity data; expose a mismatch without leaking the item.
+    assert.ok(Number.isInteger(response.total) && Number.isInteger(expected[kind]));
+    if (response.total !== expected[kind]) console.log(JSON.stringify({ releaseSmokeCountMismatch: kind, expected: expected[kind], actual: response.total }));
     assert.equal(response.total, expected[kind]);
     assert.ok(response.total >= 0 && response.total <= expected.total);
     for (const item of response.items) for (const field of fields) assert.ok(item.periodMetrics?.[field] > 0);
@@ -63,7 +87,9 @@ async function verifyAgencyCounts(service, period, expected) {
   return actual;
 }
 async function inspect(env = process.env) {
+  stage('inputs');
   validateInputs(env);
+  stage('compiled_contract');
   const apiRoot = '/app/apps/api/dist';
   const compiled = fs.readFileSync(path.join(apiRoot, 'scheduler/content-freshness.service.js'), 'utf8');
   const moduleCode = fs.readFileSync(path.join(apiRoot, 'scheduler/scheduler.module.js'), 'utf8');
@@ -71,21 +97,28 @@ async function inspect(env = process.env) {
   assert.ok(compiled.includes('15 9 * * *') && compiled.includes('Europe/Moscow'));
   assert.match(moduleCode, /providers:[\s\S]*ContentFreshnessService/);
   assert.ok(loyaltyCode.includes('const explicitDealPredicate') && loyaltyCode.includes('const noMeetings'));
+  stage('public_health');
   const health = await publicJson('/api/health');
   assert.equal(health.deployedSha, env.SMOKE_EXPECTED_SHA);
+  stage('public_documents');
   const documents = summarizeDocuments(await publicJson('/api/public/documents?category=cooperation'));
   assert.equal(documents.obsoleteAbsent, true);
+  stage('public_offer');
   const offer = await publicJson('/api/offer/current');
   assert.ok(typeof offer.body === 'string' && offer.body.length > 100 && typeof offer.version === 'string');
+  stage('database_client');
   const { PrismaClient } = require('/app/node_modules/@st-michael/database');
   const prisma = new PrismaClient();
   try {
+    stage('database_transaction');
     const report = await prisma.$transaction(async tx => {
       await tx.$executeRawUnsafe('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
       await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '20000ms'");
+      stage('database_identity');
       const identity = await tx.$queryRawUnsafe('SELECT system_identifier::text AS id FROM pg_control_system()');
       assert.equal(identity[0]?.id, env.PRODUCTION_PG_SYSTEM_IDENTIFIER);
       assert.ok(await tx.broker.count() >= Number(env.PRODUCTION_MIN_BROKER_ROWS));
+      stage('catalog_metadata');
       const metadata = [];
       for (const project of ['ZORGE9', 'SILVER_BOR']) {
         const row = await tx.systemSetting.findUnique({ where: { key: 'catalog.feed.freshness.' + project }, select: { value: true } });
@@ -95,6 +128,7 @@ async function inspect(env = process.env) {
       }
       // Independent current-membership counts, NOT complete API parity. Registry
       // agency-name aliases intentionally are not approximated by this query.
+      stage('agency_sql_counts');
       const rows = await tx.$queryRawUnsafe(`
         WITH periods AS (
           SELECT date_trunc('month', now() AT TIME ZONE 'Europe/Moscow')::date AS start,
@@ -112,13 +146,17 @@ async function inspect(env = process.env) {
           count(*) FILTER (WHERE fixes)::int AS with_fixations,
           count(*) FILTER (WHERE meetings)::int AS with_meetings,
           count(*) FILTER (WHERE fixes AND meetings)::int AS with_both FROM activity`);
+      stage('agency_period');
       const periodRows = await tx.$queryRawUnsafe(`SELECT to_char(date_trunc('month', now() AT TIME ZONE 'Europe/Moscow'), 'YYYY-MM-DD') AS "from", to_char(now() AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD') AS "to"`);
+      stage('service_import');
       const { LoyaltyBaseService } = require(path.join(apiRoot, 'loyalty-base/loyalty-base.service'));
-      const actual = await verifyAgencyCounts(new LoyaltyBaseService(tx), periodRows[0], rows[0]);
+      const actual = await verifyAgencyCounts(new LoyaltyBaseService(tx), periodRows[0], rows[0], stage);
       return { catalogMetadata: metadata, currentMonthAgencySqlCounts: rows[0], currentMonthAgencyServiceCounts: actual, fixationMeetingParityVerified: true, apiParityVerified: false };
     }, { timeout: 90000 });
+    stage('readonly_report');
     console.log(JSON.stringify({ deployedSha: env.SMOKE_EXPECTED_SHA, freshnessRegistered: true, cron: '09:15 Europe/Moscow', ...documents, offerPresent: true, ...report }));
     if (env.SMOKE_CONFIRM_SEND === 'true') {
+      stage('freshness_setup');
       // Explicit opt-in only: this can notify ops and reserve daily dedup keys.
       const { ConfigService } = require('/app/node_modules/@nestjs/config');
       const { CatalogService } = require(path.join(apiRoot, 'catalog/catalog.service'));
@@ -146,11 +184,19 @@ async function inspect(env = process.env) {
         if (sent === true) delivery.confirmed++; else delivery.unconfirmed++;
         return sent;
       } };
+      stage('freshness_check');
       await new ContentFreshnessService({ systemSetting: settings, document: { findMany: prisma.document.findMany.bind(prisma.document) } }, new CatalogService(prisma), trackedAlerts).check();
+      stage('freshness_delivery');
       console.log(JSON.stringify({ freshnessCheckInvoked: true, delivery, stateWrites, noDeliveryAttemptMade: delivery.attempted === 0 }));
       if (delivery.unconfirmed) throw new Error(SAFE_FAILURE);
     }
-  } finally { await prisma.$disconnect(); }
+  } finally {
+    // Preserve the originating failure stage if disconnect succeeds.
+    const previousStage = failureStage;
+    try { await prisma.$disconnect(); } catch (error) { failureStage = 'database_disconnect'; throw error; }
+    failureStage = previousStage;
+  }
+  stage('complete');
 }
-module.exports = { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, inspect };
-if (require.main === module) inspect().catch(() => { console.error(SAFE_FAILURE); process.exitCode = 1; });
+module.exports = { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, reportFailure, inspect };
+if (require.main === module) inspect().catch(error => { reportFailure(error); process.exitCode = 1; });

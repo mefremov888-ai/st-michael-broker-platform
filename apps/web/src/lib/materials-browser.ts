@@ -17,6 +17,10 @@ export interface MaterialDocument {
   fileUrl: string;
   fileSize?: number | null;
 }
+/** Hide explicitly superseded cooperation files only; private cabinet materials remain available. */
+export function currentMaterials<T extends { description?: string | null }>(documents: T[]): T[] {
+  return documents.filter(doc => !/^\s*\[archived:cooperation-current\]/i.test(doc.description || ''));
+}
 export type MaterialCover = { kind: 'image' | 'video'; src: string; poster?: string };
 
 export function materialsFolderCover(layout: MaterialsFolderLayout, docs: MaterialDocument[], parts: string[]): MaterialCover | null {

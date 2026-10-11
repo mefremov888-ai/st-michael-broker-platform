@@ -12,6 +12,7 @@ import {
   materialsProjectCover,
   standaloneMaterials,
   uniqueMaterials,
+  currentMaterials,
   type MaterialDocument,
 } from './materials-browser';
 import { materialHref } from './materials-folder-tree';
@@ -28,6 +29,16 @@ function document(overrides: Partial<MaterialDocument> = {}): MaterialDocument {
     ...overrides,
   };
 }
+test('explicitly archived cooperation material is hidden without hiding legitimate private documents', () => {
+  const rows = [
+    {...document({id:'old',description:'[archived:cooperation-current] superseded'}),isPublic:false},
+    {...document({id:'private',description:'Внутренние материалы для брокеров'}),isPublic:false},
+    {...document({id:'current',description:'Текущие условия'}),isPublic:true},
+    document({id:'other-archive',description:'[archived:other-scope]'}),
+  ];
+  assert.deepEqual(currentMaterials(rows).map(d => d.id), ['private','current','other-archive']);
+  assert.equal(rows.length,4);
+});
 
 function layout(overrides: Partial<MaterialsFolderLayout> = {}): MaterialsFolderLayout {
   return {

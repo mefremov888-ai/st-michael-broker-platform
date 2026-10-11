@@ -5,5 +5,5 @@ export function publishedCooperationDocuments<T extends { isPublic: boolean }>(p
 }
 
 export function visibleDocumentDescription(description: string | null): string {
-  return description && !/^\[(?:seed:|landing-)/i.test(description) ? description : '';
+  return description && !/^\s*\[(?:seed:|landing-|archived:cooperation-current\])/i.test(description) ? description : '';
 }

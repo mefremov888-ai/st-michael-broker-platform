@@ -1,7 +1,7 @@
-name: Publish approved October 2026 rewards PDF
+name: Publish approved October 2026 rewards and advertising PDFs
 
-# Exact one-document case. Plan is read-only; apply preserves the old file,
-# archives only the pinned row, and leaves offer versions/acceptances untouched.
+# Exact two-PDF case. Plan is read-only; apply preserves all old files,
+# archives only two pinned rows, and leaves offer versions/acceptances untouched.
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +11,7 @@ on:
         default: plan
         required: true
       confirmation:
-        description: Apply only - type PUBLISH_APPROVED_OCTOBER_REWARDS
+        description: Apply only - type PUBLISH_APPROVED_CURRENT_TWO_PDFS
         type: string
         required: false
       expected_old_hash:
@@ -60,7 +60,7 @@ jobs:
           mode=$(jq -er '.inputs.mode | select(. == "plan" or . == "apply")' "$GITHUB_EVENT_PATH")
           old_hash=none; backup_run=0; backup_attempt=0; backup_epoch=0
           if [ "$mode" = apply ]; then
-            jq -e '.inputs.confirmation == "PUBLISH_APPROVED_OCTOBER_REWARDS"' "$GITHUB_EVENT_PATH" >/dev/null
+            jq -e '.inputs.confirmation == "PUBLISH_APPROVED_CURRENT_TWO_PDFS"' "$GITHUB_EVENT_PATH" >/dev/null
             old_hash=$(jq -er '.inputs.expected_old_hash | select(type == "string" and test("^[a-f0-9]{64}$"))' "$GITHUB_EVENT_PATH")
             backup_run=$(jq -er '.inputs.backup_run_id | select(type == "string" and test("^[1-9][0-9]{5,19}$"))' "$GITHUB_EVENT_PATH")
             backup=$(gh api "/repos/$EXPECTED_REPOSITORY/actions/runs/$backup_run")
@@ -78,12 +78,14 @@ jobs:
           if [ "$mode" = apply ]; then test "$deployed_sha" = "$SOURCE_SHA"; fi
           comparison=$(gh api "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$SOURCE_SHA" --jq '.status')
           case "$comparison" in ahead|identical) ;; *) exit 1;; esac
-          for file in scripts/publish-rewards-october-2026.js assets/cooperation/rewards-2026-10-11.pdf; do
+          for file in scripts/publish-rewards-october-2026.js assets/cooperation/rewards-2026-10-11.pdf assets/cooperation/advertising-regulation-2026-10-11.pdf; do
             test -f "$file" -a ! -L "$file"
             test "$(git show "$SOURCE_SHA:$file" | sha256sum | cut -d' ' -f1)" = "$(sha256sum "$file" | cut -d' ' -f1)"
           done
           test "$(sha256sum assets/cooperation/rewards-2026-10-11.pdf | cut -d' ' -f1)" = e2161fa26b105b3cec99a2e234315fb64fda1c2fd12b1db13107cc11697ce80d
           test "$(stat -c %s assets/cooperation/rewards-2026-10-11.pdf)" = 1274759
+          test "$(sha256sum assets/cooperation/advertising-regulation-2026-10-11.pdf | cut -d' ' -f1)" = da2ec1f91970b80cc5ff44fc076527e4b66c9f1b5d7cb883b793d93eac3c4085
+          test "$(stat -c %s assets/cooperation/advertising-regulation-2026-10-11.pdf)" = 221309
           node --test scripts/publish-rewards-october-2026.test.js
           printf 'mode=%s\nold_hash=%s\nbackup_run=%s\nbackup_attempt=%s\nbackup_epoch=%s\ndeployed_sha=%s\n' "$mode" "$old_hash" "$backup_run" "$backup_attempt" "$backup_epoch" "$deployed_sha" >> "$GITHUB_OUTPUT"
       - name: Stream exact immutable PDF and scoped publisher under production lock
@@ -118,7 +120,7 @@ jobs:
           archive="$work/payload.tar"; key="$work/key"; hosts="$work/known_hosts"
           cleanup_local() { rm -f -- "$archive" "$key" "$hosts"; rmdir -- "$work" 2>/dev/null || true; }
           trap cleanup_local EXIT
-          tar --format=ustar -cf "$archive" scripts/publish-rewards-october-2026.js assets/cooperation/rewards-2026-10-11.pdf
+          tar --format=ustar -cf "$archive" scripts/publish-rewards-october-2026.js assets/cooperation/rewards-2026-10-11.pdf assets/cooperation/advertising-regulation-2026-10-11.pdf
           archive_sha=$(sha256sum "$archive" | cut -d' ' -f1)
           script_sha=$(sha256sum scripts/publish-rewards-october-2026.js | cut -d' ' -f1)
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"; chmod 600 "$key"; unset SSH_PRIVATE_KEY
@@ -202,6 +204,7 @@ jobs:
               timeout 10 docker exec st-michael-api sh -c '
                 root=$1
                 rm -f -- "$root/scripts/publish-rewards-october-2026.js" "$root/assets/cooperation/rewards-2026-10-11.pdf"
+                rm -f -- "$root/assets/cooperation/advertising-regulation-2026-10-11.pdf"
                 rmdir -- "$root/assets/cooperation" "$root/assets" "$root/scripts" "$root"
               ' cleanup "$container_root" >/dev/null 2>/dev/null || true
             fi
@@ -217,7 +220,7 @@ jobs:
             cat <<'REMOTE_SUFFIX'
           test "$(stat -c %s "$archive")" -le 2097152
           test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$archive_sha"
-          test "$(tar -tf "$archive")" = $'scripts/publish-rewards-october-2026.js\nassets/cooperation/rewards-2026-10-11.pdf'
+          test "$(tar -tf "$archive")" = $'scripts/publish-rewards-october-2026.js\nassets/cooperation/rewards-2026-10-11.pdf\nassets/cooperation/advertising-regulation-2026-10-11.pdf'
           container_root=$(timeout 20 docker exec -i st-michael-api sh -c '
             set -eu; umask 077
             test -d /app -a ! -L /app
@@ -225,8 +228,10 @@ jobs:
             tar -xf - -C "$root"
             test -f "$root/scripts/publish-rewards-october-2026.js" -a ! -L "$root/scripts/publish-rewards-october-2026.js"
             test -f "$root/assets/cooperation/rewards-2026-10-11.pdf" -a ! -L "$root/assets/cooperation/rewards-2026-10-11.pdf"
+            test -f "$root/assets/cooperation/advertising-regulation-2026-10-11.pdf" -a ! -L "$root/assets/cooperation/advertising-regulation-2026-10-11.pdf"
             test "$(sha256sum "$root/scripts/publish-rewards-october-2026.js" | cut -d" " -f1)" = "$1"
             test "$(sha256sum "$root/assets/cooperation/rewards-2026-10-11.pdf" | cut -d" " -f1)" = e2161fa26b105b3cec99a2e234315fb64fda1c2fd12b1db13107cc11697ce80d
+            test "$(sha256sum "$root/assets/cooperation/advertising-regulation-2026-10-11.pdf" | cut -d" " -f1)" = da2ec1f91970b80cc5ff44fc076527e4b66c9f1b5d7cb883b793d93eac3c4085
             printf "%s" "$root"
           ' staging "$script_sha" < "$archive")
           [[ "$container_root" =~ ^/app/\.rewards-publication\.[A-Za-z0-9]{6}$ ]]
@@ -236,6 +241,7 @@ jobs:
             -e EXPECTED_DEPLOYED_SHA="$deployed_sha" -e PRODUCTION_PG_SYSTEM_IDENTIFIER="$expected_pg" \
             -e PRODUCTION_MIN_BROKER_ROWS="$broker_floor" -e VERIFIED_BACKUP_SHA256="$backup_checksum" -e VERIFIED_BACKUP_AT="$backup_at" \
             -e SOURCE_PDF="$container_root/assets/cooperation/rewards-2026-10-11.pdf" \
+            -e SOURCE_AD_PDF="$container_root/assets/cooperation/advertising-regulation-2026-10-11.pdf" \
             st-michael-api node "$container_root/scripts/publish-rewards-october-2026.js" 2>/dev/null
           assert_runtime
           REMOTE_SUFFIX
