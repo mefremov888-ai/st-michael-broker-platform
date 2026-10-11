@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
-const { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, classifyFailure, reportFailure } = require('./inspect-release-718-smoke');
+const { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, traceReadQueries, stage, classifyFailure, reportFailure } = require('./inspect-release-718-smoke');
 test('exact deployed SHA and explicit send flag are required', () => {
   const env = { SMOKE_EXPECTED_SHA: 'a'.repeat(40), GIT_SHA: 'a'.repeat(40), PRODUCTION_PG_SYSTEM_IDENTIFIER: '123', PRODUCTION_MIN_BROKER_ROWS: '100' };
   validateInputs(env);
@@ -138,4 +138,26 @@ test('workflow pins SSH host and checks container plus checkout SHA before smoke
   assert.match(workflow, /com\.docker\.compose\.service/);
   assert.doesNotMatch(workflow, /docker compose up|restart|git pull|system prune/);
   assert.match(workflow, /printf '\\ninspect\(\)\.catch/);
+});
+
+test('query tracing preserves reads and exposes only fixed model/operation/count/timing labels', async () => {
+  const log = [], args = { where: { phone: 'private-phone' } }, result = [{ id: 'private-id' }];
+  let time = 0;
+  const delegate = { async findMany(input) { assert.equal(this, delegate); assert.equal(input, args); return result; } };
+  const transaction = { agency: delegate, async $queryRawUnsafe(sql) { assert.equal(this, transaction); assert.equal(sql, 'private-sql'); return result; } };
+  const traced = traceReadQueries(transaction, value => log.push(value), () => ++time);
+  assert.equal(await traced.agency.findMany(args), result);
+  assert.equal(await traced.$queryRawUnsafe('private-sql'), result);
+  assert.deepEqual(log[0], { releaseSmokeQuery: { query: 1, model: 'agency', operation: 'findMany', phase: 'start' } });
+  assert.deepEqual(log[1], { releaseSmokeQuery: { query: 1, model: 'agency', operation: 'findMany', phase: 'complete', elapsedMs: 1, rowCount: 1 } });
+  assert.doesNotMatch(JSON.stringify(log), /private-phone|private-id|private-sql/);
+});
+
+test('query failure tracing never logs provider messages, arguments or returned entity data', async () => {
+  const log = [], error = new Error('private-token private-sql private-phone');
+  let time = 0;
+  const traced = traceReadQueries({ client: { async groupBy() { throw error; } } }, value => log.push(value), () => ++time);
+  await assert.rejects(traced.client.groupBy({ private: 'private-argument' }), candidate => candidate === error);
+  assert.deepEqual(log[1], { releaseSmokeQuery: { query: 1, model: 'client', operation: 'groupBy', elapsedMs: 1, phase: 'failed' } });
+  assert.doesNotMatch(JSON.stringify(log), /private/);
 });
