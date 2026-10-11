@@ -56,7 +56,7 @@ test('workflow defaults to plan, uses existing exact-SHA backups and strict prod
   assert.match(text, /expected_old_hash/);
   assert.match(text, /head_sha == \$sha/);
   assert.match(text, /\/var\/backups\/stmichael\/loyalty-predeploy/);
-  assert.match(text, /loyalty-predeploy-\$\{source_sha\}-run\$\{backup_run\}-attempt\$\{backup_attempt\}\.dump/);
+  assert.match(text, /loyalty-predeploy-\$\{deployed_sha\}-run\$\{backup_run\}-attempt\$\{backup_attempt\}\.dump/);
   assert.match(text, /-le 21600/);
   assert.match(text, /pg_restore --exit-on-error --no-owner --file=\/dev\/null/);
   assert.match(text, /StrictHostKeyChecking=yes/);
@@ -66,6 +66,24 @@ test('workflow defaults to plan, uses existing exact-SHA backups and strict prod
   assert.match(text, /base64 -w 0 "\$archive"/);
   assert.match(text, /git show "\$SOURCE_SHA:\$file"/);
   assert.doesNotMatch(text, /docker compose up|restart|git pull|system prune|pg_restore.*-d broker_platform/);
+});
+
+test('operational-only staging is private /tmp and exact deployed payload is attested before SSH', () => {
+  const path = require('node:path');
+  const text = readFileSync(path.join(__dirname, '../.github/workflows/publish-rewards-october-2026.yml'), 'utf8');
+  assert.match(text, /root=\$\(mktemp -d \/tmp\/st-michael-rewards-publication\.XXXXXX\)/);
+  assert.match(text, /stat -c %a "\$root"\)" = 700/);
+  assert.equal((text.match(/\^\/tmp\/st-michael-rewards-publication/g) || []).length, 2);
+  assert.doesNotMatch(text, /mktemp -d \/app|\^\/app\/\\\.rewards-publication/);
+  const healthAt = text.indexOf('deployed_sha=$(curl');
+  const backupAt = text.indexOf('backup=$(gh api');
+  assert.ok(healthAt > 0 && healthAt < backupAt);
+  assert.match(text, /--arg sha "\$deployed_sha" --arg id "\$backup_run"/);
+  assert.match(text, /git -C \.deployed-publisher-source rev-parse HEAD\)" = "\$DEPLOYED_SHA"/);
+  assert.match(text, /deployed_blob=\$\(git -C \.deployed-publisher-source show "\$DEPLOYED_SHA:\$file"/);
+  assert.match(text, /test "\$reviewed_blob" = "\$deployed_blob"/);
+  assert.ok(text.indexOf('test "$reviewed_blob" = "$deployed_blob"') < text.indexOf('Stream exact immutable PDF'));
+  assert.doesNotMatch(text, /if \[ "\$mode" = apply \]; then test "\$deployed_sha" = "\$SOURCE_SHA"/);
 });
 
 function databaseFixture(failure) {
