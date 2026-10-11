@@ -359,7 +359,19 @@ function reviewSourceEvidence(rawLead, events, row) {
     return result;
   };
   const current = (id) => scalarValues(fields.filter((field) => field?.field_id === id));
-  const historical = (id) => events.filter((event) => event.type === `custom_field_${id}_value_changed`).flatMap((event) => scalarValues([event.value_before, event.value_after]));
+  const historical = (id) => events.filter((event) => event.type === `custom_field_${id}_value_changed`).flatMap((event) => [...event.value_before, ...event.value_after].flatMap((change) => {
+    const field = change?.custom_field_value;
+    if (!record(field)) return [];
+    if (field.field_id !== undefined && field.field_id !== id) refused("REVIEW_SOURCE_INVALID");
+    // Official Events API uses custom_field_value.text, unlike current
+    // custom_fields_values[].values[].value. Never scan unrelated event text.
+    if (typeof field.text === "string") {
+      if (field.field_id !== id || Buffer.byteLength(field.text, "utf8") > 64000) refused("REVIEW_SOURCE_INVALID");
+      return [field.text];
+    }
+    if (field.text !== undefined && field.text !== null) refused("REVIEW_SOURCE_INVALID");
+    return scalarValues(field);
+  }));
   const phoneEvidence = (values) => {
     const phones = values.map((value) => helpers.normalizePhone(value)).filter(Boolean);
     const clientPhone = helpers.normalizePhone(row.phone), brokerPhone = helpers.normalizePhone(effectiveBroker(row).broker.phone);

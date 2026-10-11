@@ -107,6 +107,19 @@ describe('fixed amo lead bounded GET-only history', () => {
     const result = inspector.reviewSourceEvidence({ ...lead, custom_fields_values: [{ field_id: 618511, values: [{ value: 'somecalltouchvalue' }] }, { field_id: 618527, values: [{ value: '09.10.2026 10:52:47' }] }] }, [], row);
     expect(result).toMatchObject({ createdFromCalltouchObserved: false, parsedRequestTimes: [], unparsedRequestTimeCount: 1, caseLastAttemptAt: null, leadCreatedSecondsAfterCaseLastAttempt: null });
   });
+  it('reads official custom_field_value.text history without exposing phone, source or call ID', () => {
+    const changed = (id: number, text: string) => event({ id: `field${id}`, type: `custom_field_${id}_value_changed`, value_before: [], value_after: [{ custom_field_value: { field_id: id, field_type: 1, enum_id: null, text } }] });
+    const result = inspector.reviewSourceEvidence(lead, [changed(618517, '+79990001122'), changed(618511, 'Calltouch'), changed(618577, 'private-call-id'), changed(618527, '2026-10-09T07:52:47Z')], { ...row, broker: { ...row.broker, phone: '+79990001122' } });
+    expect(result).toMatchObject({ historicalClientNumber: { validPhoneCount: 1, exactClientPhoneMatches: false, exactEffectiveBrokerPhoneMatches: true, allObservedPhonesDifferentFromClient: true }, createdFromCalltouchObserved: true, calltouchCallIdNonempty: true, parsedRequestTimes: ['2026-10-09T07:52:47.000Z'] });
+    expect(JSON.stringify(result)).not.toMatch(/7999|private-call-id/);
+    expect(inspector.reviewSourceEvidence(lead, [changed(618517, row.phone)], row).historicalClientNumber.exactClientPhoneMatches).toBe(true);
+  });
+  it('rejects mismatched historical field IDs, oversized text and invalid text types', () => {
+    const change = (field: any) => [event({ type: 'custom_field_618517_value_changed', value_before: [], value_after: [{ custom_field_value: field }] })];
+    for (const field of [{ field_id: 618519, text: row.phone }, { text: row.phone }, { field_id: 618517, text: 'x'.repeat(64001) }, { field_id: 618517, text: 79991234567 }]) expect(() => inspector.reviewSourceEvidence(lead, change(field), row)).toThrow();
+    const unrelated = [event({ type: 'custom_field_618517_value_changed', value_before: [], value_after: [{ arbitrary: { text: row.phone } }] })];
+    expect(inspector.reviewSourceEvidence(lead, unrelated, row).historicalClientNumber.validPhoneCount).toBe(0);
+  });
   it('reports exact linked entity IDs but redacts unknown entity types, and reads plural contact links', async () => {
     const events = [event({ type: 'entity_linked', value_before: [], value_after: [{ link: { entity: { type: 'contacts', id: 800001 } } }] }), event({ id: 'unknown1', type: 'entity_linked', value_before: [], value_after: [{ link: { entity: { type: 'private-name', id: 800002 } } }] })];
     const result = await inspector.collectReviewLeadHistory(row, expanded, get, history(events));
