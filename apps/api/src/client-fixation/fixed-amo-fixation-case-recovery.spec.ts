@@ -93,7 +93,7 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     _embedded: { contacts: [{ id: 800001 }, { id: 47267177 }] },
     custom_fields_values: [{ field_id: 665195, values: [{ enum_id: 985337 }] }, { field_id: 833189, values: [{ value: unix }] }, { field_id: 839179, values: [{ value: "Зорге 9" }] }], ...changes });
   function provider(options: any = {}) {
-    const state: any = { contact: options.existingContact ? contact() : null, lead: null };
+    const state: any = { contact: options.existingContact ? contact() : null, lead: null, reviewNoteReads: 0 };
     const request = jest.fn(async (path: string) => {
       if (path === "/api/v4/account") return { id: 28552900 };
       if (path === "/api/v4/contacts/47267177") return brokerContact(Boolean(state.lead));
@@ -103,6 +103,14 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
       throw Error("private token +79990001122 private@example.test");
     });
     const fetch = jest.fn(async (url: URL, optionsFetch: any) => {
+      if (url.pathname === "/api/v4/leads/32372907/notes" && optionsFetch.method === "GET") {
+        state.reviewNoteReads++;
+        if (options.reviewNotesChanging) return state.reviewNoteReads === 1 ? json({}, 204) : json({ _embedded: { notes: [] } });
+        if (options.reviewNotes204) return json({}, 204);
+        if (options.reviewNotesRejected) return json({}, 403);
+        if (options.reviewNotesMalformed) return json({});
+        if (options.reviewNotesNull200) return json(null);
+      }
       if (url.pathname === "/api/v4/contacts" && optionsFetch.method === "POST") {
         if (options.contactAbsent) throw Error("private-contact-error");
         state.contact = contact();
@@ -206,6 +214,38 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     expect(plan.caseHash).toMatch(/^[a-f0-9]{64}$/); expect(plan.candidateHash).toMatch(/^[a-f0-9]{64}$/);
     expect(db.tx.client.updateMany).not.toHaveBeenCalled(); expect(db.tx.auditLog.create).not.toHaveBeenCalled();
     expect(crm.fetch.mock.calls.every(([_url, options]) => options.method === "GET")).toBe(true);
+  });
+  it("plans with authoritative HTTP204 notes from the strict requester, without any write", async () => {
+    inspector.createReviewNotesRequester = originals.notes;
+    const { db, crm, plan } = await execute({ planOnly: true, reviewNotes204: true });
+    expect(plan.status).toBe("planned");
+    expect(db.tx.client.updateMany).not.toHaveBeenCalled(); expect(db.tx.auditLog.create).not.toHaveBeenCalled();
+    const notes = crm.fetch.mock.calls.filter(([url]) => url.pathname === "/api/v4/leads/32372907/notes");
+    expect(notes).toHaveLength(4); expect(notes.every(([, options]) => options.method === "GET")).toBe(true);
+    expect(crm.fetch.mock.calls.every(([, options]) => options.method === "GET")).toBe(true);
+    inspector.createReviewNotesRequester = jest.fn(() => async () => ({ _embedded: { notes: [] } }));
+    const empty200 = await execute({ planOnly: true });
+    // 204 provenance cannot disappear unnoticed from the candidate fingerprint.
+    expect(plan.candidateHash).not.toBe(empty200.plan.candidateHash);
+  });
+  it.each([undefined, {}])("does not normalize a missing/malformed notes payload %j", async (payload) => {
+    inspector.createReviewNotesRequester = jest.fn(() => async () => payload);
+    await expect(execute({ planOnly: true })).rejects.toMatchObject({ safeCode: "CERT_NOTES_INCOMPLETE" });
+  });
+  it("keeps HTTP403 and malformed HTTP200 notes as failed evidence, not empty notes", async () => {
+    inspector.createReviewNotesRequester = originals.notes;
+    await expect(execute({ planOnly: true, reviewNotesRejected: true })).rejects.toMatchObject({ safeCode: "REVIEW_NOTES_REQUEST_REJECTED" });
+    await expect(execute({ planOnly: true, reviewNotesMalformed: true })).rejects.toMatchObject({ safeCode: "CERT_NOTES_INCOMPLETE" });
+  });
+  it("rejects an HTTP204-to-200 empty readback change instead of erasing provenance", async () => {
+    inspector.createReviewNotesRequester = originals.notes;
+    await expect(execute({ planOnly: true, reviewNotesChanging: true })).rejects.toMatchObject({ safeCode: "CERT_READBACK_CHANGED" });
+  });
+  it("refuses HTTP200 JSON null and unproven null instead of inventing HTTP204 provenance", async () => {
+    inspector.createReviewNotesRequester = originals.notes;
+    await expect(execute({ planOnly: true, reviewNotesNull200: true })).rejects.toMatchObject({ safeCode: "REVIEW_NOTES_REQUEST_FAILED" });
+    inspector.createReviewNotesRequester = jest.fn(() => async () => null);
+    await expect(execute({ planOnly: true })).rejects.toMatchObject({ safeCode: "CERTIFICATE_NOTES_OBSERVATION_INVALID" });
   });
   it("apply refuses a plan hash mismatch before the lease or any provider write", async () => {
     await expect(execute({ planHashMismatch: true })).rejects.toThrow("Fixed case recovery refused");

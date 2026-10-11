@@ -304,17 +304,36 @@ async function freshEvidence(row, request, token, fetchImpl, now) {
 }
 async function certificateInput(row, agency, evidence, request, token, fetchImpl) {
   const brokerContactId = id(effective(row).amoContactId);
-  const notes = inspector.createReviewNotesRequester(token, fetchImpl);
+  let notesResponseStatus = null;
+  const notesFetch = typeof fetchImpl === "function" ? fetchImpl : globalThis.fetch;
+  const notes = inspector.createReviewNotesRequester(token, async (url, options) => {
+    const response = await notesFetch(url, options);
+    notesResponseStatus = response?.status;
+    return response;
+  });
+  const observedNotes = async () => {
+    notesResponseStatus = null;
+    const payload = await notes();
+    // Pair the literal, source-attested GET with its actual HTTP response.
+    // JSON null in an HTTP 200 is malformed evidence, NOT a 204 observation.
+    // Errors throw; undefined/malformed 200 bodies remain refused. Preserve
+    // 204 provenance in both readbacks/hashes rather than guessing absence.
+    if (payload === null && notesResponseStatus !== 204) fail("CERTIFICATE_NOTES_OBSERVATION_INVALID");
+    return payload === null ? {
+      _embedded: { notes: [] },
+      fixedCaseNotesObservation: { coverage: "observed", httpStatus: 204 },
+    } : payload;
+  };
   const history = inspector.createReviewHistoryRequester(token, fetchImpl);
   const leadFirst = await request(`/api/v4/leads/${inspector.REVIEW_LEAD_ID}`, { with: "contacts" });
   const from = id(leadFirst?.created_at);
   if (!from || !Number.isSafeInteger(evidence?.expanded?.window?.to)) fail("CERTIFICATE_EVIDENCE_INVALID");
   const brokerContactFirst = await request(`/api/v4/contacts/${brokerContactId}`, { with: "leads" });
-  const notesFirst = await notes();
+  const notesFirst = await observedNotes();
   const eventsFirst = await inspector.collectReviewEvents(history, from, evidence.expanded.window.to);
   const leadSecond = await request(`/api/v4/leads/${inspector.REVIEW_LEAD_ID}`, { with: "contacts" });
   const brokerContactSecond = await request(`/api/v4/contacts/${brokerContactId}`, { with: "leads" });
-  const notesSecond = await notes();
+  const notesSecond = await observedNotes();
   const eventsSecond = await inspector.collectReviewEvents(history, from, evidence.expanded.window.to);
   return { row, agency, expanded: evidence.expanded, brokerContactId, expectedCompanyId: 43419077,
     candidate: { leadFirst, leadSecond, brokerContactFirst, brokerContactSecond,
