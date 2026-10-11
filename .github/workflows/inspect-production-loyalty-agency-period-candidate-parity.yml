@@ -1,0 +1,287 @@
+name: Inspect loyalty agency period candidate parity (read-only)
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    steps:
+      - name: Checkout exact reviewed inspector
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Inspect production candidate superset only
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          PRODUCTION_PG_SYSTEM_IDENTIFIER: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+        run: |
+          set -eEuo pipefail
+          stage=local_validation
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then printf "loyalty_parity_failed_stage=%s\nloyalty_parity_exit_code=%s\n" "$stage" "$rc" >&2; fi' EXIT
+          set_stage() { stage=$1; printf 'loyalty_parity_stage=%s\n' "$stage"; }
+
+          test "$EXPECTED_REPOSITORY" = sereganikitin/st-michael-broker-platform
+          test "$EXPECTED_REF" = refs/heads/master
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH"
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]]
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]]
+          [[ "$PRODUCTION_MIN_BROKER_ROWS" =~ ^[1-9][0-9]*$ ]]
+          for tool in base64 curl gh git jq node sha256sum ssh ssh-keygen ssh-keyscan timeout; do
+            command -v "$tool" >/dev/null
+          done
+
+          inspector_path=scripts/inspect-loyalty-agency-period-candidate-parity.js
+          test_path=scripts/inspect-loyalty-agency-period-candidate-parity.test.js
+          for path in "$inspector_path" "$test_path"; do
+            test -f "$path" -a ! -L "$path"
+          done
+          node --test "$test_path"
+          inspector_sha=$(sha256sum -- "$inspector_path" | awk '{print $1}')
+          [[ "$inspector_sha" =~ ^[0-9a-f]{64}$ ]]
+          test "$(git show "$SOURCE_SHA:$inspector_path" | sha256sum | awk '{print $1}')" = "$inspector_sha"
+
+          set_stage local_master_and_health_identity
+          master_sha=$(gh api "/repos/$EXPECTED_REPOSITORY/git/ref/heads/master" --jq '.object.sha' 2>/dev/null)
+          test "$master_sha" = "$SOURCE_SHA"
+          deployed_sha=$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 \
+            https://broker.stmichael.ru/api/health | \
+            jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')
+          compare_status=$(gh api "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$SOURCE_SHA" --jq '.status' 2>/dev/null)
+          case "$compare_status" in ahead|identical) ;; *) exit 1;; esac
+          unset master_sha compare_status GH_TOKEN
+
+          runner_temp=${RUNNER_TEMP:-/tmp}
+          test -d "$runner_temp" -a ! -L "$runner_temp"
+          ssh_root=$(mktemp -d "$runner_temp/st-michael-loyalty-parity.XXXXXX")
+          test "$(stat -c %a "$ssh_root")" = 700
+          known_hosts="$ssh_root/known_hosts"
+          private_key="$ssh_root/deploy-key"
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then printf "loyalty_parity_failed_stage=%s\nloyalty_parity_exit_code=%s\n" "$stage" "$rc" >&2; fi; rm -f -- "$known_hosts" "$private_key"; rmdir -- "$ssh_root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          unset SSH_PRIVATE_KEY
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          chmod 600 "$known_hosts"
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT"
+
+          set_stage local_pinned_ssh
+          {
+            cat <<'REMOTE_PREFIX'
+          set -eEuo pipefail
+          export LC_ALL=C GIT_OPTIONAL_LOCKS=0
+          stage=remote_validation
+          trap 'rc=$?; if [ "$rc" -ne 0 ]; then printf "loyalty_parity_failed_stage=%s\nloyalty_parity_exit_code=%s\n" "$stage" "$rc" >&2; fi' EXIT
+          set_stage() { stage=$1; printf 'loyalty_parity_stage=%s\n' "$stage"; }
+          deploy_path=$1
+          expected_deployed_sha=$2
+          expected_source_hash=$3
+          expected_system_identifier=$4
+          minimum_broker_rows=$5
+          for tool in awk base64 curl docker flock git jq readlink sha256sum stat timeout; do command -v "$tool" >/dev/null; done
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          [[ "$expected_deployed_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$expected_source_hash" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$expected_system_identifier" =~ ^[0-9]+$ ]]
+          [[ "$minimum_broker_rows" =~ ^[1-9][0-9]*$ ]]
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != / -a -d "$deploy_root"
+
+          set_stage remote_shared_lock
+          lock_path=/tmp/st-michael-production-deploy.lock
+          test -f "$lock_path" -a ! -L "$lock_path"
+          test "$(stat -c '%a:%u:%g' "$lock_path")" = '600:0:0'
+          lock_identity=$(stat -Lc '%d:%i' -- "$lock_path")
+          exec 9<"$lock_path"
+          test "$(stat -Lc '%d:%i' -- /proc/$$/fd/9)" = "$lock_identity"
+          flock -s -n 9 || { echo production_lock_busy=true; exit 1; }
+          assert_lock() {
+            test -f "$lock_path" -a ! -L "$lock_path"
+            test "$(stat -Lc '%d:%i' -- "$lock_path")" = "$lock_identity"
+            test "$(stat -Lc '%d:%i' -- /proc/$$/fd/9)" = "$lock_identity"
+            flock -s -n 9
+          }
+
+          set_stage remote_runtime_identity
+          cd -- "$deploy_root"
+          test "$(git rev-parse --show-toplevel)" = "$deploy_root"
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform.git
+          test "$(git symbolic-ref --short HEAD)" = master
+          test "$(git rev-parse HEAD)" = "$expected_deployed_sha"
+          test "$(git rev-parse refs/heads/master)" = "$expected_deployed_sha"
+          test -z "${DOCKER_HOST:-}" -a -z "${DOCKER_CONTEXT:-}"
+          test "$(timeout 15 docker context show 2>/dev/null)" = default
+          test "$(timeout 15 docker context inspect default --format '{{.Endpoints.docker.Host}}' 2>/dev/null)" = unix:///var/run/docker.sock
+          test -S /var/run/docker.sock
+          security_options=$(timeout 15 docker info --format '{{json .SecurityOptions}}' 2>/dev/null)
+          printf '%s' "$security_options" | jq -e 'type == "array" and all(.[]; type == "string" and (contains("rootless") | not))' >/dev/null
+          unset security_options
+          project=$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' st-michael-postgres)
+          [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
+          for service in api postgres; do
+            test "$(timeout 15 docker inspect --format '{{.State.Running}}' "st-michael-$service")" = true
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "st-michael-$service")" = "$project"
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "st-michael-$service")" = "$service"
+          done
+          assert_health() {
+            local sha
+            sha=$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')
+            test "$sha" = "$expected_deployed_sha"
+            test "$(timeout 15 docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')" = "$expected_deployed_sha"
+          }
+          assert_health
+
+          set_stage remote_database_identity
+          database_metrics=$(timeout 20 docker exec st-michael-postgres \
+            psql -U postgres -d broker_platform --no-psqlrc -AtF '|' -v ON_ERROR_STOP=1 \
+            -c "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL statement_timeout='5000ms'; SET LOCAL lock_timeout='1000ms'; SELECT system_identifier::text, (SELECT count(*)::text FROM public.brokers) FROM pg_control_system(); ROLLBACK;" \
+            2>/dev/null | awk -F'|' 'NF==2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {print}')
+          [[ "$database_metrics" =~ ^[0-9]+\|[0-9]+$ ]]
+          IFS='|' read -r system_identifier broker_rows <<< "$database_metrics"
+          test "$system_identifier" = "$expected_system_identifier"
+          test "$broker_rows" -ge "$minimum_broker_rows"
+          unset database_metrics system_identifier broker_rows
+
+          set_stage remote_hash_bound_inspection
+          work=$(timeout 15 docker exec st-michael-api sh -c 'umask 077; mktemp -d /tmp/st-michael-loyalty-parity.XXXXXX')
+          case "$work" in /tmp/st-michael-loyalty-parity.??????) ;; *) exit 1;; esac
+          test "$(docker exec st-michael-api stat -c %a "$work")" = 700
+          inspector="$work/inspector.js"
+          report="$work/report.json"
+          errors="$work/errors.txt"
+          cleanup_container() {
+            docker exec st-michael-api sh -c 'rm -f -- "$2" "$3" "$4"; rmdir -- "$1"' cleanup "$work" "$inspector" "$report" "$errors" >/dev/null 2>&1 || true
+          }
+          trap 'rc=$?; cleanup_container; if [ "$rc" -ne 0 ]; then printf "loyalty_parity_failed_stage=%s\nloyalty_parity_exit_code=%s\n" "$stage" "$rc" >&2; fi' EXIT
+          base64 -d <<'LOYALTY_PARITY_PAYLOAD' | docker exec -i st-michael-api sh -c '
+            set -eu
+            work=$1
+            target=$2
+            expected=$3
+            test -d "$work" -a ! -L "$work"
+            test "$(stat -c %a "$work")" = 700
+            umask 077
+            cat > "$target"
+            test -f "$target" -a ! -L "$target"
+            chmod 600 "$target"
+            actual=$(sha256sum "$target"); actual=${actual%% *}
+            test "$actual" = "$expected"
+          ' upload "$work" "$inspector" "$expected_source_hash"
+          REMOTE_PREFIX
+            base64 -w 0 -- "$inspector_path"
+            printf '\nLOYALTY_PARITY_PAYLOAD\n'
+            cat <<'REMOTE_SUFFIX'
+          assert_lock
+          set +e
+          timeout 45 docker exec \
+            -e LOYALTY_PARITY_INSPECTOR_SHA256="$expected_source_hash" \
+            -e LOYALTY_PARITY_DEPLOYED_GIT_SHA="$expected_deployed_sha" \
+            -e PRODUCTION_PG_SYSTEM_IDENTIFIER="$expected_system_identifier" \
+            -e PRODUCTION_MIN_BROKER_ROWS="$minimum_broker_rows" \
+            st-michael-api sh -c '
+              set -eu
+              umask 077
+              inspector=$1
+              report=$2
+              errors=$3
+              expected=$4
+              actual=$(sha256sum "$inspector"); actual=${actual%% *}
+              test "$actual" = "$expected"
+              node "$inspector" > "$report" 2> "$errors"
+            ' inspect "$inspector" "$report" "$errors" "$expected_source_hash"
+          inspector_rc=$?
+          set -e
+
+          safe_report=$(docker exec st-michael-api cat "$report" 2>/dev/null || true)
+          if [ -n "$safe_report" ]; then
+            printf '%s' "$safe_report" | jq -e -s '
+              length == 1 and
+              .[0] as $r |
+              ($r | keys | sort) == (["fullApiParityClaimed","parity","scenarioCount","scenarios","schemaVersion","scope","statementTimeoutMs"] | sort) and
+              $r.schemaVersion == 1 and
+              $r.scope == "AGENCY_PERIOD_SQL_CANDIDATE_SUPERSET_ONLY" and
+              $r.fullApiParityClaimed == false and
+              ($r.parity | type) == "boolean" and
+              $r.statementTimeoutMs == 20000 and
+              $r.scenarioCount == 27 and
+              ($r.scenarios | length) == 27 and
+              all($r.scenarios[];
+                (keys | sort) == (["candidateCount","candidateDigest","exactCount","exactDigest","extraCount","metric","missingCount","missingDigest","period","source"] | sort) and
+                (.period | IN("month","quarter","custom")) and
+                (.source | IN("all","old","new")) and
+                (.metric | IN("fixations","meetings","independent_and")) and
+                ([.exactCount,.candidateCount,.missingCount,.extraCount] | all(. >= 0 and (floor == .))) and
+                ([.exactDigest,.candidateDigest,.missingDigest] | all(type == "string" and test("^[0-9a-f]{64}$")))
+              )
+            ' >/dev/null
+            printf '%s\n' "$safe_report"
+          fi
+
+          if [ "$inspector_rc" -ne 0 ]; then
+            safe_error=$(docker exec st-michael-api cat "$errors" 2>/dev/null || true)
+            if [[ "$safe_error" =~ ^loyalty_parity_failure_code=(SOURCE_ATTESTATION_INVALID|DATABASE_URL_INVALID|DATABASE_ATTESTATION_INVALID|QUERY_RESULT_INVALID|STATEMENT_TIMEOUT|DATABASE_QUERY_FAILED|PARITY_MISSING_CANDIDATES|UNKNOWN_FAILURE)$ ]]; then
+              printf '%s\n' "$safe_error" >&2
+            else
+              printf 'loyalty_parity_failure_code=UNKNOWN_FAILURE\n' >&2
+            fi
+            exit 1
+          fi
+          docker exec st-michael-api sh -c '
+            set -eu
+            report=$1
+            errors=$2
+            test -f "$report" -a ! -L "$report" -a -s "$report"
+            test "$(stat -c %a "$report")" = 600
+            test -f "$errors" -a ! -L "$errors" -a ! -s "$errors"
+            test "$(stat -c %a "$errors")" = 600
+          ' verify-output "$report" "$errors"
+          printf '%s' "$safe_report" | jq -e '.parity == true and all(.scenarios[]; .missingCount == 0)' >/dev/null
+          unset safe_report
+
+          set_stage remote_post_inspection_identity
+          assert_lock
+          assert_health
+          test "$(git rev-parse HEAD)" = "$expected_deployed_sha"
+          REMOTE_SUFFIX
+          } | timeout --foreground 7m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$deployed_sha' '$inspector_sha' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'"
