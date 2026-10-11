@@ -13,6 +13,7 @@ import {
   MATERIALS_CATALOG_HREF, MATERIALS_CONDITIONS_HREF, MATERIALS_CONTACT_EMAIL,
   isMaterialImage, isMaterialPdf, isMaterialVideo, materialsFolderCover,
   materialsParentHref, materialsProjectCover, standaloneMaterials, uniqueMaterials,
+  currentMaterials,
   type MaterialCover, type MaterialDocument,
 } from '@/lib/materials-browser';
 import { DEFAULT_MATERIALS_LAYOUT, parseMaterialsLayout, withDisplaySubcategory, type MaterialsFolderLayout } from '@shared/materials-folder-layout';
@@ -140,7 +141,7 @@ export function MaterialsBrowser({ parts = [], surface = 'landing', embedded = f
       .then(([data, layoutData, termsData]) => {
         if (controller.signal.aborted) return;
         if (!Array.isArray(data) || !layoutData?.layout) throw new Error('Invalid materials response');
-        setDocs(data); setTerms(termsData); setLayout(parseMaterialsLayout(layoutData.layout));
+        setDocs(currentMaterials(data)); setTerms(termsData); setLayout(parseMaterialsLayout(layoutData.layout));
       })
       .catch(() => { if (!controller.signal.aborted) setError(true); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
-const { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts } = require('./inspect-release-718-smoke');
+const { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, reportFailure } = require('./inspect-release-718-smoke');
 test('exact deployed SHA and explicit send flag are required', () => {
   const env = { SMOKE_EXPECTED_SHA: 'a'.repeat(40), GIT_SHA: 'a'.repeat(40), PRODUCTION_PG_SYSTEM_IDENTIFIER: '123', PRODUCTION_MIN_BROKER_ROWS: '100' };
   validateInputs(env);
@@ -42,6 +42,41 @@ test('compiled service smoke uses three period cases and never outputs entity da
 test('only normalized timestamps escape stored JSON', () => {
   assert.equal(safeTimestamp('secret-value'), null);
   assert.equal(safeTimestamp('2026-10-11T14:00:00Z'), '2026-10-11T14:00:00.000Z');
+});
+
+test('diagnostics expose only allowlisted stages and safe classifications', () => {
+  const log = [];
+  const previousLog = console.log;
+  const previousError = console.error;
+  console.log = value => log.push(value);
+  console.error = value => log.push(value);
+  try {
+    stage('agency_sql_counts');
+    reportFailure({ code: 'P2010', message: 'SELECT secret_phone FROM private_data', stack: 'private_stack' });
+    reportFailure({ code: 'attacker_secret', message: 'broker_private_email' });
+    reportFailure({ code: 'P2010', meta: { code: '57014', message: 'SELECT secret_phone FROM private_data' } });
+    assert.deepEqual(JSON.parse(log[1]), { failure: 'RELEASE_SMOKE_FAILED', stage: 'agency_sql_counts', code: 'P2010' });
+    assert.equal(JSON.parse(log[2]).code, 'UNCLASSIFIED');
+    assert.equal(JSON.parse(log[3]).sqlFailure, 'STATEMENT_TIMEOUT_OR_CANCELED');
+    assert.throws(() => stage('broker_private_email'));
+    assert.doesNotMatch(log.join('\n'), /secret_phone|private_data|private_stack|broker_private_email|attacker_secret/);
+  } finally { console.log = previousLog; console.error = previousError; }
+});
+
+test('failed service reads and failed parity comparisons retain different stages', async () => {
+  const marks = [];
+  await assert.rejects(verifyAgencyCounts({ list: async () => { throw new Error('private'); } }, {}, {}, value => marks.push(value)));
+  assert.deepEqual(marks, ['service_with_fixations']);
+  marks.length = 0;
+  const previousLog = console.log;
+  const log = [];
+  console.log = value => log.push(value);
+  try {
+    await assert.rejects(verifyAgencyCounts({ list: async () => ({ total: 3, items: [{ private: 'not printed' }] }) }, {}, { total: 5, with_fixations: 2 }, value => marks.push(value)));
+    assert.deepEqual(marks, ['service_with_fixations', 'parity_with_fixations']);
+    assert.deepEqual(JSON.parse(log[0]), { releaseSmokeCountMismatch: 'with_fixations', expected: 2, actual: 3 });
+    assert.doesNotMatch(log.join(''), /private|printed/);
+  } finally { console.log = previousLog; }
 });
 
 test('agency SQL uses service UTC date labels, not broker Moscow instant boundaries', () => {

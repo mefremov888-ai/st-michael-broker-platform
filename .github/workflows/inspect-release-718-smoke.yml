@@ -119,7 +119,7 @@ jobs:
           # entry point rather than returning a misleading no-op success.
           {
             printf '%s' "$bundle" | base64 -d
-            printf '\ninspect().catch(() => { console.error("RELEASE_SMOKE_FAILED"); process.exitCode = 1; });\n'
+            printf '\ninspect().catch(error => { reportFailure(error); process.exitCode = 1; });\n'
           } | timeout 140 docker exec -i \
             -e SMOKE_EXPECTED_SHA="$expected_sha" -e SMOKE_CONFIRM_SEND="$confirm_send" \
             -e PRODUCTION_PG_SYSTEM_IDENTIFIER="$system_identifier" -e PRODUCTION_MIN_BROKER_ROWS="$minimum_broker_rows" \
