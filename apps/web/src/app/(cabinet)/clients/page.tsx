@@ -5,7 +5,7 @@ import { apiGet, apiPost } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Search, ChevronLeft, ChevronRight, X, AlertTriangle, Mail, Building, User, Phone as PhoneIcon, Calendar, FileText, CheckCircle2, AlertCircle, PhoneCall } from 'lucide-react';
 import { uniquenessHistoryLabel } from '@/lib/uniqueness-history';
-import { clientStatusDisplay, clientTransferUnconfirmed } from '@/lib/client-status-display';
+import { clientStatusDisplay, clientTransferUnconfirmed, clientTransferAwaitingFixation } from '@/lib/client-status-display';
 
 // 2026-07-02: если А зафиксировал клиента на Б через «Фиксирую на другого
 // брокера», уникальность принадлежит А (создателю). Б просто исполнитель —
@@ -228,6 +228,11 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
               Исполнитель по фиксации
             </span>
           ) : (
+            <span className={`text-xs px-2 py-1 rounded ${displayedStatus.cls}`}>
+              {displayedStatus.label}
+            </span>
+          )}
+          {isExecutorView(client, broker?.id) && clientTransferAwaitingFixation(client) && (
             <span className={`text-xs px-2 py-1 rounded ${displayedStatus.cls}`}>
               {displayedStatus.label}
             </span>
@@ -732,12 +737,21 @@ export default function ClientsPage() {
                         {/* 2026-07-02: исполнитель по фиксации не видит «Уникален» —
                             уникальность принадлежит создателю (А). */}
                         {isExecutorView(c, broker?.id) && !clientTransferUnconfirmed(c) ? (
-                          <span
-                            className="text-xs px-2 py-1 rounded bg-info/20 text-info"
-                            title={`Заявку за вас подал ${executorSubmitterLabel(c)}. Клиент закреплён за вами — вы ведёте показы и сделку.`}
-                          >
-                            Исполнитель по фиксации
-                          </span>
+                          <>
+                            <span
+                              className="text-xs px-2 py-1 rounded bg-info/20 text-info"
+                              title={`Заявку за вас подал ${executorSubmitterLabel(c)}. Клиент закреплён за вами — вы ведёте показы и сделку.`}
+                            >
+                              Исполнитель по фиксации
+                            </span>
+                            {clientTransferAwaitingFixation(c) && (
+                              <div className="mt-1">
+                                <span className={`text-xs px-2 py-1 rounded ${clientStatusDisplay(c).cls}`} title={clientStatusDisplay(c).explanation}>
+                                  {clientStatusDisplay(c).label}
+                                </span>
+                              </div>
+                            )}
+                          </>
                         ) : (
                           <>
                             <span className={`text-xs px-2 py-1 rounded ${clientStatusDisplay(c).cls}`}>
