@@ -313,20 +313,36 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
       // then the preclaim readback observes HTTP200 rather than HTTP204.
       const { result, db, lease } = await execute({ reviewNotes204UntilRead: 6 });
       expect(failureCode).toBe('CERT_RECHECK_CHANGED');
-      expect(result).toMatchObject({ status: 'unresolved', failureCode: 'RECOVERY_REFUSED', contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 });
+      expect(result).toMatchObject({ status: 'unresolved', failureCode: 'CERT_RECHECK_CHANGED', contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 });
       expect(db.tx.client.updateMany).not.toHaveBeenCalled(); expect(db.tx.auditLog.create).not.toHaveBeenCalled();
       expect(db.data.row.updatedAt).toEqual(row().updatedAt);
       expect([...lease.data.values()]).toEqual([expect.objectContaining({ status: 'uncertain' })]);
     } finally { certificate.recheckFixedCaseExclusionCertificate = original; }
   });
-  it("the exact busy Redis lease code is currently hidden by the generic recovery allowlist", async () => {
+  it("preserves the shared Redis lease code without exposing its error message", async () => {
     const leaseModule = loaded.require('./apply-amo-deadletter-group-recovery');
     let caught: any;
     try { await leaseModule.acquirePhoneLeases({ set: async () => null }, [{ group: { normalizedPhone: '+79990001122' } }], Buffer.alloc(32, 1), amoFixationPhoneLockRedisKey); }
     catch (error) { caught = error; }
     expect(caught?.code).toBe('PHONE_LOCK_BUSY');
     expect(caught?.safeCode).toBeUndefined();
-    expect(recovery.safeFailureCode(caught)).toBe('RECOVERY_REFUSED');
+    expect(recovery.safeFailureCode(caught)).toBe('PHONE_LOCK_BUSY');
+  });
+  it("only reports literal reviewed certificate/provider/lease codes from safeCode or code", () => {
+    const certificateSource = readFileSync(resolve(root, 'scripts/fixed-amo-case-exclusion-certificate.js'), 'utf8');
+    const constants = Array.from(new Set([...certificateSource.matchAll(/fail\("([A-Z0-9_]+)"\)/g)].map((match) => match[1])));
+    expect(constants.length).toBeGreaterThan(20);
+    for (const code of constants) {
+      expect(recovery.safeFailureCode({ safeCode: code, message: 'private token +7999', stack: 'private' })).toBe(code);
+      expect(recovery.safeFailureCode({ code, body: { secret: 'private' } })).toBe(code);
+    }
+    for (const code of ['PHONE_LOCK_BUSY', 'PHONE_LOCK_OWNERSHIP_LOST', 'SHARED_PHONE_LOCK_CONTRACT_INVALID', 'ATTESTATION_KEY_INVALID', 'REVIEW_NOTES_REQUEST_FAILED']) {
+      expect(recovery.safeFailureCode({ code, message: 'private' })).toBe(code);
+    }
+    for (const value of [{ safeCode: 'CERT_PRIVATE_7999' }, { code: 'PHONE_LOCK_BUSY private' }, { message: 'PHONE_LOCK_BUSY', stack: 'private' }, { safeCode: '+79990001122', code: 'private-api-token' }, null]) {
+      expect(recovery.safeFailureCode(value)).toBe('RECOVERY_REFUSED');
+    }
+    expect(recovery.safeFailureCode(Object.defineProperty({}, 'safeCode', { get() { throw Error('private'); } }))).toBe('RECOVERY_REFUSED');
   });
   it("lost contact response is GET-reconciled without another POST", async () => {
     const { result, crm } = await execute({ contactUnknown: true });
