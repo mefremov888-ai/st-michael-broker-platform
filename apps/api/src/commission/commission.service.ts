@@ -1,5 +1,6 @@
 import { Injectable, Inject, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaClient, CommissionLevel, CommissionMode } from '@st-michael/database';
+import { confirmedAgencySalesRub, currentRubleTerms, isRublePolicy, prospectiveRubleBonus, RUB_DISPLAY_END, RUB_COMMISSION_LEVELS, rubleBonus, rublePaymentRate } from './ruble-commission';
 
 /**
  * Найти активную политику комиссии для проекта на заданную дату.
@@ -42,6 +43,11 @@ export async function rateForWithPolicy(
     // Fallback на хардкод (старая логика на случай если БД пуста).
     const level = levelForSqm(project, totalSqm);
     return { rate: rateFor(project, level), level, mode: 'FALLBACK' };
+  }
+  if (isRublePolicy(policy)) {
+    // Automatic deal imports do not yet provide payment method/down payment.
+    // Refuse rather than interpret ruble thresholds as sqm and silently write a wrong rate.
+    throw new BadRequestException('Для рублёвой комиссии требуется тип оплаты и первоначальный взнос; используйте калькулятор комиссии.');
   }
   if (policy.mode === 'FLAT') {
     return { rate: Number(policy.flatRate || 0), level: null, mode: 'FLAT' };
@@ -189,6 +195,26 @@ export class CommissionService {
     if (!broker) throw new NotFoundException('Broker not found');
 
     const primaryAgency = broker.brokerAgencies[0]?.agency;
+    if (new Date() > RUB_DISPLAY_END) return {
+      basis:'CURRENT_TERMS_UNAVAILABLE', rates:{ZORGE9:null,SILVER_BOR:null}, scales:{ZORGE9:[],SILVER_BOR:[]},
+      paymentTerms:{ZORGE9:{installmentEnabled:false,subsidizedMortgageEnabled:false},SILVER_BOR:{installmentEnabled:false,subsidizedMortgageEnabled:false}},
+      displayNotes:{ZORGE9:'Срок опубликованных условий закончился. Запросите актуальную редакцию.',SILVER_BOR:'Срок опубликованных условий закончился. Запросите актуальную редакцию.'},
+    };
+    if (currentRubleTerms()) {
+      const salesRub = await confirmedAgencySalesRub(this.prisma, primaryAgency?.id);
+      const bonus = salesRub === null ? null : rubleBonus(salesRub);
+      const paid = await this.prisma.deal.findMany({ where: { brokerId, status: { in: ['PAID', 'COMMISSION_PAID'] } }, select: { commissionAmount: true } });
+      return {
+        basis: 'SALES_RUB_2026', totalSalesRub: salesRub, bonusRate: bonus,
+        volumeNote: salesRub === null ? 'Объём продаж требует сверки: агентство или данные договоров не подтверждены.' : 'По подписанным ДДУ, ПДКП и ДКП агентства в кабинете за 2026 год, по обоим проектам.',
+        isEstimate: true, retentionUntil: '2027-01-31', rates: { ZORGE9: bonus === null ? null : 5 + bonus, SILVER_BOR: bonus === null ? null : 5 + bonus },
+        modes: { ZORGE9: 'PROGRESSIVE', SILVER_BOR: 'PROGRESSIVE' },
+        scales: { ZORGE9: RUB_COMMISSION_LEVELS, SILVER_BOR: RUB_COMMISSION_LEVELS },
+        paymentTerms: { ZORGE9: { installmentEnabled: true, subsidizedMortgageEnabled: true }, SILVER_BOR: { installmentEnabled: true, subsidizedMortgageEnabled: true } },
+        totalEarned: paid.reduce((sum, item) => sum + Number(item.commissionAmount), 0),
+        agency: primaryAgency ? { id: primaryAgency.id, name: primaryAgency.name, inn: primaryAgency.inn } : null,
+      };
+    }
     const totalSqmSold = primaryAgency ? Number(primaryAgency.totalSqmSold) : 0;
 
     // Правка 2026-07-01: возвращаем не только текущую ставку и режим, но и
@@ -316,8 +342,10 @@ export class CommissionService {
     amount: number;
     project: string;
     paymentMode: 'FULL' | 'INSTALLMENT' | 'SUBSIDIZED_MORTGAGE';
+    downPaymentPercent?: number;
     brokerId: string;
   }) {
+    if (new Date() > RUB_DISPLAY_END) throw new BadRequestException('Срок опубликованных условий закончился. Требуется актуальная редакция комиссии.');
     // 2026-07-01: раньше калькулятор требовал agencyInn в форме. Теперь
     // берём primary-агентство брокера напрямую из БД — брокер и так знает
     // от какого агентства работает.
@@ -336,6 +364,21 @@ export class CommissionService {
 
     // Условия оплаты теперь являются частью активной CommissionPolicy.
     // CMS остаётся только fallback для старых политик с null в новых полях.
+    if (currentRubleTerms()) {
+      const salesRub = await confirmedAgencySalesRub(this.prisma, agency?.id);
+      if (salesRub === null) throw new BadRequestException('Объём продаж агентства не подтверждён; требуется сверка данных договоров.');
+      let baseRate: number;
+      try { baseRate = rublePaymentRate(data.paymentMode, data.downPaymentPercent); }
+      catch { throw new BadRequestException('Укажите первоначальный взнос от 0 до 100% для рассрочки.'); }
+      const { bonusRate, bonusBasisRub, includesProposedDeal } = prospectiveRubleBonus(salesRub, data.amount);
+      const rate = Math.round((baseRate + bonusRate) * 100) / 100;
+      return { amount: data.amount, rate, baseRate, bonusRate, commission: data.amount * rate / 100, paymentMode: data.paymentMode,
+        isEstimate:true, mode: 'SALES_RUB_2026', totalSalesRub: salesRub, bonusBasisRub, includesProposedDeal,
+        bonusBasisNote: includesProposedDeal
+          ? 'Надбавка рассчитана с учётом этой новой планируемой сделки, ещё не включённой в накопленный объём 2026 года.'
+          : 'В январе 2027 года применяется сохранённый уровень по итогам 2026 года; сумма новой сделки не увеличивает объём для надбавки.',
+        agencyName: agency?.name || null };
+    }
     const policy = await findActivePolicy(this.prisma, data.project);
     const commissionCms = await this.prisma.siteContent.findUnique({ where: { key: 'commission' } });
     const cmsValue = (commissionCms?.value || {}) as any;
@@ -398,6 +441,7 @@ export class CommissionService {
       sqm: Number(deal.sqm),
       rate: Number(deal.commissionRate),
       commission: Number(deal.commissionAmount),
+      commissionStatus: Number(deal.commissionRate) <= 0 ? 'REVIEW_REQUIRED' : 'RECORDED',
       status: deal.status,
       isInstallment: deal.isInstallment,
       // signedAt — дата из amoCRM, createdAt — день нашего синка. Правка 2026-05-13.

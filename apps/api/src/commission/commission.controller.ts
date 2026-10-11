@@ -37,6 +37,7 @@ export class CommissionController {
       amount: number;
       project: string;
       paymentMode: 'FULL' | 'INSTALLMENT' | 'SUBSIDIZED_MORTGAGE';
+      downPaymentPercent?: number;
     };
     return this.commissionService.calculateCommission({ ...data, brokerId: user.id });
   }

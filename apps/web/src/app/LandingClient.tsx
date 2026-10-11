@@ -26,6 +26,7 @@ import {
   buildPaymentTermsText,
   findActiveCommissionPolicy,
   getCommissionRateLabel,
+  publishedInstallmentPayoutText,
   resolveCommissionText,
   type CommissionProject,
 } from '@/lib/commission-display';
@@ -81,6 +82,21 @@ function CommissionScale({
   activePolicies: ActiveCommissionPolicy[];
 }) {
   const policy = findActiveCommissionPolicy(activePolicies, project);
+  if (policy?.basis === 'SALES_RUB_2026') {
+    return (
+      <div className="comm-table">
+        <div className="ct-head"><span>Надбавка</span><span>Общий объём продаж, ₽</span><span>К базовой ставке</span></div>
+        {(policy.levels || []).map((level) => (
+          <div key={level.level} className="ct-row">
+            <span className="ct-level">Накопительная</span>
+            <span className="ct-range">От {Number(level.minSalesRub).toLocaleString('ru-RU')} ₽</span>
+            <span className="ct-rate">+{String(level.bonusRate).replace('.', ',')}%</span>
+          </div>
+        ))}
+        <p className="text-sm mt-3">{policy.displayNote}</p>
+      </div>
+    );
+  }
 
   // 1) Активная FLAT-политика в БД.
   if (policy && policy.mode === 'FLAT' && policy.flatRate != null) {
@@ -1866,10 +1882,14 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
             <div className="comm-info">
               {(() => {
                 const byProject = commission?.cardsByProject?.[commissionProject];
-                const source = Array.isArray(byProject)
+                const isPublished = findActiveCommissionPolicy(activePolicies, commissionProject)?.basis === 'SALES_RUB_2026';
+                const source = isPublished
+                  ? [{ title:'Накопительная надбавка', text:'Объём подписанных ДДУ, ПДКП и ДКП агентства за 2026 год суммируется по обоим проектам в рублях. Повышенная надбавка применяется уже к сделке, достигающей порога. Достигнутый по итогам 2026 года уровень сохраняется до 31 января 2027 года. Предварительные расчёты не изменяют сохранённые начисления.' }]
+                  : Array.isArray(byProject)
                   ? byProject
                   : (commission?.cards || []);
                 const list = source.filter((card: any) => !/рассроч|ипотек/i.test(String(card?.title || '')));
+                if (isPublished) list.push({title:'Порядок выплаты при рассрочке',text:publishedInstallmentPayoutText(commissionProject)});
                 const paymentText = buildPaymentTermsText(
                   findActiveCommissionPolicy(activePolicies, commissionProject),
                 );
@@ -1878,8 +1898,8 @@ body{background:var(--white);color:var(--black);font-family:'Inter',sans-serif;f
                 }
                 return list.map((c: any, i: number) => (
                   <div key={i} className="comm-card">
-                    <div className="comm-card-title">{resolveLandingCopy(c.title, activePolicies, `${c.title} ${c.text}`, commissionProject)}</div>
-                    <p>{resolveLandingCopy(c.text, activePolicies, `${c.title} ${c.text}`, commissionProject)}</p>
+                    <div className="comm-card-title">{isPublished ? c.title : resolveLandingCopy(c.title, activePolicies, `${c.title} ${c.text}`, commissionProject)}</div>
+                    <p>{isPublished ? c.text : resolveLandingCopy(c.text, activePolicies, `${c.title} ${c.text}`, commissionProject)}</p>
                   </div>
                 ));
               })()}

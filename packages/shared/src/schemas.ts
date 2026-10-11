@@ -229,6 +229,7 @@ export const commissionCalculationDtoSchema = z.object({
   amount: z.number().positive(),
   project: z.nativeEnum(Project),
   paymentMode: z.enum(['FULL', 'INSTALLMENT', 'SUBSIDIZED_MORTGAGE']).default('FULL'),
+  downPaymentPercent: z.number().min(0).max(100).optional(),
 });
 
 // Analytics schemas

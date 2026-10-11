@@ -52,6 +52,8 @@ export interface Client {
   uniquenessReason?: string;
   uniquenessExpiresAt?: Date;
   fixationStatus: FixationStatus;
+  /** Delivery evidence is separate from the uniqueness verdict. */
+  amoSyncStatus?: 'PENDING' | 'FAILED' | 'SYNCED' | null;
   fixationExpiresAt?: Date;
   inspectionActSigned: boolean;
   status: ClientStatus;

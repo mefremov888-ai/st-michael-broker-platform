@@ -5,6 +5,7 @@ import { apiGet, apiPost } from '@/lib/api';
 import {
   ActiveCommissionPolicy,
   buildPaymentTermsText,
+  publishedInstallmentPayoutText,
   resolveCommissionText,
 } from '@/lib/commission-display';
 import { TrendingUp, Wallet, Award, CreditCard, Building2 } from 'lucide-react';
@@ -57,7 +58,7 @@ export default function CommissionPage() {
   const [deals, setDeals] = useState<any[]>([]);
   const [selectedProject, setSelectedProject] = useState<'ZORGE9' | 'SILVER_BOR'>('ZORGE9');
   const [calcResult, setCalcResult] = useState<any>(null);
-  const [calcForm, setCalcForm] = useState<{ amount: string; project: string; paymentMode: 'FULL' | 'INSTALLMENT' | 'SUBSIDIZED_MORTGAGE' }>({
+  const [calcForm, setCalcForm] = useState<{ amount: string; project: string; downPaymentPercent?: number; paymentMode: 'FULL' | 'INSTALLMENT' | 'SUBSIDIZED_MORTGAGE' }>({
     amount: '',
     project: 'ZORGE9',
     paymentMode: 'FULL',
@@ -92,6 +93,11 @@ export default function CommissionPage() {
   // Редакционные карточки остаются в CMS, но числовая карточка условий оплаты
   // всегда генерируется ниже из активной CommissionPolicy.
   const termsCards = useMemo<Array<{ title: string; text: string }>>(() => {
+    if (commission?.basis === 'SALES_RUB_2026') return [
+      { title: 'Условия оплаты', text: 'Полная оплата и стандартная ипотека — 5%. Рассрочка: первоначальный взнос больше 50% — 4,5%; до 50% включительно — 4%. Субсидированная ипотека — 4%. К базовой ставке добавляется накопительная надбавка.' },
+      { title: 'Накопительная надбавка', text: 'Общий объём подписанных ДДУ, ПДКП и ДКП агентства по обоим проектам за 2026 год, в рублях. Повышенная надбавка применяется уже к сделке, достигающей следующего порога. Достигнутый по итогам 2026 года уровень сохраняется до 31 января 2027 года. Исторически начисленные комиссии не пересчитываются.' },
+      { title: 'Порядок выплаты при рассрочке', text: publishedInstallmentPayoutText(selectedProject) },
+    ];
     const byProject = cmsCommission?.cardsByProject?.[selectedProject];
     const source = Array.isArray(byProject)
       ? byProject
@@ -114,7 +120,7 @@ export default function CommissionPage() {
       editorial.push({ title: 'Рассрочка и ипотека', text: paymentText });
     }
     return editorial;
-  }, [activeDisplayPolicies, cmsCommission, selectedProject, selectedPaymentTerms]);
+  }, [activeDisplayPolicies, cmsCommission, selectedProject, selectedPaymentTerms, commission?.basis]);
 
   const installmentEnabled = calculatorPaymentTerms?.installmentEnabled !== false;
   const subsidizedMortgageEnabled = calculatorPaymentTerms?.subsidizedMortgageEnabled !== false;
@@ -144,6 +150,7 @@ export default function CommissionPage() {
   const currentRateLabel = currentRate == null ? '—' : `${String(currentRate).replace('.', ',')}%`;
   const currentMode = commission?.modes?.[selectedProject];
   const isFlat = currentMode === 'FLAT';
+  const isRuble = commission?.basis === 'SALES_RUB_2026';
   const currentDisplayNote = commission?.displayNotes?.[selectedProject]
     ? resolveCommissionText(
         commission.displayNotes[selectedProject],
@@ -168,6 +175,7 @@ export default function CommissionPage() {
         amount: amountNum,
         project: calcForm.project,
         paymentMode: calcForm.paymentMode,
+        downPaymentPercent: calcForm.downPaymentPercent,
       });
       setCalcResult(result);
     } catch (err: any) {
@@ -214,11 +222,18 @@ export default function CommissionPage() {
           <div className="card" data-tour="commission-card">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm text-text-muted">
-                {isFlat ? 'Текущая ставка' : 'Текущий уровень'}
+                {isRuble ? 'Накопительная надбавка' : isFlat ? 'Текущая ставка' : 'Текущий уровень'}
               </h3>
               <TrendingUp className="w-5 h-5 text-accent" />
             </div>
-            {isFlat ? (
+            {isRuble ? (
+              <>
+                <p className="text-2xl font-bold text-accent">{commission.bonusRate == null ? 'Требуется сверка' : `+${String(commission.bonusRate).replace('.', ',')}%`}</p>
+                <p className="text-sm text-text-muted mt-1">Накопительная надбавка к базовой ставке по типу оплаты</p>
+                <p className="text-sm mt-2">{commission.totalSalesRub == null ? 'Объём не подтверждён' : `${Number(commission.totalSalesRub).toLocaleString('ru-RU')} ₽`}</p>
+                <p className="text-xs text-text-muted mt-2">{commission.volumeNote}</p>
+              </>
+            ) : isFlat ? (
               <>
                 <p className="text-4xl font-bold text-accent">{currentRateLabel}</p>
                 <p className="text-sm text-text-muted mt-1">
@@ -269,7 +284,7 @@ export default function CommissionPage() {
 
           {!isFlat && (
             <div className="card">
-              <h3 className="text-sm text-text-muted mb-2">Шкала ставок — {projectLabels[selectedProject]}</h3>
+              <h3 className="text-sm text-text-muted mb-2">{isRuble ? 'Надбавка по объёму продаж в рублях' : `Шкала ставок — ${projectLabels[selectedProject]}`}</h3>
               <div className="space-y-1">
                 {/* Шкала приходит из активной политики в /admin/commission-policies. */}
                 {currentScale.map((s) => {
@@ -285,10 +300,10 @@ export default function CommissionPage() {
                     >
                       <span className="flex items-center gap-2">
                         {active && <span aria-hidden>▶</span>}
-                        {levelNames[s.level] || s.level}
+                        {isRuble ? `От ${Number((s as any).minSalesRub).toLocaleString('ru-RU')} ₽` : (levelNames[s.level] || s.level)}
                         {active && <span className="text-[10px] uppercase tracking-wide opacity-80">← вы здесь</span>}
                       </span>
-                      <span>{s.rate}%</span>
+                      <span>{isRuble ? `+${String((s as any).bonusRate).replace('.', ',')}%` : `${s.rate}%`}</span>
                     </div>
                   );
                 })}
@@ -326,7 +341,7 @@ export default function CommissionPage() {
           <h3 className="text-lg font-semibold mb-4">Калькулятор комиссии</h3>
           <form onSubmit={handleCalculate} className="space-y-4">
             <div>
-              <label className="label">Сумма сделки (₽)</label>
+              <label className="label">{isRuble ? 'Сумма новой планируемой сделки, ещё не включённой в объём (₽)' : 'Сумма сделки (₽)'}</label>
               {/* КБ6: форматируем поле с пробелами между разрядами тысяч.
                   Реальное число хранится в state как digits-only-строка. */}
               <input
@@ -386,11 +401,19 @@ export default function CommissionPage() {
             {calcError && (
               <div className="p-2 bg-error/10 text-error rounded text-sm">{calcError}</div>
             )}
+            {isRuble && calcForm.paymentMode === 'INSTALLMENT' && (
+              <div><label className="label">Первоначальный взнос (%)</label>
+                <input className="input" type="number" min="0" max="100" step="0.1" required value={calcForm.downPaymentPercent ?? ''}
+                  onChange={(e) => { setCalcForm({ ...calcForm, downPaymentPercent: e.target.value === '' ? undefined : Number(e.target.value) }); setCalcResult(null); }} />
+              </div>
+            )}
             <button type="submit" className="btn btn-primary w-full">Рассчитать</button>
           </form>
 
           {calcResult && (
             <div className="mt-4 p-4 bg-surface-secondary rounded-lg">
+              {calcResult.isEstimate && <p className="text-xs text-text-muted mb-3">Предварительный расчёт по условиям лендинга. Не является подтверждённым начислением; требуется сверка полного объёма договоров агентства.</p>}
+              {calcResult.bonusBasisNote && <p className="text-xs text-text-muted mb-3">{calcResult.bonusBasisNote} Основание надбавки: {Number(calcResult.bonusBasisRub).toLocaleString('ru-RU')} ₽.</p>}
               <div className="flex justify-between text-sm mb-2">
                 <span className="text-text-muted">Сумма:</span>
                 <span>{Math.round(Number(calcResult.amount)).toLocaleString('ru-RU')} ₽</span>
@@ -405,18 +428,19 @@ export default function CommissionPage() {
                 <span className="text-text-muted">Ставка:</span>
                 <span>{calcResult.rate}%</span>
               </div>
-              {calcResult.paymentMode === 'INSTALLMENT' && (
+              {calcResult.paymentMode === 'INSTALLMENT' && calcResult.mode !== 'SALES_RUB_2026' && (
                 <div className="flex justify-between text-xs mb-2 text-text-muted">
                   <span>Рассрочка:</span>
                   <span>−{calcResult.installmentDiscount}%</span>
                 </div>
               )}
-              {calcResult.paymentMode === 'SUBSIDIZED_MORTGAGE' && (
+              {calcResult.paymentMode === 'SUBSIDIZED_MORTGAGE' && calcResult.mode !== 'SALES_RUB_2026' && (
                 <div className="flex justify-between text-xs mb-2 text-text-muted">
                   <span>Субс. ипотека:</span>
                   <span>фиксированные {calcResult.subsidizedMortgageRate}%</span>
                 </div>
               )}
+              {calcResult.mode === 'SALES_RUB_2026' && <p className="text-xs text-text-muted">Базовая ставка {calcResult.baseRate}% + надбавка {calcResult.bonusRate}%</p>}
               <div className="flex justify-between text-lg font-bold border-t border-border pt-2 mt-2">
                 <span>Комиссия:</span>
                 <span className="text-accent">{Math.round(Number(calcResult.commission)).toLocaleString('ru-RU')} ₽</span>
@@ -427,7 +451,7 @@ export default function CommissionPage() {
 
         <div className="card">
           <h3 className="text-lg font-semibold mb-4">
-            История комиссий — {projectLabels[selectedProject]}
+            Сохранённые начисления — {projectLabels[selectedProject]}
           </h3>
           {projectDeals.length === 0 ? (
             <p className="text-text-muted">Нет сделок по этому проекту</p>
@@ -438,12 +462,12 @@ export default function CommissionPage() {
                   <div>
                     <div className="font-medium text-sm">{deal.clientName}</div>
                     <div className="text-xs text-text-muted">
-                      {projectLabels[deal.project] || deal.project} · {deal.rate}%
+                      {projectLabels[deal.project] || deal.project} · {deal.commissionStatus === 'REVIEW_REQUIRED' ? 'Требует проверки начисления' : `${deal.rate}%`}
                     </div>
                   </div>
                   <div className="text-right">
                     <div className="text-sm font-bold text-accent">
-                      {Math.round(Number(deal.commission)).toLocaleString('ru-RU')} ₽
+                      {deal.commissionStatus === 'REVIEW_REQUIRED' ? 'Требует проверки' : `${Math.round(Number(deal.commission)).toLocaleString('ru-RU')} ₽`}
                     </div>
                     <span className={`text-xs px-2 py-0.5 rounded inline-block mt-1 ${statusLabels[deal.status]?.cls || 'text-text-muted'}`}>
                       {statusLabels[deal.status]?.label || deal.status}

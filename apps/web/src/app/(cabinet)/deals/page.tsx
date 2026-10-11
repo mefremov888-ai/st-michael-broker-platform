@@ -171,7 +171,7 @@ export default function DealsPage() {
                       })()}</td>
                       <td className="py-3">{Math.round(Number(deal.amount)).toLocaleString('ru-RU')} ₽</td>
                       <td className="py-3 text-accent">
-                        {Math.round(Number(deal.commissionAmount)).toLocaleString('ru-RU')} ₽
+                        {Number(deal.commissionRate) <= 0 ? 'Требует проверки' : `${Math.round(Number(deal.commissionAmount)).toLocaleString('ru-RU')} ₽`}
                       </td>
                       <td className="py-3">
                         <span className={`text-xs px-2 py-1 rounded ${statusLabels[deal.status]?.cls || ''}`}>

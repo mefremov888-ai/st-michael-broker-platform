@@ -59,6 +59,8 @@ describe('paymentTermsForPolicy', () => {
   });
 });
 describe('CommissionService.calculateCommission', () => {
+  beforeEach(() => { jest.useFakeTimers(); jest.setSystemTime(new Date('2026-07-01T00:00:00Z')); });
+  afterEach(() => jest.useRealTimers());
   const activePolicy = {
     id: 'policy-1',
     project: 'ZORGE9',

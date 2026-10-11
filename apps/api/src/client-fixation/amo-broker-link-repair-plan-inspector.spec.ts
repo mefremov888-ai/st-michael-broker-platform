@@ -163,7 +163,7 @@ describe("PII-safe amo broker-link repair-plan inspector", () => {
         take: 2,
       },
     });
-    expect(script).toContain(
+    expect(script.replace(/\r\n/g, "\n")).toContain(
       "select: provisioningMode\n        ? PROVISIONING_QUEUE_ROW_SELECT\n        : OWNERSHIP_QUEUE_ROW_SELECT",
     );
     const provisioningReportSource = script.slice(

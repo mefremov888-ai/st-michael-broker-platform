@@ -396,12 +396,12 @@ function CommissionEditor({ content, updateField }: any) {
       <FieldTextarea label="Подзаголовок" value={content.subtitle || ''} onChange={(v) => updateField('commission', 'subtitle', v)} />
 
       <div className="rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm">
-        <div className="font-semibold mb-1">Проценты редактируются в одном месте</div>
+        <div className="font-semibold mb-1">Опубликованные условия и начисления разделены</div>
         <p className="text-text-muted mb-2">
-          Ставка, шкала, рассрочка и субсидированная ипотека берутся из активной политики и автоматически попадают в кабинет и на лендинг.
+          Текущие публичные ставки и предварительный калькулятор используют опубликованные условия PDF: 5% / 4,5% / 4% плюс рублёвая надбавка 0,2–1%. Исторические политики фактического начисления сохраняются отдельно. Текстовые карточки ниже не изменяют эти проценты.
         </p>
         <a className="text-accent font-medium hover:underline" href="/admin/commission-policies">
-          Открыть «Комиссия и рассрочка» →
+          Открыть политики фактического начисления →
         </a>
       </div>
 

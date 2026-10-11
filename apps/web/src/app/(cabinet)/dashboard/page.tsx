@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { apiGet } from '@/lib/api';
 import { Users, Shield, HeartHandshake, Calculator } from 'lucide-react';
 import PushPromptBanner from '@/components/PushPromptBanner';
+import { clientStatusDisplay } from '@/lib/client-status-display';
 
 interface DashboardData {
   clients: { total: number; activeFixations: number; expiringFixations: number };
@@ -87,17 +88,12 @@ export default function DashboardPage() {
                     <div className="font-medium text-sm">{client.fullName}</div>
                     <div className="text-xs text-text-muted">{client.phone}</div>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded ${
-                    client.uniquenessStatus === 'CONDITIONALLY_UNIQUE'
-                      ? 'bg-success/20 text-success'
-                      : client.uniquenessStatus === 'REJECTED'
-                      ? 'bg-error/20 text-error'
-                      : 'bg-warning/20 text-warning'
-                  }`}>
-                    {client.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'Уникален' :
-                     client.uniquenessStatus === 'REJECTED' ? 'Отклонён' :
-                     client.uniquenessStatus === 'EXPIRED' ? 'Истёк' : 'На проверке'}
-                  </span>
+                  <div className="text-right max-w-[55%]">
+                    <span className={`text-xs px-2 py-1 rounded ${clientStatusDisplay(client).cls}`}>
+                      {clientStatusDisplay(client).label}
+                    </span>
+                    {clientStatusDisplay(client).explanation && <div className="text-xs text-warning mt-1">Клиент не зафиксирован</div>}
+                  </div>
                 </div>
               ))}
             </div>

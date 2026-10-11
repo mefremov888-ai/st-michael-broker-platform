@@ -1884,7 +1884,7 @@ export class AdminService {
         // Never return a raw amo/WAF response. Legacy rows can contain HTML
         // and the original request URL may include the client's phone number.
         amoSyncError: publicAmoSyncError(c.amoSyncError),
-        extra: { project: c.project, uniquenessStatus: c.uniquenessStatus, fromAmoSync },
+        extra: { project: c.project, uniquenessStatus: c.uniquenessStatus, fixationStatus: c.fixationStatus, fromAmoSync },
       });
     }
     for (const m of meetings as any[]) {

@@ -35,6 +35,7 @@ import {
   paymentTermsForPolicy,
   rateFor,
 } from "../commission/commission.service";
+import { currentRubleDisplayPolicies } from "../commission/ruble-commission";
 
 const KNOWN_KEYS = [
   "hero",
@@ -1569,6 +1570,9 @@ export class CmsService {
   // для Зорге через /admin/commission-policies, лендинг должен это отразить).
   async getActiveCommissionPolicies() {
     const now = new Date();
+    // Display-only published terms never rewrite dated accounting policies or deal history.
+    const published = currentRubleDisplayPolicies(now);
+    if (published) return published;
     const [rows, commissionContent] = await Promise.all([
       this.prisma.commissionPolicy.findMany({
         where: {

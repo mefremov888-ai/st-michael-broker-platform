@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { api, apiGet } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { AdminPasswordForm } from '@/components/AdminPasswordForm';
+import { clientStatusDisplay } from '@/lib/client-status-display';
 import { ArrowLeft, RefreshCw, Save, Shield, Trash2, Phone, Ban, Database } from 'lucide-react';
 
 const categoryLabels: Record<string, { label: string; cls: string }> = {
@@ -478,18 +479,13 @@ function ClientRowWithStatus({ client, isAdmin, onUpdated }: { client: any; isAd
         <div>
           <div className="font-medium">{client.fullName}</div>
           <div className="text-text-muted text-xs">{client.phone}</div>
-          {client.uniquenessExpiresAt && (
+          {client.uniquenessExpiresAt && clientStatusDisplay(client).showUniquenessExpiry && (
             <div className="text-xs text-text-muted">до {new Date(client.uniquenessExpiresAt).toLocaleDateString('ru-RU')}</div>
           )}
         </div>
         <div className="flex items-center gap-2">
-          <span className={`text-xs px-2 py-1 rounded ${
-            client.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'bg-success/20 text-success'
-            : client.uniquenessStatus === 'REJECTED' ? 'bg-error/20 text-error'
-            : client.uniquenessStatus === 'UNDER_REVIEW' ? 'bg-warning/20 text-warning'
-            : 'bg-text-muted/20 text-text-muted'
-          }`}>
-            {STATUS_LABELS[client.uniquenessStatus] || client.uniquenessStatus}
+          <span className={`text-xs px-2 py-1 rounded ${clientStatusDisplay(client).cls}`} title={clientStatusDisplay(client).explanation}>
+            {clientStatusDisplay(client).label}
           </span>
           {isAdmin && !editing && (
             <button

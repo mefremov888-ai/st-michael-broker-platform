@@ -12,6 +12,7 @@ const EXPECTED_BROKER_ID = "6e414141-f2ca-4c71-8402-2032c9186568";
 // tests bind this exact checkbox ID, without importing a mutable live module.
 const IS_BROKER_FIELD_ID = 835415;
 const KC_PIPELINE_ID = 7600542;
+const REVIEW_LEAD_ID = 32372907;
 const WINDOW_PAGE_LIMIT = 250;
 const WINDOW_MAX_PAGES = 10;
 const BROKER_MAX_LINKED_LEADS = 250;
@@ -174,6 +175,63 @@ function serializeRequester(request) {
     const current = tail.then(() => request(...args));
     tail = current.catch(() => {});
     return current;
+  };
+}
+function normalizedName(value) {
+  return typeof value === "string" ? value.normalize("NFC").toLocaleLowerCase("ru-RU").replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim() : "";
+}
+function textPhoneMatches(value, phone) {
+  if (typeof value !== "string") return false;
+  return (value.match(/(?:\+?7|8)[\s()\-]*\d(?:[\s()\-]*\d){9}/g) || []).some((entry) => helpers.normalizePhone(entry) === phone);
+}
+function createReviewNotesRequester(accessToken, fetchImpl = globalThis.fetch) {
+  if (typeof accessToken !== "string" || !accessToken.trim() || typeof fetchImpl !== "function") refused("REVIEW_REQUEST_CONFIGURATION_INVALID");
+  return async () => {
+    const url = new URL(`https://stmichael.amocrm.ru/api/v4/leads/${REVIEW_LEAD_ID}/notes?limit=100&page=1`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetchImpl(url, { method: "GET", redirect: "error", signal: controller.signal, headers: { Accept: "application/json", Authorization: `Bearer ${accessToken.trim()}` } });
+      if (response?.status === 204) return null;
+      if (response?.ok !== true) refused("REVIEW_NOTES_REQUEST_REJECTED");
+      return await helpers.readBoundedJsonResponse(response, controller);
+    } catch (error) {
+      controller.abort();
+      if (error?.safeCode === "REVIEW_NOTES_REQUEST_REJECTED") throw error;
+      refused("REVIEW_NOTES_REQUEST_FAILED");
+    } finally { clearTimeout(timeout); }
+  };
+}
+async function collectReviewLeadComparison(row, expanded, request, requestNotes) {
+  if (!expanded.possibleCandidates.some((candidate) => candidate.leadId === REVIEW_LEAD_ID)) return { performed: false, reason: "fixed_review_lead_not_in_candidate_scope" };
+  const effective = validateCase(row, true);
+  const raw = await request(`/api/v4/leads/${REVIEW_LEAD_ID}`, { with: "contacts" });
+  const reduced = validatedLead(raw, REVIEW_LEAD_ID, row, expanded.window, false);
+  const prior = expanded.possibleCandidates.find((candidate) => candidate.leadId === REVIEW_LEAD_ID).privateLead;
+  if (JSON.stringify(reduced) !== JSON.stringify(prior)) refused("EXPANDED_LEAD_CHANGED_DURING_SCAN");
+  const phone = helpers.normalizePhone(row.phone), name = normalizedName(row.fullName), contacts = [];
+  for (const id of reduced.contactIds) {
+    if (id === positiveId(effective.broker.amoContactId)) continue;
+    const contact = await request(`/api/v4/contacts/${id}`, { with: "leads" });
+    if (!record(contact) || contact.id !== id || typeof contact.name !== "string" || Buffer.byteLength(contact.name, "utf8") > 4000) refused("REVIEW_CONTACT_INVALID");
+    const flag = brokerFlagEvidence(contact);
+    contacts.push({ brokerFlagEvidence: flag.coverage, isBroker: flag.value, exactClientPhoneMatches: helpers.contactHasExactPhone(contact, phone), normalizedClientNameMatches: normalizedName(contact.name) === name });
+  }
+  const payload = await requestNotes(), notes = payload === null ? [] : payload?._embedded?.notes;
+  if (!Array.isArray(notes) || notes.length > 100 || (payload?._links !== undefined && !record(payload._links))) refused("REVIEW_NOTES_INVALID");
+  const texts = notes.map((note) => {
+    if (!record(note) || !positiveId(note.id) || note.entity_id !== REVIEW_LEAD_ID || !record(note.params)) refused("REVIEW_NOTES_INVALID");
+    if (note.params.text === undefined) return "";
+    if (typeof note.params.text !== "string" || Buffer.byteLength(note.params.text, "utf8") > 64000) refused("REVIEW_NOTES_INVALID");
+    return note.params.text;
+  });
+  return {
+    performed: true, leadId: REVIEW_LEAD_ID, leadUrl: `https://stmichael.amocrm.ru/leads/detail/${REVIEW_LEAD_ID}`,
+    normalizedLeadNameMatchesClient: normalizedName(raw.name) === name,
+    clientNameMentionedInLeadName: (` ${normalizedName(raw.name)} `).includes(` ${name} `), exactGeneratedName: reduced.exactGeneratedName,
+    nonEffectiveBrokerContactsRead: contacts.length, contacts,
+    notes: { read: notes.length, complete: payload === null || (!payload._links?.next && notes.length < 100), requestUuidMentioned: texts.some((text) => text.includes(CLIENT_ID)), exactClientPhoneMentioned: texts.some((text) => textPhoneMatches(text, phone)), clientNameMentioned: texts.some((text) => (` ${normalizedName(text)} `).includes(` ${name} `)) },
+    advisoryOnly: true, identityConfirmed: false,
   };
 }
 function validatedLead(raw, expectedId, row, window, requireWindow) {
@@ -446,16 +504,18 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   if (brokerContact && brokerContact.id !== brokerContactId) refused("BROKER_CONTACT_ID_MISMATCH");
   const contactEvidence = () => helpers.collectAmoEvidence([initial.row], request);
   const expanded = await collectExpandedEvidence({ row: initial.row, brokerContact, contactEvidence, request, requestWindow, scanNow });
+  const reviewLeadComparison = await collectReviewLeadComparison(initial.row, expanded, request, createReviewNotesRequester(token, fetchImpl));
   const evidence = expanded.contactEvidence;
   const storedId = helpers.optionalStoredAmoLeadId(initial.row.amoLeadId);
   const storedRaw = storedId ? await request(`/api/v4/leads/${storedId}`, { with: "contacts" }) : null;
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
   const final = await snapshot(prisma, environment, false);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
-  return buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded);
+  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison };
 }
 function failureCode(error) {
   const allowed = ["INVALID_CASE_TIMESTAMP", "INVALID_CASE_STATE", "RESPONSIBLE_BROKER_UNRESOLVED", "OWNER_BROKER_UNRESOLVED", "FIXED_CLIENT_MISSING", "EXPECTED_BROKER_MISMATCH", "EXPECTED_BROKER_NOT_CANONICAL", "INVALID_CLIENT_PHONE", "PROJECT_MAPPING_UNSUPPORTED", "INVALID_SYNC_ATTEMPTS", "INVALID_BROKER_CONTACT_ID", "AGENCY_SCOPE_TOO_LARGE", "SOURCE_ATTESTATION_INVALID", "DATABASE_ATTESTATION_INVALID", "UNSAFE_TLS_CONFIGURATION", "DATABASE_IDENTITY_MISMATCH", "BROKER_CONTACT_ID_MISMATCH", "CASE_CHANGED_DURING_SCAN", "INVALID_CASE_NAME", "CASE_SCAN_WINDOW_UNSAFE", "WINDOW_REQUEST_CONFIGURATION_INVALID", "WINDOW_PAGE_BOUND_EXCEEDED", "WINDOW_REQUEST_REJECTED", "WINDOW_REQUEST_FAILED", "EXPANDED_LEAD_INVALID", "WINDOW_LEAD_OUT_OF_SCOPE", "WINDOW_PAGE_INVALID", "WINDOW_LEAD_DUPLICATED", "WINDOW_PAGINATION_INCOMPLETE", "BROKER_LINK_SCAN_UNAVAILABLE", "BROKER_LINK_SCAN_INVALID", "EXPANDED_CONTACT_EVIDENCE_INVALID", "EXPANDED_LEAD_CHANGED_DURING_SCAN", "EXPANDED_EVIDENCE_INCOMPLETE", "EXPANDED_POSSIBLE_LEAD_PRESENT"];
+  allowed.push("REVIEW_REQUEST_CONFIGURATION_INVALID", "REVIEW_NOTES_REQUEST_REJECTED", "REVIEW_NOTES_REQUEST_FAILED", "REVIEW_CONTACT_INVALID", "REVIEW_NOTES_INVALID");
   try { return allowed.includes(error?.safeCode) ? error.safeCode : helpers.classifyFailure(error); } catch { return "UNKNOWN_FAILURE"; }
 }
 async function main() {
@@ -467,4 +527,5 @@ async function main() {
   finally { await prisma.$disconnect(); }
 }
 module.exports = { CLIENT_ID, EXPECTED_BROKER_ID, IS_BROKER_FIELD_ID, CLIENT_SELECT, KC_PIPELINE_ID, WINDOW_PAGE_LIMIT, WINDOW_MAX_PAGES, BROKER_MAX_LINKED_LEADS, privateFingerprint, expectedGeneratedName, makeEvidenceWindow, createKcWindowRequester, collectWindowLeads, collectBrokerLeads, collectExpandedEvidence, assertCompleteNegativeEvidence, validateCase, canInspectEffectiveBroker, brokerFlagEvidence, runtimeMetadata, snapshot, buildReport, buildOwnershipReport, run, failureCode, main };
+Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches, createReviewNotesRequester, collectReviewLeadComparison, validatedLead });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });

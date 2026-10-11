@@ -14,6 +14,7 @@ import {
   CheckCircle2, XCircle, Clock,
 } from 'lucide-react';
 import AmoHealthBanner from '@/components/AmoHealthBanner';
+import { clientStatusDisplay } from '@/lib/client-status-display';
 
 type AppType = 'CLIENT' | 'MEETING' | 'CALL' | 'OFFER' | 'LOGIN';
 type AmoStatus = 'SYNCED' | 'FAILED' | 'PENDING';
@@ -396,17 +397,8 @@ export default function BrokerApplicationsPage() {
                         </td>
                         <td className="py-3">
                           {item.type === 'CLIENT' && item.extra?.uniquenessStatus ? (
-                            <span className={`text-xs px-2 py-1 rounded ${
-                              item.extra.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'bg-success/20 text-success'
-                              : item.extra.uniquenessStatus === 'REJECTED' ? 'bg-error/20 text-error'
-                              : item.extra.uniquenessStatus === 'UNDER_REVIEW' ? 'bg-warning/20 text-warning'
-                              : 'bg-text-muted/20 text-text-muted'
-                            }`}>
-                              {item.extra.uniquenessStatus === 'CONDITIONALLY_UNIQUE' ? 'Уникален'
-                                : item.extra.uniquenessStatus === 'REJECTED' ? 'Не уникален'
-                                : item.extra.uniquenessStatus === 'UNDER_REVIEW' ? 'На проверке'
-                                : item.extra.uniquenessStatus === 'EXPIRED' ? 'Истёк'
-                                : item.extra.uniquenessStatus}
+                            <span className={`text-xs px-2 py-1 rounded ${clientStatusDisplay({ ...item.extra, amoSyncStatus: item.amoStatus }).cls}`} title={clientStatusDisplay({ ...item.extra, amoSyncStatus: item.amoStatus }).explanation}>
+                              {clientStatusDisplay({ ...item.extra, amoSyncStatus: item.amoStatus }).label}
                             </span>
                           ) : (
                             <span className="text-xs text-text-muted">—</span>

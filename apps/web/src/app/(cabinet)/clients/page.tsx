@@ -5,13 +5,7 @@ import { apiGet, apiPost } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Search, ChevronLeft, ChevronRight, X, AlertTriangle, Mail, Building, User, Phone as PhoneIcon, Calendar, FileText, CheckCircle2, AlertCircle, PhoneCall } from 'lucide-react';
 import { uniquenessHistoryLabel } from '@/lib/uniqueness-history';
-
-const statusLabels: Record<string, { label: string; cls: string }> = {
-  CONDITIONALLY_UNIQUE: { label: 'Уникален', cls: 'bg-success/20 text-success' },
-  REJECTED: { label: 'Не уникален', cls: 'bg-error/20 text-error' },
-  UNDER_REVIEW: { label: 'На проверке', cls: 'bg-warning/20 text-warning' },
-  EXPIRED: { label: 'Истёк', cls: 'bg-text-muted/20 text-text-muted' },
-};
+import { clientStatusDisplay, clientTransferUnconfirmed } from '@/lib/client-status-display';
 
 // 2026-07-02: если А зафиксировал клиента на Б через «Фиксирую на другого
 // брокера», уникальность принадлежит А (создателю). Б просто исполнитель —
@@ -189,6 +183,7 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
   }, [shallowClient.id]);
 
   const daysLeft = daysUntilExpiry(client.uniquenessExpiresAt);
+  const displayedStatus = clientStatusDisplay(client);
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -225,7 +220,7 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
           {/* 2026-07-02: если брокер только исполнитель по фиксации (А зафиксировал
               на него) — не показываем «Уникален», показываем «Исполнитель»:
               уникальность принадлежит создателю (А). */}
-          {isExecutorView(client, broker?.id) ? (
+          {isExecutorView(client, broker?.id) && !clientTransferUnconfirmed(client) ? (
             <span
               className="text-xs px-2 py-1 rounded bg-info/20 text-info"
               title="Заявку на этого клиента подали за вас. Клиент закреплён за вами — вы ведёте показы и сделку."
@@ -233,8 +228,8 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
               Исполнитель по фиксации
             </span>
           ) : (
-            <span className={`text-xs px-2 py-1 rounded ${statusLabels[client.uniquenessStatus]?.cls || 'bg-text-muted/20'}`}>
-              {statusLabels[client.uniquenessStatus]?.label || client.uniquenessStatus}
+            <span className={`text-xs px-2 py-1 rounded ${displayedStatus.cls}`}>
+              {displayedStatus.label}
             </span>
           )}
           {client.fixationStatus && client.fixationStatus !== 'NOT_FIXED' && (
@@ -251,11 +246,16 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
             </span>
           )}
         </div>
+        {displayedStatus.explanation && (
+          <div role="status" className="mb-4 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+            {displayedStatus.explanation}
+          </div>
+        )}
 
         {/* 2026-09-17 (просьба владельца): объясняем брокеру, откуда у него
             этот клиент — кто подал заявку, когда и что это значит для него.
             Раньше была только плашка «Исполнитель по фиксации» без пояснений. */}
-        {isExecutorView(client, broker?.id) && (
+        {isExecutorView(client, broker?.id) && !clientTransferUnconfirmed(client) && (
           <div className="mb-4 rounded-lg border border-info/30 bg-info/10 p-3">
             <div className="text-sm font-medium">
               Заявку за вас подал {executorSubmitterLabel(client)}
@@ -288,7 +288,7 @@ function ClientDetail({ client: shallowClient, onClose }: { client: any; onClose
           )}
           {/* 2026-07-02: срок уникальности показываем только владельцу (creator).
               Исполнитель не имеет уникальности, ему таймер неактуален. */}
-          {!isExecutorView(client, broker?.id) && (
+          {!isExecutorView(client, broker?.id) && displayedStatus.showUniquenessExpiry && (
             <div className="bg-surface-secondary rounded-lg p-3 col-span-2">
               <span className="text-text-muted block text-xs flex items-center gap-1">
                 <Calendar className="w-3 h-3" /> Статус до
@@ -591,7 +591,7 @@ export default function ClientsPage() {
           // 2026-07-02: исполнителя по фиксации не тревожим — уникальность
           // и её срок принадлежат создателю (А), не Б.
           if (isExecutorView(c, broker?.id)) return false;
-          if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE') return false;
+          if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE' || clientTransferUnconfirmed(c)) return false;
           const d = daysUntilExpiry(c.uniquenessExpiresAt);
           return d !== null && d >= 0 && d <= 7;
         });
@@ -731,7 +731,7 @@ export default function ClientsPage() {
                       <td className="py-3">
                         {/* 2026-07-02: исполнитель по фиксации не видит «Уникален» —
                             уникальность принадлежит создателю (А). */}
-                        {isExecutorView(c, broker?.id) ? (
+                        {isExecutorView(c, broker?.id) && !clientTransferUnconfirmed(c) ? (
                           <span
                             className="text-xs px-2 py-1 rounded bg-info/20 text-info"
                             title={`Заявку за вас подал ${executorSubmitterLabel(c)}. Клиент закреплён за вами — вы ведёте показы и сделку.`}
@@ -740,11 +740,12 @@ export default function ClientsPage() {
                           </span>
                         ) : (
                           <>
-                            <span className={`text-xs px-2 py-1 rounded ${statusLabels[c.uniquenessStatus]?.cls || ''}`}>
-                              {statusLabels[c.uniquenessStatus]?.label || c.uniquenessStatus}
+                            <span className={`text-xs px-2 py-1 rounded ${clientStatusDisplay(c).cls}`}>
+                              {clientStatusDisplay(c).label}
                             </span>
+                            {clientStatusDisplay(c).explanation && <div className="text-xs text-warning mt-1">Клиент не зафиксирован</div>}
                             {(() => {
-                              if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE') return null;
+                              if (c.uniquenessStatus !== 'CONDITIONALLY_UNIQUE' || clientTransferUnconfirmed(c)) return null;
                               const d = daysUntilExpiry(c.uniquenessExpiresAt);
                               if (d === null || d > 7 || d < 0) return null;
                               return (
@@ -760,7 +761,7 @@ export default function ClientsPage() {
                         {/* КБ6: колонка «Уникален до» — дата окончания 30-дн уникальности.
                             Подсветка: ≤1 дн — красный, ≤7 дн — оранжевый.
                             2026-07-02: исполнителю таймер уникальности не показываем. */}
-                        {isExecutorView(c, broker?.id)
+                        {isExecutorView(c, broker?.id) || !clientStatusDisplay(c).showUniquenessExpiry
                           ? '—'
                           : (c.uniquenessExpiresAt ? (() => {
                               const d = daysUntilExpiry(c.uniquenessExpiresAt);

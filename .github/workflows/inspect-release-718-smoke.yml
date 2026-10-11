@@ -1,0 +1,130 @@
+name: Inspect release 718 smoke (read-only by default)
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact deployed release SHA (40 lowercase hex characters)
+        required: true
+        type: string
+      confirm_send:
+        description: Also invoke freshness once (ops Telegram and daily dedup setting writes)
+        default: false
+        required: true
+        type: boolean
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Inspect exact release without starting application context
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          CONFIRM_SEND: ${{ inputs.confirm_send }}
+          PRODUCTION_PG_SYSTEM_IDENTIFIER: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+          SOURCE_SHA: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_REPOSITORY" = sereganikitin/st-michael-broker-platform
+          test "$SOURCE_REF" = refs/heads/master
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform
+          test -n "$SSH_HOST" -a -n "$SSH_USER" -a -n "$SSH_PRIVATE_KEY" -a -n "$DEPLOY_PATH"
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]]
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CONFIRM_SEND" = false || "$CONFIRM_SEND" = true ]]
+          [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ && "$PRODUCTION_MIN_BROKER_ROWS" =~ ^[1-9][0-9]*$ ]]
+          node --test scripts/inspect-release-718-smoke.test.js
+          bundle=$(base64 -w0 scripts/inspect-release-718-smoke.js)
+          bundle_hash=$(sha256sum scripts/inspect-release-718-smoke.js | cut -d' ' -f1)
+          test "$(git show "$SOURCE_SHA:scripts/inspect-release-718-smoke.js" | sha256sum | cut -d' ' -f1)" = "$bundle_hash"
+          root=$(mktemp -d)
+          known_hosts="$root/known_hosts"
+          private_key="$root/deploy-key"
+          trap 'rm -f -- "$known_hosts" "$private_key"; rmdir -- "$root" 2>/dev/null || true' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"
+          chmod 600 "$private_key"
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          mapfile -t fingerprints < <(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)
+          test "${#fingerprints[@]}" -eq 1
+          test "${fingerprints[0]}" = "$EXPECTED_SSH_FINGERPRINT"
+          ssh -i "$private_key" -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            "${SSH_USER}@${SSH_HOST}" "bash -s -- '$DEPLOY_PATH' '$EXPECTED_SHA' '$CONFIRM_SEND' '$bundle_hash' '$bundle' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS'" <<'REMOTE'
+          set -euo pipefail
+          deploy_path=$1
+          expected_sha=$2
+          confirm_send=$3
+          expected_hash=$4
+          bundle=$5
+          system_identifier=$6
+          minimum_broker_rows=$7
+          [[ "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ && "$expected_sha" =~ ^[0-9a-f]{40}$ && "$expected_hash" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$confirm_send" = false || "$confirm_send" = true ]]
+          [[ "$system_identifier" =~ ^[0-9]+$ && "$minimum_broker_rows" =~ ^[1-9][0-9]*$ ]]
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          deploy_root=$(readlink -f -- "$deploy_path")
+          test -n "$deploy_root" -a "$deploy_root" != / -a -d "$deploy_root"
+          lock_path=/tmp/st-michael-production-deploy.lock
+          test -f "$lock_path" -a ! -L "$lock_path"
+          lock_identity=$(stat -Lc '%d:%i' -- "$lock_path")
+          exec 9<"$lock_path"
+          test "$(stat -Lc '%d:%i' -- /proc/$$/fd/9)" = "$lock_identity"
+          flock -s -n 9 || { echo production_lock_busy=true; exit 1; }
+          test "$(stat -Lc '%d:%i' -- "$lock_path")" = "$lock_identity"
+          cd -- "$deploy_root"
+          test "$(git rev-parse --show-toplevel)" = "$deploy_root"
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform.git
+          test "$(git symbolic-ref --short HEAD)" = master
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test -z "${DOCKER_HOST:-}" -a -z "${DOCKER_CONTEXT:-}"
+          test "$(timeout 15 docker context show)" = default
+          test "$(timeout 15 docker context inspect default --format '{{.Endpoints.docker.Host}}')" = unix:///var/run/docker.sock
+          test -S /var/run/docker.sock
+          security_options=$(timeout 15 docker info --format '{{json .SecurityOptions}}')
+          printf '%s' "$security_options" | jq -e 'type == "array" and all(.[]; type == "string" and (contains("rootless") | not))' >/dev/null
+          unset security_options
+          project=$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' st-michael-postgres)
+          [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
+          for service in api postgres; do
+            test "$(timeout 15 docker inspect --format '{{.State.Running}}' "st-michael-$service")" = true
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "st-michael-$service")" = "$project"
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "st-michael-$service")" = "$service"
+          done
+          test "$(printf '%s' "$bundle" | base64 -d | sha256sum | cut -d' ' -f1)" = "$expected_hash"
+          test "$(timeout 15 docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')" = "$expected_sha"
+          # node stdin does not set require.main; explicitly invoke the reviewed
+          # entry point rather than returning a misleading no-op success.
+          {
+            printf '%s' "$bundle" | base64 -d
+            printf '\ninspect().catch(() => { console.error("RELEASE_SMOKE_FAILED"); process.exitCode = 1; });\n'
+          } | timeout 140 docker exec -i \
+            -e SMOKE_EXPECTED_SHA="$expected_sha" -e SMOKE_CONFIRM_SEND="$confirm_send" \
+            -e PRODUCTION_PG_SYSTEM_IDENTIFIER="$system_identifier" -e PRODUCTION_MIN_BROKER_ROWS="$minimum_broker_rows" \
+            st-michael-api node -
+          test "$(git rev-parse HEAD)" = "$expected_sha"
+          test "$(stat -Lc '%d:%i' -- "$lock_path")" = "$lock_identity"
+          test "$(timeout 15 docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')" = "$expected_sha"
+          REMOTE
