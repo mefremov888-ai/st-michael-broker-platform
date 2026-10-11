@@ -105,6 +105,7 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     const fetch = jest.fn(async (url: URL, optionsFetch: any) => {
       if (url.pathname === "/api/v4/leads/32372907/notes" && optionsFetch.method === "GET") {
         state.reviewNoteReads++;
+        if (options.reviewNotes204UntilRead) return state.reviewNoteReads <= options.reviewNotes204UntilRead ? json({}, 204) : json({ _embedded: { notes: [] } });
         if (options.reviewNotesChanging) return state.reviewNoteReads === 1 ? json({}, 204) : json({ _embedded: { notes: [] } });
         if (options.reviewNotes204) return json({}, 204);
         if (options.reviewNotesRejected) return json({}, 403);
@@ -182,16 +183,18 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     const db = database(options.row || row(), options);
     if (options.prior) db.data.audits.push({ action: "AMO_FIXED_CASE_CONTACT_ARMED", payload: { operationKey: recovery.OPERATION_KEY } });
     const crm = provider(options), lease = redis();
+    let clockCalls = 0;
+    const clock = () => options.movingCaptures ? new Date(NOW.getTime() - 30_000 + ++clockCalls * 1000) : new Date(NOW);
     let lockCalls = 0;
     const lock = { assertOwned: jest.fn(async () => { if (++lockCalls === options.lockLostAt) throw Error("private-lock-error"); }) };
     if (options.leaseBusy) lease.set.mockImplementation(async (_key, _value) => null);
     helpers.createGetOnlyRequester = jest.fn((token: string) => { expect(token).toBe("private-db-token"); return crm.request; });
     helpers.collectAmoEvidence = crm.collect; inspector.collectExpandedEvidence = crm.expanded;
-    const plan = await recovery.runPlan({ prisma: db, environment: environment("plan"), confirmation: recovery.PLAN_CONFIRMATION, operationLock: lock, fetchImpl: crm.fetch, now: () => new Date(NOW) });
+    const plan = await recovery.runPlan({ prisma: db, environment: environment("plan"), confirmation: recovery.PLAN_CONFIRMATION, operationLock: lock, fetchImpl: crm.fetch, now: clock });
     if (options.planOnly) return { db, crm, lease, lock, plan, result: plan };
     const applyEnvironment = environment("apply", plan);
     if (options.planHashMismatch) applyEnvironment.FIXED_CASE_EXPECTED_CANDIDATE_HASH = "f".repeat(64);
-    const result = await recovery.runDraftRecovery({ prisma: db, redis: lease, environment: applyEnvironment, confirmation: recovery.CONFIRMATION, operationLock: lock, fetchImpl: crm.fetch, now: () => new Date(NOW), sleep: async () => {} });
+    const result = await recovery.runDraftRecovery({ prisma: db, redis: lease, environment: applyEnvironment, confirmation: recovery.CONFIRMATION, operationLock: lock, fetchImpl: crm.fetch, now: clock, sleep: async () => {} });
     return { db, crm, lease, lock, plan, result };
   }
 
@@ -288,6 +291,42 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     expect(lease.data.size).toBe(0);
     expect(crm.expanded).toHaveBeenCalledTimes(7);
     expect(crm.request.mock.calls.filter(([path]) => path === "/api/v4/leads/32372907")).toHaveLength(14);
+  });
+  it("advancing capture timestamps and KC windows do not change the reviewed certificate before claim", async () => {
+    inspector.createReviewNotesRequester = originals.notes;
+    const { result, crm } = await execute({ movingCaptures: true, reviewNotes204: true });
+    expect(result).toMatchObject({ status: 'linked', contactPosts: 1, leadPosts: 1 });
+    const captures = crm.expanded.mock.calls.map(([input]) => input.scanNow.getTime());
+    expect(new Set(captures).size).toBe(7);
+    expect(captures.every((time, index) => index === 0 || time > captures[index - 1])).toBe(true);
+  });
+  it("successful plan can refuse before claim when later notes provenance changes, even with no durable audit", async () => {
+    inspector.createReviewNotesRequester = originals.notes;
+    const certificate = loaded.require('./fixed-amo-case-exclusion-certificate');
+    const original = certificate.recheckFixedCaseExclusionCertificate;
+    let failureCode: string | undefined;
+    certificate.recheckFixedCaseExclusionCertificate = (...args: any[]) => {
+      try { return original(...args); } catch (error) { failureCode = (error as any).safeCode; throw error; }
+    };
+    try {
+      // Two plan readbacks (4 GETs), initial apply readback (2 GETs),
+      // then the preclaim readback observes HTTP200 rather than HTTP204.
+      const { result, db, lease } = await execute({ reviewNotes204UntilRead: 6 });
+      expect(failureCode).toBe('CERT_RECHECK_CHANGED');
+      expect(result).toMatchObject({ status: 'unresolved', failureCode: 'RECOVERY_REFUSED', contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 });
+      expect(db.tx.client.updateMany).not.toHaveBeenCalled(); expect(db.tx.auditLog.create).not.toHaveBeenCalled();
+      expect(db.data.row.updatedAt).toEqual(row().updatedAt);
+      expect([...lease.data.values()]).toEqual([expect.objectContaining({ status: 'uncertain' })]);
+    } finally { certificate.recheckFixedCaseExclusionCertificate = original; }
+  });
+  it("the exact busy Redis lease code is currently hidden by the generic recovery allowlist", async () => {
+    const leaseModule = loaded.require('./apply-amo-deadletter-group-recovery');
+    let caught: any;
+    try { await leaseModule.acquirePhoneLeases({ set: async () => null }, [{ group: { normalizedPhone: '+79990001122' } }], Buffer.alloc(32, 1), amoFixationPhoneLockRedisKey); }
+    catch (error) { caught = error; }
+    expect(caught?.code).toBe('PHONE_LOCK_BUSY');
+    expect(caught?.safeCode).toBeUndefined();
+    expect(recovery.safeFailureCode(caught)).toBe('RECOVERY_REFUSED');
   });
   it("lost contact response is GET-reconciled without another POST", async () => {
     const { result, crm } = await execute({ contactUnknown: true });

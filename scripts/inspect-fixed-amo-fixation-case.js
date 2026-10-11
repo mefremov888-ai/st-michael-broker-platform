@@ -808,10 +808,71 @@ function safeTimestamp(values, reference) {
   const evidence = helpers.unixTimestampEvidence(values, reference);
   return { coverage: evidence.coverage, validValueCount: evidence.validValueCount, relativeToQueue: evidence.relativeToQueue };
 }
-async function run({ prisma, environment = process.env, fetchImpl, now = () => new Date() } = {}) {
+const RUNTIME_PHONE_LOCK_PATH = "/app/packages/integrations/dist/amo-fixation-phone-lock.js";
+const RUNTIME_PHONE_LOCK_SHA256 = "9bfdcd078d6e708456c8b5face324e04b90174abf85b00ed6b533edd4c5c8c49";
+function attestedRuntimePhoneLock() {
+  const fs = require("node:fs");
+  for (const path of ["/app", "/app/packages", "/app/packages/integrations", "/app/packages/integrations/dist", RUNTIME_PHONE_LOCK_PATH]) {
+    const stat = fs.lstatSync(path);
+    if (stat.isSymbolicLink() || (path === RUNTIME_PHONE_LOCK_PATH ? !stat.isFile() || stat.size > 64000 : !stat.isDirectory()) || fs.realpathSync(path) !== path) refused("REDIS_HELPER_ATTESTATION_INVALID");
+  }
+  const bytes = fs.readFileSync(RUNTIME_PHONE_LOCK_PATH);
+  if (createHash("sha256").update(bytes).digest("hex") !== RUNTIME_PHONE_LOCK_SHA256) refused("REDIS_HELPER_ATTESTATION_INVALID");
+  const module = { exports: {} };
+  require("node:vm").runInNewContext(bytes.toString("utf8"), {
+    module, exports: module.exports,
+    require: (name) => { if (name !== "node:crypto") refused("REDIS_HELPER_ATTESTATION_INVALID"); return require(name); },
+  }, { timeout: 1000 });
+  if (module.exports.AMO_FIXATION_PHONE_LOCK_REDIS_PREFIX !== "client-fixation:semantic:" || typeof module.exports.amoFixationPhoneLockRedisKey !== "function") refused("REDIS_HELPER_ATTESTATION_INVALID");
+  return module.exports.amoFixationPhoneLockRedisKey;
+}
+function createReadOnlyRedis(Redis, environment) {
+  if (environment.REDIS_HOST !== "redis" || environment.REDIS_PORT !== "6379" ||
+    (environment.REDIS_DB !== undefined && environment.REDIS_DB !== "0") || environment.REDIS_PASSWORD) refused("REDIS_IDENTITY_INVALID");
+  return new Redis({ host: "redis", port: 6379, db: 0, lazyConnect: true,
+    enableReadyCheck: false, maxRetriesPerRequest: 0, commandTimeout: 3000,
+    connectTimeout: 3000, retryStrategy: () => null });
+}
+async function collectReadOnlyRedisLease(redis, row, phoneLockKey, clock = () => Date.now()) {
+  validateCase(row, true);
+  if (!canInspectEffectiveBroker(row) || typeof phoneLockKey !== "function" ||
+    !redis || ["get", "exists", "pttl"].some((method) => typeof redis[method] !== "function")) refused("REDIS_LEASE_SCOPE_INVALID");
+  const key = phoneLockKey(row.phone);
+  if (typeof key !== "string" || !/^client-fixation:semantic:[0-9a-f]{64}$/.test(key)) refused("REDIS_LEASE_SCOPE_INVALID");
+  const sample = async () => {
+    const start = clock();
+    // The raw key/value stay private. Only these three readonly Redis methods
+    // are called; never SCAN, KEYS, SET, EVAL, MULTI, delete or lease renewal.
+    const value = await redis.get(key);
+    const ttl = await redis.pttl(key);
+    const exists = await redis.exists(key);
+    const end = clock();
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start || end - start > 10000 ||
+      ![0, 1].includes(exists) || !Number.isSafeInteger(ttl) || ttl < -2 || ttl > 24 * 60 * 60 * 1000 ||
+      (value !== null && (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 4096))) refused("REDIS_LEASE_OBSERVATION_INVALID");
+    let status = "absent";
+    if (value !== null) {
+      let parsed; try { parsed = JSON.parse(value); } catch { refused("REDIS_LEASE_OBSERVATION_INVALID"); }
+      if (!record(parsed) || !["processing", "completed", "uncertain"].includes(parsed.status)) refused("REDIS_LEASE_OBSERVATION_INVALID");
+      status = parsed.status;
+    }
+    return { valueHash: privateFingerprint(value), present: exists === 1, ttl, status, start, end,
+      consistent: value === null ? exists === 0 && ttl === -2 : exists === 1 && ttl >= -1 };
+  };
+  const first = await sample(), second = await sample();
+  const elapsed = second.end - first.start;
+  const ttlStable = first.ttl < 0 ? first.ttl === second.ttl : second.ttl >= 0 && second.ttl <= first.ttl && first.ttl - second.ttl <= elapsed + 100;
+  const stableReadback = first.consistent && second.consistent && first.present === second.present && first.status === second.status && first.valueHash === second.valueHash && elapsed >= 0 && elapsed <= 20000 && ttlStable;
+  return { performed: true, lockPresent: second.present, ttlMs: second.ttl,
+    uncertainPresent: second.present && second.status === "uncertain",
+    uncertainTtlMs: second.present && second.status === "uncertain" ? second.ttl : null,
+    bounded: true, identitySafe: true, stableReadback, mutationAttempted: false };
+}
+async function run({ prisma, environment = process.env, fetchImpl, now = () => new Date(), readRedisLease } = {}) {
   const metadata = runtimeMetadata(environment);
   const initial = await snapshot(prisma, environment, true, true);
   if (!canInspectEffectiveBroker(initial.row)) return buildOwnershipReport(initial.row, metadata);
+  const redisLease = typeof readRedisLease === "function" ? await readRedisLease(initial.row) : { performed: false };
   const token = typeof initial.token === "string" && initial.token.trim() ? initial.token : environment.AMO_ACCESS_TOKEN;
   const scanNow = now();
   const window = makeEvidenceWindow(initial.row, scanNow);
@@ -832,13 +893,14 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
   const final = await snapshot(prisma, environment, false, true);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
-  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)), recoveryAudit: recoveryAuditReport(initial.recoveryAudit, privateFingerprint(initial.recoveryAudit) === privateFingerprint(final.recoveryAudit)) };
+  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)), recoveryAudit: recoveryAuditReport(initial.recoveryAudit, privateFingerprint(initial.recoveryAudit) === privateFingerprint(final.recoveryAudit)), redisLease };
 }
 function failureCode(error) {
   const allowed = ["INVALID_CASE_TIMESTAMP", "INVALID_CASE_STATE", "RESPONSIBLE_BROKER_UNRESOLVED", "OWNER_BROKER_UNRESOLVED", "FIXED_CLIENT_MISSING", "EXPECTED_BROKER_MISMATCH", "EXPECTED_BROKER_NOT_CANONICAL", "INVALID_CLIENT_PHONE", "PROJECT_MAPPING_UNSUPPORTED", "INVALID_SYNC_ATTEMPTS", "INVALID_BROKER_CONTACT_ID", "AGENCY_SCOPE_TOO_LARGE", "SOURCE_ATTESTATION_INVALID", "DATABASE_ATTESTATION_INVALID", "UNSAFE_TLS_CONFIGURATION", "DATABASE_IDENTITY_MISMATCH", "BROKER_CONTACT_ID_MISMATCH", "CASE_CHANGED_DURING_SCAN", "INVALID_CASE_NAME", "CASE_SCAN_WINDOW_UNSAFE", "WINDOW_REQUEST_CONFIGURATION_INVALID", "WINDOW_PAGE_BOUND_EXCEEDED", "WINDOW_REQUEST_REJECTED", "WINDOW_REQUEST_FAILED", "EXPANDED_LEAD_INVALID", "WINDOW_LEAD_OUT_OF_SCOPE", "WINDOW_PAGE_INVALID", "WINDOW_LEAD_DUPLICATED", "WINDOW_PAGINATION_INCOMPLETE", "BROKER_LINK_SCAN_UNAVAILABLE", "BROKER_LINK_SCAN_INVALID", "EXPANDED_CONTACT_EVIDENCE_INVALID", "EXPANDED_LEAD_CHANGED_DURING_SCAN", "EXPANDED_EVIDENCE_INCOMPLETE", "EXPANDED_POSSIBLE_LEAD_PRESENT"];
   allowed.push("REVIEW_REQUEST_CONFIGURATION_INVALID", "REVIEW_NOTES_REQUEST_REJECTED", "REVIEW_NOTES_REQUEST_FAILED", "REVIEW_CONTACT_INVALID", "REVIEW_NOTES_INVALID", "REVIEW_HISTORY_SCOPE_INVALID", "REVIEW_EVENTS_INVALID", "REVIEW_CONTACT_SCOPE_EXCEEDED");
   allowed.push("REVIEW_SOURCE_INVALID", "CASE_AUDIT_INVALID", "CASE_AUDIT_SCOPE_EXCEEDED");
   allowed.push("RECOVERY_AUDIT_INVALID", "RECOVERY_AUDIT_SCOPE_EXCEEDED");
+  allowed.push("REDIS_HELPER_ATTESTATION_INVALID", "REDIS_IDENTITY_INVALID", "REDIS_LEASE_SCOPE_INVALID", "REDIS_LEASE_OBSERVATION_INVALID");
   try { return allowed.includes(error?.safeCode) ? error.safeCode : helpers.classifyFailure(error); } catch { return "UNKNOWN_FAILURE"; }
 }
 async function main() {
@@ -846,11 +908,18 @@ async function main() {
   runtimeMetadata(process.env);
   const { PrismaClient } = require("@st-michael/database");
   const prisma = new PrismaClient({ datasources: { db: { url: helpers.buildReadOnlyDatabaseUrl(process.env.DATABASE_URL) } }, log: [] });
-  try { process.stdout.write(`${JSON.stringify(await run({ prisma }), null, 2)}\n`); }
-  finally { await prisma.$disconnect(); }
+  let redis;
+  try {
+    const phoneLockKey = attestedRuntimePhoneLock();
+    redis = createReadOnlyRedis(require("/app/node_modules/ioredis"), process.env);
+    redis.on("error", () => {});
+    await redis.connect();
+    process.stdout.write(`${JSON.stringify(await run({ prisma, readRedisLease: (row) => collectReadOnlyRedisLease(redis, row, phoneLockKey) }), null, 2)}\n`);
+  } finally { redis?.disconnect(); await prisma.$disconnect(); }
 }
 module.exports = { CLIENT_ID, EXPECTED_BROKER_ID, IS_BROKER_FIELD_ID, CLIENT_SELECT, KC_PIPELINE_ID, WINDOW_PAGE_LIMIT, WINDOW_MAX_PAGES, BROKER_MAX_LINKED_LEADS, privateFingerprint, expectedGeneratedName, makeEvidenceWindow, createKcWindowRequester, collectWindowLeads, collectBrokerLeads, collectExpandedEvidence, assertCompleteNegativeEvidence, validateCase, canInspectEffectiveBroker, brokerFlagEvidence, runtimeMetadata, snapshot, buildReport, buildOwnershipReport, run, failureCode, main };
 Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches, createReviewNotesRequester, collectReviewLeadComparison, validatedLead });
 Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence, reviewSourceEvidence, auditQuery, validateAuditRows, auditReport });
 Object.assign(module.exports, { recoveryAuditQuery, validateRecoveryAuditRows, recoveryAuditReport });
+Object.assign(module.exports, { attestedRuntimePhoneLock, createReadOnlyRedis, collectReadOnlyRedisLease });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });
