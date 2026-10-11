@@ -1,12 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 
 import {
   buildReport,
   findMisnamedRecordings,
   parsePlaudRecent,
+  parsePlaudRecentChecked,
   splitTelegramMessage,
   validateRecordingName,
+  main,
 } from './monitor-plaud-file-names.mjs';
 
 const fixture = `
@@ -59,5 +64,41 @@ test('splits long Telegram messages under the configured limit', () => {
   const chunks = splitTelegramMessage(['header', ...Array.from({ length: 30 }, (_, i) => `${i}. ${'x'.repeat(20)}`)].join('\n'), 100);
   assert.ok(chunks.length > 1);
   assert.ok(chunks.every((chunk) => chunk.length <= 100));
+});
+
+test('server parser accepts zero only with explicit matching CLI header', () => {
+  assert.deepEqual(parsePlaudRecentChecked('Recordings in the last 7 days: 0\n', 7), []);
+  for (const output of ['', 'Login required', '{"files":[]}', 'Recordings in the last 7 days: 3', 'Recordings in the last 8 days: 0']) assert.throws(() => parsePlaudRecentChecked(output, 7), { code: 'plaud_output_untrusted' });
+  assert.equal(parsePlaudRecentChecked(fixture, 7).length, 4);
+});
+
+test('splitter bounds single long lines without splitting surrogate pairs', () => {
+  const value = `header\n${'🧩'.repeat(3000)}\ntail`;
+  const chunks = splitTelegramMessage(value, 100);
+  assert.ok(chunks.every(chunk => chunk.length <= 100 && !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(chunk)));
+  assert.equal(chunks.join('').replace(/\n/g, ''), value.replace(/\n/g, ''));
+});
+
+test('legacy manual dry-run logs counts and fixed failures, never report names or raw errors', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'plaud-manual-log-test-'));
+  const file = path.join(directory, 'synthetic.txt');
+  const previousArgs = process.argv;
+  const previousExitCode = process.exitCode;
+  const previousLog = console.log;
+  const previousError = console.error;
+  const logs = [];
+  t.after(async () => { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
+  try {
+    process.argv = [process.execPath, 'monitor-plaud-file-names.mjs', '--input', file, '--dry-run'];
+    console.log = value => logs.push(String(value));
+    console.error = value => logs.push(String(value));
+    await writeFile(file, fixture);
+    await main();
+    await writeFile(file, 'SensitiveSyntheticErrorWithToken');
+    await main();
+    assert.equal(logs.some(line => line.includes('Иван') || line.includes('Анна') || line.includes('SensitiveSyntheticErrorWithToken')), false);
+    assert.deepEqual(JSON.parse(logs[0]), { status: 'CHECKED', lookback_days: 7, recordings: 4, misnamed: 2 });
+    assert.deepEqual(JSON.parse(logs[1]), { status: 'FAILED', error: 'plaud_output_untrusted' });
+  } finally { process.argv = previousArgs; process.exitCode = previousExitCode; console.log = previousLog; console.error = previousError; }
 });
 

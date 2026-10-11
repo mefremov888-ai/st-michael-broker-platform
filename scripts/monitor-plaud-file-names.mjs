@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 const MOSCOW_TIME_ZONE = 'Europe/Moscow';
@@ -31,6 +31,18 @@ export function parsePlaudRecent(output) {
     const [, id, name, createdDate, duration] = match;
     if (id.toUpperCase() === 'ID' || !/^[-\w]{16,}$/u.test(id)) continue;
     recordings.push({ id, name: name.trim(), createdDate, duration });
+  }
+  return recordings;
+}
+
+/** A zero-row parser result is not proof of an empty account. Server mode
+ * accepts zero only with the CLI's explicit, matching zero-count header. */
+export function parsePlaudRecentChecked(output, days) {
+  const text = stripAnsi(output);
+  const headers = [...text.matchAll(/^\s*Recordings in the last (\d+) days:\s*(\d+)\s*$/gmu)];
+  const recordings = parsePlaudRecent(text);
+  if (headers.length > 1 || (headers.length === 1 && (Number(headers[0][1]) !== days || Number(headers[0][2]) !== recordings.length)) || (recordings.length === 0 && (headers.length !== 1 || Number(headers[0][2]) !== 0))) {
+    throw Object.assign(new Error('plaud_output_untrusted'), { code: 'plaud_output_untrusted' });
   }
   return recordings;
 }
@@ -119,6 +131,7 @@ export function buildReport(recordings, misnamed, days, now = new Date()) {
 }
 
 export function splitTelegramMessage(message, limit = MAX_TELEGRAM_TEXT) {
+  if (!Number.isInteger(limit) || limit < 2 || limit > MAX_TELEGRAM_TEXT) throw new Error('Invalid Telegram message limit');
   if (message.length <= limit) return [message];
   const chunks = [];
   let current = '';
@@ -129,7 +142,11 @@ export function splitTelegramMessage(message, limit = MAX_TELEGRAM_TEXT) {
       continue;
     }
     if (current) chunks.push(current);
-    current = line;
+    current = '';
+    for (const point of line) {
+      if (current.length + point.length > limit) { chunks.push(current); current = ''; }
+      current += point;
+    }
   }
   if (current) chunks.push(current);
   return chunks;
@@ -172,17 +189,23 @@ function readArgument(name, fallback) {
   return index >= 0 ? process.argv[index + 1] : fallback;
 }
 
-async function getPlaudOutput(days) {
-  const fixturePath = readArgument('--input');
+export async function getPlaudOutput(days, options = {}) {
+  const fixturePath = options.fixturePath === undefined ? readArgument('--input') : options.fixturePath;
   if (fixturePath) return readFile(fixturePath, 'utf8');
 
-  const command = process.platform === 'win32' ? 'plaud.cmd' : 'plaud';
-  const result = spawnSync(command, ['recent', '--days', String(days)], {
+  const command = options.command || (process.platform === 'win32' ? 'plaud.cmd' : 'plaud');
+  const spawn = options.spawnSyncImpl || spawnSync;
+  const result = spawn(command, ['recent', '--days', String(days)], {
     encoding: 'utf8',
-    env: { ...process.env, NO_COLOR: '1' },
+    env: { ...(options.env || process.env), NO_COLOR: '1' },
     timeout: 120_000,
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (result.error) throw result.error;
+  if (result.error && !options.safeErrors) throw result.error;
+  if (result.error || result.status !== 0) {
+    if (options.safeErrors) throw Object.assign(new Error('plaud_cli_failed'), { code: 'plaud_cli_failed' });
+  }
   if (result.status !== 0) {
     throw new Error(stripAnsi(result.stderr || result.stdout || `PLAUD CLI завершился с кодом ${result.status}`));
   }
@@ -193,26 +216,28 @@ export async function main() {
   const days = Number(readArgument('--days', process.env.PLAUD_NAME_LOOKBACK_DAYS || DEFAULT_LOOKBACK_DAYS));
   if (!Number.isInteger(days) || days < 1 || days > 30) throw new Error('--days должен быть целым числом от 1 до 30');
   const shouldNotify = !process.argv.includes('--dry-run');
+  let errorCategory = 'plaud_cli_failed';
 
   try {
     const output = await getPlaudOutput(days);
-    const recordings = parsePlaudRecent(output);
+    errorCategory = 'plaud_output_untrusted';
+    const recordings = parsePlaudRecentChecked(output, days);
     const misnamed = findMisnamedRecordings(recordings);
     const report = buildReport(recordings, misnamed, days);
-    console.log(report);
+    // Detailed names belong in the authorized Telegram report, never CI logs.
+    console.log(JSON.stringify({ status: 'CHECKED', lookback_days: days, recordings: recordings.length, misnamed: misnamed.length }));
+    errorCategory = 'telegram_send_failed';
     if (shouldNotify) await sendTelegram(report);
-  } catch (error) {
-    const safeMessage = String(error instanceof Error ? error.message : error)
-      .replace(/[\r\n]+/gu, ' ')
-      .slice(0, 300);
-    const alert = `🔴 PLAUD - проверка названий не выполнена\nПричина: ${safeMessage}\nПроверьте авторизацию PLAUD CLI и повторите запуск.`;
-    console.error(alert);
+  } catch {
+    const alert = '🔴 PLAUD - проверка названий не выполнена.\nПроверьте доступность PLAUD CLI, авторизацию и настройки технического бота. Названия записей пока не подтверждены.';
+    console.error(JSON.stringify({ status: 'FAILED', error: errorCategory }));
     if (shouldNotify) await sendTelegram(alert).catch(() => undefined);
     process.exitCode = 1;
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+const invokedPath = process.argv[1] ? await realpath(process.argv[1]).catch(() => null) : null;
+if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
   await main();
 }
 

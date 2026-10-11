@@ -1,9 +1,8 @@
 name: Monitor PLAUD file names
 
 on:
-  schedule:
-    # 09:00 Europe/Moscow. Moscow is UTC+3 year-round.
-    - cron: '0 6 * * *'
+  # Daily production check moved to plaud-name-monitor.timer (09:00 Moscow).
+  # Manual recovery only: do not dispatch after the server already sent today.
   workflow_dispatch:
     inputs:
       lookback_days:

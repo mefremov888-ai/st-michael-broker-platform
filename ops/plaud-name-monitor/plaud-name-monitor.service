@@ -1,0 +1,35 @@
+[Unit]
+Description=Daily PLAUD recording-name check and confirmed Telegram delivery
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/plaud-name-monitor/current
+EnvironmentFile=/etc/plaud-name-monitor.env
+Environment=HOME=/root NO_COLOR=1
+ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 0 /var/lib/plaud-name-monitor/run.lock /usr/bin/node /opt/plaud-name-monitor/current/monitor-plaud-server-runner.mjs
+TimeoutStartSec=600
+Restart=on-failure
+RestartSec=300
+StateDirectory=plaud-name-monitor
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/root/.plaud
+ReadWritePaths=/var/lib/plaud-name-monitor /root/.plaud
+PrivateTmp=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/opt/tg-agent -/opt/tg-userbot -/opt/plaud-agent -/opt/bitrix24-agent -/etc/openclaw-control.env -/etc/openclaw-stt.env -/etc/openclaw-control-actions.json -/var/lib/openclaw-control -/var/lib/openclaw-control-actions

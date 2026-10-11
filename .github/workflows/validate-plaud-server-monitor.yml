@@ -1,0 +1,36 @@
+name: Validate PLAUD server monitor
+on:
+  pull_request:
+    paths:
+      - 'scripts/monitor-plaud-*.mjs'
+      - 'scripts/install-plaud-server-monitor*.py'
+      - 'ops/plaud-name-monitor/**'
+      - '.github/workflows/*plaud*'
+  push:
+    branches: [master]
+    paths:
+      - 'scripts/monitor-plaud-*.mjs'
+      - 'scripts/install-plaud-server-monitor*.py'
+      - 'ops/plaud-name-monitor/**'
+      - '.github/workflows/*plaud*'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Test parser and durable delivery without credentials or network
+        run: node --test scripts/monitor-plaud-file-names.test.mjs scripts/monitor-plaud-server-runner.test.mjs
+      - name: Validate installer syntax
+        run: |
+          python3 -m py_compile scripts/install-plaud-server-monitor.py
+          python3 scripts/install-plaud-server-monitor.test.py
+      - name: Validate systemd units
+        run: systemd-analyze verify ops/plaud-name-monitor/*.service ops/plaud-name-monitor/*.timer
