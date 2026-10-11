@@ -1059,6 +1059,80 @@ export function brokerPeriodNarrowingWhere(args: {
   return clauses;
 }
 
+function agencyPeriodCandidateRange(period: LoyaltyFilterPeriod): {
+  gte: Date;
+  lt: Date;
+} {
+  // Agency period metrics compare UTC date labels in memory. The canonical
+  // Date boundaries are Moscow instants, so using them verbatim would drop
+  // events from the last three UTC hours of the selected end date. Keep the
+  // SQL predicate deliberately fail-open; matchesOurAgency remains the
+  // authoritative filter after the candidate graph is loaded.
+  const utcDay = (value: string) => {
+    const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+    return Date.UTC(year, month - 1, day);
+  };
+  const utcFrom = utcDay(period.fromIso);
+  const utcAfterTo = (() => {
+    const value = new Date(utcDay(period.toIso));
+    value.setUTCDate(value.getUTCDate() + 1);
+    return value.getTime();
+  })();
+  return {
+    gte: new Date(Math.min(period.from.getTime(), utcFrom)),
+    lt: new Date(Math.max(period.to.getTime() + 1, utcAfterTo)),
+  };
+}
+
+export function agencyPeriodNarrowingWhere(args: {
+  fixationPeriod?: LoyaltyFilterPeriod | null;
+  meetingPeriod?: LoyaltyFilterPeriod | null;
+  cabinetSource?: CabinetSource | null;
+  activityColumn?: string | null;
+  scenario?: string | null;
+  meetingsMax?: number;
+}): any[] {
+  const clauses: any[] = [];
+  if (args.fixationPeriod && args.activityColumn !== "NO_FIXATIONS") {
+    clauses.push({
+      brokerAgencies: {
+        some: {
+          broker: {
+            clients: {
+              some: {
+                ...fixationClientWhere(args.cabinetSource),
+                createdAt: agencyPeriodCandidateRange(args.fixationPeriod),
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+  const noMeetings =
+    args.activityColumn === "NO_MEETINGS" ||
+    args.scenario === "NO_MEETINGS" ||
+    args.meetingsMax === 0;
+  if (args.meetingPeriod && !noMeetings) {
+    clauses.push({
+      brokerAgencies: {
+        some: {
+          broker: {
+            meetings: {
+              some: {
+                status: { in: ["CONFIRMED", "COMPLETED"] },
+                type: { not: "BROKER_TOUR" },
+                date: agencyPeriodCandidateRange(args.meetingPeriod),
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+  return clauses;
+}
+
 export function activeFixationClientWhereFor(
   source?: string | null,
   now: Date = new Date(),
@@ -9317,6 +9391,19 @@ export class LoyaltyBaseService {
         ],
       });
     }
+    // Period predicates only narrow the root agency candidates. The include
+    // below intentionally remains lifetime-wide because status, other filters,
+    // and the returned metrics depend on the complete relation graph.
+    and.push(
+      ...agencyPeriodNarrowingWhere({
+        fixationPeriod: filter.fixationPeriod,
+        meetingPeriod: filter.meetingPeriod,
+        cabinetSource: filter.cabinetSource,
+        activityColumn: filter.columns.activity,
+        scenario: filter.scenario,
+        meetingsMax: filter.meetings.max,
+      }),
+    );
     if (and.length) where.AND = and;
     const scanKey = fullScanCacheKey("ours-agencies", {
       where,

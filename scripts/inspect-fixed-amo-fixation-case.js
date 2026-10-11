@@ -622,6 +622,55 @@ function auditReport(rows, row, stableReadback) {
     }),
   };
 }
+// One approved failed operation only. No configurable UUID, run, or time window.
+const RECOVERY_AUDIT_FROM = "2026-10-11T00:00:00.000Z";
+const RECOVERY_AUDIT_TO = "2026-10-11T23:59:59.999Z";
+const RECOVERY_PHASES = Object.freeze(["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "LEAD_RESOLVED", "LINKED", "UNRESOLVED"]);
+const RECOVERY_REASONS = Object.freeze(["CONTACT_UNCONFIRMED", "LEAD_UNCONFIRMED", "CASE_DRIFT", "LEASE_LOST", "UNEXPECTED_FAILURE"]);
+const RECOVERY_PLAN = Object.freeze({ runId: "38150838032", planRunId: "38150597583",
+  caseHash: "84252dd3069705e3f29d703f4e60b50e89db7e66b45b126cce94f88e63e03a1f",
+  candidateHash: "65e35f7515359f37364c8e24a04074562e8dc2570ff30c63eb89da7f8797c67f" });
+function recoveryAuditQuery() {
+  return { where: { entity: "AmoFixedCaseRecovery", entityId: CLIENT_ID,
+    createdAt: { gte: new Date(RECOVERY_AUDIT_FROM), lte: new Date(RECOVERY_AUDIT_TO) } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 9,
+    select: { id: true, entity: true, entityId: true, action: true, createdAt: true, payload: true } };
+}
+function validateRecoveryAuditRows(rows) {
+  if (!Array.isArray(rows) || rows.length > 8) refused("RECOVERY_AUDIT_SCOPE_EXCEEDED");
+  const ids = new Set();
+  for (const row of rows) {
+    if (!record(row) || typeof row.id !== "string" || !/^[A-Za-z0-9-]{1,80}$/.test(row.id) || ids.has(row.id) ||
+      row.entity !== "AmoFixedCaseRecovery" || row.entityId !== CLIENT_ID ||
+      !RECOVERY_PHASES.some((phase) => row.action === `AMO_FIXED_CASE_${phase}`) ||
+      iso(row.createdAt) < RECOVERY_AUDIT_FROM || iso(row.createdAt) > RECOVERY_AUDIT_TO ||
+      !record(row.payload) || Buffer.byteLength(JSON.stringify(row.payload), "utf8") > 64000)
+      refused("RECOVERY_AUDIT_INVALID");
+    ids.add(row.id);
+  }
+  return rows;
+}
+function recoveryAuditReport(rows, stableReadback) {
+  validateRecoveryAuditRows(rows);
+  return { recordsRead: rows.length, boundedWindowComplete: true, stableReadback, absenceProof: false,
+    events: rows.map((row) => {
+      const payload = row.payload;
+      const counters = {};
+      for (const key of ["contactPosts", "leadPosts", "patchPosts", "notePosts"]) {
+        if (Number.isSafeInteger(payload[key]) && payload[key] >= 0 && payload[key] <= 1) counters[key] = payload[key];
+      }
+      return { phase: row.action.slice("AMO_FIXED_CASE_".length),
+        phasePayloadMatches: payload.phase === row.action.slice("AMO_FIXED_CASE_".length),
+        reason: RECOVERY_REASONS.includes(payload.reason) ? payload.reason : "unknown_or_missing",
+        operationKeyMatches: payload.operationKey === `fixed-amo-fixation-case:v1:${CLIENT_ID}`,
+        applyRunMatches: payload.runId === RECOVERY_PLAN.runId,
+        planRunMatches: payload.planRunId === RECOVERY_PLAN.planRunId,
+        caseHashMatchesPlan: payload.caseHash === RECOVERY_PLAN.caseHash,
+        candidateHashMatchesPlan: payload.candidateHash === RECOVERY_PLAN.candidateHash,
+        sourceMetadataWellFormed: typeof payload.deployedGitSha === "string" && /^[0-9a-f]{40}$/.test(payload.deployedGitSha) && typeof payload.sourceSha256 === "string" && /^[0-9a-f]{64}$/.test(payload.sourceSha256),
+        automaticRetryBlocked: payload.automaticRetryBlocked === true, ...counters };
+    }) };
+}
 async function snapshot(prisma, environment, includeToken, includeAudit = false) {
   return prisma.$transaction(async (tx) => {
     await helpers.assertReadOnlySession(tx);
@@ -632,7 +681,8 @@ async function snapshot(prisma, environment, includeToken, includeAudit = false)
     const effective = validateCase(row, true);
     const tokenRow = includeToken && canInspectEffectiveBroker(row, effective) ? await tx.systemSetting.findUnique({ where: { key: "AMO_ACCESS_TOKEN" }, select: { value: true } }) : null;
     const audit = includeAudit && canInspectEffectiveBroker(row, effective) ? validateAuditRows(await tx.auditLog.findMany(auditQuery())) : [];
-    return { row, token: tokenRow?.value, audit };
+    const recoveryAudit = includeAudit && canInspectEffectiveBroker(row, effective) ? validateRecoveryAuditRows(await tx.auditLog.findMany(recoveryAuditQuery())) : [];
+    return { row, token: tokenRow?.value, audit, recoveryAudit };
   }, { isolationLevel: "RepeatableRead", timeout: 20000, maxWait: 5000 });
 }
 function buildReport(row, evidence, brokerContact, storedLead, metadata, expanded = null) {
@@ -782,12 +832,13 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
   const final = await snapshot(prisma, environment, false, true);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
-  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)) };
+  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)), recoveryAudit: recoveryAuditReport(initial.recoveryAudit, privateFingerprint(initial.recoveryAudit) === privateFingerprint(final.recoveryAudit)) };
 }
 function failureCode(error) {
   const allowed = ["INVALID_CASE_TIMESTAMP", "INVALID_CASE_STATE", "RESPONSIBLE_BROKER_UNRESOLVED", "OWNER_BROKER_UNRESOLVED", "FIXED_CLIENT_MISSING", "EXPECTED_BROKER_MISMATCH", "EXPECTED_BROKER_NOT_CANONICAL", "INVALID_CLIENT_PHONE", "PROJECT_MAPPING_UNSUPPORTED", "INVALID_SYNC_ATTEMPTS", "INVALID_BROKER_CONTACT_ID", "AGENCY_SCOPE_TOO_LARGE", "SOURCE_ATTESTATION_INVALID", "DATABASE_ATTESTATION_INVALID", "UNSAFE_TLS_CONFIGURATION", "DATABASE_IDENTITY_MISMATCH", "BROKER_CONTACT_ID_MISMATCH", "CASE_CHANGED_DURING_SCAN", "INVALID_CASE_NAME", "CASE_SCAN_WINDOW_UNSAFE", "WINDOW_REQUEST_CONFIGURATION_INVALID", "WINDOW_PAGE_BOUND_EXCEEDED", "WINDOW_REQUEST_REJECTED", "WINDOW_REQUEST_FAILED", "EXPANDED_LEAD_INVALID", "WINDOW_LEAD_OUT_OF_SCOPE", "WINDOW_PAGE_INVALID", "WINDOW_LEAD_DUPLICATED", "WINDOW_PAGINATION_INCOMPLETE", "BROKER_LINK_SCAN_UNAVAILABLE", "BROKER_LINK_SCAN_INVALID", "EXPANDED_CONTACT_EVIDENCE_INVALID", "EXPANDED_LEAD_CHANGED_DURING_SCAN", "EXPANDED_EVIDENCE_INCOMPLETE", "EXPANDED_POSSIBLE_LEAD_PRESENT"];
   allowed.push("REVIEW_REQUEST_CONFIGURATION_INVALID", "REVIEW_NOTES_REQUEST_REJECTED", "REVIEW_NOTES_REQUEST_FAILED", "REVIEW_CONTACT_INVALID", "REVIEW_NOTES_INVALID", "REVIEW_HISTORY_SCOPE_INVALID", "REVIEW_EVENTS_INVALID", "REVIEW_CONTACT_SCOPE_EXCEEDED");
   allowed.push("REVIEW_SOURCE_INVALID", "CASE_AUDIT_INVALID", "CASE_AUDIT_SCOPE_EXCEEDED");
+  allowed.push("RECOVERY_AUDIT_INVALID", "RECOVERY_AUDIT_SCOPE_EXCEEDED");
   try { return allowed.includes(error?.safeCode) ? error.safeCode : helpers.classifyFailure(error); } catch { return "UNKNOWN_FAILURE"; }
 }
 async function main() {
@@ -801,4 +852,5 @@ async function main() {
 module.exports = { CLIENT_ID, EXPECTED_BROKER_ID, IS_BROKER_FIELD_ID, CLIENT_SELECT, KC_PIPELINE_ID, WINDOW_PAGE_LIMIT, WINDOW_MAX_PAGES, BROKER_MAX_LINKED_LEADS, privateFingerprint, expectedGeneratedName, makeEvidenceWindow, createKcWindowRequester, collectWindowLeads, collectBrokerLeads, collectExpandedEvidence, assertCompleteNegativeEvidence, validateCase, canInspectEffectiveBroker, brokerFlagEvidence, runtimeMetadata, snapshot, buildReport, buildOwnershipReport, run, failureCode, main };
 Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches, createReviewNotesRequester, collectReviewLeadComparison, validatedLead });
 Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence, reviewSourceEvidence, auditQuery, validateAuditRows, auditReport });
+Object.assign(module.exports, { recoveryAuditQuery, validateRecoveryAuditRows, recoveryAuditReport });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });

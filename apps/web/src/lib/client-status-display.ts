@@ -17,7 +17,21 @@ export function clientTransferUnconfirmed(client: ClientStatusEvidence): boolean
     && (client.amoSyncStatus === 'FAILED' || client.amoSyncStatus === 'PENDING');
 }
 
+export function clientTransferAwaitingFixation(client: ClientStatusEvidence): boolean {
+  return client.amoSyncStatus === 'SYNCED'
+    && client.fixationStatus === 'NOT_FIXED'
+    && client.uniquenessStatus === 'CONDITIONALLY_UNIQUE';
+}
+
 export function clientStatusDisplay(client: ClientStatusEvidence) {
+  if (clientTransferAwaitingFixation(client)) {
+    return {
+      label: 'Передан в amoCRM — не зафиксирован',
+      cls: 'bg-info/20 text-info',
+      explanation: 'Заявка передана в amoCRM. Результат проверки — условно уникален; фиксация пока не оформлена. Повторно подавать заявку не нужно.',
+      showUniquenessExpiry: true,
+    };
+  }
   const blocked = clientTransferUnconfirmed(client);
   if (blocked && client.uniquenessStatus === 'CONDITIONALLY_UNIQUE') {
     return {
