@@ -80,7 +80,7 @@ export default function AnalyticsPage() {
           <div className="text-sm">
             <span className="text-text-muted">Также вы ведёте </span>
             <span className="font-bold text-info">{delegated}</span>
-            <span className="text-text-muted"> {delegated === 1 ? 'клиента' : 'клиентов'} для других брокеров (исполнитель по фиксации). За них комиссия и м² в уровень идут создателю заявки — не вам.</span>
+            <span className="text-text-muted"> {delegated === 1 ? 'клиента' : 'клиентов'} для других брокеров (исполнитель по фиксации). В аналитике заявка и связанная комиссия учитываются у создателя заявки.</span>
           </div>
         </div>
       )}

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import {
   type ActiveCommissionPolicy,
   buildPaymentTermsText,
@@ -20,6 +21,13 @@ const flat: ActiveCommissionPolicy = {
   project: 'SILVER_BOR', mode: 'FLAT', flatRate: '4,25', levels: null,
 };
 const policies = [progressive, flat];
+
+test('delegated analytics copy describes attribution without advertising obsolete sqm levels', () => {
+  const source = readFileSync(new URL('../app/(cabinet)/analytics/page.tsx', import.meta.url), 'utf8');
+  assert.match(source, /В аналитике заявка и связанная комиссия учитываются у создателя заявки\./);
+  assert.doesNotMatch(source, /м² в уровень|За них комиссия и м²/);
+  assert.match(source, /delegated > 0/);
+});
 
 test('formats Decimal strings safely without inventing missing or invalid rates', () => {
   assert.equal(formatPercent('5,25%'), '5,25%');
