@@ -16,6 +16,47 @@ const PRISMA_FAILURES = Object.freeze({
   PrismaClientValidationError: 'PRISMA_VALIDATION',
 });
 let failureStage = 'inputs';
+let failureQuery = null;
+const TRACE_MODELS = new Set(['agency', 'broker', 'brokerAgency', 'client', 'deal', 'meeting', 'registryDeal', 'loyaltyActivity', 'loyaltyContactPoint', 'loyaltyDataset', 'loyaltyEntityLink', 'loyaltyReconciliationCase', 'loyaltySourceAggregate', 'loyaltySourceRecord', 'loyaltyCallAttempt', 'loyaltyEngagementEvent']);
+const TRACE_READS = new Set(['findMany', 'findUnique', 'findFirst', 'count', 'groupBy', 'aggregate']);
+function traceReadQueries(transaction, emit = value => console.log(JSON.stringify(value)), clock = () => performance.now()) {
+  const cache = new Map();
+  let sequence = 0;
+  function wrap(target, model, operation, method) {
+    return async (...args) => {
+      const query = ++sequence;
+      assert.ok(query <= 200);
+      const started = clock();
+      emit({ releaseSmokeQuery: { query, model, operation, phase: 'start' } });
+      try {
+        const result = await method.apply(target, args);
+        const elapsedMs = Math.max(0, Math.round(clock() - started));
+        assert.ok(Number.isSafeInteger(elapsedMs));
+        emit({ releaseSmokeQuery: { query, model, operation, phase: 'complete', elapsedMs, ...(Array.isArray(result) ? { rowCount: result.length } : {}) } });
+        return result;
+      } catch (error) {
+        const elapsedMs = Math.max(0, Math.round(clock() - started));
+        failureQuery = { model, operation, elapsedMs: Number.isSafeInteger(elapsedMs) ? elapsedMs : 0 };
+        emit({ releaseSmokeQuery: { query, ...failureQuery, phase: 'failed' } });
+        throw error;
+      }
+    };
+  }
+  return new Proxy(transaction, { get(target, key) {
+    const value = Reflect.get(target, key, target);
+    if (['$queryRaw', '$queryRawUnsafe'].includes(key) && typeof value === 'function') {
+      if (!cache.has(key)) cache.set(key, wrap(target, 'database', key, value));
+      return cache.get(key);
+    }
+    if (!TRACE_MODELS.has(key) || !value) return typeof value === 'function' ? value.bind(target) : value;
+    if (!cache.has(key)) cache.set(key, new Proxy(value, { get(delegate, operation) {
+      const method = Reflect.get(delegate, operation, delegate);
+      if (TRACE_READS.has(operation) && typeof method === 'function') return wrap(delegate, key, operation, method);
+      return typeof method === 'function' ? method.bind(delegate) : method;
+    } }));
+    return cache.get(key);
+  } });
+}
 function stage(value) {
   assert.ok(STAGES.has(value));
   failureStage = value;
@@ -47,7 +88,7 @@ function classifyFailure(error) {
   }
 }
 function reportFailure(error) {
-  console.error(JSON.stringify({ failure: SAFE_FAILURE, stage: STAGES.has(failureStage) ? failureStage : 'inputs', ...classifyFailure(error) }));
+  console.error(JSON.stringify({ failure: SAFE_FAILURE, stage: STAGES.has(failureStage) ? failureStage : 'inputs', ...classifyFailure(error), ...(failureQuery ? { query: failureQuery } : {}) }));
 }
 function validateInputs(env) {
   assert.match(env.SMOKE_EXPECTED_SHA || '', /^[0-9a-f]{40}$/);
@@ -174,7 +215,7 @@ async function inspect(env = process.env) {
       const periodRows = await tx.$queryRawUnsafe(`SELECT to_char(date_trunc('month', now() AT TIME ZONE 'Europe/Moscow'), 'YYYY-MM-DD') AS "from", to_char(now() AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD') AS "to"`);
       stage('service_import');
       const { LoyaltyBaseService } = require(path.join(apiRoot, 'loyalty-base/loyalty-base.service'));
-      const actual = await verifyAgencyCounts(new LoyaltyBaseService(tx), periodRows[0], rows[0], stage);
+      const actual = await verifyAgencyCounts(new LoyaltyBaseService(traceReadQueries(tx)), periodRows[0], rows[0], stage);
       return { catalogMetadata: metadata, currentMonthAgencySqlCounts: rows[0], currentMonthAgencyServiceCounts: actual, fixationMeetingParityVerified: true, apiParityVerified: false };
     }, { timeout: 90000 });
     stage('readonly_report');
@@ -222,5 +263,5 @@ async function inspect(env = process.env) {
   }
   stage('complete');
 }
-module.exports = { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, classifyFailure, reportFailure, inspect };
+module.exports = { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, traceReadQueries, stage, classifyFailure, reportFailure, inspect };
 if (require.main === module) inspect().catch(error => { reportFailure(error); process.exitCode = 1; });
