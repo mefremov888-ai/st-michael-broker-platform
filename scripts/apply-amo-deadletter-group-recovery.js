@@ -438,8 +438,10 @@ const COMPARE_OWNER_DELETE = [
   "return redis.call('DEL', KEYS[1])",
 ].join("\n");
 
-async function acquirePhoneLeases(redis, classifications, phoneKey) {
-  const { amoFixationPhoneLockRedisKey } = require("@st-michael/integrations");
+async function acquirePhoneLeases(redis, classifications, phoneKey, injectedRedisKey) {
+  const amoFixationPhoneLockRedisKey = injectedRedisKey === undefined
+    ? require("@st-michael/integrations").amoFixationPhoneLockRedisKey
+    : injectedRedisKey;
   if (typeof amoFixationPhoneLockRedisKey !== "function") {
     fail("SHARED_PHONE_LOCK_CONTRACT_INVALID");
   }
