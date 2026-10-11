@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
-const { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, reportFailure } = require('./inspect-release-718-smoke');
+const { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, classifyFailure, reportFailure } = require('./inspect-release-718-smoke');
 test('exact deployed SHA and explicit send flag are required', () => {
   const env = { SMOKE_EXPECTED_SHA: 'a'.repeat(40), GIT_SHA: 'a'.repeat(40), PRODUCTION_PG_SYSTEM_IDENTIFIER: '123', PRODUCTION_MIN_BROKER_ROWS: '100' };
   validateInputs(env);
@@ -55,12 +55,34 @@ test('diagnostics expose only allowlisted stages and safe classifications', () =
     reportFailure({ code: 'P2010', message: 'SELECT secret_phone FROM private_data', stack: 'private_stack' });
     reportFailure({ code: 'attacker_secret', message: 'broker_private_email' });
     reportFailure({ code: 'P2010', meta: { code: '57014', message: 'SELECT secret_phone FROM private_data' } });
+    reportFailure({ name: 'PrismaClientUnknownRequestError', cause: { code: '57014', message: 'broker_private_cause' }, message: 'broker_private_message' });
+    reportFailure(Object.defineProperty({}, 'meta', { get() { throw new Error('broker_private_getter'); } }));
     assert.deepEqual(JSON.parse(log[1]), { failure: 'RELEASE_SMOKE_FAILED', stage: 'agency_sql_counts', code: 'P2010' });
     assert.equal(JSON.parse(log[2]).code, 'UNCLASSIFIED');
     assert.equal(JSON.parse(log[3]).sqlFailure, 'STATEMENT_TIMEOUT_OR_CANCELED');
+    assert.deepEqual(JSON.parse(log[4]), { failure: 'RELEASE_SMOKE_FAILED', stage: 'agency_sql_counts', code: 'PRISMA_UNKNOWN_REQUEST', sqlFailure: 'STATEMENT_TIMEOUT_OR_CANCELED' });
+    assert.deepEqual(JSON.parse(log[5]), { failure: 'RELEASE_SMOKE_FAILED', stage: 'agency_sql_counts', code: 'UNCLASSIFIED' });
     assert.throws(() => stage('broker_private_email'));
-    assert.doesNotMatch(log.join('\n'), /secret_phone|private_data|private_stack|broker_private_email|attacker_secret/);
+    assert.doesNotMatch(log.join('\n'), /secret_phone|private_data|private_stack|broker_private_email|broker_private_cause|broker_private_message|broker_private_getter|attacker_secret/);
   } finally { console.log = previousLog; console.error = previousError; }
+});
+
+test('failure classifier uses only structural allowlists and never parses messages', () => {
+  assert.deepEqual(classifyFailure({ name: 'PrismaClientUnknownRequestError' }), { code: 'PRISMA_UNKNOWN_REQUEST' });
+  assert.deepEqual(classifyFailure({ name: 'PrismaClientKnownRequestError' }), { code: 'PRISMA_KNOWN_REQUEST' });
+  assert.deepEqual(classifyFailure({ name: 'PrismaClientRustPanicError' }), { code: 'PRISMA_ENGINE_PANIC' });
+  assert.deepEqual(classifyFailure({ name: 'PrismaClientInitializationError' }), { code: 'PRISMA_INITIALIZATION' });
+  assert.deepEqual(classifyFailure({ name: 'PrismaClientValidationError' }), { code: 'PRISMA_VALIDATION' });
+  assert.deepEqual(classifyFailure({ code: '57014' }), { code: 'DATABASE', sqlFailure: 'STATEMENT_TIMEOUT_OR_CANCELED' });
+  assert.deepEqual(classifyFailure({ code: 'P2010', meta: { database_error_code: '25006' } }), { code: 'P2010', sqlFailure: 'READ_ONLY_VIOLATION' });
+  assert.deepEqual(classifyFailure({ code: 'P2010', cause: { meta: { code: '42P01' } } }), { code: 'P2010', sqlFailure: 'MISSING_TABLE' });
+  assert.deepEqual(classifyFailure({ message: 'canceling statement due to statement timeout 57014 private_sql' }), { code: 'UNCLASSIFIED' });
+  assert.deepEqual(classifyFailure({ name: 'PrismaClientUnknownRequestError_private', code: 'private_57014', meta: { code: 'private' } }), { code: 'UNCLASSIFIED' });
+  for (const field of ['code', 'name', 'meta', 'cause']) {
+    const error = Object.defineProperty({}, field, { get() { throw new Error(`private_${field}`); } });
+    assert.deepEqual(classifyFailure(error), { code: 'UNCLASSIFIED' });
+  }
+  assert.deepEqual(classifyFailure(new Proxy({}, { get() { throw new Error('private_proxy'); } })), { code: 'UNCLASSIFIED' });
 });
 
 test('failed service reads and failed parity comparisons retain different stages', async () => {

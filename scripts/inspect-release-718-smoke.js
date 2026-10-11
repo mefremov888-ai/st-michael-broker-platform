@@ -7,23 +7,47 @@ const BASE = 'https://broker.stmichael.ru';
 const OLD = ['Условия рассрочки Квартал Серебряный бор', 'Условия вознаграждения для брокеров на август 2026 г.', 'Условия вознаграждения партнёром St Michael'];
 const SAFE_FAILURE = 'RELEASE_SMOKE_FAILED';
 const STAGES = new Set(['inputs', 'compiled_contract', 'public_health', 'public_documents', 'public_offer', 'database_client', 'database_transaction', 'database_identity', 'catalog_metadata', 'agency_sql_counts', 'agency_period', 'service_import', 'service_with_fixations', 'parity_with_fixations', 'service_with_meetings', 'parity_with_meetings', 'service_with_both', 'parity_with_both', 'readonly_report', 'freshness_setup', 'freshness_check', 'freshness_delivery', 'database_disconnect', 'complete']);
+const SQL_FAILURES = Object.freeze({ '57014': 'STATEMENT_TIMEOUT_OR_CANCELED', '25006': 'READ_ONLY_VIOLATION', '42703': 'UNKNOWN_COLUMN', '42P01': 'MISSING_TABLE', '22P02': 'INVALID_ENUM_OR_VALUE' });
+const PRISMA_FAILURES = Object.freeze({
+  PrismaClientKnownRequestError: 'PRISMA_KNOWN_REQUEST',
+  PrismaClientUnknownRequestError: 'PRISMA_UNKNOWN_REQUEST',
+  PrismaClientRustPanicError: 'PRISMA_ENGINE_PANIC',
+  PrismaClientInitializationError: 'PRISMA_INITIALIZATION',
+  PrismaClientValidationError: 'PRISMA_VALIDATION',
+});
 let failureStage = 'inputs';
 function stage(value) {
   assert.ok(STAGES.has(value));
   failureStage = value;
   console.log(JSON.stringify({ releaseSmokeStage: value }));
 }
+function classifyFailure(error) {
+  // Inspect only fixed structural fields and return allowlisted constants. Never
+  // parse or expose message, stack, SQL, query parameters, or entity details.
+  try {
+    const rawCode = error?.code;
+    const rawName = error?.name;
+    const meta = error?.meta;
+    const cause = error?.cause;
+    const causeMeta = cause?.meta;
+    const directCode = typeof rawCode === 'string' ? rawCode : '';
+    const name = typeof rawName === 'string' ? rawName : '';
+    const sqlCandidates = [directCode, meta?.code, meta?.database_error_code, cause?.code, causeMeta?.code];
+    const sqlCode = sqlCandidates.find(value => typeof value === 'string' && Object.hasOwn(SQL_FAILURES, value));
+    const code = /^P\d{4}$/.test(directCode) ? directCode
+      : directCode === 'ERR_ASSERTION' ? 'ASSERTION'
+      : directCode === 'MODULE_NOT_FOUND' ? 'MODULE_NOT_FOUND'
+      : ['TimeoutError', 'AbortError'].includes(name) ? 'TIMEOUT'
+      : Object.hasOwn(PRISMA_FAILURES, name) ? PRISMA_FAILURES[name]
+      : sqlCode ? 'DATABASE'
+      : 'UNCLASSIFIED';
+    return { code, ...(sqlCode ? { sqlFailure: SQL_FAILURES[sqlCode] } : {}) };
+  } catch {
+    return { code: 'UNCLASSIFIED' };
+  }
+}
 function reportFailure(error) {
-  // Only allowlisted classifications, never message/stack/SQL/entity details.
-  const code = typeof error?.code === 'string' && /^P\d{4}$/.test(error.code) ? error.code
-    : error?.code === 'ERR_ASSERTION' ? 'ASSERTION'
-    : error?.code === 'MODULE_NOT_FOUND' ? 'MODULE_NOT_FOUND'
-    : ['TimeoutError', 'AbortError'].includes(error?.name) ? 'TIMEOUT'
-    : 'UNCLASSIFIED';
-  const SQL_FAILURES = { '57014': 'STATEMENT_TIMEOUT_OR_CANCELED', '25006': 'READ_ONLY_VIOLATION', '42703': 'UNKNOWN_COLUMN', '42P01': 'MISSING_TABLE', '22P02': 'INVALID_ENUM_OR_VALUE' };
-  const sqlCode = error?.meta?.code;
-  const sqlFailure = code === 'P2010' && typeof sqlCode === 'string' && Object.hasOwn(SQL_FAILURES, sqlCode) ? SQL_FAILURES[sqlCode] : undefined;
-  console.error(JSON.stringify({ failure: SAFE_FAILURE, stage: STAGES.has(failureStage) ? failureStage : 'inputs', code, ...(sqlFailure ? { sqlFailure } : {}) }));
+  console.error(JSON.stringify({ failure: SAFE_FAILURE, stage: STAGES.has(failureStage) ? failureStage : 'inputs', ...classifyFailure(error) }));
 }
 function validateInputs(env) {
   assert.match(env.SMOKE_EXPECTED_SHA || '', /^[0-9a-f]{40}$/);
@@ -198,5 +222,5 @@ async function inspect(env = process.env) {
   }
   stage('complete');
 }
-module.exports = { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, reportFailure, inspect };
+module.exports = { validateInputs, summarizeDocuments, safeTimestamp, boundedJson, verifyAgencyCounts, stage, classifyFailure, reportFailure, inspect };
 if (require.main === module) inspect().catch(error => { reportFailure(error); process.exitCode = 1; });
