@@ -19,7 +19,7 @@ on:
         type: string
         required: false
       backup_run_id:
-        description: Apply only - exact-source successful production backup under 6 hours old
+        description: Apply only - exact deployed-SHA successful production backup under 6 hours old
         type: string
         required: false
 concurrency:
@@ -57,6 +57,9 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform
           test "$(gh api /repos/$EXPECTED_REPOSITORY/git/ref/heads/master --jq '.object.sha')" = "$SOURCE_SHA"
+          deployed_sha=$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha | select(type == "string" and test("^[a-f0-9]{40}$"))')
+          comparison=$(gh api "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$SOURCE_SHA" --jq '.status')
+          case "$comparison" in ahead|identical) ;; *) exit 1;; esac
           mode=$(jq -er '.inputs.mode | select(. == "plan" or . == "apply")' "$GITHUB_EVENT_PATH")
           old_hash=none; backup_run=0; backup_attempt=0; backup_epoch=0
           if [ "$mode" = apply ]; then
@@ -64,7 +67,7 @@ jobs:
             old_hash=$(jq -er '.inputs.expected_old_hash | select(type == "string" and test("^[a-f0-9]{64}$"))' "$GITHUB_EVENT_PATH")
             backup_run=$(jq -er '.inputs.backup_run_id | select(type == "string" and test("^[1-9][0-9]{5,19}$"))' "$GITHUB_EVENT_PATH")
             backup=$(gh api "/repos/$EXPECTED_REPOSITORY/actions/runs/$backup_run")
-            printf '%s' "$backup" | jq -e --arg sha "$SOURCE_SHA" --arg id "$backup_run" '
+            printf '%s' "$backup" | jq -e --arg sha "$deployed_sha" --arg id "$backup_run" '
               (.id | tostring) == $id and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
               .head_repository.full_name == .repository.full_name and .head_sha == $sha and .head_branch == "master" and
               .path == ".github/workflows/backup-production-loyalty-predeploy.yml" and .event == "workflow_dispatch" and
@@ -74,10 +77,6 @@ jobs:
             backup_epoch=$(date -u -d "$backup_time" +%s)
             age=$(( $(date -u +%s) - backup_epoch )); test "$age" -ge 0 -a "$age" -le 21600
           fi
-          deployed_sha=$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha | select(type == "string" and test("^[a-f0-9]{40}$"))')
-          if [ "$mode" = apply ]; then test "$deployed_sha" = "$SOURCE_SHA"; fi
-          comparison=$(gh api "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$SOURCE_SHA" --jq '.status')
-          case "$comparison" in ahead|identical) ;; *) exit 1;; esac
           for file in scripts/publish-rewards-october-2026.js assets/cooperation/rewards-2026-10-11.pdf assets/cooperation/advertising-regulation-2026-10-11.pdf; do
             test -f "$file" -a ! -L "$file"
             test "$(git show "$SOURCE_SHA:$file" | sha256sum | cut -d' ' -f1)" = "$(sha256sum "$file" | cut -d' ' -f1)"
@@ -88,6 +87,29 @@ jobs:
           test "$(stat -c %s assets/cooperation/advertising-regulation-2026-10-11.pdf)" = 221309
           node --test scripts/publish-rewards-october-2026.test.js
           printf 'mode=%s\nold_hash=%s\nbackup_run=%s\nbackup_attempt=%s\nbackup_epoch=%s\ndeployed_sha=%s\n' "$mode" "$old_hash" "$backup_run" "$backup_attempt" "$backup_epoch" "$deployed_sha" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact deployed publisher and PDF blobs for operational-only attestation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.gate.outputs.deployed_sha }}
+          path: .deployed-publisher-source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Refuse a runtime publisher or PDF change without production deployment
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          DEPLOYED_SHA: ${{ steps.gate.outputs.deployed_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ && "$DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C .deployed-publisher-source rev-parse HEAD)" = "$DEPLOYED_SHA"
+          for file in scripts/publish-rewards-october-2026.js assets/cooperation/rewards-2026-10-11.pdf assets/cooperation/advertising-regulation-2026-10-11.pdf; do
+            reviewed_blob=$(git show "$SOURCE_SHA:$file" | sha256sum | cut -d' ' -f1)
+            deployed_blob=$(git -C .deployed-publisher-source show "$DEPLOYED_SHA:$file" | sha256sum | cut -d' ' -f1)
+            test "$reviewed_blob" = "$deployed_blob"
+          done
+          echo deployed_publication_payload_identical=true
       - name: Stream exact immutable PDF and scoped publisher under production lock
         shell: bash
         env:
@@ -182,7 +204,7 @@ jobs:
             backup_dir=/var/backups/stmichael/loyalty-predeploy
             test -d "$backup_dir" -a ! -L "$backup_dir"
             test "$(readlink -f "$backup_dir")" = "$backup_dir"
-            backup="$backup_dir/loyalty-predeploy-${source_sha}-run${backup_run}-attempt${backup_attempt}.dump"
+            backup="$backup_dir/loyalty-predeploy-${deployed_sha}-run${backup_run}-attempt${backup_attempt}.dump"
             for file in "$backup" "$backup.sha256"; do
               test -f "$file" -a ! -L "$file"
               test "$(readlink -f "$file")" = "$file"
@@ -200,7 +222,7 @@ jobs:
           archive="$work/payload.tar"; container_root=""
           cleanup_remote() {
             rc=$?
-            if [[ "$container_root" =~ ^/app/\.rewards-publication\.[A-Za-z0-9]{6}$ ]]; then
+            if [[ "$container_root" =~ ^/tmp/st-michael-rewards-publication\.[A-Za-z0-9]{6}$ ]]; then
               timeout 10 docker exec st-michael-api sh -c '
                 root=$1
                 rm -f -- "$root/scripts/publish-rewards-october-2026.js" "$root/assets/cooperation/rewards-2026-10-11.pdf"
@@ -223,8 +245,9 @@ jobs:
           test "$(tar -tf "$archive")" = $'scripts/publish-rewards-october-2026.js\nassets/cooperation/rewards-2026-10-11.pdf\nassets/cooperation/advertising-regulation-2026-10-11.pdf'
           container_root=$(timeout 20 docker exec -i st-michael-api sh -c '
             set -eu; umask 077
-            test -d /app -a ! -L /app
-            root=$(mktemp -d /app/.rewards-publication.XXXXXX)
+            test -d /tmp -a ! -L /tmp
+            root=$(mktemp -d /tmp/st-michael-rewards-publication.XXXXXX)
+            test "$(stat -c %a "$root")" = 700
             tar -xf - -C "$root"
             test -f "$root/scripts/publish-rewards-october-2026.js" -a ! -L "$root/scripts/publish-rewards-october-2026.js"
             test -f "$root/assets/cooperation/rewards-2026-10-11.pdf" -a ! -L "$root/assets/cooperation/rewards-2026-10-11.pdf"
@@ -234,7 +257,7 @@ jobs:
             test "$(sha256sum "$root/assets/cooperation/advertising-regulation-2026-10-11.pdf" | cut -d" " -f1)" = da2ec1f91970b80cc5ff44fc076527e4b66c9f1b5d7cb883b793d93eac3c4085
             printf "%s" "$root"
           ' staging "$script_sha" < "$archive")
-          [[ "$container_root" =~ ^/app/\.rewards-publication\.[A-Za-z0-9]{6}$ ]]
+          [[ "$container_root" =~ ^/tmp/st-michael-rewards-publication\.[A-Za-z0-9]{6}$ ]]
           assert_runtime
           timeout --foreground 2m docker exec \
             -e MODE="$mode" -e CONFIRM_APPLY="$confirm_apply" -e EXPECTED_OLD_HASH="$old_hash" \
