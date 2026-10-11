@@ -1,0 +1,543 @@
+name: Plan or recover approved single amo fixation case once
+
+# One fixed case only. Plan mode is GET/read-only. Apply mode performs one
+# contact POST, one lead POST, one lead PATCH and one note POST at most. It
+# never calls Morekit directly, but
+# ordinary amoCRM automations may react to a newly created lead. The database
+# backup cannot remove or roll back external amoCRM objects.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: First run plan; run apply only with the reviewed fresh plan hashes
+        required: true
+        type: choice
+        options: [plan, apply]
+        default: plan
+      confirmation:
+        description: PLAN_FIXED_AMO_CASE_READONLY or RECOVER_APPROVED_FIXED_AMO_CASE_ONCE
+        required: true
+        type: string
+      plan_run_id:
+        description: Successful plan run for this exact master SHA, less than 30 minutes old (apply only)
+        required: false
+        type: string
+      expected_case_hash:
+        description: Reviewed 64-hex case hash printed by plan mode (apply only)
+        required: false
+        type: string
+      expected_candidate_hash:
+        description: Reviewed 64-hex excluded-candidate hash printed by plan mode (apply only)
+        required: false
+        type: string
+      expected_deployed_sha:
+        description: Reviewed deployedGitSha printed by plan mode; must still be live (apply only)
+        required: false
+        type: string
+      backup_run_id:
+        description: Successful exact-source backup run, less than 6 hours old (apply only)
+        required: false
+        type: string
+      ci_run_id:
+        description: Successful deploy.yml verification run for this exact source SHA (apply only)
+        required: false
+        type: string
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    steps:
+      - name: Checkout exact reviewed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate mode, current master, runtime and apply attestations
+        id: gate
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_ACTOR: ${{ github.actor }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_RUN_ATTEMPT" = 1 || exit 1
+          test "$EXPECTED_ACTOR" = mefremov888-ai || exit 1
+          test "$EXPECTED_REPOSITORY" = sereganikitin/st-michael-broker-platform || exit 1
+          test "$EXPECTED_REF" = refs/heads/master || exit 1
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || exit 1
+          mode=$(jq -er '.inputs.mode | select(. == "plan" or . == "apply")' "$GITHUB_EVENT_PATH") || exit 1
+          confirmation=$(jq -er '.inputs.confirmation | select(type == "string" and length < 80 and (test("[\\r\\n]") | not))' "$GITHUB_EVENT_PATH") || exit 1
+          test "$(gh api "/repos/$EXPECTED_REPOSITORY/git/ref/heads/master" --jq '.object.sha')" = "$EXPECTED_SHA" || exit 1
+          deployed_sha=$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))') || exit 1
+          comparison=$(gh api "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$EXPECTED_SHA" --jq '.status') || exit 1
+          case "$comparison" in ahead|identical) ;; *) exit 1;; esac
+          plan_run=0; case_hash=0; candidate_hash=0; reviewed_deployed_sha=0; backup_run=0; backup_epoch=0; ci_run=0
+          if [ "$mode" = plan ]; then
+            test "$confirmation" = PLAN_FIXED_AMO_CASE_READONLY || exit 1
+            jq -e '[.inputs.plan_run_id,.inputs.expected_case_hash,.inputs.expected_candidate_hash,.inputs.expected_deployed_sha,.inputs.backup_run_id,.inputs.ci_run_id] | all(. == "" or . == null)' "$GITHUB_EVENT_PATH" >/dev/null || exit 1
+          else
+            test "$confirmation" = RECOVER_APPROVED_FIXED_AMO_CASE_ONCE || exit 1
+            plan_run=$(jq -er '.inputs.plan_run_id | select(type == "string" and test("^[1-9][0-9]{5,19}$"))' "$GITHUB_EVENT_PATH") || exit 1
+            case_hash=$(jq -er '.inputs.expected_case_hash | select(type == "string" and test("^[a-f0-9]{64}$"))' "$GITHUB_EVENT_PATH") || exit 1
+            candidate_hash=$(jq -er '.inputs.expected_candidate_hash | select(type == "string" and test("^[a-f0-9]{64}$"))' "$GITHUB_EVENT_PATH") || exit 1
+            reviewed_deployed_sha=$(jq -er '.inputs.expected_deployed_sha | select(type == "string" and test("^[a-f0-9]{40}$"))' "$GITHUB_EVENT_PATH") || exit 1
+            test "$reviewed_deployed_sha" = "$deployed_sha" || exit 1
+            backup_run=$(jq -er '.inputs.backup_run_id | select(type == "string" and test("^[1-9][0-9]{5,19}$"))' "$GITHUB_EVENT_PATH") || exit 1
+            ci_run=$(jq -er '.inputs.ci_run_id | select(type == "string" and test("^[1-9][0-9]{5,19}$"))' "$GITHUB_EVENT_PATH") || exit 1
+            plan=$(gh api "/repos/$EXPECTED_REPOSITORY/actions/runs/$plan_run") || exit 1
+            printf '%s' "$plan" | jq -e --arg sha "$EXPECTED_SHA" --arg id "$plan_run" '
+              (.id | tostring) == $id and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
+              .actor.login == "mefremov888-ai" and
+              .head_repository.full_name == .repository.full_name and .head_sha == $sha and .head_branch == "master" and
+              .path == ".github/workflows/apply-fixed-amo-fixation-case.yml" and .event == "workflow_dispatch" and
+              .status == "completed" and .conclusion == "success" and .run_attempt == 1' >/dev/null || exit 1
+            plan_epoch=$(date -u -d "$(printf '%s' "$plan" | jq -er .updated_at)" +%s)
+            plan_age=$(( $(date -u +%s) - plan_epoch )); test "$plan_age" -ge 0 -a "$plan_age" -le 1800 || exit 1
+            ci=$(gh api "/repos/$EXPECTED_REPOSITORY/actions/runs/$ci_run") || exit 1
+            printf '%s' "$ci" | jq -e --arg sha "$EXPECTED_SHA" --arg id "$ci_run" '
+              (.id | tostring) == $id and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
+              .actor.login == "mefremov888-ai" and
+              .head_repository.full_name == .repository.full_name and .head_sha == $sha and .head_branch == "master" and
+              .path == ".github/workflows/deploy.yml" and .event == "push" and
+              .status == "completed" and .conclusion == "success" and .run_attempt == 1' >/dev/null || exit 1
+            ci_epoch=$(date -u -d "$(printf '%s' "$ci" | jq -er .updated_at)" +%s)
+            ci_age=$(( $(date -u +%s) - ci_epoch )); test "$ci_age" -ge 0 -a "$ci_age" -le 21600 || exit 1
+            backup=$(gh api "/repos/$EXPECTED_REPOSITORY/actions/runs/$backup_run") || exit 1
+            printf '%s' "$backup" | jq -e --arg sha "$EXPECTED_SHA" --arg id "$backup_run" '
+              (.id | tostring) == $id and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
+              .actor.login == "mefremov888-ai" and
+              .head_repository.full_name == .repository.full_name and .head_sha == $sha and .head_branch == "master" and
+              .path == ".github/workflows/backup-production-loyalty-predeploy.yml" and .event == "workflow_dispatch" and
+              .status == "completed" and .conclusion == "success" and .run_attempt == 1' >/dev/null || exit 1
+            backup_epoch=$(date -u -d "$(printf '%s' "$backup" | jq -er .updated_at)" +%s)
+            age=$(( $(date -u +%s) - backup_epoch )); test "$age" -ge 0 -a "$age" -le 21600 || exit 1
+          fi
+          printf 'mode=%s\ndeployed_sha=%s\nplan_run=%s\ncase_hash=%s\ncandidate_hash=%s\nbackup_run=%s\nbackup_epoch=%s\nci_run=%s\n' \
+            "$mode" "$deployed_sha" "$plan_run" "$case_hash" "$candidate_hash" "$backup_run" "$backup_epoch" "$ci_run" >> "$GITHUB_OUTPUT"
+      - name: Download immutable reviewed-plan attestation
+        if: ${{ inputs.mode == 'apply' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: fixed-amo-case-plan-attestation
+          path: ${{ runner.temp }}/fixed-amo-case-plan-review
+          github-token: ${{ github.token }}
+          repository: sereganikitin/st-michael-broker-platform
+          run-id: ${{ inputs.plan_run_id }}
+      - name: Bind apply inputs to the reviewed plan report
+        if: ${{ inputs.mode == 'apply' }}
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_ACTOR: ${{ github.actor }}
+          EXPECTED_SHA: ${{ github.sha }}
+          PLAN_RUN_ID: ${{ steps.gate.outputs.plan_run }}
+          EXPECTED_DEPLOYED_SHA: ${{ steps.gate.outputs.deployed_sha }}
+          EXPECTED_CASE_HASH: ${{ steps.gate.outputs.case_hash }}
+          EXPECTED_CANDIDATE_HASH: ${{ steps.gate.outputs.candidate_hash }}
+        run: |
+          set -euo pipefail
+          directory="${RUNNER_TEMP}/fixed-amo-case-plan-review"
+          attestation="$directory/fixed-amo-case-plan-attestation.json"
+          test -d "$directory" -a ! -L "$directory" || exit 1
+          test -f "$attestation" -a ! -L "$attestation" || exit 1
+          test "$(find "$directory" -mindepth 1 -maxdepth 1 -type f -printf . | wc -c)" -eq 1 || exit 1
+          test "$(stat -c %s "$attestation")" -le 4096 || exit 1
+          jq -e --arg repository "$EXPECTED_REPOSITORY" --arg actor "$EXPECTED_ACTOR" --arg run "$PLAN_RUN_ID" \
+            --arg source "$EXPECTED_SHA" --arg deployed "$EXPECTED_DEPLOYED_SHA" --arg caseHash "$EXPECTED_CASE_HASH" \
+            --arg candidateHash "$EXPECTED_CANDIDATE_HASH" '
+              type == "object" and
+              ((keys | sort) == (["actor","amoWrites","candidateHash","caseHash","databaseWrites","deployedGitSha","mode","mutationAuthorized","planRunId","repository","schemaVersion","sourceGitSha","sourceSha256"] | sort)) and
+              .schemaVersion == 1 and .mode == "plan" and .mutationAuthorized == false and .databaseWrites == false and .amoWrites == false and
+              .repository == $repository and .actor == $actor and .planRunId == $run and .sourceGitSha == $source and .deployedGitSha == $deployed and
+              .caseHash == $caseHash and .candidateHash == $candidateHash and (.sourceSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+            ' "$attestation" >/dev/null || exit 1
+      - name: Checkout exact deployed adapter revision separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.gate.outputs.deployed_sha }}
+          path: .fixed-case-runtime
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up pinned Node for deterministic adapter compilation
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Build separately checked-out deployed integration and writer bytes
+        shell: bash
+        env:
+          EXPECTED_DEPLOYED_SHA: ${{ steps.gate.outputs.deployed_sha }}
+        run: |
+          set -euo pipefail
+          cd .fixed-case-runtime
+          test "$(git rev-parse HEAD)" = "$EXPECTED_DEPLOYED_SHA" || exit 1
+          npm ci --ignore-scripts
+          npm run db:generate
+          npm run build --workspace @st-michael/shared
+          npm run build --workspace @st-michael/integrations
+          npm run build --workspace @st-michael/api
+      - name: Stream attested case under continuously checked physical exclusive lock
+        id: execute
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_ACTOR: ${{ github.actor }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          FIXED_CASE_MODE: ${{ steps.gate.outputs.mode }}
+          EXPECTED_DEPLOYED_SHA: ${{ steps.gate.outputs.deployed_sha }}
+          PLAN_RUN_ID: ${{ steps.gate.outputs.plan_run }}
+          EXPECTED_CASE_HASH: ${{ steps.gate.outputs.case_hash }}
+          EXPECTED_CANDIDATE_HASH: ${{ steps.gate.outputs.candidate_hash }}
+          BACKUP_RUN_ID: ${{ steps.gate.outputs.backup_run }}
+          BACKUP_EPOCH: ${{ steps.gate.outputs.backup_epoch }}
+          CI_RUN_ID: ${{ steps.gate.outputs.ci_run }}
+          GH_TOKEN: ${{ github.token }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          PRODUCTION_PG_SYSTEM_IDENTIFIER: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          PRODUCTION_MIN_BROKER_ROWS: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+        run: |
+          set -eEuo pipefail
+          test "$EXPECTED_RUN_ATTEMPT" = 1 || exit 1
+          test "$EXPECTED_ACTOR" = mefremov888-ai || exit 1
+          for sha in "$EXPECTED_SHA" "$EXPECTED_DEPLOYED_SHA"; do [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || exit 1; done
+          [[ "$FIXED_CASE_MODE" = plan || "$FIXED_CASE_MODE" = apply ]] || exit 1
+          for number in "$EXPECTED_RUN_ID" "$PRODUCTION_MIN_BROKER_ROWS"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
+          if [ "$FIXED_CASE_MODE" = apply ]; then
+            for number in "$PLAN_RUN_ID" "$BACKUP_RUN_ID" "$BACKUP_EPOCH" "$CI_RUN_ID"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
+            [[ "$EXPECTED_CASE_HASH" =~ ^[a-f0-9]{64}$ && "$EXPECTED_CANDIDATE_HASH" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          else
+            test "$PLAN_RUN_ID:$BACKUP_RUN_ID:$BACKUP_EPOCH:$CI_RUN_ID:$EXPECTED_CASE_HASH:$EXPECTED_CANDIDATE_HASH" = 0:0:0:0:0:0 || exit 1
+          fi
+          [[ "$PRODUCTION_PG_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || exit 1
+          test "$(gh api /repos/sereganikitin/st-michael-broker-platform/git/ref/heads/master --jq '.object.sha')" = "$EXPECTED_SHA" || exit 1
+          unset GH_TOKEN
+          test -n "$SSH_PRIVATE_KEY" -a -n "$SSH_HOST" -a -n "$SSH_USER" || exit 1
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]] || exit 1
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535 || exit 1
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || exit 1
+          umask 077
+          work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/fixed-case-apply.XXXXXX")
+          payload="$work/payload"; archive="$work/payload.tar"; private_key="$work/key"; known_hosts="$work/known_hosts"; safe_output="$work/safe-output"
+          cleanup_local() {
+            rm -f -- "$archive" "$private_key" "$known_hosts" "$safe_output"
+            for file in apply-fixed-amo-fixation-case fixed-amo-case-exclusion-certificate inspect-fixed-amo-fixation-case inspect-amo-fixation-lead-reconciliation apply-amo-deadletter-group-recovery amo-deadletter-group-recovery-core inspect-amo-deadletter-group-recovery-plan run-fixed-amo-fixation-case; do rm -f -- "$payload/scripts/$file.js"; done
+            for file in amo-crm.adapter amo-crm.fields amo-crm.touches amo-fixation-phone-lock amo-traffic-light; do rm -f -- "$payload/packages/integrations/dist/$file.js"; done
+            rm -f -- "$payload/apps/api/dist/common/amo-fixation-phone-lock.service.js" "$payload/apps/api/dist/common/amo-sync-retry.js" \
+              "$payload/apps/api/dist/client-fixation/client-fixation-safety.service.js" "$payload/apps/api/dist/client-fixation/client-fixation.controller.js" \
+              "$payload/apps/api/dist/client-fixation/client-fixation.service.js" "$payload/apps/api/dist/scheduler/scheduler.service.js" "$payload/apps/api/dist/admin/admin.service.js"
+            rm -f -- "$payload/manifest.json"
+            rmdir -- "$payload/apps/api/dist/common" "$payload/apps/api/dist/client-fixation" "$payload/apps/api/dist/scheduler" "$payload/apps/api/dist/admin" "$payload/apps/api/dist" "$payload/apps/api" "$payload/apps" 2>/dev/null || true
+            rmdir -- "$payload/packages/integrations/dist" "$payload/packages/integrations" "$payload/packages" "$payload/scripts" "$payload" "$work" 2>/dev/null || true
+          }
+          trap cleanup_local EXIT
+          node - "$PWD" "$PWD/.fixed-case-runtime" "$payload" "$EXPECTED_SHA" "$EXPECTED_DEPLOYED_SHA" <<'BUILD'
+          const [reviewed, runtime, payload, sourceGitSha, deployedGitSha] = process.argv.slice(2);
+          require('./scripts/run-fixed-amo-fixation-case.js').buildPayload(reviewed, runtime, payload, {sourceGitSha, deployedGitSha});
+          BUILD
+          # Explicit names only; no wildcard expansion or symlink archive entries.
+          tar --format=ustar -C "$payload" -cf "$archive" \
+            scripts/apply-fixed-amo-fixation-case.js scripts/fixed-amo-case-exclusion-certificate.js scripts/inspect-fixed-amo-fixation-case.js \
+            scripts/inspect-amo-fixation-lead-reconciliation.js scripts/apply-amo-deadletter-group-recovery.js \
+            scripts/amo-deadletter-group-recovery-core.js scripts/inspect-amo-deadletter-group-recovery-plan.js \
+            packages/integrations/dist/amo-crm.adapter.js packages/integrations/dist/amo-crm.fields.js \
+            packages/integrations/dist/amo-crm.touches.js packages/integrations/dist/amo-fixation-phone-lock.js \
+            packages/integrations/dist/amo-traffic-light.js \
+            apps/api/dist/common/amo-fixation-phone-lock.service.js apps/api/dist/common/amo-sync-retry.js \
+            apps/api/dist/client-fixation/client-fixation-safety.service.js apps/api/dist/client-fixation/client-fixation.controller.js \
+            apps/api/dist/client-fixation/client-fixation.service.js apps/api/dist/scheduler/scheduler.service.js \
+            apps/api/dist/admin/admin.service.js scripts/run-fixed-amo-fixation-case.js manifest.json
+          test "$(stat -c %s "$archive")" -le 8388608 || exit 1
+          archive_sha=$(sha256sum "$archive" | cut -d' ' -f1)
+          manifest_sha=$(sha256sum "$payload/manifest.json" | cut -d' ' -f1)
+          runner_sha=$(sha256sum "$payload/scripts/run-fixed-amo-fixation-case.js" | cut -d' ' -f1)
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$private_key"; chmod 600 "$private_key"; unset SSH_PRIVATE_KEY
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$known_hosts" 2>/dev/null
+          test "$(ssh-keygen -lf "$known_hosts" -E sha256 | awk '{print $2}' | sort -u)" = "$EXPECTED_SSH_FINGERPRINT" || exit 1
+          {
+            cat <<'REMOTE_PREFIX'
+          set -eEuo pipefail
+          export LC_ALL=C GIT_OPTIONAL_LOCKS=0
+          umask 077
+          deploy_path=$1; source_sha=$2; deployed_sha=$3; run_id=$4; backup_run=$5; backup_epoch=$6
+          expected_pg=$7; broker_floor=$8; archive_sha=$9; manifest_sha=${10}; runner_sha=${11}
+          mode=${12}; plan_run=${13}; case_hash=${14}; candidate_hash=${15}; ci_run=${16}
+          stage=remote_validation
+          phase() { stage=$1; printf 'fixed_case_stage=%s\n' "$stage"; }
+          for sha in "$source_sha" "$deployed_sha"; do [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || exit 1; done
+          for sha in "$archive_sha" "$manifest_sha" "$runner_sha"; do [[ "$sha" =~ ^[a-f0-9]{64}$ ]] || exit 1; done
+          [[ "$mode" = plan || "$mode" = apply ]] || exit 1
+          for number in "$run_id" "$broker_floor"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
+          if [ "$mode" = apply ]; then
+            for number in "$backup_run" "$backup_epoch" "$plan_run" "$ci_run"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
+            [[ "$case_hash" =~ ^[a-f0-9]{64}$ && "$candidate_hash" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          else
+            test "$backup_run:$backup_epoch:$plan_run:$ci_run:$case_hash:$candidate_hash" = 0:0:0:0:0:0 || exit 1
+          fi
+          [[ "$expected_pg" =~ ^[0-9]+$ && "$deploy_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+          case "$deploy_path/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          deploy_root=$(readlink -f "$deploy_path"); test "$deploy_root" != / -a -d "$deploy_root" || exit 1
+          for tool in awk base64 curl date docker flock git jq mkfifo mktemp readlink sed sha256sum stat tar timeout wc; do command -v "$tool" >/dev/null || exit 1; done
+          lock_path=/tmp/st-michael-production-deploy.lock
+          test -f "$lock_path" -a ! -L "$lock_path" || exit 1
+          test "$(stat -Lc '%a:%u' "$lock_path")" = 600:0 || exit 1
+          lock_identity=$(stat -Lc '%d:%i' "$lock_path")
+          exec 9<"$lock_path"
+          flock -x -n 9 || { echo production_lock_busy=true; exit 1; }
+          assert_lock() {
+            test -f "$lock_path" -a ! -L "$lock_path" &&
+            test "$(stat -Lc '%a:%u' "$lock_path")" = 600:0 &&
+            test "$(stat -Lc '%d:%i' "$lock_path")" = "$lock_identity" &&
+            test "$(stat -Lc '%d:%i' "/proc/$$/fd/9")" = "$lock_identity" && flock -x -n 9
+          }
+          assert_lock || exit 1
+          cd "$deploy_root"
+          test "$(git rev-parse --show-toplevel)" = "$deploy_root" || exit 1
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform.git || exit 1
+          test "$(git symbolic-ref --short HEAD)" = master || exit 1
+          test "$(git rev-parse HEAD)" = "$deployed_sha" || exit 1
+          test -z "${DOCKER_HOST:-}" -a -z "${DOCKER_CONTEXT:-}" || exit 1
+          test "$(timeout 15 docker context show)" = default || exit 1
+          test "$(timeout 15 docker context inspect default --format '{{.Endpoints.docker.Host}}')" = unix:///var/run/docker.sock || exit 1
+          test -S /var/run/docker.sock || exit 1
+          timeout 15 docker info --format '{{json .SecurityOptions}}' | jq -e 'type == "array" and all(.[]; type == "string" and (contains("rootless") | not))' >/dev/null || exit 1
+          project=$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' st-michael-postgres)
+          [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || exit 1
+          for service in api postgres redis; do
+            test "$(timeout 15 docker inspect --format '{{.State.Running}}' "st-michael-$service")" = true || exit 1
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "st-michael-$service")" = "$project" || exit 1
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "st-michael-$service")" = "$service" || exit 1
+          done
+          api_identity=$(timeout 15 docker inspect --format '{{.Id}}:{{.State.StartedAt}}' st-michael-api)
+          assert_health() {
+            test "$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha | select(type == "string" and test("^[0-9a-f]{40}$"))')" = "$deployed_sha" &&
+            test "$(timeout 15 docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')" = "$deployed_sha" &&
+            test "$(timeout 15 docker inspect --format '{{.Id}}:{{.State.StartedAt}}' st-michael-api)" = "$api_identity" &&
+            test "$(git rev-parse HEAD)" = "$deployed_sha"
+          }
+          assert_database() {
+            local metrics pg rows
+            metrics=$(timeout 20 docker exec st-michael-postgres psql -U postgres -d broker_platform --no-psqlrc -AtF '|' -v ON_ERROR_STOP=1 -c "BEGIN READ ONLY; SET LOCAL statement_timeout='5s'; SELECT system_identifier, (SELECT count(*) FROM public.brokers) FROM pg_control_system(); ROLLBACK;" 2>/dev/null | awk -F'|' 'NF==2 && $1 ~ /^[0-9]+$/ {print}') || return 1
+            [[ "$metrics" =~ ^[0-9]+\|[0-9]+$ ]] || return 1
+            IFS='|' read -r pg rows <<< "$metrics"
+            test "$pg" = "$expected_pg" && test "$rows" -ge "$broker_floor"
+          }
+          phase remote_runtime_and_database
+          assert_health && assert_database && assert_lock || exit 1
+          if [ "$mode" = apply ]; then
+            phase remote_fresh_verified_backup
+            backup_dir=/var/backups/stmichael/loyalty-predeploy
+            test -d "$backup_dir" -a ! -L "$backup_dir" && test "$(readlink -f "$backup_dir")" = "$backup_dir" || exit 1
+            backup="$backup_dir/loyalty-predeploy-${source_sha}-run${backup_run}-attempt1.dump"
+            for file in "$backup" "$backup.sha256"; do
+              test -f "$file" -a ! -L "$file" && test "$(readlink -f "$file")" = "$file" && test "$(stat -c '%a:%u' "$file")" = "600:$(id -u)" || exit 1
+            done
+            age=$(( $(date -u +%s) - backup_epoch )); test "$age" -ge 0 -a "$age" -le 21600 || exit 1
+            checksum=$(< "$backup.sha256"); [[ "$checksum" =~ ^[a-f0-9]{64}$ ]] || exit 1
+            test "$(sha256sum "$backup" | cut -d' ' -f1)" = "$checksum" || exit 1
+            timeout 3m docker exec -i st-michael-postgres pg_restore --list < "$backup" >/dev/null 2>/dev/null
+            timeout 3m docker exec -i st-michael-postgres pg_restore --exit-on-error --no-owner --file=/dev/null < "$backup" >/dev/null 2>/dev/null
+          fi
+          assert_lock || exit 1
+          work=$(mktemp -d /tmp/st-michael-fixed-case-apply.XXXXXX)
+          test "$(stat -c %a "$work")" = 700 || exit 1
+          archive="$work/payload.tar"; fifo_in="$work/input"; fifo_out="$work/output"; runner_stderr="$work/runner.stderr"; child=""; container_root=""
+          : > "$runner_stderr"; chmod 600 "$runner_stderr"
+          terminate_runner() {
+            if [[ "$container_root" =~ ^/tmp/st-michael-fixed-case\.[A-Za-z0-9]{6}$ ]]; then
+              timeout 10 docker exec st-michael-api node -e '
+                const fs=require("node:fs"),root=process.argv[1];
+                try { const p=root+"/runner.pid",s=fs.lstatSync(p); if(!s.isFile()||s.isSymbolicLink()||(s.mode&511)!==384)process.exit(1);
+                  const text=fs.readFileSync(p,"utf8");if(!/^[1-9][0-9]{0,9}$/.test(text))process.exit(1);
+                  const pid=Number(text),argv=fs.readFileSync("/proc/"+pid+"/cmdline","utf8").split("\0");
+                  if(argv[1]!==root+"/scripts/run-fixed-amo-fixation-case.js")process.exit(1);process.kill(pid,"SIGKILL");
+                } catch { process.exitCode=1; }
+              ' "$container_root" >/dev/null 2>/dev/null || true
+            fi
+            if [ -n "$child" ]; then kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; child=""; fi
+          }
+          cleanup_remote() {
+            rc=$?; terminate_runner
+            exec 7>&- 6>&- || true
+            if [[ "$container_root" =~ ^/tmp/st-michael-fixed-case\.[A-Za-z0-9]{6}$ ]]; then
+              timeout 10 docker exec st-michael-api sh -c '
+                root=$1
+                for name in apply-fixed-amo-fixation-case fixed-amo-case-exclusion-certificate inspect-fixed-amo-fixation-case inspect-amo-fixation-lead-reconciliation apply-amo-deadletter-group-recovery amo-deadletter-group-recovery-core inspect-amo-deadletter-group-recovery-plan run-fixed-amo-fixation-case; do rm -f -- "$root/scripts/$name.js"; done
+                for name in amo-crm.adapter amo-crm.fields amo-crm.touches amo-fixation-phone-lock amo-traffic-light; do rm -f -- "$root/packages/integrations/dist/$name.js"; done
+          rm -f -- "$root/apps/api/dist/common/amo-fixation-phone-lock.service.js" "$root/apps/api/dist/common/amo-sync-retry.js" \
+            "$root/apps/api/dist/client-fixation/client-fixation-safety.service.js" "$root/apps/api/dist/client-fixation/client-fixation.controller.js" \
+            "$root/apps/api/dist/client-fixation/client-fixation.service.js" "$root/apps/api/dist/scheduler/scheduler.service.js" "$root/apps/api/dist/admin/admin.service.js"
+                rm -f -- "$root/runner.pid" "$root/manifest.json"
+                rmdir -- "$root/apps/api/dist/common" "$root/apps/api/dist/client-fixation" "$root/apps/api/dist/scheduler" "$root/apps/api/dist/admin" "$root/apps/api/dist" "$root/apps/api" "$root/apps"
+                rmdir -- "$root/packages/integrations/dist" "$root/packages/integrations" "$root/packages" "$root/scripts" "$root"
+              ' cleanup "$container_root" >/dev/null 2>/dev/null || true
+            fi
+            rm -f -- "$archive" "$fifo_in" "$fifo_out" "$runner_stderr"; rmdir -- "$work" 2>/dev/null || true
+            if [ "$rc" -ne 0 ]; then printf 'fixed_case_failed_stage=%s\n' "$stage" >&2; fi
+          }
+          trap cleanup_remote EXIT
+          trap 'exit 1' HUP INT TERM
+          base64 -d > "$archive" <<'FIXED_CASE_PAYLOAD'
+          REMOTE_PREFIX
+            base64 -w 0 "$archive"
+            printf '\nFIXED_CASE_PAYLOAD\n'
+            cat <<'REMOTE_SUFFIX'
+          test "$(stat -c %s "$archive")" -le 8388608 || exit 1
+          test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$archive_sha" || exit 1
+          expected_entries=$'scripts/apply-fixed-amo-fixation-case.js\nscripts/fixed-amo-case-exclusion-certificate.js\nscripts/inspect-fixed-amo-fixation-case.js\nscripts/inspect-amo-fixation-lead-reconciliation.js\nscripts/apply-amo-deadletter-group-recovery.js\nscripts/amo-deadletter-group-recovery-core.js\nscripts/inspect-amo-deadletter-group-recovery-plan.js\npackages/integrations/dist/amo-crm.adapter.js\npackages/integrations/dist/amo-crm.fields.js\npackages/integrations/dist/amo-crm.touches.js\npackages/integrations/dist/amo-fixation-phone-lock.js\npackages/integrations/dist/amo-traffic-light.js\napps/api/dist/common/amo-fixation-phone-lock.service.js\napps/api/dist/common/amo-sync-retry.js\napps/api/dist/client-fixation/client-fixation-safety.service.js\napps/api/dist/client-fixation/client-fixation.controller.js\napps/api/dist/client-fixation/client-fixation.service.js\napps/api/dist/scheduler/scheduler.service.js\napps/api/dist/admin/admin.service.js\nscripts/run-fixed-amo-fixation-case.js\nmanifest.json'
+          test "$(tar -tf "$archive")" = "$expected_entries" || exit 1
+          phase remote_attested_private_staging
+          container_root=$(timeout 20 docker exec -i st-michael-api sh -c '
+            set -eu; umask 077
+            test -d /tmp -a ! -L /tmp
+            root=$(mktemp -d /tmp/st-michael-fixed-case.XXXXXX)
+            test "$(stat -c %a "$root")" = 700
+            tar -xf - -C "$root"
+            test -f "$root/scripts/run-fixed-amo-fixation-case.js" -a ! -L "$root/scripts/run-fixed-amo-fixation-case.js"
+            test "$(sha256sum "$root/scripts/run-fixed-amo-fixation-case.js" | cut -d" " -f1)" = "$1"
+            printf "%s" "$root"
+          ' staging "$runner_sha" < "$archive")
+          [[ "$container_root" =~ ^/tmp/st-michael-fixed-case\.[A-Za-z0-9]{6}$ ]] || exit 1
+          assert_health && assert_database && assert_lock || exit 1
+          if [ "$mode" = apply ]; then age=$(( $(date -u +%s) - backup_epoch )); test "$age" -ge 0 -a "$age" -le 21600 || exit 1; fi
+          mkfifo -m 600 "$fifo_in" "$fifo_out"
+          exec 7<>"$fifo_in" 6<>"$fifo_out"
+          phase remote_continuous_lock_bridge
+          if [ "$mode" = plan ]; then confirmation=PLAN_FIXED_AMO_CASE_READONLY; else confirmation=RECOVER_APPROVED_FIXED_AMO_CASE_ONCE; fi
+          timeout --foreground 9m docker exec -i \
+            -e FIXED_CASE_MODE="$mode" -e FIXED_CASE_CONFIRMATION="$confirmation" \
+            -e FIXED_CASE_RUN_ID="$run_id" -e FIXED_CASE_RUN_ATTEMPT=1 \
+            -e FIXED_CASE_PLAN_RUN_ID="$plan_run" -e FIXED_CASE_EXPECTED_CASE_HASH="$case_hash" \
+            -e FIXED_CASE_EXPECTED_CANDIDATE_HASH="$candidate_hash" \
+            -e FIXED_CASE_SOURCE_GIT_SHA="$source_sha" -e FIXED_CASE_DEPLOYED_GIT_SHA="$deployed_sha" \
+            -e FIXED_CASE_RUNNER_SHA256="$runner_sha" -e FIXED_CASE_MANIFEST_SHA256="$manifest_sha" \
+            -e PRODUCTION_PG_SYSTEM_IDENTIFIER="$expected_pg" -e PRODUCTION_MIN_BROKER_ROWS="$broker_floor" \
+            st-michael-api node "$container_root/scripts/run-fixed-amo-fixation-case.js" \
+            < "$fifo_in" > "$fifo_out" 2>"$runner_stderr" 9<&- 7>&- 6>&- &
+          child=$!
+          report=""; buffer=""; deadline=$((SECONDS + 540))
+          while true; do
+            assert_lock || { terminate_runner; exit 1; }
+            test "$SECONDS" -le "$deadline" || { terminate_runner; exit 1; }
+            packet=""; read_status=0
+            IFS= read -r -t 0.25 -n 4097 packet <&6 || read_status=$?
+            buffer+=$packet
+            test "${#buffer}" -le 4096 || { terminate_runner; exit 1; }
+            if [ "$read_status" -eq 0 ]; then
+              case "$buffer" in
+                lock-check:*)
+                  nonce=${buffer#lock-check:}; [[ "$nonce" =~ ^[a-f0-9]{32}$ ]] || { terminate_runner; exit 1; }
+                  assert_lock || { terminate_runner; exit 1; }
+                  printf 'lock-ok:%s\n' "$nonce" >&7
+                  ;;
+                report:*)
+                  test -z "$report" || { terminate_runner; exit 1; }
+                  encoded=${buffer#report:}; [[ "$encoded" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || { terminate_runner; exit 1; }
+                  report=$(printf '%s' "$encoded" | base64 -d | jq -ce '
+                    . as $report | (type == "object" and (
+                      ((.status == "planned") and ((keys | sort) == (["amoWrites","candidateHash","caseHash","databaseWrites","deployedGitSha","mutationAuthorized","sourceSha256","status"] | sort)) and
+                        .mutationAuthorized == false and .databaseWrites == false and .amoWrites == false and (.caseHash | test("^[a-f0-9]{64}$")) and (.candidateHash | test("^[a-f0-9]{64}$"))) or
+                      ((.status == "linked" or .status == "unresolved" or .status == "prior_operation_readonly") and
+                  ((keys - ["status","leadId","contactPosts","leadPosts","patchPosts","notePosts","failureCode","automaticRetryBlocked","assignmentNeeded","directMorekitDispatchAttempted","databaseWrites","businessStatePreserved","accountStatusPreserved"]) | length == 0) and
+                  .directMorekitDispatchAttempted == false and .assignmentNeeded == true and (.contactPosts == 0 or .contactPosts == 1) and (.leadPosts == 0 or .leadPosts == 1) and
+                  (.patchPosts == 0 or .patchPosts == 1) and (.notePosts == 0 or .notePosts == 1))))
+                    | if . then $report else empty end' 2>/dev/null) || { terminate_runner; exit 1; }
+                  ;;
+                *) terminate_runner; exit 1;;
+              esac
+              buffer=""
+            elif [ "$read_status" -le 128 ]; then terminate_runner; exit 1; fi
+            if ! kill -0 "$child" 2>/dev/null && [ "$read_status" -ne 0 ]; then
+              test -z "$buffer" || exit 1
+              break
+            fi
+          done
+          exit_status=0; wait "$child" || exit_status=$?; child=""
+          assert_lock && assert_health && assert_database || exit 1
+          if [ -s "$runner_stderr" ]; then
+            first=$(sed -n '1p' "$runner_stderr"); second=$(sed -n '2p' "$runner_stderr")
+            if [ "$(wc -l < "$runner_stderr")" -eq 2 ] && [ "$first" = fixed_case_runner_refused=true ] && [[ "$second" =~ ^fixed_case_runner_refused_code=[A-Z0-9_]+$ ]]; then
+              printf '%s\n%s\n' "$first" "$second" >&2
+            else
+              printf 'fixed_case_runner_refused=true\nfixed_case_runner_refused_code=UNCLASSIFIED_REFUSAL\n' >&2
+            fi
+             exit_status=1
+          fi
+          test -n "$report" -a -z "$buffer" || exit 1
+          printf '%s\n' "$report"
+          echo direct_morekit_dispatch_attempted=false
+          echo amo_automation_may_run=$([ "$mode" = apply ] && printf true || printf false)
+          exit "$exit_status"
+          REMOTE_SUFFIX
+          } | timeout --foreground 15m ssh -T -i "$private_key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" \
+             "bash -s -- '$DEPLOY_PATH' '$EXPECTED_SHA' '$EXPECTED_DEPLOYED_SHA' '$EXPECTED_RUN_ID' '$BACKUP_RUN_ID' '$BACKUP_EPOCH' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS' '$archive_sha' '$manifest_sha' '$runner_sha' '$FIXED_CASE_MODE' '$PLAN_RUN_ID' '$EXPECTED_CASE_HASH' '$EXPECTED_CANDIDATE_HASH' '$CI_RUN_ID'" | tee "$safe_output"
+          mapfile -t safe_lines < "$safe_output"
+          test "${safe_lines[0]:-}" = fixed_case_stage=remote_runtime_and_database || exit 1
+          if [ "$FIXED_CASE_MODE" = plan ]; then
+            test "${#safe_lines[@]}" -eq 6 || exit 1
+            test "${safe_lines[1]:-}" = fixed_case_stage=remote_attested_private_staging || exit 1
+            test "${safe_lines[2]:-}" = fixed_case_stage=remote_continuous_lock_bridge || exit 1
+            report=${safe_lines[3]:-}
+            test "${safe_lines[4]:-}" = direct_morekit_dispatch_attempted=false || exit 1
+            test "${safe_lines[5]:-}" = amo_automation_may_run=false || exit 1
+            jq -e '.status == "planned" and .mutationAuthorized == false and .databaseWrites == false and .amoWrites == false' <<<"$report" >/dev/null || exit 1
+            attestation="${RUNNER_TEMP}/fixed-amo-case-plan-attestation.json"
+            jq -cn --argjson report "$report" --arg repository "$EXPECTED_REPOSITORY" --arg actor "$EXPECTED_ACTOR" \
+              --arg run "$EXPECTED_RUN_ID" --arg source "$EXPECTED_SHA" --arg deployed "$EXPECTED_DEPLOYED_SHA" '
+                {schemaVersion:1,mode:"plan",repository:$repository,actor:$actor,planRunId:$run,sourceGitSha:$source,deployedGitSha:$deployed,
+                 caseHash:$report.caseHash,candidateHash:$report.candidateHash,sourceSha256:$report.sourceSha256,
+                 mutationAuthorized:$report.mutationAuthorized,databaseWrites:$report.databaseWrites,amoWrites:$report.amoWrites}
+              ' > "$attestation"
+            chmod 600 "$attestation"
+          else
+            test "${#safe_lines[@]}" -eq 7 || exit 1
+            test "${safe_lines[1]:-}" = fixed_case_stage=remote_fresh_verified_backup || exit 1
+            test "${safe_lines[2]:-}" = fixed_case_stage=remote_attested_private_staging || exit 1
+            test "${safe_lines[3]:-}" = fixed_case_stage=remote_continuous_lock_bridge || exit 1
+            report=${safe_lines[4]:-}
+            test "${safe_lines[5]:-}" = direct_morekit_dispatch_attempted=false || exit 1
+            test "${safe_lines[6]:-}" = amo_automation_may_run=true || exit 1
+          fi
+      - name: Upload immutable reviewed-plan attestation
+        if: ${{ inputs.mode == 'plan' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fixed-amo-case-plan-attestation
+          path: ${{ runner.temp }}/fixed-amo-case-plan-attestation.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+      - name: Remove local plan attestations
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          rm -f -- "${RUNNER_TEMP}/fixed-amo-case-plan-attestation.json" "${RUNNER_TEMP}/fixed-amo-case-plan-review/fixed-amo-case-plan-attestation.json"
+          rmdir -- "${RUNNER_TEMP}/fixed-amo-case-plan-review" 2>/dev/null || true

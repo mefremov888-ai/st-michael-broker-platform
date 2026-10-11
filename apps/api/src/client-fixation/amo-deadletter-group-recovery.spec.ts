@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
+import { amoFixationPhoneLockRedisKey } from "../../../../packages/integrations/src/amo-fixation-phone-lock";
 
 jest.mock("@st-michael/integrations", () => ({
   amoFixationPhoneLockRedisKey: (phone: string) =>
@@ -628,6 +629,13 @@ describe("signed amo deadletter phone-group recovery", () => {
       [{ group: { normalizedPhone: "+79990000001" } }],
       key,
     );
+    expect(redis.set).toHaveBeenCalledWith(
+      amoFixationPhoneLockRedisKey("+79990000001"),
+      expect.any(String),
+      "PX",
+      600_000,
+      "NX",
+    );
     await expect(leases.assertOwned()).resolves.toBeUndefined();
     denyOwnerChecks = true;
     await expect(leases.assertOwned()).rejects.toThrow(
@@ -636,6 +644,29 @@ describe("signed amo deadletter phone-group recovery", () => {
     denyOwnerChecks = false;
     await leases.release(new Set());
     expect(redis.eval).toHaveBeenCalled();
+  });
+
+  it("uses an explicitly injected staged shared-lock key function", async () => {
+    const redis = {
+      set: jest.fn(async () => "OK"),
+      eval: jest.fn(async () => 1),
+    };
+    const stagedRedisKey = jest.fn(() => "staged-attested-shared-lock-key");
+    const leases = await apply.acquirePhoneLeases(
+      redis,
+      [{ group: { normalizedPhone: "+79990000001" } }],
+      key,
+      stagedRedisKey,
+    );
+    expect(stagedRedisKey).toHaveBeenCalledWith("+79990000001");
+    expect(redis.set).toHaveBeenCalledWith(
+      "staged-attested-shared-lock-key",
+      expect.any(String),
+      "PX",
+      600_000,
+      "NX",
+    );
+    await leases.release(new Set());
   });
 
   it.each(["fresh revalidation", "final lease verification"])(
