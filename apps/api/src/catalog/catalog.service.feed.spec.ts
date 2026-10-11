@@ -8,7 +8,8 @@ describe('CatalogService last-good XML feed preservation', () => {
   function setup() {
     const lastGood = { externalId: '1', status: 'AVAILABLE', price: 21000000, sqm: 50, photos: ['last-good-photo'] };
     const lot = { findUnique: jest.fn(async () => lastGood), update: jest.fn(async () => ({})), create: jest.fn(async () => ({})), deleteMany: jest.fn(), updateMany: jest.fn() };
-    return { service: new CatalogService({ lot } as any), lot, lastGood };
+    const systemSetting = { upsert: jest.fn(async () => ({})), findUnique: jest.fn(async () => null) };
+    return { service: new CatalogService({ lot, systemSetting } as any), lot, lastGood, systemSetting };
   }
   afterEach(() => jest.restoreAllMocks());
   it.each(['<realty-feed>' + OFFER, '<realty-feed/>', '<html>private error</html>', '<realty-feed>' + OFFER + OFFER + '</realty-feed>'])('never changes, clears or archives last-good lots for a rejected feed', async (xml) => {

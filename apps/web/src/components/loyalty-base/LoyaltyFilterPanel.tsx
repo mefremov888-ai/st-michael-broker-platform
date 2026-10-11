@@ -164,9 +164,13 @@ export function LoyaltyFilterPanel({
   const commit = (
     next: LoyaltyFilterFormState,
     keys: ReadonlyArray<keyof LoyaltyFilterFormState>,
+    applyImmediately = false,
   ) => {
     onChange(next);
-    if (onApplyDraft && !keys.some((key) => TYPED_KEYS.includes(key)))
+    if (
+      onApplyDraft &&
+      (applyImmediately || !keys.some((key) => TYPED_KEYS.includes(key)))
+    )
       onApplyDraft(next);
   };
   const update = <K extends keyof LoyaltyFilterFormState>(
@@ -180,13 +184,14 @@ export function LoyaltyFilterPanel({
       }),
       [key],
     );
-  const patch = (next: Partial<LoyaltyFilterFormState>) =>
+  const patch = (next: Partial<LoyaltyFilterFormState>, applyImmediately = false) =>
     commit(
       sanitizeLoyaltyFilterState(base, entityType, {
         ...draft,
         ...next,
       }),
       Object.keys(next) as Array<keyof LoyaltyFilterFormState>,
+      applyImmediately,
     );
   const isBroker = entityType === "brokers";
   const callResults = getLoyaltyCallResultOptions(entityType);
@@ -399,6 +404,7 @@ export function LoyaltyFilterPanel({
             <select
               className="input"
               value={draft.specialization}
+              disabled={!capabilities.specialization}
               onChange={(event) =>
                 update("specialization", event.target.value)
               }
@@ -410,6 +416,11 @@ export function LoyaltyFilterPanel({
                 </option>
               ))}
             </select>
+            {!capabilities.specialization && (
+              <p className="text-xs text-text-muted">
+                Недоступно: в нашей базе агентств нет подтверждённых данных о направлении.
+              </p>
+            )}
           </Field>
 
           {isBroker && (
@@ -629,7 +640,7 @@ export function LoyaltyFilterPanel({
               className="input"
               value={dealPresetFromDraft(draft)}
               onChange={(event) =>
-                patch(dealPatchFromPreset(event.target.value as DealPreset))
+                patch(dealPatchFromPreset(event.target.value as DealPreset), true)
               }
             >
               <option value="">Все сделки</option>

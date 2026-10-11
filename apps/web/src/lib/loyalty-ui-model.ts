@@ -359,6 +359,7 @@ export const AGENCY_SCENARIOS: ReadonlyArray<
 export type LoyaltyArchiveMode = LoyaltyFilterFormState["archived"];
 
 export interface LoyaltyFilterCapabilities {
+  specialization: boolean;
   hasAmo: boolean;
   dataQuality: boolean;
   agencySize: boolean;
@@ -491,6 +492,7 @@ export function loyaltyFilterCapabilities(
   const agencyWithSourceFields = entityType === "agencies" && !ourAgency;
   const ourBroker = base === "ours" && entityType === "brokers";
   return {
+    specialization: !ourAgency,
     hasAmo: !ourAgency,
     dataQuality: !ourAgency,
     agencySize: agencyWithSourceFields,
@@ -609,6 +611,9 @@ export function sanitizeLoyaltyFilterState(
   if (!scenarioAllowed) patch.scenario = "";
   if (!capabilities.agencySize && state.agencySize !== "") {
     patch.agencySize = "";
+  }
+  if (!capabilities.specialization && state.specialization !== "") {
+    patch.specialization = "";
   }
   if (!capabilities.websitePresent && state.websitePresent !== "") {
     patch.websitePresent = "";

@@ -3848,7 +3848,7 @@ describe("LoyaltyBaseService", () => {
         callPeriod: { from: "2026-08-01", to: "2026-08-31" },
         dealsInPeriod: true,
       }),
-    ).toThrow("dealsInPeriod requires activityPeriod");
+    ).toThrow("dealsInPeriod requires dealPeriod or activityPeriod");
   });
 
   it("keeps the legacy flat from/to as a shared period for both calls and activity", () => {

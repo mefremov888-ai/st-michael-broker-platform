@@ -39,6 +39,20 @@ describe("периоды в фильтрах «Нашей базы»", () => {
   });
 
   describe("отдельные периоды по видам активности", () => {
+    it.each([true, false])("свой период сделок поддерживает dealsInPeriod=%s", (dealsInPeriod) => {
+      const f = normalize({}, {
+        dealPeriod: { from: "2026-09-01", to: "2026-09-30" },
+        dealsInPeriod,
+      });
+      expect(f.activityPeriod).toBeUndefined();
+      expect(f.dealPeriod.fromIso).toBe("2026-09-01");
+      expect(f.dealsInPeriod).toBe(dealsInPeriod);
+    });
+
+    it("предикат сделок без любого периода остаётся ошибкой", () => {
+      expect(() => normalize({}, { dealsInPeriod: false })).toThrow();
+    });
+
     it("свой период у фиксаций не затрагивает встречи и сделки", () => {
       const f = normalize({}, { fixationPeriod: { from: "2026-08-01", to: "2026-08-31" } });
       expect(f.fixationPeriod.fromIso).toBe("2026-08-01");

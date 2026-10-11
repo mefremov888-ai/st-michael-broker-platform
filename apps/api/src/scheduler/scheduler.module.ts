@@ -10,6 +10,7 @@ import { CmsModule } from '../cms/cms.module';
 import { AmoFixationPhoneLockModule } from '../common/amo-fixation-phone-lock.module';
 import { ClientFixationModule } from '../client-fixation/client-fixation.module';
 import { SmsModule } from '../sms/sms.module';
+import { ContentFreshnessService } from './content-freshness.service';
 
 @Module({
   imports: [
@@ -29,6 +30,6 @@ import { SmsModule } from '../sms/sms.module';
     SmsModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
-  providers: [SchedulerService],
+  providers: [SchedulerService, ContentFreshnessService],
 })
 export class SchedulerModule {}

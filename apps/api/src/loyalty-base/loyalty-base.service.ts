@@ -1406,11 +1406,11 @@ export class LoyaltyBaseService {
     if (
       (result.dealsInPeriod !== undefined ||
         ["HAS_DEALS"].includes(result.scenario || "")) &&
-      !result.activityPeriod &&
+      !result.dealPeriod &&
       result.dealsInPeriod !== undefined
     ) {
       throw new BadRequestException(
-        "dealsInPeriod requires activityPeriod (or flat from/to)",
+        "dealsInPeriod requires dealPeriod or activityPeriod (or flat from/to)",
       );
     }
     // 2026-09-04: отсутствие callPeriod у звонковых предикатов (called,
@@ -11570,6 +11570,35 @@ export class LoyaltyBaseService {
     const filteredFixations = filter.fixationPeriod
       ? finiteNumber(item.periodMetrics?.fixations)
       : fixations;
+    // Selected periods narrow agencies as well as recomputing their metrics.
+    // Explicit zero/negative predicates remain authoritative: adding a positive
+    // period gate to them would make "no activity in period" impossible.
+    if (
+      filter.fixationPeriod &&
+      filter.columns.activity !== "NO_FIXATIONS" &&
+      (filteredFixations === null || filteredFixations <= 0)
+    )
+      return false;
+    const noMeetings =
+      filter.columns.activity === "NO_MEETINGS" ||
+      filter.scenario === "NO_MEETINGS" ||
+      filter.meetings.max === 0;
+    if (
+      filter.meetingPeriod &&
+      !noMeetings &&
+      (filteredMeetings === null || filteredMeetings <= 0)
+    )
+      return false;
+    const explicitDealPredicate =
+      filter.dealsInPeriod !== undefined ||
+      filter.columns.deals === "NO_DEALS" ||
+      filter.dealCount.max === 0;
+    if (
+      filter.dealPeriod &&
+      !explicitDealPredicate &&
+      (filteredDeals === null || filteredDeals <= 0)
+    )
+      return false;
     const latestCall = this.applyCallSummary(item, "AGENCY", calls);
     const agencyActivityDates = [
       relationMetrics.lastActivityAt,
@@ -11604,7 +11633,11 @@ export class LoyaltyBaseService {
     // активности (колонка «Активность» или тип активности) правило не
     // применяется вовсе — пользователь сам сказал, что ищет.
     const explicitActivityFilter = Boolean(
-      filter.columns?.activity || filter.activityType,
+      filter.columns?.activity ||
+      filter.activityType ||
+      filter.fixationPeriod ||
+      filter.meetingPeriod ||
+      filter.dealPeriod,
     );
     if (
       !filter.includeLowSignal &&

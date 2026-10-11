@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { apiGet } from '@/lib/api';
+import { publishedCooperationDocuments, visibleDocumentDescription } from '@/lib/published-cooperation-documents';
 import { FileText, Download, FileSignature, ChevronRight, CheckCircle2 } from 'lucide-react';
 
 interface DocItem {
@@ -37,10 +38,10 @@ export default function DocumentsPage() {
     setLoading(true); setError('');
     try {
       const [docs, offer] = await Promise.all([
-        apiGet('/documents?category=cooperation&limit=200'),
+        apiGet<DocItem[]>('/public/documents?category=cooperation'),
         apiGet<OfferStatus>('/offer/my').catch(() => null),
       ]);
-      setDocuments(docs.documents || []);
+      setDocuments(publishedCooperationDocuments(docs));
       setOfferStatus(offer);
     } catch (e: any) {
       setError(e.message || 'Ошибка загрузки');
@@ -104,7 +105,7 @@ export default function DocumentsPage() {
                       {doc.type}{doc.fileSize ? ` · ${formatSize(doc.fileSize)}` : ''}
                       {/* Bug fix 2026-06-02: [seed:...] маркер — техника
                           для идемпотентности seed-скрипта, не для UI. */}
-                      {doc.description && !/^\[seed:/i.test(doc.description) ? ` · ${doc.description}` : ''}
+                      {visibleDocumentDescription(doc.description) ? ` · ${visibleDocumentDescription(doc.description)}` : ''}
                     </div>
                   </div>
                 </div>

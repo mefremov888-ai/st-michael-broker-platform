@@ -1,6 +1,14 @@
 import { Injectable, Inject, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaClient } from '@st-michael/database';
 import { loadProfitbaseOffers, ProfitbaseFeedError } from './profitbase-feed';
+import { normalizeFeedGeneratedAt } from './profitbase-feed';
+
+export const CATALOG_FEED_FRESHNESS_PREFIX = 'catalog.feed.freshness.';
+export type CatalogFeedFreshness = {
+  project: string;
+  lastSuccessfulImportAt: string | null;
+  sourceGeneratedAt: string | null;
+};
 
 const FEEDS = [
   {
@@ -36,7 +44,8 @@ export class CatalogService {
 
   private async syncSingleFeed(feedUrl: string, defaultProject: string) {
     let offers: any[];
-    try { offers = await loadProfitbaseOffers(feedUrl); }
+    let sourceGeneratedAt: string | null = null;
+    try { offers = await loadProfitbaseOffers(feedUrl, { onMetadata: (metadata) => { sourceGeneratedAt = metadata.sourceGeneratedAt; } }); }
     catch (error) {
       // Keep the last good catalog and retain the existing failure/alert path.
       // Do not expose the export URL/token or raw upstream response in logs.
@@ -46,6 +55,7 @@ export class CatalogService {
     let created = 0;
     let updated = 0;
     let skipped = 0;
+    let failedWrites = 0;
 
     for (const offer of offers) {
       const externalId = String(offer['@_internal-id'] || '');
@@ -196,10 +206,39 @@ export class CatalogService {
         }
       } catch {
         skipped++;
+        failedWrites++;
       }
     }
 
+    // A partial import must not refresh the heartbeat: old prices can remain
+    // for failed rows. Intentional test-lot skips are not import errors.
+    if (failedWrites > 0 || created + updated === 0) {
+      throw new BadRequestException('Feed import failed: FEED_IMPORT_INCOMPLETE');
+    }
+    const key = CATALOG_FEED_FRESHNESS_PREFIX + defaultProject;
+    const value = JSON.stringify({ lastSuccessfulImportAt: new Date().toISOString(), sourceGeneratedAt });
+    await this.prisma.systemSetting.upsert({
+      where: { key },
+      create: { key, value, updatedBy: 'catalog-feed-sync' },
+      update: { value, updatedBy: 'catalog-feed-sync' },
+    });
     return { created, updated, skipped, total: offers.length };
+  }
+
+  /** Read-only, durable per-feed status, independent of lot updatedAt/prices. */
+  async getFreshnessReport(_now: Date = new Date()): Promise<CatalogFeedFreshness[]> {
+    return Promise.all(FEEDS.map(async ({ project }) => {
+      const row = await this.prisma.systemSetting.findUnique({
+        where: { key: CATALOG_FEED_FRESHNESS_PREFIX + project }, select: { value: true },
+      });
+      let stored: any = null;
+      try { stored = row ? JSON.parse(row.value) : null; } catch { /* Missing/corrupt status is unknown, never fresh. */ }
+      return {
+        project,
+        lastSuccessfulImportAt: normalizeFeedGeneratedAt(stored?.lastSuccessfulImportAt),
+        sourceGeneratedAt: normalizeFeedGeneratedAt(stored?.sourceGeneratedAt),
+      };
+    }));
   }
 
 

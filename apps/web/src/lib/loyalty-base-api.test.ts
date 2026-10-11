@@ -343,6 +343,7 @@ test("builds independent canonical filters for brokers and agencies", () => {
 test("defines authoritative filter capabilities for every base/entity pair", () => {
   const ourAgency = loyaltyFilterCapabilities("ours", "agencies");
   assert.equal(ourAgency.hasAmo, false);
+  assert.equal(ourAgency.specialization, false);
   assert.equal(ourAgency.dataQuality, false);
   assert.equal(ourAgency.agencySize, false);
   assert.equal(ourAgency.websitePresent, false);
@@ -364,6 +365,7 @@ test("defines authoritative filter capabilities for every base/entity pair", () 
 
   const annaAgency = loyaltyFilterCapabilities("anna", "agencies");
   assert.equal(annaAgency.hasAmo, true);
+  assert.equal(annaAgency.specialization, true);
   assert.equal(annaAgency.dataQuality, true);
   assert.equal(annaAgency.agencySize, true);
   assert.deepEqual(annaAgency.archivedModes, ["exclude", "only", "include"]);
@@ -374,6 +376,7 @@ test("defines authoritative filter capabilities for every base/entity pair", () 
 
   const ourBroker = loyaltyFilterCapabilities("ours", "brokers");
   assert.equal(ourBroker.hasAmo, true);
+  assert.equal(ourBroker.specialization, true);
   assert.equal(ourBroker.dataQuality, true);
   assert.equal(ourBroker.agencySize, false);
   assert.equal(ourBroker.websitePresent, false);
@@ -418,9 +421,38 @@ test("keeps Anna's scenario option order for brokers and agencies", () => {
   );
 });
 
+test("deal presets apply immediately while typed fields remain deferred", () => {
+  const panel = readFileSync(new URL(
+    "../components/loyalty-base/LoyaltyFilterPanel.tsx", import.meta.url,
+  ), "utf8");
+  assert.match(panel, /patch\(dealPatchFromPreset\(event\.target\.value as DealPreset\), true\)/);
+  assert.match(panel, /applyImmediately \|\| !keys\.some\(\(key\) => TYPED_KEYS\.includes\(key\)\)/);
+  assert.match(panel, /Object\.keys\(next\)[\s\S]*?applyImmediately,/);
+  assert.match(panel, /const TYPED_KEYS:[\s\S]*?"search"[\s\S]*?"dealFrom"[\s\S]*?"dealsMin"/);
+});
+
+test("OUR agency direction is explicitly disabled rather than sending an impossible predicate", () => {
+  const panel = readFileSync(new URL(
+    "../components/loyalty-base/LoyaltyFilterPanel.tsx", import.meta.url,
+  ), "utf8");
+  assert.match(panel, /value=\{draft\.specialization\}[\s\S]*?disabled=\{!capabilities\.specialization\}/);
+  assert.match(panel, /нет подтверждённых данных о направлении/);
+  const restored = restoreLoyaltySavedView("ours", "agencies", {
+    ui: { filters: { specialization: "Вторичка" } },
+  });
+  assert.equal(restored.filters.specialization, "");
+  assert.equal(toCanonicalFilter(restored.filters, "agencies", "ours").specializations, undefined);
+  for (const [base, entityType] of [["anna", "agencies"], ["anna", "brokers"], ["ours", "brokers"]] as const) {
+    const filters = emptyLoyaltyFilters();
+    filters.specialization = "Вторичка";
+    assert.deepEqual(toCanonicalFilter(filters, entityType, base).specializations, ["Вторичка"]);
+  }
+});
+
 test("clears unsupported OUR agency predicates before building an API filter", () => {
   const unsafe = emptyLoyaltyFilters();
   unsafe.hasAmo = "false";
+  unsafe.specialization = "Вторичка";
   unsafe.dataQuality = "FULL";
   unsafe.agencySize = "Крупное";
   unsafe.websitePresent = "false";
@@ -430,6 +462,7 @@ test("clears unsupported OUR agency predicates before building an API filter", (
 
   const safe = sanitizeLoyaltyFilterState("ours", "agencies", unsafe);
   assert.equal(safe.hasAmo, "");
+  assert.equal(safe.specialization, "");
   assert.equal(safe.dataQuality, "");
   assert.equal(safe.agencySize, "");
   assert.equal(safe.websitePresent, "");
@@ -442,6 +475,7 @@ test("clears unsupported OUR agency predicates before building an API filter", (
 
   const canonical = toCanonicalFilter(unsafe, "agencies", "ours");
   assert.equal(canonical.dataQuality, undefined);
+  assert.equal(canonical.specializations, undefined);
   assert.equal(canonical.agencySizes, undefined);
   assert.equal(canonical.websitePresent, undefined);
   assert.equal(canonical.projectsOnSite, undefined);

@@ -66,7 +66,18 @@ function fitsLotDecimal(value: number, integerDigits: number): boolean {
   // actual Number used by the existing mapping, including a carry at .995.
   return Number.isFinite(value) && new Prisma.Decimal(value).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).abs().lt(new Prisma.Decimal(10).pow(integerDigits));
 }
-export function parseValidatedProfitbaseOffers(xml: string): any[] {
+export type ProfitbaseFeedMetadata = { sourceGeneratedAt: string | null };
+/** Only a timezone-qualified ISO date is persisted; never raw provider text. */
+export function normalizeFeedGeneratedAt(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const [year, month, day, hour, minute, second] = value.match(/\d+/g)!.slice(0, 6).map(Number);
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day || hour > 23 || minute > 59 || second > 59) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+function parseValidatedProfitbaseFeed(xml: string): { offers: any[]; metadata: ProfitbaseFeedMetadata } {
   // XMLValidator alone accepts forbidden raw XML 1.0 controls (including NUL,
   // which PostgreSQL text cannot store). Reject these before parsing any rows.
   if (!xml.trim() || /<!DOCTYPE|<!ENTITY/i.test(xml) || /[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/.test(xml)) reject('FEED_XML_INVALID');
@@ -126,13 +137,18 @@ export function parseValidatedProfitbaseOffers(xml: string): any[] {
       if (!fitsLotDecimal(Number(special['discount-price'] || 0), 12) || ((special['discount-unit'] || '').toUpperCase() === 'PERCENT' && !fitsLotDecimal(Number(special.value || 0), 3))) reject('FEED_OFFERS_INVALID');
     }
   }
-  return offers;
+  return { offers, metadata: { sourceGeneratedAt: normalizeFeedGeneratedAt(parsed['realty-feed']['generation-date']) } };
+}
+
+export function parseValidatedProfitbaseOffers(xml: string): any[] {
+  return parseValidatedProfitbaseFeed(xml).offers;
 }
 
 type Dependencies = {
   fetchImpl?: typeof fetch;
   wait?: (milliseconds: number) => Promise<void>;
   now?: () => number;
+  onMetadata?: (metadata: ProfitbaseFeedMetadata) => void;
 };
 export async function loadProfitbaseOffers(rawUrl: string, dependencies: Dependencies = {}): Promise<any[]> {
   const url = validateProfitbaseFeedUrl(rawUrl);
@@ -180,7 +196,9 @@ export async function loadProfitbaseOffers(rawUrl: string, dependencies: Depende
         let xml: string;
         try { xml = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)); }
         catch { reject('FEED_BODY_INVALID'); }
-        return parseValidatedProfitbaseOffers(xml);
+        const parsed = parseValidatedProfitbaseFeed(xml);
+        dependencies.onMetadata?.(parsed.metadata);
+        return parsed.offers;
       };
       return await Promise.race([work(), expired]);
     } catch (error) {
