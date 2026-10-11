@@ -286,6 +286,15 @@ describe("approved single-client GET-only amo inspector", () => {
   const expanded = (changes: any = {}) => inspector.collectExpandedEvidence({ row: row(), brokerContact: brokerWithLeads(), contactEvidence: evidence([], []), request: jest.fn(), requestWindow: jest.fn(async () => null), scanNow, ...changes });
   const generatedLead = (changes: any = {}) => ({ ...crmLead(), name: "Фиксация: private-name (ZORGE9)", ...changes });
   const leadsPage = (leads: any[], next: any = undefined) => ({ _embedded: { leads }, ...(next === undefined ? {} : { _links: { next } }) });
+  it("allows a delayed manual review within seven days without changing pagination bounds", () => {
+    const delayed = new Date("2026-10-11T11:00:00Z");
+    const window = inspector.makeEvidenceWindow(row(), delayed);
+    expect(window).toEqual({ pipelineId: 7600542, from: created - 120, to: Math.floor(delayed.getTime() / 1000) + 120 });
+    expect(inspector.WINDOW_MAX_PAGES).toBe(10);
+    expect(inspector.WINDOW_PAGE_LIMIT).toBe(250);
+    expect(() => inspector.makeEvidenceWindow(row(), new Date("2026-10-15T08:00:01Z"))).toThrow();
+    expect(() => inspector.makeEvidenceWindow(row(), new Date("2026-10-08T07:57:59Z"))).toThrow();
+  });
   it("certifies only the completed bounded scopes, not write authority or global CRM absence", async () => {
     const found = await expanded();
     expect(inspector.assertCompleteNegativeEvidence(found, row())).toBe(true);
@@ -391,7 +400,7 @@ describe("approved single-client GET-only amo inspector", () => {
     await expect(expanded({ brokerContact: brokerWithLeads([101]), request: jest.fn(async () => { throw Error("private-token"); }) })).rejects.toThrow();
   });
   it.each([
-    { createdAt: new Date(scanNow.getTime() - 86401 * 1000) },
+    { createdAt: new Date(scanNow.getTime() - (7 * 86400 + 1) * 1000) },
     { createdAt: new Date(scanNow.getTime() + 121 * 1000) },
     { fullName: null }, { fullName: "" }, { fullName: "private\nname" }, { fullName: "x".repeat(1001) },
   ])("refuses stale/future/name-invalid case scopes before AMO calls", async (changes) => {

@@ -15,7 +15,10 @@ const KC_PIPELINE_ID = 7600542;
 const WINDOW_PAGE_LIMIT = 250;
 const WINDOW_MAX_PAGES = 10;
 const BROKER_MAX_LINKED_LEADS = 250;
-const WINDOW_MAX_AGE_SECONDS = 24 * 60 * 60;
+// Manual review may happen after a weekend. Keep the scope fixed to this
+// approved case and KC pipeline, with the existing hard page/row limits and
+// fail-closed pagination. Never treat a truncated scan as absence evidence.
+const WINDOW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 const WINDOW_SKEW_SECONDS = 120;
 const BROKER_SELECT = {
   id: true, phone: true, amoContactId: true, role: true, status: true, mergedIntoId: true,
