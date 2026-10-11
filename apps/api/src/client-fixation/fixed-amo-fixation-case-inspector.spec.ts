@@ -167,10 +167,26 @@ describe("approved single-client GET-only amo inspector", () => {
     let calls = 0;
     (db.tx.auditLog.findMany as any).mockImplementation(async () => ++calls === 1 ? [entry] : []);
     const report = await run({ prisma: db, environment: env, fetchImpl: crm() });
-    expect(db.tx.auditLog.findMany).toHaveBeenCalledTimes(2);
+    expect(db.tx.auditLog.findMany).toHaveBeenCalledTimes(4);
     expect(db.tx.auditLog.findMany).toHaveBeenCalledWith(inspector.auditQuery());
     expect(report.caseAudit).toMatchObject({ stableReadback: false, recordsRead: 1, absenceProof: false });
     expect(JSON.stringify(report)).not.toContain('private-token');
+  });
+  it("pairs the narrow durable recovery read inside the same readonly snapshots and flags drift", async () => {
+    const db = database();
+    const entry = { id: 'durable1', entity: 'AmoFixedCaseRecovery', entityId: inspector.CLIENT_ID,
+      createdAt: new Date('2026-10-11T20:00:00Z'), action: 'AMO_FIXED_CASE_CLAIMED',
+      payload: { phase: 'CLAIMED', runId: '38150838032', secret: 'never-public' } };
+    let durableReads = 0;
+    (db.tx.auditLog.findMany as any).mockImplementation(async (query: any) =>
+      query.where.entity === 'AmoFixedCaseRecovery' && ++durableReads === 1 ? [entry] : []);
+    const report = await run({ prisma: db, environment: env, fetchImpl: crm() });
+    expect(durableReads).toBe(2);
+    expect(db.tx.auditLog.findMany).toHaveBeenCalledWith(inspector.recoveryAuditQuery());
+    expect(report.recoveryAudit).toMatchObject({ stableReadback: false, absenceProof: false,
+      recordsRead: 1, events: [{ phase: 'CLAIMED', applyRunMatches: true }] });
+    expect(JSON.stringify(report)).not.toContain('never-public');
+    expect(db.tx.auditLog).not.toHaveProperty('create');
   });
   it("uses env only when the DB access-token setting is empty", async () => {
     const fetchImpl = jest.fn(async () => json({ id: 1 }));
