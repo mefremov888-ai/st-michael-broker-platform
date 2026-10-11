@@ -340,6 +340,65 @@ function reviewContactEvidence(raw, row, leadName, id) {
     clientRoleConfirmed: false,
   };
 }
+function reviewSourceEvidence(rawLead, events, row) {
+  const fields = rawLead.custom_fields_values || [];
+  if (!Array.isArray(fields) || fields.length > 1000) refused("REVIEW_SOURCE_INVALID");
+  const scalarValues = (value, depth = 0) => {
+    if (depth > 8) refused("REVIEW_SOURCE_INVALID");
+    if (Array.isArray(value)) return value.flatMap((entry) => scalarValues(entry, depth + 1));
+    if (!record(value)) return [];
+    const result = [];
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "value" && (typeof child === "string" || typeof child === "number")) {
+        if (typeof child === "number" && !Number.isSafeInteger(child)) continue;
+        const text = String(child);
+        if (Buffer.byteLength(text, "utf8") > 64000) refused("REVIEW_SOURCE_INVALID");
+        result.push(text);
+      } else if (record(child) || Array.isArray(child)) result.push(...scalarValues(child, depth + 1));
+    }
+    return result;
+  };
+  const current = (id) => scalarValues(fields.filter((field) => field?.field_id === id));
+  const historical = (id) => events.filter((event) => event.type === `custom_field_${id}_value_changed`).flatMap((event) => scalarValues([event.value_before, event.value_after]));
+  const phoneEvidence = (values) => {
+    const phones = values.map((value) => helpers.normalizePhone(value)).filter(Boolean);
+    const clientPhone = helpers.normalizePhone(row.phone), brokerPhone = helpers.normalizePhone(effectiveBroker(row).broker.phone);
+    return { validPhoneCount: phones.length, exactClientPhoneMatches: !!clientPhone && phones.includes(clientPhone), exactEffectiveBrokerPhoneMatches: !!brokerPhone && phones.includes(brokerPhone), allObservedPhonesDifferentFromClient: phones.length > 0 && !phones.includes(clientPhone) };
+  };
+  const parseTime = (value) => {
+    // Ambiguous local date strings must never be silently assigned UTC.
+    if (/^\d{10}$/.test(value) && unixTime(Number(value))) return new Date(Number(value) * 1000).toISOString();
+    if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return null;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && unixTime(Math.floor(parsed / 1000)) ? new Date(parsed).toISOString() : null;
+  };
+  const sourceValues = [...current(618511), ...historical(618511)];
+  const callIds = [...current(618577), ...historical(618577)];
+  const requestTimes = [...current(618527), ...historical(618527)];
+  const linkedEntities = [];
+  for (const event of events.filter((item) => ["contact_linked", "contact_unlinked", "entity_linked", "entity_unlinked"].includes(item.type))) {
+    for (const change of [...event.value_before, ...event.value_after]) {
+      const entity = change?.link?.entity || change?.unlink?.entity;
+      if (!entity) continue;
+      if (!positiveId(entity.id)) refused("REVIEW_SOURCE_INVALID");
+      linkedEntities.push({ eventType: event.type, at: new Date(event.created_at * 1000).toISOString(), entityId: entity.id, entityType: ["contact", "contacts", "company", "companies", "lead", "leads", "customer", "customers"].includes(entity.type) ? entity.type : "unknown" });
+    }
+  }
+  const lastAttempt = row.amoSyncLastAttemptAt === null ? null : new Date(iso(row.amoSyncLastAttemptAt)).getTime();
+  const leadCreated = rawLead.created_at * 1000;
+  return {
+    currentClientNumber: phoneEvidence(current(618517)), historicalClientNumber: phoneEvidence(historical(618517)),
+    createdFromCalltouchObserved: sourceValues.some((value) => /(?:^|[^a-z])calltouch(?:$|[^a-z])/i.test(value)),
+    createdFromCoverage: sourceValues.length > 0 ? "observed_unclassified_or_calltouch" : "missing",
+    calltouchCallIdNonempty: callIds.some((value) => value.trim().length > 0),
+    parsedRequestTimes: [...new Set(requestTimes.map(parseTime).filter(Boolean))], unparsedRequestTimeCount: requestTimes.filter((value) => parseTime(value) === null).length,
+    linkedEntities,
+    caseLastAttemptAt: lastAttempt === null ? null : new Date(lastAttempt).toISOString(),
+    leadCreatedAt: new Date(leadCreated).toISOString(),
+    leadCreatedSecondsAfterCaseLastAttempt: lastAttempt === null ? null : Math.floor((leadCreated - lastAttempt) / 1000),
+    laterAutoRetryProven: false, identityConfirmed: false, absenceProof: false,
+  };
+}
 async function collectReviewLeadHistory(row, expanded, request, requestHistory) {
   if (!expanded.possibleCandidates.some((candidate) => candidate.leadId === REVIEW_LEAD_ID)) return { performed: false, reason: "fixed_review_lead_not_in_candidate_scope" };
   const rawLead = await request(`/api/v4/leads/${REVIEW_LEAD_ID}`, { with: "contacts" });
@@ -353,7 +412,7 @@ async function collectReviewLeadHistory(row, expanded, request, requestHistory) 
     if (!["contact_linked", "contact_unlinked", "entity_linked", "entity_unlinked"].includes(event.type)) continue;
     for (const change of [...event.value_before, ...event.value_after]) {
       const entity = change?.link?.entity || change?.unlink?.entity;
-      if (entity?.type === "contact") { if (!positiveId(entity.id)) refused("REVIEW_EVENTS_INVALID"); if (entity.id !== brokerId) ids.add(entity.id); }
+      if (["contact", "contacts"].includes(entity?.type)) { if (!positiveId(entity.id)) refused("REVIEW_EVENTS_INVALID"); if (entity.id !== brokerId) ids.add(entity.id); }
     }
   }
   if (ids.size > REVIEW_MAX_HISTORICAL_CONTACTS) refused("REVIEW_CONTACT_SCOPE_EXCEEDED");
@@ -395,6 +454,7 @@ async function collectReviewLeadHistory(row, expanded, request, requestHistory) 
     requestUuidMentionedInEvents: texts.some((text) => text.includes(CLIENT_ID)),
     exactClientPhoneMentionedInEvents: texts.some((text) => textPhoneMatches(text, helpers.normalizePhone(row.phone))),
     eventSummary: first.events.map((event) => ({ type: event.type, at: new Date(event.created_at * 1000).toISOString() })),
+    sourceComparison: reviewSourceEvidence(rawLead, first.events, row),
     advisoryOnly: true, identityConfirmed: false, historicalPhoneChangesInspected: false, absenceProof: false,
   };
 }
@@ -517,7 +577,40 @@ function runtimeMetadata(environment) {
   if (environment.NODE_TLS_REJECT_UNAUTHORIZED === "0") refused("UNSAFE_TLS_CONFIGURATION");
   return metadata;
 }
-async function snapshot(prisma, environment, includeToken) {
+const AUDIT_FROM = "2026-10-08T14:16:00.000Z";
+const AUDIT_TO = "2026-10-09T08:00:00.000Z";
+function auditQuery() {
+  return { where: { entity: "Client", entityId: CLIENT_ID, createdAt: { gte: new Date(AUDIT_FROM), lte: new Date(AUDIT_TO) } }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 101, select: { id: true, entity: true, entityId: true, action: true, createdAt: true, payload: true } };
+}
+function validateAuditRows(rows) {
+  if (!Array.isArray(rows) || rows.length > 100) refused("CASE_AUDIT_SCOPE_EXCEEDED");
+  const ids = new Set();
+  for (const row of rows) {
+    if (!record(row) || typeof row.id !== "string" || !/^[a-zA-Z0-9-]{1,80}$/.test(row.id) || ids.has(row.id) || row.entity !== "Client" || row.entityId !== CLIENT_ID || typeof row.action !== "string" || Buffer.byteLength(row.action) > 200 || iso(row.createdAt) < AUDIT_FROM || iso(row.createdAt) > AUDIT_TO || Buffer.byteLength(JSON.stringify(row.payload ?? null), "utf8") > 64000) refused("CASE_AUDIT_INVALID");
+    ids.add(row.id);
+  }
+  return rows;
+}
+function auditReport(rows, row, stableReadback) {
+  validateAuditRows(rows);
+  return { from: AUDIT_FROM, to: AUDIT_TO, recordsRead: rows.length, boundedWindowComplete: true, stableReadback, absenceProof: false,
+    events: rows.map((entry) => {
+      const payload = record(entry.payload) ? entry.payload : {};
+      const error = typeof payload.error === "string" ? payload.error : "";
+      const code = error.match(/(?:HTTP(?:\s+(?:status|error))?|status(?:Code)?|code)[\s:=]+([45]\d{2})(?!\d)/i);
+      return { at: iso(entry.createdAt), action: ["AMO_SYNC_FAILED", "CLIENT_FIXATION", "CLIENT_FIXATION_CONFLICT", "CLIENT_FIXATION_DUPLICATE_LEAD"].includes(entry.action) ? entry.action : "other",
+        step: ["createFixationRequest", "refixation", "retryAmoSync", "retry", "sync"].includes(payload.step) ? payload.step : "unknown_or_missing",
+        scenario: ["NEW_CLIENT", "REFIX_AFTER_CLOSED", "REFIX_AMO_DOWN"].includes(payload.scenario) ? payload.scenario : "unknown_or_missing",
+        clientPhoneMatches: !!helpers.normalizePhone(payload.phone) && helpers.normalizePhone(payload.phone) === helpers.normalizePhone(row.phone),
+        errorPresent: !!error, errorClass: error ? helpers.classifySyncError(error) : "none",
+        httpStatus: code ? Number(code[1]) : null,
+        requestUuidMentioned: error.includes(CLIENT_ID), reviewLeadIdMentioned: /(?:^|\D)32372907(?:$|\D)/.test(error),
+        timeoutMentioned: /timeout|timed out|ETIMEDOUT|AbortError/i.test(error), connectionResetMentioned: /ECONNRESET|socket hang up/i.test(error),
+      };
+    }),
+  };
+}
+async function snapshot(prisma, environment, includeToken, includeAudit = false) {
   return prisma.$transaction(async (tx) => {
     await helpers.assertReadOnlySession(tx);
     const identities = await tx.$queryRaw`SELECT current_setting('transaction_read_only') AS read_only, current_database() AS database_name, system_identifier::text AS system_identifier, (SELECT count(*)::text FROM public.brokers) AS broker_rows FROM pg_control_system()`;
@@ -526,7 +619,8 @@ async function snapshot(prisma, environment, includeToken) {
     const row = await tx.client.findUnique({ where: { id: CLIENT_ID }, select: CLIENT_SELECT });
     const effective = validateCase(row, true);
     const tokenRow = includeToken && canInspectEffectiveBroker(row, effective) ? await tx.systemSetting.findUnique({ where: { key: "AMO_ACCESS_TOKEN" }, select: { value: true } }) : null;
-    return { row, token: tokenRow?.value };
+    const audit = includeAudit && canInspectEffectiveBroker(row, effective) ? validateAuditRows(await tx.auditLog.findMany(auditQuery())) : [];
+    return { row, token: tokenRow?.value, audit };
   }, { isolationLevel: "RepeatableRead", timeout: 20000, maxWait: 5000 });
 }
 function buildReport(row, evidence, brokerContact, storedLead, metadata, expanded = null) {
@@ -654,7 +748,7 @@ function safeTimestamp(values, reference) {
 }
 async function run({ prisma, environment = process.env, fetchImpl, now = () => new Date() } = {}) {
   const metadata = runtimeMetadata(environment);
-  const initial = await snapshot(prisma, environment, true);
+  const initial = await snapshot(prisma, environment, true, true);
   if (!canInspectEffectiveBroker(initial.row)) return buildOwnershipReport(initial.row, metadata);
   const token = typeof initial.token === "string" && initial.token.trim() ? initial.token : environment.AMO_ACCESS_TOKEN;
   const scanNow = now();
@@ -674,13 +768,14 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   const storedId = helpers.optionalStoredAmoLeadId(initial.row.amoLeadId);
   const storedRaw = storedId ? await request(`/api/v4/leads/${storedId}`, { with: "contacts" }) : null;
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
-  const final = await snapshot(prisma, environment, false);
+  const final = await snapshot(prisma, environment, false, true);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
-  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory };
+  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)) };
 }
 function failureCode(error) {
   const allowed = ["INVALID_CASE_TIMESTAMP", "INVALID_CASE_STATE", "RESPONSIBLE_BROKER_UNRESOLVED", "OWNER_BROKER_UNRESOLVED", "FIXED_CLIENT_MISSING", "EXPECTED_BROKER_MISMATCH", "EXPECTED_BROKER_NOT_CANONICAL", "INVALID_CLIENT_PHONE", "PROJECT_MAPPING_UNSUPPORTED", "INVALID_SYNC_ATTEMPTS", "INVALID_BROKER_CONTACT_ID", "AGENCY_SCOPE_TOO_LARGE", "SOURCE_ATTESTATION_INVALID", "DATABASE_ATTESTATION_INVALID", "UNSAFE_TLS_CONFIGURATION", "DATABASE_IDENTITY_MISMATCH", "BROKER_CONTACT_ID_MISMATCH", "CASE_CHANGED_DURING_SCAN", "INVALID_CASE_NAME", "CASE_SCAN_WINDOW_UNSAFE", "WINDOW_REQUEST_CONFIGURATION_INVALID", "WINDOW_PAGE_BOUND_EXCEEDED", "WINDOW_REQUEST_REJECTED", "WINDOW_REQUEST_FAILED", "EXPANDED_LEAD_INVALID", "WINDOW_LEAD_OUT_OF_SCOPE", "WINDOW_PAGE_INVALID", "WINDOW_LEAD_DUPLICATED", "WINDOW_PAGINATION_INCOMPLETE", "BROKER_LINK_SCAN_UNAVAILABLE", "BROKER_LINK_SCAN_INVALID", "EXPANDED_CONTACT_EVIDENCE_INVALID", "EXPANDED_LEAD_CHANGED_DURING_SCAN", "EXPANDED_EVIDENCE_INCOMPLETE", "EXPANDED_POSSIBLE_LEAD_PRESENT"];
   allowed.push("REVIEW_REQUEST_CONFIGURATION_INVALID", "REVIEW_NOTES_REQUEST_REJECTED", "REVIEW_NOTES_REQUEST_FAILED", "REVIEW_CONTACT_INVALID", "REVIEW_NOTES_INVALID", "REVIEW_HISTORY_SCOPE_INVALID", "REVIEW_EVENTS_INVALID", "REVIEW_CONTACT_SCOPE_EXCEEDED");
+  allowed.push("REVIEW_SOURCE_INVALID", "CASE_AUDIT_INVALID", "CASE_AUDIT_SCOPE_EXCEEDED");
   try { return allowed.includes(error?.safeCode) ? error.safeCode : helpers.classifyFailure(error); } catch { return "UNKNOWN_FAILURE"; }
 }
 async function main() {
@@ -693,5 +788,5 @@ async function main() {
 }
 module.exports = { CLIENT_ID, EXPECTED_BROKER_ID, IS_BROKER_FIELD_ID, CLIENT_SELECT, KC_PIPELINE_ID, WINDOW_PAGE_LIMIT, WINDOW_MAX_PAGES, BROKER_MAX_LINKED_LEADS, privateFingerprint, expectedGeneratedName, makeEvidenceWindow, createKcWindowRequester, collectWindowLeads, collectBrokerLeads, collectExpandedEvidence, assertCompleteNegativeEvidence, validateCase, canInspectEffectiveBroker, brokerFlagEvidence, runtimeMetadata, snapshot, buildReport, buildOwnershipReport, run, failureCode, main };
 Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches, createReviewNotesRequester, collectReviewLeadComparison, validatedLead });
-Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence });
+Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence, reviewSourceEvidence, auditQuery, validateAuditRows, auditReport });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });

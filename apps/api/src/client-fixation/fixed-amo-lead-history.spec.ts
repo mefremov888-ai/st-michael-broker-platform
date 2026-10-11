@@ -92,4 +92,46 @@ describe('fixed amo lead bounded GET-only history', () => {
     const request = inspector.createReviewHistoryRequester('private-token', async () => ({ status: 404, ok: false }));
     expect(await request('historicalContact', { id: 800001, allowedIds: [800001] })).toEqual({ coverage: 'deleted_or_unavailable', payload: null });
   });
+  it('compares current and historical Calltouch client number privately, including numeric values', () => {
+    const sourceLead = { ...lead, custom_fields_values: [
+      { field_id: 618517, values: [{ value: '+79990001122' }] },
+      { field_id: 618511, values: [{ value: 'Calltouch' }] },
+      { field_id: 618577, values: [{ value: 'private-call-id' }] },
+      { field_id: 618527, values: [{ value: '2026-10-09T10:52:47+03:00' }] },
+    ] };
+    const result = inspector.reviewSourceEvidence(sourceLead, [event({ type: 'custom_field_618517_value_changed', value_before: [], value_after: [{ custom_field_value: { value: 79991234567 } }] })], { ...row, broker: { ...row.broker, phone: '+79990001122' }, amoSyncLastAttemptAt: new Date('2026-10-08T14:18:19Z') });
+    expect(result).toMatchObject({ currentClientNumber: { exactClientPhoneMatches: false, exactEffectiveBrokerPhoneMatches: true, allObservedPhonesDifferentFromClient: true }, historicalClientNumber: { exactClientPhoneMatches: true }, createdFromCalltouchObserved: true, calltouchCallIdNonempty: true, parsedRequestTimes: ['2026-10-09T07:52:47.000Z'], laterAutoRetryProven: false, identityConfirmed: false });
+    expect(JSON.stringify(result)).not.toMatch(/7999|private-call-id|Секретное/);
+  });
+  it('does not assume timezone for local request time or infer source from arbitrary text', () => {
+    const result = inspector.reviewSourceEvidence({ ...lead, custom_fields_values: [{ field_id: 618511, values: [{ value: 'somecalltouchvalue' }] }, { field_id: 618527, values: [{ value: '09.10.2026 10:52:47' }] }] }, [], row);
+    expect(result).toMatchObject({ createdFromCalltouchObserved: false, parsedRequestTimes: [], unparsedRequestTimeCount: 1, caseLastAttemptAt: null, leadCreatedSecondsAfterCaseLastAttempt: null });
+  });
+  it('reports exact linked entity IDs but redacts unknown entity types, and reads plural contact links', async () => {
+    const events = [event({ type: 'entity_linked', value_before: [], value_after: [{ link: { entity: { type: 'contacts', id: 800001 } } }] }), event({ id: 'unknown1', type: 'entity_linked', value_before: [], value_after: [{ link: { entity: { type: 'private-name', id: 800002 } } }] })];
+    const result = await inspector.collectReviewLeadHistory(row, expanded, get, history(events));
+    expect(result.historicalContactsRead).toBe(1);
+    expect(result.sourceComparison.linkedEntities).toEqual(expect.arrayContaining([expect.objectContaining({ entityType: 'contacts', entityId: 800001 }), expect.objectContaining({ entityType: 'unknown', entityId: 800002 })]));
+    expect(JSON.stringify(result)).not.toContain('private-name');
+  });
+  it('keeps source inspection bounded and refuses oversized private values', () => {
+    expect(() => inspector.reviewSourceEvidence({ ...lead, custom_fields_values: [{ field_id: 618511, values: [{ value: 'x'.repeat(64001) }] }] }, [], row)).toThrow();
+    expect(() => inspector.reviewSourceEvidence(lead, [event({ value_before: [{ link: { entity: { type: 'contact', id: 0 } } }] })], row)).toThrow();
+  });
+  const audit = (changes: any = {}) => ({ id: 'audit1', entity: 'Client', entityId: inspector.CLIENT_ID, createdAt: new Date('2026-10-08T14:18:19Z'), action: 'AMO_SYNC_FAILED', payload: { step: 'createFixationRequest', error: 'HTTP status: 503 token=private-secret Секретное Имя' }, ...changes });
+  it('scopes the audit query to the exact case and time window with overflow detection', () => {
+    expect(inspector.auditQuery()).toMatchObject({ where: { entity: 'Client', entityId: inspector.CLIENT_ID, createdAt: { gte: new Date('2026-10-08T14:16:00Z'), lte: new Date('2026-10-09T08:00:00Z') } }, take: 101 });
+    expect(() => inspector.validateAuditRows(Array.from({ length: 101 }, (_, i) => audit({ id: `audit${i}` })))).toThrow();
+  });
+  it('classifies exact case audit errors without printing raw strings or arbitrary action/step', () => {
+    const report = inspector.auditReport([audit(), audit({ id: 'audit2', action: 'private-action', payload: { step: 'private-step', scenario: 'private-scenario', error: 'ETIMEDOUT private-secret' } }), audit({ id: 'audit3', action: 'CLIENT_FIXATION', payload: { phone: row.phone, scenario: 'NEW_CLIENT' } })], row, true);
+    expect(report.events[0]).toMatchObject({ errorClass: 'temporary_unavailable', httpStatus: 503, step: 'createFixationRequest' });
+    expect(report.events[1]).toMatchObject({ action: 'other', step: 'unknown_or_missing', timeoutMentioned: true });
+    expect(report.events[2]).toMatchObject({ clientPhoneMatches: true, scenario: 'NEW_CLIENT' });
+    expect(JSON.stringify(report)).not.toMatch(/private-|Секретное|7999/);
+    expect(inspector.auditReport([audit()], row, false).stableReadback).toBe(false);
+  });
+  it.each([{ entityId: 'other' }, { entity: 'Broker' }, { createdAt: new Date('2026-10-10T00:00:00Z') }, { payload: { error: 'x'.repeat(64001) } }])('rejects invalid or oversized audit rows %j', (changes) => {
+    expect(() => inspector.validateAuditRows([audit(changes)])).toThrow();
+  });
 });
