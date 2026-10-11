@@ -1084,53 +1084,33 @@ function agencyPeriodCandidateRange(period: LoyaltyFilterPeriod): {
   };
 }
 
-export function agencyPeriodNarrowingWhere(args: {
+export function agencyPeriodCandidateCriteria(args: {
   fixationPeriod?: LoyaltyFilterPeriod | null;
   meetingPeriod?: LoyaltyFilterPeriod | null;
   cabinetSource?: CabinetSource | null;
   activityColumn?: string | null;
   scenario?: string | null;
   meetingsMax?: number;
-}): any[] {
-  const clauses: any[] = [];
+}): { fixationWhere?: any; meetingWhere?: any } {
+  const criteria: { fixationWhere?: any; meetingWhere?: any } = {};
   if (args.fixationPeriod && args.activityColumn !== "NO_FIXATIONS") {
-    clauses.push({
-      brokerAgencies: {
-        some: {
-          broker: {
-            clients: {
-              some: {
-                ...fixationClientWhere(args.cabinetSource),
-                createdAt: agencyPeriodCandidateRange(args.fixationPeriod),
-              },
-            },
-          },
-        },
-      },
-    });
+    criteria.fixationWhere = {
+      ...fixationClientWhere(args.cabinetSource),
+      createdAt: agencyPeriodCandidateRange(args.fixationPeriod),
+    };
   }
   const noMeetings =
     args.activityColumn === "NO_MEETINGS" ||
     args.scenario === "NO_MEETINGS" ||
     args.meetingsMax === 0;
   if (args.meetingPeriod && !noMeetings) {
-    clauses.push({
-      brokerAgencies: {
-        some: {
-          broker: {
-            meetings: {
-              some: {
-                status: { in: ["CONFIRMED", "COMPLETED"] },
-                type: { not: "BROKER_TOUR" },
-                date: agencyPeriodCandidateRange(args.meetingPeriod),
-              },
-            },
-          },
-        },
-      },
-    });
+    criteria.meetingWhere = {
+      status: { in: ["CONFIRMED", "COMPLETED"] },
+      type: { not: "BROKER_TOUR" },
+      date: agencyPeriodCandidateRange(args.meetingPeriod),
+    };
   }
-  return clauses;
+  return criteria;
 }
 
 export function activeFixationClientWhereFor(
@@ -9391,19 +9371,25 @@ export class LoyaltyBaseService {
         ],
       });
     }
-    // Period predicates only narrow the root agency candidates. The include
-    // below intentionally remains lifetime-wide because status, other filters,
-    // and the returned metrics depend on the complete relation graph.
-    and.push(
-      ...agencyPeriodNarrowingWhere({
-        fixationPeriod: filter.fixationPeriod,
-        meetingPeriod: filter.meetingPeriod,
-        cabinetSource: filter.cabinetSource,
-        activityColumn: filter.columns.activity,
-        scenario: filter.scenario,
-        meetingsMax: filter.meetings.max,
-      }),
-    );
+    // Resolve the period-positive agency set from the activity side first.
+    // This avoids making the root Agency query express a correlated
+    // Agency -> BrokerAgency.some predicate whose only production compound
+    // index starts with broker_id. The bounded smoke cannot identify the
+    // individual Prisma statement, so this remains a proportional plan-shape
+    // improvement rather than a claim about the single proven slow statement.
+    // The lifetime include below stays unchanged because status, other filters
+    // and returned metrics still need the complete relation graph.
+    const periodCandidateIds = await this.agencyPeriodCandidateIds({
+      fixationPeriod: filter.fixationPeriod,
+      meetingPeriod: filter.meetingPeriod,
+      cabinetSource: filter.cabinetSource,
+      activityColumn: filter.columns.activity,
+      scenario: filter.scenario,
+      meetingsMax: filter.meetings.max,
+    });
+    if (periodCandidateIds !== null) {
+      and.push({ id: { in: periodCandidateIds } });
+    }
     if (and.length) where.AND = and;
     const scanKey = fullScanCacheKey("ours-agencies", {
       where,
@@ -9494,6 +9480,65 @@ export class LoyaltyBaseService {
     );
     if (summary) envelope.activitySummary = summary;
     return envelope;
+  }
+
+  private async agencyIdsForCandidateBrokers(
+    brokerIds: string[],
+  ): Promise<Set<string>> {
+    const result = new Set<string>();
+    for (const batch of chunks(uniqueSorted(brokerIds))) {
+      const relations = await this.prisma.brokerAgency.findMany({
+        where: { brokerId: { in: batch } },
+        select: { agencyId: true },
+      });
+      for (const relation of relations) {
+        if (relation.agencyId) result.add(String(relation.agencyId));
+      }
+    }
+    return result;
+  }
+
+  private async agencyPeriodCandidateIds(args: {
+    fixationPeriod?: LoyaltyFilterPeriod | null;
+    meetingPeriod?: LoyaltyFilterPeriod | null;
+    cabinetSource?: CabinetSource | null;
+    activityColumn?: string | null;
+    scenario?: string | null;
+    meetingsMax?: number;
+  }): Promise<string[] | null> {
+    const criteria = agencyPeriodCandidateCriteria(args);
+    const sets: Set<string>[] = [];
+    if (criteria.fixationWhere) {
+      const rows = await this.prisma.client.groupBy({
+        by: ["brokerId"],
+        where: criteria.fixationWhere,
+      });
+      sets.push(
+        await this.agencyIdsForCandidateBrokers(
+          rows.map((row) => String(row.brokerId)),
+        ),
+      );
+    }
+    // Both positive periods are an agency-level AND. If the first side is
+    // empty, the intersection is empty without issuing a second activity read.
+    if (criteria.meetingWhere && (!sets.length || sets[0].size > 0)) {
+      const rows = await this.prisma.meeting.groupBy({
+        by: ["brokerId"],
+        where: criteria.meetingWhere,
+      });
+      sets.push(
+        await this.agencyIdsForCandidateBrokers(
+          rows.map((row) => String(row.brokerId)),
+        ),
+      );
+    } else if (criteria.meetingWhere) {
+      sets.push(new Set());
+    }
+    if (!sets.length) return null;
+    const [first, ...rest] = sets;
+    return [...first]
+      .filter((agencyId) => rest.every((set) => set.has(agencyId)))
+      .sort();
   }
 
   /**

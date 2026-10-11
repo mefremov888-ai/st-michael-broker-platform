@@ -6419,6 +6419,17 @@ describe("LoyaltyBaseService", () => {
     };
     prisma.agency.findMany.mockResolvedValue([agency]);
     prisma.agency.findUnique.mockResolvedValue(agency);
+    prisma.client.groupBy.mockResolvedValue([
+      { brokerId: "broker-1" },
+      { brokerId: "broker-2" },
+    ]);
+    prisma.meeting.groupBy.mockResolvedValue([
+      { brokerId: "broker-1" },
+      { brokerId: "broker-2" },
+    ]);
+    prisma.brokerAgency.findMany.mockResolvedValue([
+      { agencyId: "agency-1" },
+    ]);
     prisma.loyaltyCallAttempt.findMany.mockResolvedValue([]);
     prisma.loyaltyEngagementEvent.findMany.mockResolvedValue([]);
 

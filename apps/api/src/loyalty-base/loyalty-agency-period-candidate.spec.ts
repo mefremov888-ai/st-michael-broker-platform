@@ -1,5 +1,5 @@
 import {
-  agencyPeriodNarrowingWhere,
+  agencyPeriodCandidateCriteria,
   LoyaltyBaseService,
 } from "./loyalty-base.service";
 
@@ -48,7 +48,7 @@ function loadedAgency(raw: any, filter: any): any {
 }
 
 function survivesCandidatePushdown(raw: any, filter: any): boolean {
-  const clauses = agencyPeriodNarrowingWhere({
+  const criteria = agencyPeriodCandidateCriteria({
     fixationPeriod: filter.fixationPeriod,
     meetingPeriod: filter.meetingPeriod,
     cabinetSource: filter.cabinetSource,
@@ -56,28 +56,28 @@ function survivesCandidatePushdown(raw: any, filter: any): boolean {
     scenario: filter.scenario,
     meetingsMax: filter.meetings.max,
   });
-  return clauses.every((clause: any) => {
-    const broker = clause.brokerAgencies.some.broker;
-    return raw.brokerAgencies.some((relation: any) => {
-      if (broker.clients) {
-        const range = broker.clients.some.createdAt;
-        return relation.broker.clients.some(
+  const fixationMatch = !criteria.fixationWhere
+    ? true
+    : raw.brokerAgencies.some((relation: any) =>
+        relation.broker.clients.some(
           (client: any) =>
             qualifyingFixation(client) &&
             sourceMatches(client, filter.cabinetSource) &&
-            client.createdAt >= range.gte &&
-            client.createdAt < range.lt,
-        );
-      }
-      const range = broker.meetings.some.date;
-      return relation.broker.meetings.some(
-        (meeting: any) =>
-          qualifyingMeeting(meeting) &&
-          meeting.date >= range.gte &&
-          meeting.date < range.lt,
+            client.createdAt >= criteria.fixationWhere.createdAt.gte &&
+            client.createdAt < criteria.fixationWhere.createdAt.lt,
+        ),
       );
-    });
-  });
+  const meetingMatch = !criteria.meetingWhere
+    ? true
+    : raw.brokerAgencies.some((relation: any) =>
+        relation.broker.meetings.some(
+          (meeting: any) =>
+            qualifyingMeeting(meeting) &&
+            meeting.date >= criteria.meetingWhere.date.gte &&
+            meeting.date < criteria.meetingWhere.date.lt,
+        ),
+      );
+  return fixationMatch && meetingMatch;
 }
 
 function agencyFixture(
@@ -143,19 +143,18 @@ function meeting(
 describe("OUR agency period candidate pushdown", () => {
   const service = new LoyaltyBaseService({} as any) as any;
 
-  it("builds two independent positive EXISTS with fail-open date bounds", () => {
+  it("builds two independent positive criteria with fail-open date bounds", () => {
     const filter = service.normalizeListFilter(
       {},
       { fixationPeriod: PERIOD, meetingPeriod: PERIOD },
     );
-    const clauses = agencyPeriodNarrowingWhere({
+    const criteria = agencyPeriodCandidateCriteria({
       fixationPeriod: filter.fixationPeriod,
       meetingPeriod: filter.meetingPeriod,
     });
 
-    expect(clauses).toHaveLength(2);
-    const clients = clauses[0].brokerAgencies.some.broker.clients.some;
-    const meetings = clauses[1].brokerAgencies.some.broker.meetings.some;
+    const clients = criteria.fixationWhere;
+    const meetings = criteria.meetingWhere;
     expect(clients.OR).toEqual([
       { fixationStatus: { in: ["FIXED", "EXPIRED"] } },
       {
@@ -171,8 +170,8 @@ describe("OUR agency period candidate pushdown", () => {
     );
     expect(clients.createdAt.lt.toISOString()).toBe("2026-10-01T00:00:00.000Z");
     expect(meetings.date).toEqual(clients.createdAt);
-    expect(clauses[0].brokerAgencies.some.broker.meetings).toBeUndefined();
-    expect(clauses[1].brokerAgencies.some.broker.clients).toBeUndefined();
+    expect(clients).not.toHaveProperty("meetings");
+    expect(meetings).not.toHaveProperty("clients");
   });
 
   it("preserves cabinet source and never invents a direct fixationAgencyId path", () => {
@@ -180,16 +179,16 @@ describe("OUR agency period candidate pushdown", () => {
       {},
       { fixationPeriod: PERIOD, cabinetSource: "old" },
     );
-    const clauses = agencyPeriodNarrowingWhere({
+    const criteria = agencyPeriodCandidateCriteria({
       fixationPeriod: filter.fixationPeriod,
       cabinetSource: filter.cabinetSource,
     });
 
-    expect(clauses[0].brokerAgencies.some.broker.clients.some.AND).toEqual([
+    expect(criteria.fixationWhere.AND).toEqual([
       expect.objectContaining({ OR: expect.any(Array) }),
       { comment: { startsWith: HISTORICAL } },
     ]);
-    expect(JSON.stringify(clauses)).not.toContain("fixationAgencyId");
+    expect(JSON.stringify(criteria)).not.toContain("fixationAgencyId");
   });
 
   it("does not add positive EXISTS for inverse filters", () => {
@@ -198,31 +197,60 @@ describe("OUR agency period candidate pushdown", () => {
       { fixationPeriod: PERIOD, meetingPeriod: PERIOD },
     );
     expect(
-      agencyPeriodNarrowingWhere({
+      agencyPeriodCandidateCriteria({
         fixationPeriod: normalized.fixationPeriod,
         activityColumn: "NO_FIXATIONS",
-      }),
-    ).toEqual([]);
+      }).fixationWhere,
+    ).toBeUndefined();
     for (const guard of [
       { activityColumn: "NO_MEETINGS" },
       { scenario: "NO_MEETINGS" },
       { meetingsMax: 0 },
     ]) {
       expect(
-        agencyPeriodNarrowingWhere({
+        agencyPeriodCandidateCriteria({
           meetingPeriod: normalized.meetingPeriod,
           ...guard,
-        }),
-      ).toEqual([]);
+        }).meetingWhere,
+      ).toBeUndefined();
     }
   });
 
   it("adds no candidate predicate when no explicit period was selected", () => {
-    expect(agencyPeriodNarrowingWhere({})).toEqual([]);
+    expect(agencyPeriodCandidateCriteria({})).toEqual({});
   });
 
   it("wires candidate predicates into root where without narrowing include", async () => {
-    const prisma = { agency: { findMany: jest.fn().mockResolvedValue([]) } };
+    const prisma = {
+      client: {
+        groupBy: jest.fn().mockResolvedValue([
+          { brokerId: "fix-broker" },
+          { brokerId: "fix-only-broker" },
+        ]),
+      },
+      meeting: {
+        groupBy: jest.fn().mockResolvedValue([{ brokerId: "meeting-broker" }]),
+      },
+      brokerAgency: {
+        findMany: jest.fn(({ where }: any) => {
+          const brokerIds = where.brokerId.in;
+          return Promise.resolve(
+            [
+              brokerIds.includes("fix-broker")
+                ? { agencyId: "agency-shared" }
+                : null,
+              brokerIds.includes("fix-only-broker")
+                ? { agencyId: "agency-fix-only" }
+                : null,
+              brokerIds.includes("meeting-broker")
+                ? { agencyId: "agency-shared" }
+                : null,
+            ].filter(Boolean),
+          );
+        }),
+      },
+      agency: { findMany: jest.fn().mockResolvedValue([]) },
+    };
     const local = new LoyaltyBaseService(prisma as any) as any;
     local.attachOurAgencyRegistryDeals = jest.fn();
     local.workflowCallReadModels = jest.fn().mockResolvedValue([]);
@@ -243,7 +271,23 @@ describe("OUR agency period candidate pushdown", () => {
     await local.listOurAgencies({ page: 1, pageSize: 1 }, filter);
 
     const query = prisma.agency.findMany.mock.calls[0][0];
-    expect(query.where.AND).toHaveLength(2);
+    expect(prisma.client.groupBy).toHaveBeenCalledWith({
+      by: ["brokerId"],
+      where: expect.objectContaining({
+        OR: expect.any(Array),
+        createdAt: expect.any(Object),
+      }),
+    });
+    expect(prisma.meeting.groupBy).toHaveBeenCalledWith({
+      by: ["brokerId"],
+      where: expect.objectContaining({
+        status: { in: ["CONFIRMED", "COMPLETED"] },
+        date: expect.any(Object),
+      }),
+    });
+    expect(prisma.brokerAgency.findMany).toHaveBeenCalledTimes(2);
+    expect(query.where.AND).toEqual([{ id: { in: ["agency-shared"] } }]);
+    expect(JSON.stringify(query.where)).not.toContain("brokerAgencies");
     expect(
       query.include.brokerAgencies.include.broker.select.clients.where,
     ).toEqual(expect.objectContaining({ OR: expect.any(Array) }));
@@ -253,6 +297,71 @@ describe("OUR agency period candidate pushdown", () => {
     expect(
       query.include.brokerAgencies.include.broker.select.meetings.where,
     ).not.toHaveProperty("date");
+  });
+
+  it("maps every candidate broker in complete bounded batches", async () => {
+    const prisma = {
+      brokerAgency: {
+        findMany: jest.fn(({ where }: any) =>
+          Promise.resolve(
+            where.brokerId.in.map((brokerId: string) => ({
+              agencyId: `agency-${brokerId}`,
+            })),
+          ),
+        ),
+      },
+    };
+    const local = new LoyaltyBaseService(prisma as any) as any;
+    const brokerIds = Array.from({ length: 501 }, (_, index) =>
+      String(index).padStart(4, "0"),
+    );
+
+    const agencies = await local.agencyIdsForCandidateBrokers(brokerIds);
+
+    expect(agencies.size).toBe(501);
+    expect(prisma.brokerAgency.findMany).toHaveBeenCalledTimes(2);
+    expect(
+      prisma.brokerAgency.findMany.mock.calls[0][0].where.brokerId.in,
+    ).toHaveLength(500);
+    expect(
+      prisma.brokerAgency.findMany.mock.calls[1][0].where.brokerId.in,
+    ).toHaveLength(1);
+  });
+
+  it("does no activity preselection without a positive period", async () => {
+    const prisma = {
+      client: { groupBy: jest.fn() },
+      meeting: { groupBy: jest.fn() },
+      brokerAgency: { findMany: jest.fn() },
+    };
+    const local = new LoyaltyBaseService(prisma as any) as any;
+
+    await expect(local.agencyPeriodCandidateIds({})).resolves.toBeNull();
+    expect(prisma.client.groupBy).not.toHaveBeenCalled();
+    expect(prisma.meeting.groupBy).not.toHaveBeenCalled();
+    expect(prisma.brokerAgency.findMany).not.toHaveBeenCalled();
+  });
+
+  it("short-circuits an agency-level AND after an empty fixation side", async () => {
+    const prisma = {
+      client: { groupBy: jest.fn().mockResolvedValue([]) },
+      meeting: { groupBy: jest.fn() },
+      brokerAgency: { findMany: jest.fn() },
+    };
+    const local = new LoyaltyBaseService(prisma as any) as any;
+    const filter = local.normalizeListFilter(
+      {},
+      { fixationPeriod: PERIOD, meetingPeriod: PERIOD },
+    );
+
+    await expect(
+      local.agencyPeriodCandidateIds({
+        fixationPeriod: filter.fixationPeriod,
+        meetingPeriod: filter.meetingPeriod,
+      }),
+    ).resolves.toEqual([]);
+    expect(prisma.meeting.groupBy).not.toHaveBeenCalled();
+    expect(prisma.brokerAgency.findMany).not.toHaveBeenCalled();
   });
 
   it.each([
