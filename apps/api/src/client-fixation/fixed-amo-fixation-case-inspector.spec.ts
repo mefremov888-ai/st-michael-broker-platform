@@ -49,6 +49,7 @@ describe("approved single-client GET-only amo inspector", () => {
     const tx = {
       $queryRaw: jest.fn(async (strings: TemplateStringsArray) => strings.join("").includes("pg_control_system") ? [{ read_only: "on", database_name: "broker_platform", system_identifier: "1234567", broker_rows: "1000", ...identityChanges }] : [{ mode: "on" }]),
       client: { findUnique: jest.fn(async () => rows[Math.min(index++, rows.length - 1)]) },
+      auditLog: { findMany: jest.fn(async () => []) },
       systemSetting: { findUnique: jest.fn(async () => token === null ? null : { value: token }) },
     };
     return { tx, $transaction: jest.fn(async (callback: any) => callback(tx)) };
@@ -159,6 +160,17 @@ describe("approved single-client GET-only amo inspector", () => {
       expect(new URL(url).origin).toBe("https://stmichael.amocrm.ru");
       expect(options).toMatchObject({ method: "GET", redirect: "error", headers: { Authorization: "Bearer private-db-token" } });
     }
+  });
+  it("reads bounded audit snapshots in both readonly transactions and flags changed audit evidence", async () => {
+    const db = database();
+    const entry = { id: 'audit1', entity: 'Client', entityId: inspector.CLIENT_ID, createdAt: new Date('2026-10-08T14:18:19Z'), action: 'AMO_SYNC_FAILED', payload: { error: 'HTTP status 503 private-token' } };
+    let calls = 0;
+    (db.tx.auditLog.findMany as any).mockImplementation(async () => ++calls === 1 ? [entry] : []);
+    const report = await run({ prisma: db, environment: env, fetchImpl: crm() });
+    expect(db.tx.auditLog.findMany).toHaveBeenCalledTimes(2);
+    expect(db.tx.auditLog.findMany).toHaveBeenCalledWith(inspector.auditQuery());
+    expect(report.caseAudit).toMatchObject({ stableReadback: false, recordsRead: 1, absenceProof: false });
+    expect(JSON.stringify(report)).not.toContain('private-token');
   });
   it("uses env only when the DB access-token setting is empty", async () => {
     const fetchImpl = jest.fn(async () => json({ id: 1 }));
