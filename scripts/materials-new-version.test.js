@@ -1,8 +1,42 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { material, coverTargets, buildLayout, replaceable, sourceRoot, fetchHeaders } = require('./materials-new-version');
+const { material, coverTargets, buildLayout, replaceable, sourceRoot, fetchHeaders, stagedReady, publicationPlan } = require('./materials-new-version');
 const make = (name, folder = 'Зорге 9/Фото/Лобби') => material({ name, path: '/Новая версия/' + folder + '/' + name, size: 100 });
 const saved = { version: 1, groups: [], rules: [{ prefix: 'ЗОРГЕ 9', groupId: 'zorge' }, { prefix: 'Условия сотрудничества', groupId: null }], covers: { 'Зорге 9/Фото': 'old', 'Условия сотрудничества': 'keep' }, looseFolders: { 'Зорге 9/Видео': 'УТП' } };
+test('partial publication is opt-in, partitions source and never publishes missing links', () => {
+  const ready = make('ready.jpg'), missing = make('missing.jpg', 'Зорге 9/Видео/Недоступно');
+  const failure = { path: missing.path, error: 'Download 500' };
+  assert.throws(() => publicationPlan([ready, missing], [ready], [failure], false), /No DB changes/);
+  const plan = publicationPlan([ready, missing], [ready], [failure], true);
+  assert.deepEqual(plan.files, [ready]);
+  assert.deepEqual(plan.missing, [failure]);
+  const layout = buildLayout(saved, plan.files);
+  assert.ok(!Object.values(layout.covers).includes(missing.fileUrl));
+  assert.ok(!layout.rules.some(r => r.prefix.includes('Видео')));
+  assert.throws(() => publicationPlan([ready], [], [failure], true), /No verified/);
+  assert.throws(() => publicationPlan([ready, missing], [ready], [], true), /Incomplete/);
+  assert.throws(() => publicationPlan([ready, missing], [ready], [{ path: ready.path }], true), /Incomplete/);
+  assert.deepEqual(publicationPlan([ready, missing], [ready, missing], [], false).missing, []);
+});
+test('reuse-only staging requires source checksum plus existing valid JPEG thumbnail', async () => {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'materials-ready-'));
+  const bytes = Buffer.from('verified-original');
+  const f = material({ name: 'Photo.jpg', path: '/Версия ИИ/Зорге 9/Фото/Photo.jpg', size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }, '/Версия ИИ');
+  const original = path.join(root, 'yandex', f.rel), thumb = path.join(root, 'yandex-thumbs', f.browserRel + '.thumb.jpg');
+  const sharp = filename => ({ metadata: async () => { if (!fs.existsSync(filename)) throw new Error('missing thumbnail'); return { format: 'jpeg', width: 1024, height: 768 }; } });
+  try {
+    await assert.rejects(stagedReady(f, root, sharp), /Original not staged/);
+    fs.mkdirSync(path.dirname(original), { recursive: true }); fs.writeFileSync(original, bytes);
+    await assert.rejects(stagedReady(f, root, sharp), /missing thumbnail/);
+    fs.mkdirSync(path.dirname(thumb), { recursive: true }); fs.writeFileSync(thumb, 'mock-jpeg');
+    await stagedReady(f, root, sharp);
+    await assert.rejects(stagedReady(f, root, () => ({ metadata: async () => ({ format: 'png', width: 1024, height: 768 }) })), /Thumbnail not ready/);
+    await assert.rejects(stagedReady(f, root, () => ({ metadata: async () => ({ format: 'jpeg', width: 20, height: 10 }) })), /Thumbnail not ready/);
+    fs.writeFileSync(original, Buffer.alloc(bytes.length));
+    await assert.rejects(stagedReady(f, root, sharp), /checksum invalid/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 test('stalled headers abort promptly while a responding large body keeps its transfer deadline', async () => {
   const http = require('node:http');
   const server = http.createServer((req, res) => {

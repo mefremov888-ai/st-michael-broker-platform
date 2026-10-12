@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'inspect: только аудит; apply: проверенная замена с резервной копией'
+        description: 'apply_available: опубликовать только проверенные уже скачанные материалы Вики; apply: полный перенос'
         type: choice
-        options: [inspect, apply, status, verify, stop_staging]
+        options: [inspect, apply, apply_available, status, verify, stop_staging]
         default: inspect
         required: true
       source_root:
@@ -70,9 +70,9 @@ jobs:
               docker compose exec -T api node /app/scripts/verify-materials-new-version.js
               exit 0
             fi
-            case "$MATERIALS_MODE" in inspect|apply) ;; *) exit 1 ;; esac
+            case "$MATERIALS_MODE" in inspect|apply|apply_available) ;; *) exit 1 ;; esac
             case "$MATERIALS_SOURCE_ROOT" in auto|'') MATERIALS_SOURCE_ROOT='' ;; '/Версия ИИ') ;; *) exit 1 ;; esac
-            if [ "$MATERIALS_MODE" = apply ] && [ "$MATERIALS_SOURCE_ROOT" = '/Версия ИИ' ]; then
+            if { [ "$MATERIALS_MODE" = apply ] || [ "$MATERIALS_MODE" = apply_available ]; } && [ "$MATERIALS_SOURCE_ROOT" = '/Версия ИИ' ]; then
               umask 077
               UPLOAD_DIR=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Source}}{{end}}{{end}}' st-michael-api)
               case "$UPLOAD_DIR" in /var/lib/docker/volumes/*/_data) ;; *) echo 'Unexpected upload volume'; exit 1 ;; esac
@@ -95,7 +95,7 @@ jobs:
             docker exec st-michael-api mkdir -p /app/data
             docker cp /tmp/victoria-covers-20261012.json st-michael-api:/app/data/victoria-covers-20261012.json
             docker compose exec -T -e MATERIALS_MODE="$MATERIALS_MODE" -e MATERIALS_SOURCE_ROOT="$MATERIALS_SOURCE_ROOT" api node /app/scripts/materials-new-version.js
-            if [ "$MATERIALS_MODE" = apply ]; then
+            if [ "$MATERIALS_MODE" = apply ] || [ "$MATERIALS_MODE" = apply_available ]; then
               git show "$SCRIPT_SHA:scripts/sync-yandex-files.js" > /tmp/sync-yandex-files.js
               docker cp /tmp/sync-yandex-files.js st-michael-api:/app/scripts/sync-yandex-files.js
               echo 'New authoritative media source activated for scheduled synchronization.'
