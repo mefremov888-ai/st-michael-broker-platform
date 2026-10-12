@@ -1,8 +1,19 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { material, coverTargets, buildLayout, replaceable } = require('./materials-new-version');
+const { material, coverTargets, buildLayout, replaceable, sourceRoot } = require('./materials-new-version');
 const make = (name, folder = 'Зорге 9/Фото/Лобби') => material({ name, path: '/Новая версия/' + folder + '/' + name, size: 100 });
 const saved = { version: 1, groups: [], rules: [{ prefix: 'ЗОРГЕ 9', groupId: 'zorge' }, { prefix: 'Условия сотрудничества', groupId: null }], covers: { 'Зорге 9/Фото': 'old', 'Условия сотрудничества': 'keep' }, looseFolders: { 'Зорге 9/Видео': 'УТП' } };
+test('Victoria source is explicit, isolated, and preserves approved hierarchy', () => {
+  const f = material({ name: 'Фото — 01.jpg', path: '/Версия ИИ/Зорге 9/Архитектура/Фото/Фото — 01.jpg', size: 1 }, '/Версия ИИ');
+  assert.equal(f.folder, 'Зорге 9/Архитектура/Фото');
+  assert.ok(f.rel.startsWith('Версия ИИ/'));
+  assert.throws(() => sourceRoot('/'));
+  assert.throws(() => material({ name: 'x.jpg', path: '/Версия ИИ/Зорге 9/../x.jpg' }, '/Версия ИИ'));
+  const c = require('../data/victoria-covers-20261012.json');
+  assert.equal(c.length, 80);
+  assert.equal(c.filter(x => x.folder && /^[a-f0-9]{64}$/.test(x.sha256)).length, 79);
+  assert.equal(new Set(c.map(x => x.folder)).size, 80);
+});
 test('one/two stars and explicit triple-video destination', () => {
   assert.deepEqual(coverTargets(make('Лобби*.jpg')), ['Зорге 9/Фото/Лобби']);
   assert.deepEqual(coverTargets(make('Лобби**.jpg')), ['Зорге 9/Фото/Лобби', 'Зорге 9/Фото']);

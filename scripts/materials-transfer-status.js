@@ -21,11 +21,13 @@ async function main() {
   try {
     const root = process.env.UPLOAD_ROOT || '/app/uploads';
     const free = fs.statfsSync(root);
-    const allNewPathDocs = await db.document.findMany({ where: { category: 'materials', description: { startsWith: '[yandex-local:/Новая версия/' } } });
+    const source = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
+    const sourceRoot = source?.value || '/Новая версия';
+    const allNewPathDocs = await db.document.findMany({ where: { category: 'materials', description: { startsWith: '[yandex-local:' + sourceRoot + '/' } } });
     const docs = allNewPathDocs.filter(d => /-[a-f0-9]{12}\.[^.]+$/i.test(d.fileUrl));
     const setting = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_FOLDER_LAYOUT' } });
     const layout = setting ? JSON.parse(setting.value) : null;
-    console.log(JSON.stringify({ transferActive: fs.existsSync(path.join(root, '.materials-new-version.lock')), originals: count(path.join(root, 'yandex', 'Новая версия')), thumbnails: count(path.join(root, 'yandex-thumbs', 'Новая версия')), published: docs.length, freeBytes: free.bavail * free.bsize, projectCounts: Object.fromEntries(['ZORGE9', 'SILVER_BOR'].map(p => [p, docs.filter(d => d.project === p).length])), tripleStarVideoCover: layout?.covers?.['Зорге 9/Видео'] }));
+    console.log(JSON.stringify({ sourceRoot, transferActive: fs.existsSync(path.join(root, '.materials-new-version.lock')), originals: count(path.join(root, 'yandex', sourceRoot.slice(1))), stagingAI: count(path.join(root, 'yandex', 'Версия ИИ')), thumbnails: count(path.join(root, 'yandex-thumbs', sourceRoot.slice(1))), published: docs.length, freeBytes: free.bavail * free.bsize, projectCounts: Object.fromEntries(['ZORGE9', 'SILVER_BOR'].map(p => [p, docs.filter(d => d.project === p).length])), tripleStarVideoCover: layout?.covers?.['Зорге 9/Видео'] }));
   } finally { await db.$disconnect(); }
 }
 main().catch(e => { console.error(e.stack || e); process.exitCode = 1; });

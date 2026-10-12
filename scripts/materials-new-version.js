@@ -7,7 +7,11 @@ const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const SOURCE = 'https://disk.yandex.ru/d/Pf1bqSQkEG62sw';
-const ROOT = '/Новая версия';
+let ROOT = '/Новая версия';
+function sourceRoot(value) {
+  if (!['/Новая версия', '/Версия ИИ'].includes(value)) throw new Error('Unsupported media source');
+  return value;
+}
 const MEDIA = /\.(jpe?g|png|webp|gif|heic|avif|bmp|tiff?|mp4|mov|webm|m4v|avi|mkv)$/i;
 const VIDEO = /\.(mp4|mov|webm|m4v|avi|mkv)$/i;
 const PROJECTS = { 'Зорге 9': ['zorge', 'ZORGE9'], 'Квартал Серебряный бор': ['berarina', 'SILVER_BOR'] };
@@ -15,9 +19,11 @@ const split = s => String(s || '').split('/').map(p => p.trim()).filter(Boolean)
 const clean = s => s.replace(/[^\p{L}\p{N}\s.,()\-_]/gu, '_').replace(/\s+/g, ' ').trim();
 const urlFor = rel => '/files/yandex/' + rel.split('/').map(encodeURIComponent).join('/');
 
-function material(it) {
-  if (!it.path.startsWith(ROOT + '/')) throw new Error('Resource outside source subtree');
-  const parts = it.path.slice(ROOT.length + 1).split('/');
+function material(it, root = ROOT) {
+  sourceRoot(root);
+  if (!it.path.startsWith(root + '/')) throw new Error('Resource outside source subtree');
+  const parts = it.path.slice(root.length + 1).split('/');
+  if (parts.some(p => !p || p === '.' || p === '..' || p.includes('\\'))) throw new Error('Unsafe source path');
   const project = PROJECTS[parts[0]];
   if (!project || !MEDIA.test(it.name)) throw new Error('Unexpected project/file: ' + it.path);
   const folder = parts.slice(0, -1).map(p => p.trim()).join('/');
@@ -26,7 +32,7 @@ function material(it) {
   const ext = path.extname(it.name);
   const basename = clean(it.name.slice(0, -ext.length));
   const suffix = crypto.createHash('sha256').update(it.path).digest('hex').slice(0, 12);
-  const rel = ['Новая версия', ...parts.slice(0, -1).map(clean), basename + '-' + suffix + ext.toLowerCase()].join('/');
+  const rel = [root.slice(1), ...parts.slice(0, -1).map(clean), basename + '-' + suffix + ext.toLowerCase()].join('/');
   const browserRel = rel.replace(/\.heic$/i, '.jpg');
   return { ...it, folder, rel, browserRel, fileUrl: urlFor(browserRel), originalFileUrl: urlFor(rel), project: project[1], groupId: project[0] };
 }
@@ -123,20 +129,21 @@ async function json(endpoint, diskPath, extra = {}) {
     return response.json();
   });
 }
-async function inventory(diskPath = ROOT, files = [], dirs = []) {
+async function inventory(diskPath = ROOT, files = [], dirs = [], root = ROOT) {
+  sourceRoot(root);
   for (let offset = 0; ;) {
     const data = await json('', diskPath, { offset, limit: 1000, preview_size: '1024x768' });
     if (data.type !== 'dir' || !data._embedded) throw new Error('Incomplete inventory: ' + diskPath);
     const items = data._embedded.items;
     for (const it of items) {
-      if (it.type === 'dir') { dirs.push(it.path); await inventory(it.path, files, dirs); }
-      else files.push(material(it));
+      if (it.type === 'dir') { dirs.push(it.path); await inventory(it.path, files, dirs, root); }
+      else files.push(material(it, root));
     }
     offset += items.length;
     if (offset >= data._embedded.total) break;
     if (!items.length) throw new Error('Incomplete pagination');
   }
-  if (diskPath === ROOT) {
+  if (diskPath === root) {
     if (files.length < 400) throw new Error('Source unexpectedly small: ' + files.length);
     const paths = new Set(files.map(f => f.rel.toLowerCase()));
     if (paths.size !== files.length) throw new Error('Local filename collision');
@@ -229,6 +236,8 @@ async function main() {
     const setting = await prisma.systemSetting.findUnique({ where: { key: 'MATERIALS_FOLDER_LAYOUT' } });
     if (!setting) throw new Error('Saved layout required');
     const saved = JSON.parse(setting.value);
+    const savedSource = await prisma.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
+    ROOT = sourceRoot(process.env.MATERIALS_SOURCE_ROOT || savedSource?.value || '/Новая версия');
     const docs = await prisma.document.findMany({});
     const { files, dirs } = await inventory();
     const next = buildLayout(saved, files);
@@ -244,6 +253,15 @@ async function main() {
     if (mode === 'inspect') return;
     if (report.freeBytes < needed + 2 * 1024 ** 3) throw new Error('Insufficient staging space (2GB reserve required)');
     const sharp = require('sharp');
+    if (ROOT === '/Версия ИИ') {
+      const coverDir = path.join(uploadRoot, 'materials-backups', 'victoria-covers-20261012', 'covers');
+      const names = fs.readdirSync(coverDir);
+      const folders = new Set(dirs.map(d => d.slice(ROOT.length + 1).normalize('NFC')));
+      for (const cover of require('../data/victoria-covers-20261012.json').filter(c => c.folder)) {
+        const name = names.find(n => n.normalize('NFC') === cover.file);
+        if (!name || !folders.has(cover.folder) || await fileHash(path.join(coverDir, name), 'sha256') !== cover.sha256) throw new Error('Approved covers preflight failed');
+      }
+    }
     let cursor = 0, done = 0;
     const errors = [];
     await Promise.all(Array.from({ length: 3 }, async () => {
@@ -259,6 +277,32 @@ async function main() {
       }
     }));
     if (errors.length) throw new Error('No DB changes. Failed staging: ' + errors.join('\n'));
+    if (ROOT === '/Версия ИИ') {
+      const covers = require('../data/victoria-covers-20261012.json');
+      const coverDir = path.join(uploadRoot, 'materials-backups', 'victoria-covers-20261012', 'covers');
+      const coverNames = fs.readdirSync(coverDir);
+      const folders = new Set(dirs.map(d => d.slice(ROOT.length + 1).normalize('NFC')));
+      for (const cover of covers.filter(c => c.folder)) {
+        if (!cover.sha256 || !folders.has(cover.folder)) throw new Error('Missing approved cover/folder: ' + cover.folder);
+        const originalName = coverNames.find(name => name.normalize('NFC') === cover.file);
+        if (!originalName) throw new Error('Missing approved cover');
+        const original = path.join(coverDir, originalName);
+        if (await fileHash(original, 'sha256') !== cover.sha256) throw new Error('Cover checksum mismatch');
+        const rel = 'materials-covers/victoria-20261012/' + cover.sha256 + '.jpg';
+        const dest = path.join(uploadRoot, rel);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        if (!fs.existsSync(dest)) {
+          const meta = await sharp(original).metadata();
+          if (!meta.width || !meta.height) throw new Error('Invalid approved cover');
+          await sharp(original).resize({ width: 1200, withoutEnlargement: true }).jpeg({ quality: 90 }).toFile(dest + '.partial');
+          fs.renameSync(dest + '.partial', dest);
+        }
+        next.covers[cover.folder] = '/files/' + rel;
+      }
+    }
+    const sourceAfter = await inventory();
+    const sourceIdentity = list => list.map(f => f.path + ':' + f.size + ':' + (f.sha256 || f.md5)).sort().join('\n');
+    if (sourceIdentity(sourceAfter.files) !== sourceIdentity(files) || [...sourceAfter.dirs].sort().join('\n') !== [...dirs].sort().join('\n')) throw new Error('Source changed during staging; no DB changes');
     // Re-read: no overwriting an administrator's edits made during a long transfer.
     const currentSetting = await prisma.systemSetting.findUnique({ where: { key: setting.key } });
     if (currentSetting.value !== setting.value) throw new Error('Layout changed during staging; rerun');
@@ -270,10 +314,12 @@ async function main() {
     fs.mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
     fs.chmodSync(backupParent, 0o700);
     fs.chmodSync(backupRoot, 0o700);
-    fs.writeFileSync(path.join(backupRoot, 'documents-layout.json'), JSON.stringify({ documents: currentDocs, setting, files, removeIds: remove.map(d => d.id) }, null, 2), { mode: 0o600 });
+    fs.writeFileSync(path.join(backupRoot, 'documents-layout.json'), JSON.stringify({ documents: currentDocs, setting, sourceSetting: savedSource, files, removeIds: remove.map(d => d.id) }, null, 2), { mode: 0o600 });
     await prisma.$transaction(async tx => {
       const fresh = await tx.systemSetting.findUnique({ where: { key: setting.key } });
       if (fresh.value !== setting.value) throw new Error('Concurrent layout change');
+      const freshSource = await tx.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
+      if ((freshSource?.value || null) !== (savedSource?.value || null)) throw new Error('Concurrent source change');
       for (const f of files) {
         const description = '[yandex-local:' + f.path + ']';
         const matches = await tx.document.findMany({ where: { category: 'materials', description } });
@@ -284,7 +330,8 @@ async function main() {
       }
       await tx.document.deleteMany({ where: { id: { in: remove.map(d => d.id) }, category: 'materials' } });
       await tx.systemSetting.update({ where: { key: setting.key }, data: { value: JSON.stringify(next) } });
-      const count = await tx.document.count({ where: { category: 'materials', description: { startsWith: '[yandex-local:/Новая версия/' } } });
+      await tx.systemSetting.upsert({ where: { key: 'MATERIALS_SOURCE_ROOT' }, create: { key: 'MATERIALS_SOURCE_ROOT', value: ROOT }, update: { value: ROOT } });
+      const count = await tx.document.count({ where: { category: 'materials', description: { startsWith: '[yandex-local:' + ROOT + '/' } } });
       if (count !== files.length) throw new Error('Published count mismatch');
     }, { timeout: 120000 });
     // Recoverable retirement: only files referenced by retired media, never PDFs,
@@ -308,5 +355,5 @@ async function main() {
     await prisma.$disconnect();
   }
 }
-module.exports = { material, coverTargets, buildLayout, replaceable, inventory, validFile, main };
+module.exports = { material, coverTargets, buildLayout, replaceable, inventory, validFile, main, sourceRoot };
 if (require.main === module) main().catch(e => { console.error(e.stack || e); process.exitCode = 1; });
