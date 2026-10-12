@@ -33,6 +33,8 @@ const COMPILED = Object.freeze(["adapter", "fields", "touches", "phoneLock", "tr
   "apiPhoneLock", "apiSyncRetry", "apiFixationSafety", "apiFixationController", "apiFixationWriter", "apiSchedulerWriter", "apiAdminWriter"]);
 const RECOVERY_SOURCE_KEYS = Object.freeze(["recovery", "certificate", "inspector", "reconciliation", "lease", "leaseCore", "leasePlan", "adapter", "fields", "touches", "phoneLock", "traffic"]);
 const SAFE_REFUSAL_CODES = Object.freeze(new Set([
+  "PREFLIGHT_SNAPSHOT_FAILED", "PREFLIGHT_ACCOUNT_FAILED", "PREFLIGHT_EVIDENCE_FAILED",
+  "PREFLIGHT_CERTIFICATE_FAILED", "PREFLIGHT_PLAN_BINDING_FAILED", "PREFLIGHT_PRIOR_AUDIT_FAILED", "PREFLIGHT_NEGATIVE_FAILED",
   // Literal preflight failures only: classify without exposing raw CRM/DB errors.
   "EVIDENCE_NOT_FRESH", "CLIENT_CONTACT_EVIDENCE_CHANGED", "CLIENT_PHONE_SCOPE_INVALID",
   "OWNER_SCOPE_MISMATCH", "RESPONSIBLE_SCOPE_INVALID", "RESPONSIBLE_AGENCY_INVALID",

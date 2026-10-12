@@ -14,6 +14,22 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
   loaded.paths = NodeModule._nodeModulePaths(dirname(scriptPath));
   loaded._compile(source, scriptPath);
   const recovery = loaded.exports;
+  describe("bounded preclaim diagnostics", () => {
+    it.each(["SNAPSHOT", "ACCOUNT", "EVIDENCE", "CERTIFICATE", "PLAN_BINDING", "PRIOR_AUDIT", "NEGATIVE"])("masks raw errors in %s without retrying the callback", async (stage) => {
+      const callback = jest.fn(async () => { throw Error("private-token private@example.test +79990001122"); });
+      await expect(recovery.preflightStep(stage, callback)).rejects.toMatchObject({ safeCode: `PREFLIGHT_${stage}_FAILED`, message: "Fixed case recovery refused" });
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+    it("preserves reviewed refusal codes and successful results", async () => {
+      await expect(recovery.preflightStep("EVIDENCE", async () => { throw { safeCode: "EVIDENCE_NOT_FRESH", message: "private" }; })).rejects.toMatchObject({ safeCode: "EVIDENCE_NOT_FRESH" });
+      await expect(recovery.preflightStep("SNAPSHOT", async () => 42)).resolves.toBe(42);
+    });
+    it("refuses arbitrary stage labels before invoking code", async () => {
+      const callback = jest.fn();
+      await expect(recovery.preflightStep("private-token", callback)).rejects.toMatchObject({ safeCode: "EXECUTION_GATE_INVALID" });
+      expect(callback).not.toHaveBeenCalled();
+    });
+  });
   const inspector = loaded.require("./inspect-fixed-amo-fixation-case");
   const helpers = loaded.require("./inspect-amo-fixation-lead-reconciliation");
   const NOW = new Date();
