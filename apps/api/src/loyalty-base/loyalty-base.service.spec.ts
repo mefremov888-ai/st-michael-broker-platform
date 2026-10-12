@@ -5451,6 +5451,74 @@ describe("LoyaltyBaseService", () => {
     expect(periodFixationsOnly.items.map((item: any) => item.id)).toEqual([
       "period",
     ]);
+
+    // A date range on one metric must reach the aggregator even without
+    // activityPeriod; the old caller returned unavailable/null and filtered
+    // out brokers that the SQL period predicate had correctly selected.
+    const periodSpy = jest.spyOn(service as any, "ourBrokerPeriodMetrics");
+    for (const [key, metric] of [
+      ["fixationPeriod", "fixations"],
+      ["meetingPeriod", "meetings"],
+      ["dealPeriod", "deals"],
+    ]) {
+      const independent: any = await service.list("ours", "BROKER", {
+        page: 1, pageSize: 30, sortBy: metric, sortOrder: "desc",
+        ...(key === "fixationPeriod" ? { columns: { activity: "HAS_FIXATIONS" } } : {}),
+      } as any, undefined, { [key]: canonical.activityPeriod } as any);
+      const selected = independent.items.find((item: any) => item.id === "period");
+      expect(selected).toBeDefined();
+      expect(selected.periodMetrics[metric]).toBeGreaterThan(0);
+      expect(independent.dataAvailability.activityPeriod).toBe("LOCAL_PRELIMINARY");
+      const suppliedPeriods = periodSpy.mock.calls.at(-1)![1] as any;
+      expect(suppliedPeriods[key === "fixationPeriod" ? "fixation" : key === "meetingPeriod" ? "meeting" : "deal"])
+        .toMatchObject({ fromIso: "2026-08-01", toIso: "2026-08-31" });
+    }
+  });
+
+  it("sorts each independent period metric without replacing unfiltered lifetime metrics", () => {
+    const service = new LoyaltyBaseService(prismaMock()) as any;
+    const period = { from: "2026-08-01", to: "2026-08-31" };
+    const candidates = () => [
+      { item: { id: "lifetime", metrics: { fixations: 20, meetings: 20, deals: 20, dealAmount: "900" },
+        periodMetrics: { fixations: 1, meetings: 1, deals: 1, dealAmount: "100" } } },
+      { item: { id: "period", metrics: { fixations: 1, meetings: 1, deals: 1, dealAmount: "100" },
+        periodMetrics: { fixations: 5, meetings: 5, deals: 5, dealAmount: "500" } } },
+    ];
+    for (const [sortBy, key] of [["fixations", "fixationPeriod"], ["meetings", "meetingPeriod"],
+      ["deals", "dealPeriod"], ["dealAmount", "dealPeriod"]]) {
+      const filter = service.normalizeListFilter({ sortBy, sortOrder: "desc" }, { [key]: period });
+      const rows = candidates();
+      service.sortLoyaltyCandidates(rows, filter);
+      expect(rows[0].item.id).toBe("period");
+    }
+    const rows = candidates();
+    service.sortLoyaltyCandidates(rows, service.normalizeListFilter(
+      { sortBy: "dealAmount", sortOrder: "desc" }, { fixationPeriod: period }));
+    expect(rows[0].item.id).toBe("lifetime");
+  });
+
+  it("passes independent periods to the linked cabinet broker record and marks their availability", async () => {
+    const prisma = prismaMock();
+    const service = new LoyaltyBaseService(prisma) as any;
+    prisma.broker.findMany.mockResolvedValue([{ id: "linked-independent-period-broker" }]);
+    for (const method of ["attachOurBrokerLastCalls", "attachOurBrokerAmoTouches",
+      "attachOurBrokerLifetimeAggregates", "attachOurBrokerRegistryDeals", "attachOurDealAmounts"]) {
+      jest.spyOn(service, method).mockResolvedValue(undefined);
+    }
+    jest.spyOn(service, "mapOurBroker").mockReturnValue({ metricSource: {} });
+    const aggregate = jest.spyOn(service, "ourBrokerPeriodMetrics").mockResolvedValue(new Map([
+      ["linked-independent-period-broker", { fixations: 3 }],
+    ]));
+    const filter = service.normalizeListFilter({}, { fixationPeriod: {
+      from: "2026-09-01", to: "2026-09-30",
+    } });
+    const items = [{ linkedOurs: { type: "BROKER", id: "linked-independent-period-broker" } }] as any[];
+    await service.attachAnnaLinkedOurBrokers(items, filter);
+    expect(aggregate.mock.calls[0][1]).toMatchObject({ fixation: {
+      fromIso: "2026-09-01", toIso: "2026-09-30",
+    } });
+    expect(items[0].linkedOurRecord.periodMetrics.fixations).toBe(3);
+    expect(items[0].linkedOurRecord.metricSource.periodFilterApplied).toBe(true);
   });
 
   it("passes the OUR broker deal-count filter from registry deals alone", async () => {
