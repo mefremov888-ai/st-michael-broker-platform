@@ -21,9 +21,18 @@ export interface MaterialDocument {
 export function currentMaterials<T extends { description?: string | null }>(documents: T[]): T[] {
   return documents.filter(doc => !/^\s*\[archived:cooperation-current\]/i.test(doc.description || ''));
 }
-export type MaterialCover = { kind: 'image' | 'video'; src: string; poster?: string };
+export type MaterialCover = { kind: 'image' | 'video'; src: string; poster?: string; objectPosition?: string };
+
+function approvedVictoriaCover(layout: MaterialsFolderLayout, parts: string[]): MaterialCover | null {
+  const url = layout.covers?.[parts.join('/')];
+  if (!url?.startsWith('/files/materials-covers/victoria-20261012/')) return null;
+  const portrait = parts.join('/') === 'Зорге 9/Звездные резиденты/Фото';
+  return { kind: 'image', src: url, ...(portrait ? { objectPosition: '50% 33%' } : {}) };
+}
 
 export function materialsFolderCover(layout: MaterialsFolderLayout, docs: MaterialDocument[], parts: string[]): MaterialCover | null {
+  const approved = approvedVictoriaCover(layout, parts);
+  if (approved) return approved;
   const project = (parts[0] || '').toLocaleLowerCase('ru');
   const knownProject = project === 'зорге 9' || project === 'квартал серебряный бор';
   if (knownProject && parts.length === 2 && parts[1] === 'Презентации') {
@@ -39,7 +48,9 @@ export function materialsFolderCover(layout: MaterialsFolderLayout, docs: Materi
   return { kind: 'image', src: materialsThumbUrl(url) };
 }
 
-export function materialsProjectCover(title: string): MaterialCover {
+export function materialsProjectCover(title: string, layout?: MaterialsFolderLayout): MaterialCover {
+  const approved = layout && approvedVictoriaCover(layout, [title]);
+  if (approved) return approved;
   return { kind: 'image', src: title.toLocaleLowerCase('ru') === 'зорге 9' ? '/v2/img/materials-zorge9.webp' : '/v2/img/materials-silver-bor.webp' };
 }
 export function materialsParentHref(parts: string[], href: (parts: string[]) => string): string {

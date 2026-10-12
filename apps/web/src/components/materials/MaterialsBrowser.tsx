@@ -19,11 +19,11 @@ import {
 import { DEFAULT_MATERIALS_LAYOUT, parseMaterialsLayout, withDisplaySubcategory, type MaterialsFolderLayout } from '@shared/materials-folder-layout';
 import './materials-browser.css';
 
-function Thumbnail({ src, alt }: { src: string; alt: string }) {
+function Thumbnail({ src, alt, objectPosition }: { src: string; alt: string; objectPosition?: string }) {
   const [failed, setFailed] = useState(false);
   if (failed) return <div className="mb-card-placeholder"><ImageIcon size={36} aria-hidden="true" /><span>Предпросмотр недоступен</span></div>;
   // eslint-disable-next-line @next/next/no-img-element
-  return <img src={src} alt={alt} loading="lazy" decoding="async" onError={() => setFailed(true)} />;
+  return <img src={src} alt={alt} style={objectPosition ? { objectPosition } : undefined} loading="lazy" decoding="async" onError={() => setFailed(true)} />;
 }
 
 function Cover({ cover, title }: { cover: MaterialCover | null; title: string }) {
@@ -36,7 +36,7 @@ function Cover({ cover, title }: { cover: MaterialCover | null; title: string })
     return () => preference.removeEventListener('change', update);
   }, []);
   if (!cover) return <div className="mb-card-placeholder"><Folder size={48} aria-hidden="true" /></div>;
-  if (cover.kind === 'image' || failed) return <Thumbnail src={cover.poster || cover.src} alt={title} />;
+  if (cover.kind === 'image' || failed) return <Thumbnail src={cover.poster || cover.src} alt={title} objectPosition={cover.objectPosition} />;
   return <video src={animate ? cover.src : undefined} poster={cover.poster} autoPlay={animate} muted loop playsInline preload="none" aria-hidden="true" onError={() => setFailed(true)} />;
 }
 
@@ -202,7 +202,7 @@ export function MaterialsBrowser({ parts = [], surface = 'landing', embedded = f
       {catalog && <p className="mb-subtitle">Фото, видео и презентации проектов. Условия сотрудничества и калькулятор рассрочки.</p>}
       {loading ? <div className="mb-loading" role="status">Загрузка...</div> : error ? <div className="mb-empty" role="alert"><p>Не удалось загрузить материалы. Файлы не удалены — попробуйте обновить список.</p><button className="mb-button" onClick={retryLoading}>Повторить загрузку</button></div> : catalog ? (
         <div className="mb-grid mb-catalog-grid" data-tour="materials-grid" data-material-catalog>
-          {projectGroups.map(g => <FolderCard key={g.id} title={g.title} meta="Фото · Видео · Презентации" href={materialHref([g.title])} cover={materialsProjectCover(g.title)} />)}
+          {projectGroups.map(g => <FolderCard key={g.id} title={g.title} meta="Фото · Видео · Презентации" href={materialHref([g.title])} cover={materialsProjectCover(g.title, layout)} />)}
           <FolderCard title="Актуальные условия" meta="Условия сотрудничества · Калькулятор рассрочки" href={MATERIALS_CONDITIONS_HREF} cover={{ kind: 'image', src: '/v2/img/materials-conditions.webp' }} />
         </div>
       ) : conditions ? <>
