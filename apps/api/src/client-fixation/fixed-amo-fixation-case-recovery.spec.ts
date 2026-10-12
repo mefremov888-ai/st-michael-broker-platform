@@ -35,6 +35,65 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
   });
   const agency = { id: "agency1", name: "private-agency", inn: "1234567890", updatedAt: new Date("2026-10-08T12:00:00.000Z") };
   const metadata = { runId: "123", planRunId: "122", caseHash: "a".repeat(64), candidateHash: "b".repeat(64), deployedGitSha: "c".repeat(40), sourceSha256: "d".repeat(64) };
+  describe("reviewed zero-POST abandoned guard takeover (exact case only)", () => {
+    const clock = () => recovery.ABANDONED_LEASE_EXPIRES_AT - 3600000;
+    const raw = (status = "uncertain") => JSON.stringify({ fingerprint: "a".repeat(64),
+      status, owner: "12345678-1234-4234-8234-123456789abc" });
+    const approved = { FIXED_CASE_ZERO_POST_FAILURE_RUN_ID: "38150838032" };
+    const fixture = (options: any = {}) => {
+      let reads = 0;
+      return { set: jest.fn(async () => null),
+        get: jest.fn(async () => ++reads === 2 && options.changed ? raw("completed") : raw(options.status)),
+        pttl: jest.fn(async () => options.ttl ?? 3600000),
+        eval: jest.fn(async () => options.casFail ? 0 : 1) };
+    };
+    it("atomically replaces only the reviewed unchanged uncertain guard without DELETE", async () => {
+      const redis = fixture();
+      const leases = await recovery.acquireFixedCasePhoneLeases(redis, row(), Buffer.alloc(32, 1), approved, clock);
+      await leases.stop();
+      expect(redis.get).toHaveBeenCalledTimes(2);
+      expect(redis.eval).toHaveBeenCalledTimes(1);
+      const [script, count, key, expectedRaw, newValue] = redis.eval.mock.calls[0] as any;
+      expect(script).toContain("raw ~= ARGV[1]");
+      expect(script).not.toContain("DEL");
+      expect(count).toBe(1);
+      expect(key).toBe(amoFixationPhoneLockRedisKey(row().phone));
+      expect(expectedRaw).toBe(raw());
+      expect(JSON.parse(newValue).status).toBe("processing");
+    });
+    it.each(["processing", "completed"])("refuses %s / active-or-completed workers", async (status) => {
+      const redis = fixture({ status });
+      await expect(recovery.acquireFixedCasePhoneLeases(redis, row(), Buffer.alloc(32, 1), approved, clock))
+        .rejects.toMatchObject({ safeCode: "ABANDONED_LEASE_UNVERIFIED" });
+      expect(redis.eval).not.toHaveBeenCalled();
+    });
+    it.each([0, -1, 3605000, 90000000])("refuses expired, stale, renewed or unrelated TTL %s", async (ttl) => {
+      const redis = fixture({ ttl });
+      await expect(recovery.acquireFixedCasePhoneLeases(redis, row(), Buffer.alloc(32, 1), approved, clock))
+        .rejects.toMatchObject({ safeCode: "ABANDONED_LEASE_UNVERIFIED" });
+      expect(redis.eval).not.toHaveBeenCalled();
+    });
+    it("refuses changed raw-value readback and missing historical attestation", async () => {
+      for (const [redis, environment] of [[fixture({ changed: true }), approved], [fixture(), {}]] as any[]) {
+        await expect(recovery.acquireFixedCasePhoneLeases(redis, row(), Buffer.alloc(32, 1), environment, clock))
+          .rejects.toMatchObject({ safeCode: "ABANDONED_LEASE_UNVERIFIED" });
+        expect(redis.eval).not.toHaveBeenCalled();
+      }
+    });
+    it("loses safely when CAS detects a concurrent change; never retries SET", async () => {
+      const redis = fixture({ casFail: true });
+      await expect(recovery.acquireFixedCasePhoneLeases(redis, row(), Buffer.alloc(32, 1), approved, clock))
+        .rejects.toMatchObject({ code: "PHONE_LOCK_BUSY" });
+      expect(redis.set).toHaveBeenCalledTimes(1);
+      expect(redis.eval).toHaveBeenCalledTimes(1);
+    });
+    it("does not extend exception to another client", async () => {
+      const redis = fixture();
+      await expect(recovery.acquireFixedCasePhoneLeases(redis, row({ id: "other-client" }), Buffer.alloc(32, 1), approved, clock))
+        .rejects.toMatchObject({ safeCode: "FIXED_CLIENT_MISSING" });
+      expect(redis.set).not.toHaveBeenCalled();
+    });
+  });
   function environment(mode = "apply", planHashes: any = {}) {
     const sourceHashes = Object.fromEntries(Object.entries(recovery.SOURCE_FILES).map(([key, path]) => [key, createHash("sha256").update(readFileSync(path as string, "utf8")).digest("hex")]));
     return { NODE_ENV: "production", FIXED_CASE_MODE: mode, FIXED_CASE_RUN_ID: "123456", FIXED_CASE_PLAN_RUN_ID: "123455", FIXED_CASE_RUN_ATTEMPT: "1", FIXED_CASE_SOURCE_HASHES: JSON.stringify(sourceHashes),
@@ -316,7 +375,8 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
       expect(result).toMatchObject({ status: 'unresolved', failureCode: 'CERT_RECHECK_CHANGED', contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 });
       expect(db.tx.client.updateMany).not.toHaveBeenCalled(); expect(db.tx.auditLog.create).not.toHaveBeenCalled();
       expect(db.data.row.updatedAt).toEqual(row().updatedAt);
-      expect([...lease.data.values()]).toEqual([expect.objectContaining({ status: 'uncertain' })]);
+      // No claim and no POST means there is no ambiguous operation to fence.
+      expect([...lease.data.values()]).toEqual([]);
     } finally { certificate.recheckFixedCaseExclusionCertificate = original; }
   });
   it("preserves the shared Redis lease code without exposing its error message", async () => {
