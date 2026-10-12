@@ -28,22 +28,24 @@ describe("DRAFT protected exact-case wrapper (no providers or production command
   it("binds uncertain-lease exception to the exact immutable zero-POST failure receipt", () => {
     const proof = step("Verify exact historical zero-post failure before lease recovery");
     expect(proof.if).toBe("${{ inputs.mode == 'apply' }}");
-    expect(proof.run).toContain('.id == 38150838032');
+    expect(proof.run).toContain('.id == 38248799497');
     expect(proof.run).toContain('.actor.login == "mefremov888-ai"');
-    expect(proof.run).toContain('78e0e607d07397bfeacabbb4b41a64a57b54877a');
+    expect(proof.run).toContain('0fb5a1c64daa15539c560cfd76761a29faae1e1b');
     expect(proof.run).toContain('.run_attempt == 1');
     expect(streamStep.env.ZERO_POST_FAILURE_RUN_ID).toBe('${{ steps.abandoned.outputs.zero_post_failure_run_id }}');
     const script = proof.run.match(/node -e '([\s\S]*?)'\s*\n/)[1];
     const receipt = { status: "unresolved", failureCode: "RECOVERY_REFUSED", automaticRetryBlocked: true,
       directMorekitDispatchAttempted: false, contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 };
-    const log = (report: any) => `apply\tStream attested case under continuously checked physical exclusive lock\t2026-10-11T15:22:30.0370890Z ${JSON.stringify(report)}\n`;
+    const log = (report: any) => `apply\tStream attested case under continuously checked physical exclusive lock\t2026-10-12T12:26:13.7429533Z ${JSON.stringify(report)}\n`;
     const parseReceipt = (input: string) => spawnSync(process.execPath, ["-e", script], { input, encoding: "utf8", timeout: 5000 }).status;
     expect(parseReceipt(log(receipt))).toBe(0);
     expect(parseReceipt(log(receipt) + log(receipt))).not.toBe(0);
     expect(parseReceipt(log({ ...receipt, contactPosts: 1 }))).not.toBe(0);
     expect(parseReceipt(log({ ...receipt, status: "linked" }))).not.toBe(0);
-    expect(parseReceipt(`apply\tstep\t2026-10-11T15:22:30.0370890Z echo '${JSON.stringify(receipt)}'\n`)).not.toBe(0);
-    expect(parseReceipt(log(receipt).replace('15:22:30', '15:22:31'))).not.toBe(0);
+    expect(parseReceipt(`apply\tstep\t2026-10-12T12:26:13.7429533Z echo '${JSON.stringify(receipt)}'\n`)).not.toBe(0);
+    expect(parseReceipt(log(receipt).replace('12:26:13', '12:26:14'))).not.toBe(0);
+    expect(parseReceipt(log(receipt).replace('7429533', '7429534'))).not.toBe(0);
+    expect(parseReceipt(log(receipt).replace('2026-10-12T12:26:13.7429533', '2026-10-11T15:22:30.0370890'))).not.toBe(0);
   });
   const stream = streamStep.run.replace(/\r\n/g, "\n");
   const sha = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");

@@ -135,23 +135,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api repos/sereganikitin/st-michael-broker-platform/actions/runs/38150838032 | jq -e '
-            .id == 38150838032 and .actor.login == "mefremov888-ai" and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
-            .head_sha == "78e0e607d07397bfeacabbb4b41a64a57b54877a" and .head_branch == "master" and
+          gh api repos/sereganikitin/st-michael-broker-platform/actions/runs/38248799497 | jq -e '
+            .id == 38248799497 and .actor.login == "mefremov888-ai" and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
+            .head_sha == "0fb5a1c64daa15539c560cfd76761a29faae1e1b" and .head_branch == "master" and
             .path == ".github/workflows/apply-fixed-amo-fixation-case.yml" and .event == "workflow_dispatch" and
             .status == "completed" and .conclusion == "failure" and .run_attempt == 1' >/dev/null
           # Parse only the actual protected report at its known timestamp, not
           # echoed shell source. No raw logs, tokens or CRM data are printed.
-          gh run view 38150838032 --repo sereganikitin/st-michael-broker-platform --log | node -e '
+          gh run view 38248799497 --repo sereganikitin/st-michael-broker-platform --log | node -e '
             let input="";process.stdin.setEncoding("utf8");process.stdin.on("data",part=>{input+=part;if(input.length>8388608)process.exit(1)});
             process.stdin.on("end",()=>{
-              const matches=input.split("\n").map(line=>line.match(/^\S+\t[^\t]+\t2026-10-11T15:22:30\.\d+Z (\{.*\})\r?$/)).filter(Boolean);
+              const matches=input.split("\n").map(line=>line.match(/^\S+\t[^\t]+\t2026-10-12T12:26:13\.7429533Z (\{.*\})\r?$/)).filter(Boolean);
               if(matches.length!==1)process.exit(1);
               const report=JSON.parse(matches[0][1]);
               if(report.status!=="unresolved"||report.failureCode!=="RECOVERY_REFUSED"||report.automaticRetryBlocked!==true||report.directMorekitDispatchAttempted!==false||
                 ["contactPosts","leadPosts","patchPosts","notePosts"].some(key=>report[key]!==0))process.exit(1);
             });'
-          echo zero_post_failure_run_id=38150838032 >> "$GITHUB_OUTPUT"
+          echo zero_post_failure_run_id=38248799497 >> "$GITHUB_OUTPUT"
       - name: Download immutable reviewed-plan attestation
         if: ${{ inputs.mode == 'apply' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -317,7 +317,7 @@ jobs:
           [[ "$mode" = plan || "$mode" = apply ]] || exit 1
           for number in "$run_id" "$broker_floor"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
           if [ "$mode" = apply ]; then
-            test "$zero_post_failure" = 38150838032 || exit 1
+            test "$zero_post_failure" = 38248799497 || exit 1
             for number in "$backup_run" "$backup_epoch" "$plan_run" "$ci_run"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
             [[ "$case_hash" =~ ^[a-f0-9]{64}$ && "$candidate_hash" =~ ^[a-f0-9]{64}$ ]] || exit 1
           else

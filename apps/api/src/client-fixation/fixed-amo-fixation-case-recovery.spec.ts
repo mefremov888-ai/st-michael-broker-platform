@@ -55,7 +55,7 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     const clock = () => recovery.ABANDONED_LEASE_EXPIRES_AT - 3600000;
     const raw = (status = "uncertain") => JSON.stringify({ fingerprint: "a".repeat(64),
       status, owner: "12345678-1234-4234-8234-123456789abc" });
-    const approved = { FIXED_CASE_ZERO_POST_FAILURE_RUN_ID: "38150838032" };
+    const approved = { FIXED_CASE_ZERO_POST_FAILURE_RUN_ID: "38248799497" };
     const fixture = (options: any = {}) => {
       let reads = 0;
       return { set: jest.fn(async () => null),
@@ -108,6 +108,16 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
       await expect(recovery.acquireFixedCasePhoneLeases(redis, row({ id: "other-client" }), Buffer.alloc(32, 1), approved, clock))
         .rejects.toMatchObject({ safeCode: "FIXED_CLIENT_MISSING" });
       expect(redis.set).not.toHaveBeenCalled();
+    });
+    it("rejects the superseded receipt and old expiry without claiming or deleting", async () => {
+      const oldReceipt = fixture();
+      await expect(recovery.acquireFixedCasePhoneLeases(oldReceipt, row(), Buffer.alloc(32, 1), { FIXED_CASE_ZERO_POST_FAILURE_RUN_ID: "38150838032" }, clock))
+        .rejects.toMatchObject({ safeCode: "ABANDONED_LEASE_UNVERIFIED" });
+      expect(oldReceipt.eval).not.toHaveBeenCalled();
+      const oldExpiry = fixture();
+      await expect(recovery.acquireFixedCasePhoneLeases(oldExpiry, row(), Buffer.alloc(32, 1), approved, () => Date.parse("2026-10-12T15:22:30Z") - 3600000))
+        .rejects.toMatchObject({ safeCode: "ABANDONED_LEASE_UNVERIFIED" });
+      expect(oldExpiry.eval).not.toHaveBeenCalled();
     });
   });
   function environment(mode = "apply", planHashes: any = {}) {
