@@ -686,6 +686,42 @@ const ARMED_RECOVERY_METADATA = Object.freeze({
   sourceSha256: "33231586afb08d248a1bcf7478264d44c307d4b0dcf62b7338b75e123b0a4c3c",
   deployedGitSha: "50c88ff5cef87894394c2d563904e2befafd781a",
 });
+const ARMED_NOTE_SELECT = {
+  ...CLIENT_SELECT, email: true, comment: true, clientRegion: true,
+  broker: { select: { ...BROKER_SELECT, fullName: true } },
+  responsibleBroker: { select: { ...BROKER_SELECT, fullName: true } },
+};
+function armedRecoveryAuditBound(auditRows) {
+  const phases = ["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "UNRESOLVED"];
+  return auditRows.length === phases.length && auditRows.every((entry, index) =>
+    entry.action === `AMO_FIXED_CASE_${phases[index]}` && entry.payload.phase === phases[index] &&
+    entry.payload.operationKey === `fixed-amo-fixation-case:v1:${CLIENT_ID}` &&
+    Object.entries(ARMED_RECOVERY_METADATA).every(([key, value]) => entry.payload[key] === value));
+}
+// Literal expected note from the byte-bound writer. Private strings and the
+// agency fingerprint remain in memory, never in the public diagnostic.
+function armedRecoveryExpectedNote(row, agency) {
+  const broker = effectiveBroker(row).broker;
+  if (!agency || agency.id !== row.fixationAgencyId || typeof agency.name !== "string" || !agency.name.trim() ||
+    !/^(?:[0-9]{10}|[0-9]{12})$/.test(agency.inn || "")) refused("REVIEW_SOURCE_INVALID");
+  const tag = privateFingerprint({ id: agency.id, name: agency.name, inn: agency.inn, updatedAt: iso(agency.updatedAt) });
+  const projectName = row.project === "ZORGE9" ? "Зорге 9" : "Берзарина 37";
+  const lines = ["📝 Фиксация клиента от брокера", `Клиент: ${row.fullName}`, `Телефон: ${row.phone}`];
+  if (row.email) lines.push(`Email: ${row.email}`);
+  if (row.clientRegion) lines.push(`Регион: ${row.clientRegion}`);
+  lines.push("", `Проект: ${projectName}`);
+  if (row.propertyType) lines.push(`Тип: ${row.propertyType}`);
+  if (row.roomsCount) lines.push(`Комнат: ${row.roomsCount}`);
+  if (row.sqm) lines.push(`Метраж: ${Number(row.sqm)} м²`);
+  if (row.amount) lines.push(`Бюджет: ${Number(row.amount).toLocaleString("ru-RU")} ₽`);
+  if (row.purchaseTiming) lines.push(`Планирует покупку: ${row.purchaseTiming}`);
+  if (row.readinessLevel) lines.push(`Готовность к сделке: ${row.readinessLevel}`);
+  lines.push("", `Брокер-агент: ${broker.fullName ? `${broker.fullName}, ` : ""}${broker.phone}`);
+  if (broker.id !== row.brokerId) lines.push(`Подал координатор: ${row.broker.fullName}${row.broker.phone ? ` (${row.broker.phone})` : ""}`);
+  lines.push(`Агентство: ${agency.name} (ИНН ${agency.inn})`);
+  if (row.comment) lines.push("", `Комментарий брокера: ${row.comment}`);
+  return `${lines.join("\n")}\n\nCabinet case UUID: ${CLIENT_ID}\nRecovery UUID: 7a8d216e-1637-43eb-985b-19b75fd2b9ed\nRecovery source: st-michael-fixed-amo-case-recovery-v1\nRecovery agency tag: ${tag}`;
+}
 // These are literal fields sent by the byte-bound reviewed writer, not a
 // relaxed replacement validator. Values stay in memory; only field IDs leave.
 function armedRecoveryFormDiagnostic(raw, row) {
@@ -743,7 +779,7 @@ function createArmedRecoveryExtraRequester(token, fetchImpl = globalThis.fetch) 
     } finally { controller.abort(); clearTimeout(timeout); }
   };
 }
-function armedRecoveryExtraDiagnostic(row, payload, field) {
+function armedRecoveryExtraDiagnostic(row, payload, field, noteBaseline = null) {
   if (!record(field) || field.id !== 833189 || field.entity_type !== "leads" || typeof field.type !== "string") refused("REVIEW_SOURCE_INVALID");
   const notes = payload === null ? [] : payload?._embedded?.notes;
   if (!Array.isArray(notes) || notes.length >= 100 || payload?._links?.next) refused("REVIEW_NOTES_INVALID");
@@ -757,17 +793,17 @@ function armedRecoveryExtraDiagnostic(row, payload, field) {
       textPhoneMatches(note.params.text, helpers.normalizePhone(row.phone)) &&
       note.params.text.includes(`Клиент: ${row.fullName}`);
   });
+  const expectedNote = noteBaseline ? armedRecoveryExpectedNote(noteBaseline.row, noteBaseline.agency) : null;
+  const exact = expectedNote === null ? [] : notes.filter((note) => note.note_type === "common" && note.params.text === expectedNote);
   return { dateFieldType: ["date", "date_time"].includes(field.type) ? field.type : "other",
     recoveryNoteCount: matches.length, recoveryNoteMarkersPhoneNameMatch: matches.length === 1,
-    fullNoteExactMatchInspected: false };
+    fullNoteExactMatchInspected: expectedNote !== null,
+    fullNoteExactMatch: expectedNote !== null && exact.length === 1 && matches.length === 1,
+    exactNoteCount: exact.length };
 }
 function armedRecoveryLeadDiagnostic(row, auditRows, raw, exactIds, scanNow) {
   validateRecoveryAuditRows(auditRows);
-  const phases = ["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "UNRESOLVED"];
-  const bound = auditRows.length === phases.length && auditRows.every((entry, index) =>
-    entry.action === `AMO_FIXED_CASE_${phases[index]}` && entry.payload.phase === phases[index] &&
-    entry.payload.operationKey === `fixed-amo-fixation-case:v1:${CLIENT_ID}` &&
-    Object.entries(ARMED_RECOVERY_METADATA).every(([key, value]) => entry.payload[key] === value));
+  const bound = armedRecoveryAuditBound(auditRows);
   if (!bound) return { performed: false, reason: "literal_armed_recovery_binding_not_confirmed", retryAuthorized: false };
   const contactId = positiveId(auditRows[2].payload.contactId);
   const armed = Date.parse(auditRows[3].payload.armedAt), now = Date.parse(iso(scanNow));
@@ -815,7 +851,17 @@ async function snapshot(prisma, environment, includeToken, includeAudit = false)
     const tokenRow = includeToken && canInspectEffectiveBroker(row, effective) ? await tx.systemSetting.findUnique({ where: { key: "AMO_ACCESS_TOKEN" }, select: { value: true } }) : null;
     const audit = includeAudit && canInspectEffectiveBroker(row, effective) ? validateAuditRows(await tx.auditLog.findMany(auditQuery())) : [];
     const recoveryAudit = includeAudit && canInspectEffectiveBroker(row, effective) ? validateRecoveryAuditRows(await tx.auditLog.findMany(recoveryAuditQuery())) : [];
-    return { row, token: tokenRow?.value, audit, recoveryAudit };
+    let noteBaseline = null;
+    if (armedRecoveryAuditBound(recoveryAudit)) {
+      const noteRow = await tx.client.findUnique({ where: { id: CLIENT_ID }, select: ARMED_NOTE_SELECT });
+      if (!noteRow || Object.keys(CLIENT_SELECT).some((key) => privateFingerprint(noteRow[key] && CLIENT_SELECT[key]?.select ?
+        Object.fromEntries(Object.keys(CLIENT_SELECT[key].select).map((field) => [field, noteRow[key][field]])) : noteRow[key]) !== privateFingerprint(row[key])))
+        refused("CASE_CHANGED_DURING_SCAN");
+      const agency = await tx.agency.findUnique({ where: { id: row.fixationAgencyId }, select: { id: true, name: true, inn: true, updatedAt: true } });
+      armedRecoveryExpectedNote(noteRow, agency);
+      noteBaseline = { row: noteRow, agency };
+    }
+    return { row, token: tokenRow?.value, audit, recoveryAudit, noteBaseline };
   }, { isolationLevel: "RepeatableRead", timeout: 20000, maxWait: 5000 });
 }
 function buildReport(row, evidence, brokerContact, storedLead, metadata, expanded = null) {
@@ -1029,7 +1075,7 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
     if (armedRecoveryLead.performed) {
       const extra = createArmedRecoveryExtraRequester(token, fetchImpl);
       const notes = await extra("notes"), field = await extra("dateField");
-      Object.assign(armedRecoveryLead, armedRecoveryExtraDiagnostic(initial.row, notes, field));
+      Object.assign(armedRecoveryLead, armedRecoveryExtraDiagnostic(initial.row, notes, field, initial.noteBaseline));
       const notesAfter = await extra("notes"), fieldAfter = await extra("dateField");
       const rawAfter = await request(`/api/v4/leads/${ARMED_RECOVERY_LEAD_ID}`, { with: "contacts" });
       if (privateFingerprint(stableReviewEntity(raw)) !== privateFingerprint(stableReviewEntity(rawAfter)) ||
@@ -1042,6 +1088,7 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
   const final = await snapshot(prisma, environment, false, true);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
+  if (privateFingerprint(initial.noteBaseline) !== privateFingerprint(final.noteBaseline)) refused("CASE_CHANGED_DURING_SCAN");
   if (privateFingerprint(initial.recoveryAudit) !== privateFingerprint(final.recoveryAudit))
     armedRecoveryLead = { performed: false, reason: "recovery_audit_changed_during_scan", retryAuthorized: false };
   return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, armedRecoveryLead, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)), recoveryAudit: recoveryAuditReport(initial.recoveryAudit, privateFingerprint(initial.recoveryAudit) === privateFingerprint(final.recoveryAudit)), redisLease };
@@ -1074,5 +1121,6 @@ Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvent
 Object.assign(module.exports, { recoveryAuditQuery, validateRecoveryAuditRows, recoveryAuditReport });
 Object.assign(module.exports, { armedRecoveryLeadDiagnostic, ARMED_RECOVERY_METADATA });
 Object.assign(module.exports, { armedRecoveryFormDiagnostic, createArmedRecoveryExtraRequester, armedRecoveryExtraDiagnostic });
+Object.assign(module.exports, { ARMED_NOTE_SELECT, armedRecoveryAuditBound, armedRecoveryExpectedNote });
 Object.assign(module.exports, { attestedRuntimePhoneLock, createReadOnlyRedis, collectReadOnlyRedisLease });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });
