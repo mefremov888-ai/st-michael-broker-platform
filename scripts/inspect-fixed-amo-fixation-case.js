@@ -799,7 +799,33 @@ function armedRecoveryExtraDiagnostic(row, payload, field, noteBaseline = null) 
     recoveryNoteCount: matches.length, recoveryNoteMarkersPhoneNameMatch: matches.length === 1,
     fullNoteExactMatchInspected: expectedNote !== null,
     fullNoteExactMatch: expectedNote !== null && exact.length === 1 && matches.length === 1,
-    exactNoteCount: exact.length };
+    exactNoteCount: exact.length,
+    noteDifference: expectedNote !== null && matches.length === 1 ? armedRecoveryNoteDifference(expectedNote, matches[0].params.text) : { performed: false } };
+}
+// Classification only: none of these normalization comparisons replace the
+// strict full-note check or grant linking/retry authority. Text stays private.
+function armedRecoveryNoteDifference(expected, observed) {
+  const normalizeLines = (text) => text.replace(/\r\n/g, "\n");
+  const expectedLines = normalizeLines(expected).split("\n"), observedLines = normalizeLines(observed).split("\n");
+  const counts = (lines) => { const result = new Map(); for (const line of lines) result.set(line, (result.get(line) || 0) + 1); return result; };
+  const expectedCounts = counts(expectedLines), observedCounts = counts(observedLines);
+  const labels = [["📝", "heading"], ["Клиент:", "client"], ["Телефон:", "phone"], ["Email:", "email"],
+    ["Регион:", "region"], ["Проект:", "project"], ["Тип:", "property"], ["Комнат:", "rooms"],
+    ["Метраж:", "sqm"], ["Бюджет:", "amount"], ["Планирует покупку:", "timing"],
+    ["Готовность к сделке:", "readiness"], ["Брокер-агент:", "broker"], ["Подал координатор:", "coordinator"],
+    ["Агентство:", "agency"], ["Комментарий брокера:", "comment"], ["Cabinet case UUID:", "case"],
+    ["Recovery UUID:", "recovery"], ["Recovery source:", "source"], ["Recovery agency tag:", "agencyTag"]];
+  const missingExpectedSections = [...new Set(expectedLines.filter((line) => line &&
+    observedCounts.get(line) !== expectedCounts.get(line))
+    .map((line) => labels.find(([prefix]) => line.startsWith(prefix))?.[1] || "continuation"))];
+  const tag = (lines) => lines.filter((line) => line.startsWith("Recovery agency tag:"));
+  return { performed: true, expectedLineCount: expectedLines.length, observedLineCount: observedLines.length,
+    missingExpectedSections, lineEndingNormalizedExactMatch: normalizeLines(observed) === normalizeLines(expected),
+    unicodeNfcNormalizedExactMatch: normalizeLines(observed).normalize("NFC") === normalizeLines(expected).normalize("NFC"),
+    observedCrLf: observed.includes("\r\n"),
+    agencyTagExactMatch: tag(expectedLines).length === 1 && JSON.stringify(tag(expectedLines)) === JSON.stringify(tag(observedLines)),
+    unexpectedLinesPresent: observedLines.some((line) => line && !expectedCounts.has(line)),
+    normalizedComparisonsAuthorizeLink: false };
 }
 function armedRecoveryLeadDiagnostic(row, auditRows, raw, exactIds, scanNow) {
   validateRecoveryAuditRows(auditRows);
@@ -1122,5 +1148,6 @@ Object.assign(module.exports, { recoveryAuditQuery, validateRecoveryAuditRows, r
 Object.assign(module.exports, { armedRecoveryLeadDiagnostic, ARMED_RECOVERY_METADATA });
 Object.assign(module.exports, { armedRecoveryFormDiagnostic, createArmedRecoveryExtraRequester, armedRecoveryExtraDiagnostic });
 Object.assign(module.exports, { ARMED_NOTE_SELECT, armedRecoveryAuditBound, armedRecoveryExpectedNote });
+Object.assign(module.exports, { armedRecoveryNoteDifference });
 Object.assign(module.exports, { attestedRuntimePhoneLock, createReadOnlyRedis, collectReadOnlyRedisLease });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });

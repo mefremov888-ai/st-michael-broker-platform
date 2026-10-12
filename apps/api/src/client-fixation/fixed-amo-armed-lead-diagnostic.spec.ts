@@ -101,6 +101,23 @@ describe('literal armed recovery lead readonly diagnostic', () => {
     broker: { ...row.broker, fullName: 'private-coordinator', phone: '+79990000000' } });
   const notePayload = (text: string) => ({ _embedded: { notes: [{ id: 1, entity_id: 32377125, note_type: 'common', params: { text } }] } });
   const schema = { id: 833189, entity_type: 'leads', type: 'date' };
+  it('classifies full-note differences without revealing text or weakening exact validation', () => {
+    const text = inspector.armedRecoveryExpectedNote(noteRow(), agency);
+    const crlf = text.replace(/\n/g, '\r\n');
+    expect(inspector.armedRecoveryNoteDifference(text, crlf)).toMatchObject({ performed: true,
+      missingExpectedSections: [], observedCrLf: true, lineEndingNormalizedExactMatch: true,
+      agencyTagExactMatch: true, unexpectedLinesPresent: false, normalizedComparisonsAuthorizeLink: false });
+    const difference = inspector.armedRecoveryNoteDifference(text, text.replace('private-comment', 'changed-comment'));
+    expect(difference).toMatchObject({ missingExpectedSections: ['comment'], agencyTagExactMatch: true,
+      unexpectedLinesPresent: true, lineEndingNormalizedExactMatch: false });
+    expect(JSON.stringify(difference)).not.toMatch(/private|changed-comment|7999|1234567890|7a8d216e/);
+    expect(inspector.armedRecoveryNoteDifference(text, text.replace('Recovery agency tag:', 'Changed tag:')))
+      .toMatchObject({ missingExpectedSections: ['agencyTag'], agencyTagExactMatch: false });
+    expect(inspector.armedRecoveryNoteDifference(text, text + '\n' + text.split('\n')[1]))
+      .toMatchObject({ missingExpectedSections: ['client'], normalizedComparisonsAuthorizeLink: false });
+    expect(inspector.armedRecoveryExtraDiagnostic(noteRow(), notePayload(crlf), schema, { row: noteRow(), agency }))
+      .toMatchObject({ fullNoteExactMatch: false, noteDifference: { lineEndingNormalizedExactMatch: true } });
+  });
   it('compares the full note including agency tag and all private form/coordinator data, without outputting it', () => {
     const current = noteRow(); const text = inspector.armedRecoveryExpectedNote(current, agency);
     const result = inspector.armedRecoveryExtraDiagnostic(current, notePayload(text), schema, { row: current, agency });
