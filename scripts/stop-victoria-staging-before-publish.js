@@ -31,10 +31,11 @@ async function main() {
   try {
     process.kill(pid, 'SIGSTOP'); stopped = true;
     const ready = originals(root + '/yandex/Версия ИИ');
-    // The pinned implementation cannot dispatch any DB writes until all 1074
-    // originals and posters exist. With it frozen and fewer than 900 originals,
+    // The pinned implementation rejects inventories smaller than 400 files
+    // and cannot dispatch DB writes until every original and poster exists.
+    // With it frozen and fewer than 400 originals,
     // its write phase is unreachable. Readbacks also guard unexpected state.
-    assert.ok(ready > 0 && ready < 900);
+    assert.ok(ready > 0 && ready < 400);
     const source = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
     assert.ok(!source || source.value === '/Новая версия');
     assert.equal(await db.document.count({ where: { category: 'materials', description: { startsWith: '[yandex-local:/Версия ИИ/' } } }), 0);
