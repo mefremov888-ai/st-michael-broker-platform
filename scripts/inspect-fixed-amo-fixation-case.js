@@ -36,6 +36,8 @@ const CLIENT_SELECT = {
   amoSyncStatus: true, amoSyncAttempts: true, amoSyncLastAttemptAt: true,
   amoSyncError: true, uniquenessStatus: true, uniquenessExpiresAt: true,
   fixationStatus: true, fixationExpiresAt: true, status: true,
+  propertyType: true, roomsCount: true, amount: true, sqm: true,
+  purchaseTiming: true, readinessLevel: true,
   broker: { select: BROKER_SELECT }, responsibleBroker: { select: BROKER_SELECT },
 };
 const SAFE_VALUES = {
@@ -684,6 +686,81 @@ const ARMED_RECOVERY_METADATA = Object.freeze({
   sourceSha256: "33231586afb08d248a1bcf7478264d44c307d4b0dcf62b7338b75e123b0a4c3c",
   deployedGitSha: "50c88ff5cef87894394c2d563904e2befafd781a",
 });
+// These are literal fields sent by the byte-bound reviewed writer, not a
+// relaxed replacement validator. Values stay in memory; only field IDs leave.
+function armedRecoveryFormDiagnostic(raw, row) {
+  const expected = new Map([[583155, { value: "Себе" }],
+    [839179, { value: row.project === "ZORGE9" ? "Зорге 9" : "Берзарина 37" }],
+    [665195, { enum_id: 985337 }], [842273, { enum_id: 1028041 }]]);
+  const property = { "квартира": 1025397, "апартаменты": 859233, "апартамент": 859233,
+    "коммерческая": 889061, "коммерческое помещение": 889061, "кладовая": 981093,
+    "паркинг": 859235, "машиноместо": 859235 }[String(row.propertyType || "").toLowerCase().trim()];
+  const rooms = { "1": 852923, "1к": 852923, "однушка": 852923, "2": 852925, "2к": 852925,
+    "двушка": 852925, "3": 852927, "3к": 852927, "трёшка": 852927, "трешка": 852927,
+    "студия": 889059 }[String(row.roomsCount || "").toLowerCase().trim()];
+  if (property) expected.set(587387, { enum_id: property });
+  if (rooms) expected.set(583447, { enum_id: rooms });
+  if (Number(row.amount) > 0) expected.set(833045, { value: String(Number(row.amount)) });
+  if (Number(row.sqm) > 0) expected.set(604555, { value: String(Number(row.sqm)) });
+  const readiness = String(row.readinessLevel || "").toLowerCase().replace(/[^а-яё]/g, "");
+  if (readiness.includes("горяч")) expected.set(839449, { enum_id: 1025401 });
+  else if (readiness.includes("тёпл") || readiness.includes("тепл")) expected.set(839449, { enum_id: 1025403 });
+  else if (readiness.includes("холод")) expected.set(839449, { enum_id: 1025405 });
+  const timing = String(row.purchaseTiming || "").toLowerCase();
+  if (timing.includes("1") && timing.includes("3")) expected.set(612517, { enum_id: 890509 });
+  else if (timing.includes("3") && timing.includes("6")) expected.set(612517, { enum_id: 890511 });
+  else if (timing.includes("6") || timing.includes("12") || timing.includes("более")) expected.set(612517, { enum_id: 890513 });
+  else if (timing.includes("выясн") || timing.includes("не указ")) expected.set(612517, { enum_id: 891589 });
+  const fields = raw.custom_fields_values;
+  if (!Array.isArray(fields) || fields.length > 1000) refused("EXPANDED_LEAD_INVALID");
+  const mismatchedFieldIds = [];
+  for (const [id, value] of expected) {
+    const matches = fields.filter((field) => field?.field_id === id);
+    if (matches.length !== 1 || !Array.isArray(matches[0].values) || matches[0].values.length !== 1 ||
+      (value.value !== undefined && String(matches[0].values[0]?.value) !== value.value) ||
+      (value.enum_id !== undefined && Number(matches[0].values[0]?.enum_id) !== value.enum_id)) mismatchedFieldIds.push(id);
+  }
+  return { expectedFieldCount: expected.size, mismatchedFieldIds,
+    priceMatches: !(Number(row.amount) > 0) || Number(raw.price) === Number(row.amount) };
+}
+function createArmedRecoveryExtraRequester(token, fetchImpl = globalThis.fetch) {
+  if (typeof token !== "string" || !token.trim() || typeof fetchImpl !== "function") refused("REVIEW_REQUEST_CONFIGURATION_INVALID");
+  return async (kind) => {
+    const path = kind === "notes" ? `/api/v4/leads/${ARMED_RECOVERY_LEAD_ID}/notes?limit=100&page=1`
+      : kind === "dateField" ? "/api/v4/leads/custom_fields/833189" : null;
+    if (!path) refused("REVIEW_HISTORY_SCOPE_INVALID");
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetchImpl(new URL(`https://stmichael.amocrm.ru${path}`), {
+        method: "GET", redirect: "error", signal: controller.signal,
+        headers: { Accept: "application/json", Authorization: `Bearer ${token.trim()}` } });
+      if (response?.status === 204 && kind === "notes") return null;
+      if (response?.ok !== true) refused("REVIEW_NOTES_REQUEST_REJECTED");
+      return await helpers.readBoundedJsonResponse(response, controller);
+    } catch (error) {
+      if (error?.safeCode === "REVIEW_NOTES_REQUEST_REJECTED") throw error;
+      refused("REVIEW_NOTES_REQUEST_FAILED");
+    } finally { controller.abort(); clearTimeout(timeout); }
+  };
+}
+function armedRecoveryExtraDiagnostic(row, payload, field) {
+  if (!record(field) || field.id !== 833189 || field.entity_type !== "leads" || typeof field.type !== "string") refused("REVIEW_SOURCE_INVALID");
+  const notes = payload === null ? [] : payload?._embedded?.notes;
+  if (!Array.isArray(notes) || notes.length >= 100 || payload?._links?.next) refused("REVIEW_NOTES_INVALID");
+  const matches = notes.filter((note) => {
+    if (!record(note) || !positiveId(note.id) || note.entity_id !== ARMED_RECOVERY_LEAD_ID || !record(note.params)) refused("REVIEW_NOTES_INVALID");
+    if (note.params.text === undefined) return false;
+    if (typeof note.params.text !== "string" || Buffer.byteLength(note.params.text, "utf8") > 120000) refused("REVIEW_NOTES_INVALID");
+    return note.note_type === "common" && note.params.text.includes(`Cabinet case UUID: ${CLIENT_ID}`) &&
+      note.params.text.includes("Recovery UUID: 7a8d216e-1637-43eb-985b-19b75fd2b9ed") &&
+      note.params.text.includes("Recovery source: st-michael-fixed-amo-case-recovery-v1") &&
+      textPhoneMatches(note.params.text, helpers.normalizePhone(row.phone)) &&
+      note.params.text.includes(`Клиент: ${row.fullName}`);
+  });
+  return { dateFieldType: ["date", "date_time"].includes(field.type) ? field.type : "other",
+    recoveryNoteCount: matches.length, recoveryNoteMarkersPhoneNameMatch: matches.length === 1,
+    fullNoteExactMatchInspected: false };
+}
 function armedRecoveryLeadDiagnostic(row, auditRows, raw, exactIds, scanNow) {
   validateRecoveryAuditRows(auditRows);
   const phases = ["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "UNRESOLVED"];
@@ -719,6 +796,12 @@ function armedRecoveryLeadDiagnostic(row, auditRows, raw, exactIds, scanNow) {
     requestWithinArmedWindowNumeric: request.length === 1 && inRange(Number(request[0])),
     requestFieldCardinalityMatches: singleRequest,
     requestFieldNumericWindowMatches: singleRequest && inRange(Number(requestFields[0].values[0]?.value)),
+    requestSecondsFromArmed: request.length === 1 && unixTime(request[0]) ? request[0] - Math.floor(armed / 1000) : null,
+    requestUtcMidnight: request.length === 1 && unixTime(request[0]) ? request[0] % 86400 === 0 : false,
+    requestMoscowMidnight: request.length === 1 && unixTime(request[0]) ? (request[0] + 10800) % 86400 === 0 : false,
+    requestUtcDayMatchesArmed: request.length === 1 && unixTime(request[0]) ? Math.floor(request[0] / 86400) === Math.floor(armed / 86400000) : false,
+    requestMoscowDayMatchesArmed: request.length === 1 && unixTime(request[0]) ? Math.floor((request[0] + 10800) / 86400) === Math.floor((armed + 10800000) / 86400000) : false,
+    formFields: armedRecoveryFormDiagnostic(raw, row),
     identityConfirmed: false, databaseMutationAuthorized: false, amoMutationAuthorized: false, retryAuthorized: false };
 }
 async function snapshot(prisma, environment, includeToken, includeAudit = false) {
@@ -943,6 +1026,16 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
     const raw = await request(`/api/v4/leads/${ARMED_RECOVERY_LEAD_ID}`, { with: "contacts" });
     armedRecoveryLead = armedRecoveryLeadDiagnostic(initial.row, initial.recoveryAudit, raw,
       evidence.byPhone.get(helpers.normalizePhone(initial.row.phone))?.exactContactIds, scanNow);
+    if (armedRecoveryLead.performed) {
+      const extra = createArmedRecoveryExtraRequester(token, fetchImpl);
+      const notes = await extra("notes"), field = await extra("dateField");
+      Object.assign(armedRecoveryLead, armedRecoveryExtraDiagnostic(initial.row, notes, field));
+      const notesAfter = await extra("notes"), fieldAfter = await extra("dateField");
+      const rawAfter = await request(`/api/v4/leads/${ARMED_RECOVERY_LEAD_ID}`, { with: "contacts" });
+      if (privateFingerprint(stableReviewEntity(raw)) !== privateFingerprint(stableReviewEntity(rawAfter)) ||
+        raw.price !== rawAfter?.price || privateFingerprint(notes) !== privateFingerprint(notesAfter) || privateFingerprint(field) !== privateFingerprint(fieldAfter))
+        armedRecoveryLead = { performed: false, reason: "recovery_extra_evidence_changed_during_scan", retryAuthorized: false };
+    }
   }
   const storedId = helpers.optionalStoredAmoLeadId(initial.row.amoLeadId);
   const storedRaw = storedId ? await request(`/api/v4/leads/${storedId}`, { with: "contacts" }) : null;
@@ -980,5 +1073,6 @@ Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches
 Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence, reviewSourceEvidence, auditQuery, validateAuditRows, auditReport });
 Object.assign(module.exports, { recoveryAuditQuery, validateRecoveryAuditRows, recoveryAuditReport });
 Object.assign(module.exports, { armedRecoveryLeadDiagnostic, ARMED_RECOVERY_METADATA });
+Object.assign(module.exports, { armedRecoveryFormDiagnostic, createArmedRecoveryExtraRequester, armedRecoveryExtraDiagnostic });
 Object.assign(module.exports, { attestedRuntimePhoneLock, createReadOnlyRedis, collectReadOnlyRedisLease });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });
