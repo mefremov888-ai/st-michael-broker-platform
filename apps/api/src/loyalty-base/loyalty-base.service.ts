@@ -8165,7 +8165,10 @@ export class LoyaltyBaseService {
     // 2026-09-08: у записи базы Анны свои цифры обычно null; если есть
     // подтверждённая сцепка с нашей карточкой — сортируем по цифрам кабинета.
     const activityMetric = (item: any, field: string) =>
-      filter.activityPeriod
+      (field === "fixations" ? filter.fixationPeriod
+        : field === "meetings" ? filter.meetingPeriod
+          : field === "deals" || field === "dealAmount" ? filter.dealPeriod
+            : filter.activityPeriod)
         ? finiteNumber(
             item.periodMetrics?.[field] ??
               item.linkedOurRecord?.periodMetrics?.[field],
@@ -9084,9 +9087,15 @@ export class LoyaltyBaseService {
       );
       return loaded as any[];
     });
+    const periods = {
+      fixation: filter.fixationPeriod,
+      meeting: filter.meetingPeriod,
+      deal: filter.dealPeriod,
+    };
+    const anyPeriod = periods.fixation || periods.meeting || periods.deal;
     const periodMetrics = await this.ourBrokerPeriodMetrics(
       (records as any[]).map((record) => String(record.id)),
-      filter.activityPeriod,
+      periods,
       filter.cabinetSource,
     );
     const linkedAnnaIds = await this.linkedAnnaTargetIds("BROKER", filter);
@@ -9095,7 +9104,7 @@ export class LoyaltyBaseService {
         const item = this.mapOurBroker(record, null);
         item.periodMetrics =
           periodMetrics.get(String(record.id)) ||
-          this.unavailablePeriodMetrics(filter.activityPeriod);
+          this.unavailablePeriodMetrics(anyPeriod);
         return { record, item };
       })
       .filter(({ record, item }) =>
@@ -9105,7 +9114,7 @@ export class LoyaltyBaseService {
     await this.attachOurDealAmounts(
       candidates,
       "brokerId",
-      filter.sortBy === "dealAmount" && !filter.activityPeriod,
+      filter.sortBy === "dealAmount" && !filter.dealPeriod,
     );
     this.sortLoyaltyCandidates(candidates, filter);
     const total = candidates.length;
@@ -9113,7 +9122,7 @@ export class LoyaltyBaseService {
       (page - 1) * pageSize,
       page * pageSize,
     );
-    if (filter.sortBy !== "dealAmount" || Boolean(filter.activityPeriod)) {
+    if (filter.sortBy !== "dealAmount" || Boolean(filter.dealPeriod)) {
       await this.attachOurDealAmounts(pageCandidates, "brokerId", true);
     }
     // 2026-09-08: бейдж «в базе Анны» — сцепка в обратную сторону (страница).
@@ -9131,7 +9140,7 @@ export class LoyaltyBaseService {
       total,
       {
         callPeriod: "EXACT",
-        activityPeriod: filter.activityPeriod
+        activityPeriod: anyPeriod
           ? "LOCAL_PRELIMINARY"
           : "UNAVAILABLE",
       },
@@ -12853,16 +12862,22 @@ export class LoyaltyBaseService {
       item: this.mapOurBroker(record, null),
     }));
     await this.attachOurDealAmounts(candidates, "brokerId", true);
+    const periods = {
+      fixation: filter.fixationPeriod,
+      meeting: filter.meetingPeriod,
+      deal: filter.dealPeriod,
+    };
+    const anyPeriod = periods.fixation || periods.meeting || periods.deal;
     const periodMetrics = await this.ourBrokerPeriodMetrics(
       records.map((record) => String(record.id)),
-      filter.activityPeriod,
+      periods,
       cabinetSource,
     );
     for (const { record, item } of candidates) {
       item.periodMetrics =
         periodMetrics.get(String(record.id)) ||
-        this.unavailablePeriodMetrics(filter.activityPeriod);
-      if (filter.activityPeriod) item.metricSource.periodFilterApplied = true;
+        this.unavailablePeriodMetrics(anyPeriod);
+      if (anyPeriod) item.metricSource.periodFilterApplied = true;
       for (const target of byBrokerId.get(String(record.id)) || []) {
         target.linkedOurRecord = item;
       }
