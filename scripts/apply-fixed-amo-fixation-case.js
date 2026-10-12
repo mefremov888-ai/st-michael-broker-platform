@@ -26,6 +26,21 @@ const RECOVERY_UUID = "7a8d216e-1637-43eb-985b-19b75fd2b9ed";
 const RECOVERY_SOURCE = "st-michael-fixed-amo-case-recovery-v1";
 const MAX_EVIDENCE_AGE_MS = 60_000;
 const MAX_REQUESTS = 80;
+// The reviewed, failed 11 October operation made zero provider writes and
+// left no recovery claim. Its finally block alone installed this 24h guard.
+const ZERO_POST_FAILURE_RUN_ID = "38150838032";
+const ABANDONED_LEASE_EXPIRES_AT = Date.parse("2026-10-12T15:22:30.000Z");
+const REPLACE_ABANDONED_UNCERTAIN = [
+  "-- fixed-case:replace-reviewed-zero-post-uncertain",
+  "local raw = redis.call('GET', KEYS[1])",
+  "if raw ~= ARGV[1] then return 0 end",
+  "local ok, current = pcall(cjson.decode, raw)",
+  "if not ok or current.status ~= 'uncertain' then return 0 end",
+  "local ttl = redis.call('PTTL', KEYS[1])",
+  "if ttl <= 0 or ttl > tonumber(ARGV[4]) then return 0 end",
+  "redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])",
+  "return 1",
+].join("\n");
 const PHASES = Object.freeze(["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "LEAD_RESOLVED", "LINKED", "UNRESOLVED"]);
 const SOURCE_FILES = Object.freeze({
   recovery: __filename,
@@ -584,6 +599,55 @@ async function runPlan({ prisma, environment = process.env, confirmation,
     sourceSha256: source.hashes.recovery, deployedGitSha: metadata.deployedGitSha,
     mutationAuthorized: false, databaseWrites: false, amoWrites: false };
 }
+async function readReviewedAbandonedLease(redis, key, environment, clock = () => Date.now()) {
+  if (environment.FIXED_CASE_ZERO_POST_FAILURE_RUN_ID !== ZERO_POST_FAILURE_RUN_ID ||
+    !/^client-fixation:semantic:[0-9a-f]{64}$/.test(key)) fail("ABANDONED_LEASE_UNVERIFIED");
+  const sample = async () => {
+    const start = clock(), raw = await redis.get(key), ttl = await redis.pttl(key), end = clock();
+    let value;
+    try { value = JSON.parse(raw); } catch { fail("ABANDONED_LEASE_UNVERIFIED"); }
+    if (typeof raw !== "string" || Buffer.byteLength(raw) > 512 || !value ||
+      Object.keys(value).sort().join() !== "fingerprint,owner,status" || value.status !== "uncertain" ||
+      !/^[0-9a-f]{64}$/.test(value.fingerprint || "") ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.owner || "") ||
+      !Number.isSafeInteger(ttl) || ttl <= 0 || ttl > 86400000 ||
+      !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start || end - start > 1000 ||
+      Math.abs(end + ttl - ABANDONED_LEASE_EXPIRES_AT) > 2000) fail("ABANDONED_LEASE_UNVERIFIED");
+    return { raw, ttl, start, end };
+  };
+  const first = await sample(), second = await sample();
+  if (first.raw !== second.raw || second.ttl > first.ttl ||
+    first.ttl - second.ttl > second.end - first.start + 100 || second.end - first.start > 2000)
+    fail("ABANDONED_LEASE_UNVERIFIED");
+  return second;
+}
+async function acquireFixedCasePhoneLeases(redis, row, phoneKey, environment, clock = () => Date.now()) {
+  effective(row); // Never use this exception for another case or phone cohort.
+  const exactKey = stagedPhoneLockModule.amoFixationPhoneLockRedisKey(row.phone);
+  let replacementAttempted = false;
+  const guarded = new Proxy(redis, { get(target, property) {
+    if (property !== "set") {
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+    return async (...args) => {
+      const result = await target.set(...args);
+      if (result === "OK") return result;
+      if (replacementAttempted || args.length !== 5 || args[0] !== exactKey || args[2] !== "PX" || args[4] !== "NX")
+        fail("ABANDONED_LEASE_UNVERIFIED");
+      replacementAttempted = true;
+      const observed = await readReviewedAbandonedLease(target, exactKey, environment, clock);
+      // No DEL/SET gap. A worker, TTL renewal or raw-value change wins and this
+      // operation stops before any database claim or provider POST.
+      const replaced = await target.eval(REPLACE_ABANDONED_UNCERTAIN, 1, exactKey,
+        observed.raw, args[1], String(args[3]), String(observed.ttl));
+      return Number(replaced) === 1 ? "OK" : null;
+    };
+  } });
+  return leaseModule.acquirePhoneLeases(guarded,
+    [{ group: { normalizedPhone: helpers.normalizePhone(row.phone) } }], phoneKey,
+    stagedPhoneLockModule.amoFixationPhoneLockRedisKey);
+}
 async function runDraftRecovery({ prisma, redis, environment = process.env, confirmation,
   operationLock, fetchImpl = globalThis.fetch, now = () => new Date(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
@@ -607,17 +671,17 @@ async function runDraftRecovery({ prisma, redis, environment = process.env, conf
   if (prior.length) return { status: "prior_operation_readonly", automaticRetryBlocked: true, assignmentNeeded: true, directMorekitDispatchAttempted: false, databaseWrites: false, contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 };
   certifiedNegative(initialEvidence, initial.row, initial.agency, certificate, now);
   const leaseKey = randomBytes(32);
-  let leases, baseline, contactId, leadId, linked = false;
+  let leases, baseline, contactId, leadId, linked = false, claimAttempted = false;
   const state = { phase: "NONE", requests: 0, contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0, leadId: null };
   try {
-    leases = await leaseModule.acquirePhoneLeases(redis, [{ group: { normalizedPhone: helpers.normalizePhone(initial.row.phone) } }], leaseKey,
-      stagedPhoneLockModule.amoFixationPhoneLockRedisKey);
+    leases = await acquireFixedCasePhoneLeases(redis, initial.row, leaseKey, environment);
     await operationLock.assertOwned(); await leases.assertOwned();
     await unchanged(prisma, environment, initial);
     const currentEvidence = await freshEvidence(initial.row, request, token, fetchImpl, now);
     certificate = await recheckCertificate(certificate, initial.row, initial.agency, currentEvidence, request, token, fetchImpl);
     assertCertificateHashes(certificate, metadata);
     certifiedNegative(currentEvidence, initial.row, initial.agency, certificate, now);
+    claimAttempted = true;
     const claimed = await claim(prisma, environment, initial, metadata);
     if (claimed.prior) fail("PRIOR_OPERATION_PRESENT");
     baseline = await snapshot(prisma, environment);
@@ -679,7 +743,10 @@ async function runDraftRecovery({ prisma, redis, environment = process.env, conf
       contactPosts: state.contactPosts, leadPosts: state.leadPosts, patchPosts: state.patchPosts, notePosts: state.notePosts,
       failureCode: safeFailureCode(error) };
   } finally {
-    if (leases) await leases.release(linked ? new Set([helpers.normalizePhone(initial.row.phone)]) : new Set()).catch(() => undefined);
+    // A refusal before claiming/writing is not an ambiguous provider result.
+    // Do not leave another 24h uncertain guard after a zero-write preflight.
+    const noWrites = !claimAttempted && state.contactPosts === 0 && state.leadPosts === 0 && state.patchPosts === 0 && state.notePosts === 0;
+    if (leases) await leases.release(linked || noWrites ? new Set([helpers.normalizePhone(initial.row.phone)]) : new Set()).catch(() => undefined);
     leaseKey.fill(0);
   }
 }
@@ -689,6 +756,7 @@ function safeFailureCode(error) {
   // failures use .code, while this writer/certificate uses .safeCode. Never
   // print arbitrary codes, messages, stacks or provider payloads.
   codes.push("PHONE_LOCK_BUSY", "PHONE_LOCK_OWNERSHIP_LOST", "SHARED_PHONE_LOCK_CONTRACT_INVALID", "ATTESTATION_KEY_INVALID");
+  codes.push("ABANDONED_LEASE_UNVERIFIED");
   codes.push("CERT_BODY_BOUND_EXCEEDED", "CERT_BROKER_INVALID", "CERT_BROKER_LINKS_INVALID", "CERT_CALLTOUCH_PROVENANCE_INVALID",
     "CERT_CANDIDATE_CHANGED", "CERT_CASE_SCOPE_INVALID", "CERT_CASE_TIME_INVALID", "CERT_CREATION_EVENT_INVALID",
     "CERT_EVENT_INVALID", "CERT_EVENT_LINK_INVALID", "CERT_EVENTS_INCOMPLETE", "CERT_EVIDENCE_STALE", "CERT_FIELD_INVALID",
@@ -711,4 +779,5 @@ module.exports = { CLIENT_ID, OWNER_ID, OPERATION_KEY, ENTITY, MARKER, CONFIRMAT
   createCanonicalTransport, createIsolatedAdapter, negative, certifiedNegative, contactMatches, leadMatches,
   exactLeadFormFields, expectedRecoveryNote, confirmRecoveryNote, payload, pollContacts, pollLeads, link,
   exactLeadCustomFields, createExactFixationLeadOnce,
-  runPlan, runDraftRecovery, safeFailureCode };
+  runPlan, runDraftRecovery, safeFailureCode, ZERO_POST_FAILURE_RUN_ID,
+  ABANDONED_LEASE_EXPIRES_AT, readReviewedAbandonedLease, acquireFixedCasePhoneLeases, REPLACE_ABANDONED_UNCERTAIN };

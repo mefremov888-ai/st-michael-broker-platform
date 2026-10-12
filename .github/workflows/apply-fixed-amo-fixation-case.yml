@@ -127,6 +127,31 @@ jobs:
           fi
           printf 'mode=%s\ndeployed_sha=%s\nplan_run=%s\ncase_hash=%s\ncandidate_hash=%s\nbackup_run=%s\nbackup_epoch=%s\nci_run=%s\n' \
             "$mode" "$deployed_sha" "$plan_run" "$case_hash" "$candidate_hash" "$backup_run" "$backup_epoch" "$ci_run" >> "$GITHUB_OUTPUT"
+      - name: Verify exact historical zero-post failure before lease recovery
+        id: abandoned
+        if: ${{ inputs.mode == 'apply' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/sereganikitin/st-michael-broker-platform/actions/runs/38150838032 | jq -e '
+            .id == 38150838032 and .actor.login == "mefremov888-ai" and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
+            .head_sha == "78e0e607d07397bfeacabbb4b41a64a57b54877a" and .head_branch == "master" and
+            .path == ".github/workflows/apply-fixed-amo-fixation-case.yml" and .event == "workflow_dispatch" and
+            .status == "completed" and .conclusion == "failure" and .run_attempt == 1' >/dev/null
+          # Parse only the actual protected report at its known timestamp, not
+          # echoed shell source. No raw logs, tokens or CRM data are printed.
+          gh run view 38150838032 --repo sereganikitin/st-michael-broker-platform --log | node -e '
+            let input="";process.stdin.setEncoding("utf8");process.stdin.on("data",part=>{input+=part;if(input.length>8388608)process.exit(1)});
+            process.stdin.on("end",()=>{
+              const matches=input.split("\n").map(line=>line.match(/^\S+\t[^\t]+\t2026-10-11T15:22:30\.\d+Z (\{.*\})\r?$/)).filter(Boolean);
+              if(matches.length!==1)process.exit(1);
+              const report=JSON.parse(matches[0][1]);
+              if(report.status!=="unresolved"||report.failureCode!=="RECOVERY_REFUSED"||report.automaticRetryBlocked!==true||report.directMorekitDispatchAttempted!==false||
+                ["contactPosts","leadPosts","patchPosts","notePosts"].some(key=>report[key]!==0))process.exit(1);
+            });'
+          echo zero_post_failure_run_id=38150838032 >> "$GITHUB_OUTPUT"
       - name: Download immutable reviewed-plan attestation
         if: ${{ inputs.mode == 'apply' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -205,6 +230,7 @@ jobs:
           BACKUP_RUN_ID: ${{ steps.gate.outputs.backup_run }}
           BACKUP_EPOCH: ${{ steps.gate.outputs.backup_epoch }}
           CI_RUN_ID: ${{ steps.gate.outputs.ci_run }}
+          ZERO_POST_FAILURE_RUN_ID: ${{ steps.abandoned.outputs.zero_post_failure_run_id }}
           GH_TOKEN: ${{ github.token }}
           SSH_HOST: ${{ secrets.DEPLOY_HOST }}
           SSH_USER: ${{ secrets.DEPLOY_USER }}
@@ -283,7 +309,7 @@ jobs:
           umask 077
           deploy_path=$1; source_sha=$2; deployed_sha=$3; run_id=$4; backup_run=$5; backup_epoch=$6
           expected_pg=$7; broker_floor=$8; archive_sha=$9; manifest_sha=${10}; runner_sha=${11}
-          mode=${12}; plan_run=${13}; case_hash=${14}; candidate_hash=${15}; ci_run=${16}
+          mode=${12}; plan_run=${13}; case_hash=${14}; candidate_hash=${15}; ci_run=${16}; zero_post_failure=${17}
           stage=remote_validation
           phase() { stage=$1; printf 'fixed_case_stage=%s\n' "$stage"; }
           for sha in "$source_sha" "$deployed_sha"; do [[ "$sha" =~ ^[a-f0-9]{40}$ ]] || exit 1; done
@@ -291,6 +317,7 @@ jobs:
           [[ "$mode" = plan || "$mode" = apply ]] || exit 1
           for number in "$run_id" "$broker_floor"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
           if [ "$mode" = apply ]; then
+            test "$zero_post_failure" = 38150838032 || exit 1
             for number in "$backup_run" "$backup_epoch" "$plan_run" "$ci_run"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1; done
             [[ "$case_hash" =~ ^[a-f0-9]{64}$ && "$candidate_hash" =~ ^[a-f0-9]{64}$ ]] || exit 1
           else
@@ -428,6 +455,7 @@ jobs:
           if [ "$mode" = plan ]; then confirmation=PLAN_FIXED_AMO_CASE_READONLY; else confirmation=RECOVER_APPROVED_FIXED_AMO_CASE_ONCE; fi
           timeout --foreground 9m docker exec -i \
             -e FIXED_CASE_MODE="$mode" -e FIXED_CASE_CONFIRMATION="$confirmation" \
+            -e FIXED_CASE_ZERO_POST_FAILURE_RUN_ID="$zero_post_failure" \
             -e FIXED_CASE_RUN_ID="$run_id" -e FIXED_CASE_RUN_ATTEMPT=1 \
             -e FIXED_CASE_PLAN_RUN_ID="$plan_run" -e FIXED_CASE_EXPECTED_CASE_HASH="$case_hash" \
             -e FIXED_CASE_EXPECTED_CANDIDATE_HASH="$candidate_hash" \
@@ -497,7 +525,7 @@ jobs:
             -o UserKnownHostsFile="$known_hosts" -o ConnectTimeout=15 \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
             "${SSH_USER}@${SSH_HOST}" \
-             "bash -s -- '$DEPLOY_PATH' '$EXPECTED_SHA' '$EXPECTED_DEPLOYED_SHA' '$EXPECTED_RUN_ID' '$BACKUP_RUN_ID' '$BACKUP_EPOCH' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS' '$archive_sha' '$manifest_sha' '$runner_sha' '$FIXED_CASE_MODE' '$PLAN_RUN_ID' '$EXPECTED_CASE_HASH' '$EXPECTED_CANDIDATE_HASH' '$CI_RUN_ID'" | tee "$safe_output"
+             "bash -s -- '$DEPLOY_PATH' '$EXPECTED_SHA' '$EXPECTED_DEPLOYED_SHA' '$EXPECTED_RUN_ID' '$BACKUP_RUN_ID' '$BACKUP_EPOCH' '$PRODUCTION_PG_SYSTEM_IDENTIFIER' '$PRODUCTION_MIN_BROKER_ROWS' '$archive_sha' '$manifest_sha' '$runner_sha' '$FIXED_CASE_MODE' '$PLAN_RUN_ID' '$EXPECTED_CASE_HASH' '$EXPECTED_CANDIDATE_HASH' '$CI_RUN_ID' '$ZERO_POST_FAILURE_RUN_ID'" | tee "$safe_output"
           mapfile -t safe_lines < "$safe_output"
           test "${safe_lines[0]:-}" = fixed_case_stage=remote_runtime_and_database || exit 1
           if [ "$FIXED_CASE_MODE" = plan ]; then

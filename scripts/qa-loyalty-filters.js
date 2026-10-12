@@ -27,6 +27,37 @@ function signJwt(payload, secret) {
   return `${data}.${b64url(crypto.createHmac("sha256", secret).update(data).digest())}`;
 }
 
+// Compare Decimal(18,2) values exactly; textual formatting is not money identity.
+function decimalCents(value) {
+  if (value === null || value === undefined) return null;
+  const match = String(value).match(/^(-?)(\d+)(?:\.(\d{1,2}))?$/);
+  if (!match) return null;
+  const cents = BigInt(match[2]) * 100n + BigInt((match[3] || "").padEnd(2, "0"));
+  return match[1] ? -cents : cents;
+}
+function sameMoney(left, right) {
+  const cents = decimalCents(left);
+  return cents !== null && cents === decimalCents(right);
+}
+function fixationOnlyFilter(period) {
+  return { fixationPeriod: period };
+}
+function sampledPeriodMatches(expectedCount, result, perRowOk) {
+  return result.total === expectedCount &&
+    (expectedCount === 0 || result.items.length > 0) && perRowOk;
+}
+function agencyPeriodWhere(metric, period) {
+  // Agency metrics use UTC date labels (not Moscow midnight instants).
+  const from = new Date(`${period.from.slice(0, 10)}T00:00:00.000Z`);
+  const until = new Date(`${period.to.slice(0, 10)}T00:00:00.000Z`);
+  until.setUTCDate(until.getUTCDate() + 1);
+  const relation = metric === "fixation"
+    ? { clients: { some: { ...FIX, createdAt: { gte: from, lt: until } } } }
+    : { meetings: { some: { status: { in: ["CONFIRMED", "COMPLETED"] },
+        type: { not: "BROKER_TOUR" }, date: { gte: from, lt: until } } } };
+  return { brokerAgencies: { some: { broker: relation } } };
+}
+
 const results = [];
 function check(name, ok, detail) {
   results.push({ name, ok: Boolean(ok), detail });
@@ -91,15 +122,21 @@ async function main() {
     // ── Период активности: фиксации за 30 дней ──
     const to = new Date(); const from = new Date(to.getTime() - 30 * 86400000);
     const period = { from: from.toISOString(), to: to.toISOString() };
-    const inPeriod = await search("brokers", { activityPeriod: period }, { activity: "HAS_FIXATIONS" }, { activityType: "FIXATION" });
+    const inPeriod = await search("brokers", fixationOnlyFilter(period), { activity: "HAS_FIXATIONS" });
+    const dbPeriodBrokerCount = await prisma.broker.count({ where: {
+      role: "BROKER", mergedIntoId: null,
+      clients: { some: { ...FIX, createdAt: { gte: from, lte: to } } },
+    } });
     let periodOk = true, periodChecked = 0;
     for (const item of inPeriod.items.slice(0, 15)) {
       const n = await prisma.client.count({ where: { brokerId: item.id, ...FIX, createdAt: { gte: from, lte: to } } });
       const api = Number(item.periodMetrics?.fixations);
-      if (Number.isFinite(api) && n !== api) { periodOk = false; console.log(`   ✗ ${item.id}: periodMetrics.fixations API ${api} vs БД ${n}`); }
+      if (!Number.isFinite(api) || api <= 0 || n !== api) { periodOk = false; console.log(`   ✗ ${item.id}: periodMetrics.fixations API ${api} vs БД ${n}`); }
       periodChecked++;
     }
-    check("период: periodMetrics.fixations за 30 дней = БД", periodOk, `проверено ${periodChecked}`);
+    check("период: только фиксации за 30 дней = БД и непустая выборка при наличии данных",
+      sampledPeriodMatches(dbPeriodBrokerCount, inPeriod, periodOk),
+      `API брокеров ${inPeriod.total} vs БД ${dbPeriodBrokerCount}; проверено ${periodChecked}`);
 
     // ── Обзор: activities.fixations = БД за период ──
     const ov = await http("GET", `/loyalty-base/ours/overview?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`);
@@ -128,6 +165,24 @@ async function main() {
     const agOld = await search("agencies", { cabinetSource: "old" }, { activity: "HAS_FIXATIONS" });
     const agNew = await search("agencies", { cabinetSource: "new" }, { activity: "HAS_FIXATIONS" });
     check("агентства: источник old/new ≤ оба", agOld.total <= agHas.total && agNew.total <= agHas.total, `${agOld.total}, ${agNew.total} ≤ ${agHas.total}`);
+
+    // Independent periods must not silently require other kinds of activity.
+    const agencyFixWhere = agencyPeriodWhere("fixation", period);
+    const agencyMeetingWhere = agencyPeriodWhere("meeting", period);
+    for (const [label, filter, where, metrics] of [
+      ["фиксации", { fixationPeriod: period }, agencyFixWhere, ["fixations"]],
+      ["встречи", { meetingPeriod: period }, agencyMeetingWhere, ["meetings"]],
+      ["фиксации И встречи", { fixationPeriod: period, meetingPeriod: period },
+        { AND: [agencyFixWhere, agencyMeetingWhere] }, ["fixations", "meetings"]],
+    ]) {
+      const selection = await search("agencies", { includeLowSignal: true, ...filter });
+      const expected = await prisma.agency.count({ where });
+      const rowsOk = selection.items.every((item) => metrics.every((key) =>
+        Number.isFinite(Number(item.periodMetrics?.[key])) && Number(item.periodMetrics[key]) > 0));
+      check(`агентства: независимый период ${label} = БД`,
+        sampledPeriodMatches(expected, selection, rowsOk),
+        `API ${selection.total} vs БД ${expected}; проверено ${selection.items.length}`);
+    }
 
     // ── Сделки в периоде ──
     const deals = await search("brokers", { activityPeriod: period, dealsInPeriod: true });
@@ -201,7 +256,7 @@ async function main() {
       const s0 = await summary("brokers", {});
       const a0 = s0.body?.activities || {};
       check("сводка: без фильтров = обзор (фиксации, встречи, брони, сделки)", (s0.status === 200 || s0.status === 201) && a0.fixations === ov.body?.activities?.fixations && a0.meetings === ov.body?.activities?.meetings && a0.paidBookings === ov.body?.activities?.paidBookings && a0.deals === ov.body?.activities?.deals, `сводка ${JSON.stringify(a0)} vs обзор ${JSON.stringify(ov.body?.activities)}`);
-      check("сводка: без фильтров сумма ДДУ = обзор", String(s0.body?.dealAmount) === String(ov.body?.dealAmount), `${s0.body?.dealAmount} vs ${ov.body?.dealAmount}`);
+      check("сводка: без фильтров сумма ДДУ = обзор", sameMoney(s0.body?.dealAmount, ov.body?.dealAmount), `${s0.body?.dealAmount} vs ${ov.body?.dealAmount}`);
       check("сводка: выборка без фильтров = всего брокеров списка", Number(s0.body?.selection?.count) === all.total, `${s0.body?.selection?.count} vs ${all.total}`);
       const s1 = await summary("brokers", { columns: { activity: "HAS_FIXATIONS" } });
       const a1 = s1.body?.activities || {};
@@ -252,4 +307,7 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("FATAL:", e?.message || e); process.exit(1); });
+module.exports = { decimalCents, sameMoney, fixationOnlyFilter, sampledPeriodMatches, agencyPeriodWhere };
+if (require.main === module) {
+  main().catch((e) => { console.error("FATAL:", e?.message || e); process.exit(1); });
+}

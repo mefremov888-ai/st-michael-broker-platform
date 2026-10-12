@@ -190,6 +190,22 @@
   overflow: hidden;
   transition: transform .2s ease, box-shadow .2s ease;
 }
+/* Share the heading track within each folder row, including long titles.
+   Covers keep their own height instead of absorbing leftover card space. */
+@supports (grid-template-rows: subgrid) {
+  .mb-page .mb-grid > .mb-card {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 2;
+    row-gap: 0;
+  }
+}
+.mb-page .mb-grid > .mb-card > .mb-card-heading {
+  min-height: 126px;
+}
+.mb-page .mb-grid > .mb-card .mb-card-title {
+  min-height: 50px;
+}
 .mb-page .mb-file-preview {
   position: relative;
   display: flex;
@@ -259,7 +275,7 @@
 .mb-page .mb-card-media {
   position: relative;
   display: block;
-  flex: 1 0 auto;
+  flex: 0 0 auto;
   width: 100%;
   height: 400px;
   min-width: 0;

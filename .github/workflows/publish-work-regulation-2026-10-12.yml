@@ -1,0 +1,282 @@
+name: Publish reviewed broker work regulation 2026-10-12
+
+# Read-only plan first; exact approved old WORK IDs only, files preserved.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [plan, apply]
+        default: plan
+        required: true
+      confirmation:
+        description: Apply only - type PUBLISH_REVIEWED_BROKER_WORK_REGULATION
+        type: string
+        required: false
+      expected_old_hash:
+        description: Exact snapshot hash returned by this workflow in plan mode
+        type: string
+        required: false
+      approved_old_ids:
+        description: JSON array of exact public old WORK IDs from plan; [] for no old document
+        type: string
+        default: '[]'
+        required: true
+      backup_run_id:
+        description: Apply only - exact deployed-SHA successful production backup under 6 hours old
+        type: string
+        required: false
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Gate exact reviewed source and production backup attestation
+        id: gate
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REF: ${{ github.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$RUN_ATTEMPT" = 1
+          test "$EXPECTED_REPOSITORY" = sereganikitin/st-michael-broker-platform
+          test "$EXPECTED_REF" = refs/heads/master
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform
+          test "$(gh api /repos/$EXPECTED_REPOSITORY/git/ref/heads/master --jq '.object.sha')" = "$SOURCE_SHA"
+          deployed_sha=$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha | select(type == "string" and test("^[a-f0-9]{40}$"))')
+          comparison=$(gh api "/repos/$EXPECTED_REPOSITORY/compare/$deployed_sha...$SOURCE_SHA" --jq '.status')
+          case "$comparison" in ahead|identical) ;; *) exit 1;; esac
+          mode=$(jq -er '.inputs.mode | select(. == "plan" or . == "apply")' "$GITHUB_EVENT_PATH")
+          old_hash=none; backup_run=0; backup_attempt=0; backup_epoch=0
+          if [ "$mode" = apply ]; then
+            jq -e '.inputs.confirmation == "PUBLISH_REVIEWED_BROKER_WORK_REGULATION"' "$GITHUB_EVENT_PATH" >/dev/null
+            old_hash=$(jq -er '.inputs.expected_old_hash | select(type == "string" and test("^[a-f0-9]{64}$"))' "$GITHUB_EVENT_PATH")
+            backup_run=$(jq -er '.inputs.backup_run_id | select(type == "string" and test("^[1-9][0-9]{5,19}$"))' "$GITHUB_EVENT_PATH")
+            backup=$(gh api "/repos/$EXPECTED_REPOSITORY/actions/runs/$backup_run")
+            printf '%s' "$backup" | jq -e --arg sha "$deployed_sha" --arg id "$backup_run" '
+              (.id | tostring) == $id and .repository.full_name == "sereganikitin/st-michael-broker-platform" and
+              .head_repository.full_name == .repository.full_name and .head_sha == $sha and .head_branch == "master" and
+              .path == ".github/workflows/backup-production-loyalty-predeploy.yml" and .event == "workflow_dispatch" and
+              .status == "completed" and .conclusion == "success" and (.run_attempt | type == "number" and . >= 1)' >/dev/null
+            backup_attempt=$(printf '%s' "$backup" | jq -er '.run_attempt | tostring | select(test("^[1-9][0-9]{0,9}$"))')
+            backup_time=$(printf '%s' "$backup" | jq -er '.updated_at | select(type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))')
+            backup_epoch=$(date -u -d "$backup_time" +%s)
+            age=$(( $(date -u +%s) - backup_epoch )); test "$age" -ge 0 -a "$age" -le 21600
+          fi
+          for file in scripts/publish-work-regulation-2026-10-12.js assets/cooperation/work-regulation-2026-10-12.pdf; do
+            test -f "$file" -a ! -L "$file"
+            test "$(git show "$SOURCE_SHA:$file" | sha256sum | cut -d' ' -f1)" = "$(sha256sum "$file" | cut -d' ' -f1)"
+          done
+          test "$(sha256sum assets/cooperation/work-regulation-2026-10-12.pdf | cut -d' ' -f1)" = 55f22d405f018b4668b5bf64748b08597796bfd97a6c2db162b4847c5d3f9906
+          test "$(stat -c %s assets/cooperation/work-regulation-2026-10-12.pdf)" = 97222
+          node --test scripts/publish-work-regulation-2026-10-12.test.js
+          printf 'mode=%s\nold_hash=%s\nbackup_run=%s\nbackup_attempt=%s\nbackup_epoch=%s\ndeployed_sha=%s\n' "$mode" "$old_hash" "$backup_run" "$backup_attempt" "$backup_epoch" "$deployed_sha" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact deployed publisher and PDF blobs for operational-only attestation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.gate.outputs.deployed_sha }}
+          path: .deployed-publisher-source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Refuse a runtime publisher or PDF change without production deployment
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          DEPLOYED_SHA: ${{ steps.gate.outputs.deployed_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ && "$DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C .deployed-publisher-source rev-parse HEAD)" = "$DEPLOYED_SHA"
+          for file in scripts/publish-work-regulation-2026-10-12.js assets/cooperation/work-regulation-2026-10-12.pdf; do
+            reviewed_blob=$(git show "$SOURCE_SHA:$file" | sha256sum | cut -d' ' -f1)
+            deployed_blob=$(git -C .deployed-publisher-source show "$DEPLOYED_SHA:$file" | sha256sum | cut -d' ' -f1)
+            test "$reviewed_blob" = "$deployed_blob"
+          done
+          echo deployed_publication_payload_identical=true
+      - name: Stream exact immutable PDF and scoped publisher under production lock
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          DEPLOYED_SHA: ${{ steps.gate.outputs.deployed_sha }}
+          MODE: ${{ steps.gate.outputs.mode }}
+          OLD_HASH: ${{ steps.gate.outputs.old_hash }}
+          APPROVED_IDS: ${{ inputs.approved_old_ids }}
+          BACKUP_RUN: ${{ steps.gate.outputs.backup_run }}
+          BACKUP_ATTEMPT: ${{ steps.gate.outputs.backup_attempt }}
+          BACKUP_EPOCH: ${{ steps.gate.outputs.backup_epoch }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          EXPECTED_SSH_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          EXPECTED_PG: ${{ vars.PRODUCTION_PG_SYSTEM_IDENTIFIER }}
+          BROKER_FLOOR: ${{ vars.PRODUCTION_MIN_BROKER_ROWS }}
+        run: |
+          set -eEuo pipefail
+          case "$SSH_HOST" in ""|-*|*[[:space:]]*) exit 1;; esac
+          [[ "$SSH_USER" =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$ ]]
+          [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] && test "$SSH_PORT" -ge 1 -a "$SSH_PORT" -le 65535
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ ]]
+          case "$DEPLOY_PATH/" in *"/../"*|*"/./"*|*"//"*) exit 1;; esac
+          [[ "$EXPECTED_PG" =~ ^[0-9]+$ && "$BROKER_FLOOR" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$EXPECTED_SSH_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          node -e 'const ids=JSON.parse(process.argv[1]); if(!Array.isArray(ids)||ids.length>20||!ids.every(id=>/^[a-z0-9-]{1,80}$/i.test(id))||new Set(ids).size!==ids.length) process.exit(1)' "$APPROVED_IDS"
+          ids64=$(printf '%s' "$APPROVED_IDS" | base64 -w 0)
+          umask 077
+          work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/work-regulation-publication.XXXXXX")
+          archive="$work/payload.tar"; key="$work/key"; hosts="$work/known_hosts"
+          cleanup_local() { rm -f -- "$archive" "$key" "$hosts"; rmdir -- "$work" 2>/dev/null || true; }
+          trap cleanup_local EXIT
+          tar --format=ustar -cf "$archive" scripts/publish-work-regulation-2026-10-12.js assets/cooperation/work-regulation-2026-10-12.pdf
+          archive_sha=$(sha256sum "$archive" | cut -d' ' -f1)
+          script_sha=$(sha256sum scripts/publish-work-regulation-2026-10-12.js | cut -d' ' -f1)
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"; chmod 600 "$key"; unset SSH_PRIVATE_KEY
+          timeout 15 ssh-keyscan -p "$SSH_PORT" -t ed25519 "$SSH_HOST" > "$hosts" 2>/dev/null
+          test "$(ssh-keygen -lf "$hosts" -E sha256 | awk '{print $2}' | sort -u)" = "$EXPECTED_SSH_FINGERPRINT"
+          {
+            cat <<'REMOTE_PREFIX'
+          set -eEuo pipefail
+          umask 077
+          export LC_ALL=C GIT_OPTIONAL_LOCKS=0
+          deploy_path=$1; source_sha=$2; deployed_sha=$3; mode=$4; old_hash=$5
+          backup_run=$6; backup_attempt=$7; backup_epoch=$8; expected_pg=$9; broker_floor=${10}; archive_sha=${11}; script_sha=${12}; ids64=${13}
+          [[ "$ids64" =~ ^[A-Za-z0-9+/=]+$ ]]
+          approved_ids=$(printf %s "$ids64" | base64 -d)
+          for sha in "$source_sha" "$deployed_sha"; do [[ "$sha" =~ ^[a-f0-9]{40}$ ]]; done
+          for hash in "$archive_sha" "$script_sha"; do [[ "$hash" =~ ^[a-f0-9]{64}$ ]]; done
+          [[ "$expected_pg" =~ ^[0-9]+$ && "$broker_floor" =~ ^[1-9][0-9]{0,19}$ ]]
+          case "$mode" in plan|apply) ;; *) exit 1;; esac
+          lock_path=/tmp/st-michael-production-deploy.lock
+          test -f "$lock_path" -a ! -L "$lock_path"
+          test "$(stat -Lc '%a:%u' "$lock_path")" = 600:0
+          lock_identity=$(stat -Lc '%d:%i' "$lock_path")
+          exec 9<"$lock_path"
+          flock -x -n 9 || { echo production_lock_busy=true; exit 1; }
+          assert_lock() {
+            test -f "$lock_path" -a ! -L "$lock_path" &&
+            test "$(stat -Lc '%a:%u' "$lock_path")" = 600:0 &&
+            test "$(stat -Lc '%d:%i' "$lock_path")" = "$lock_identity" &&
+            test "$(stat -Lc '%d:%i' "/proc/$$/fd/9")" = "$lock_identity" && flock -x -n 9
+          }
+          deploy_root=$(readlink -f "$deploy_path"); test "$deploy_root" != / -a -d "$deploy_root"
+          cd "$deploy_root"
+          test "$(git rev-parse --show-toplevel)" = "$deploy_root"
+          test "$(git remote get-url origin)" = https://github.com/sereganikitin/st-michael-broker-platform.git
+          test "$(git symbolic-ref --short HEAD)" = master
+          test "$(git rev-parse HEAD)" = "$deployed_sha"
+          test -z "${DOCKER_HOST:-}" -a -z "${DOCKER_CONTEXT:-}"
+          test "$(timeout 15 docker context show)" = default
+          test "$(timeout 15 docker context inspect default --format '{{.Endpoints.docker.Host}}')" = unix:///var/run/docker.sock
+          test -S /var/run/docker.sock
+          timeout 15 docker info --format '{{json .SecurityOptions}}' | jq -e 'type == "array" and all(.[]; type == "string" and (contains("rootless") | not))' >/dev/null
+          project=$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' st-michael-postgres)
+          [[ "$project" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]
+          for service in api postgres; do
+            test "$(timeout 15 docker inspect --format '{{.State.Running}}' "st-michael-$service")" = true
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "st-michael-$service")" = "$project"
+            test "$(timeout 15 docker inspect --format '{{ index .Config.Labels "com.docker.compose.service" }}' "st-michael-$service")" = "$service"
+          done
+          api_identity=$(timeout 15 docker inspect --format '{{.Id}}:{{.State.StartedAt}}' st-michael-api)
+          assert_runtime() {
+            assert_lock && test "$(git rev-parse HEAD)" = "$deployed_sha" &&
+            test "$(timeout 15 docker inspect --format '{{.Id}}:{{.State.StartedAt}}' st-michael-api)" = "$api_identity" &&
+            test "$(timeout 15 docker exec st-michael-api sh -c 'printf %s "$GIT_SHA"')" = "$deployed_sha" &&
+            test "$(curl --fail --silent --max-time 15 --proto '=https' --tlsv1.2 https://broker.stmichael.ru/api/health | jq -er '.deployedSha')" = "$deployed_sha"
+          }
+          assert_runtime
+          backup_checksum=none; backup_at=none; confirm_apply=false
+          if [ "$mode" = apply ]; then
+            [[ "$old_hash" =~ ^[a-f0-9]{64}$ ]]
+            for number in "$backup_run" "$backup_attempt" "$backup_epoch"; do [[ "$number" =~ ^[1-9][0-9]{0,19}$ ]]; done
+            backup_dir=/var/backups/stmichael/loyalty-predeploy
+            test -d "$backup_dir" -a ! -L "$backup_dir"
+            test "$(readlink -f "$backup_dir")" = "$backup_dir"
+            backup="$backup_dir/loyalty-predeploy-${deployed_sha}-run${backup_run}-attempt${backup_attempt}.dump"
+            for file in "$backup" "$backup.sha256"; do
+              test -f "$file" -a ! -L "$file"
+              test "$(readlink -f "$file")" = "$file"
+              test "$(stat -c '%a:%u' "$file")" = "600:$(id -u)"
+            done
+            age=$(( $(date -u +%s) - backup_epoch )); test "$age" -ge 0 -a "$age" -le 21600
+            backup_checksum=$(< "$backup.sha256"); [[ "$backup_checksum" =~ ^[a-f0-9]{64}$ ]]
+            test "$(sha256sum "$backup" | cut -d' ' -f1)" = "$backup_checksum"
+            timeout 3m docker exec -i st-michael-postgres pg_restore --list < "$backup" >/dev/null 2>/dev/null
+            timeout 3m docker exec -i st-michael-postgres pg_restore --exit-on-error --no-owner --file=/dev/null < "$backup" >/dev/null 2>/dev/null
+            backup_at=$(date -u -d "@$backup_epoch" +%Y-%m-%dT%H:%M:%SZ)
+            confirm_apply=true
+          fi
+          work=$(mktemp -d /tmp/st-michael-work-regulation-publication.XXXXXX)
+          archive="$work/payload.tar"; container_root=""
+          cleanup_remote() {
+            rc=$?
+            if [[ "$container_root" =~ ^/tmp/st-michael-work-regulation-publication\.[A-Za-z0-9]{6}$ ]]; then
+              timeout 10 docker exec st-michael-api sh -c '
+                root=$1
+                rm -f -- "$root/scripts/publish-work-regulation-2026-10-12.js" "$root/assets/cooperation/work-regulation-2026-10-12.pdf"
+                rmdir -- "$root/assets/cooperation" "$root/assets" "$root/scripts" "$root"
+              ' cleanup "$container_root" >/dev/null 2>/dev/null || true
+            fi
+            rm -f -- "$archive"; rmdir -- "$work" 2>/dev/null || true
+            if [ "$rc" -ne 0 ]; then echo work_regulation_publication_failed=true >&2; fi
+          }
+          trap cleanup_remote EXIT
+          trap 'exit 1' HUP INT TERM
+          base64 -d > "$archive" <<'WORK_REGULATION_PAYLOAD'
+          REMOTE_PREFIX
+            base64 -w 0 "$archive"
+            printf '\nWORK_REGULATION_PAYLOAD\n'
+            cat <<'REMOTE_SUFFIX'
+          test "$(stat -c %s "$archive")" -le 2097152
+          test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$archive_sha"
+          test "$(tar -tf "$archive")" = $'scripts/publish-work-regulation-2026-10-12.js\nassets/cooperation/work-regulation-2026-10-12.pdf'
+          container_root=$(timeout 20 docker exec -i st-michael-api sh -c '
+            set -eu; umask 077
+            test -d /tmp -a ! -L /tmp
+            root=$(mktemp -d /tmp/st-michael-work-regulation-publication.XXXXXX)
+            test "$(stat -c %a "$root")" = 700
+            tar -xf - -C "$root"
+            test -f "$root/scripts/publish-work-regulation-2026-10-12.js" -a ! -L "$root/scripts/publish-work-regulation-2026-10-12.js"
+            test -f "$root/assets/cooperation/work-regulation-2026-10-12.pdf" -a ! -L "$root/assets/cooperation/work-regulation-2026-10-12.pdf"
+            test "$(sha256sum "$root/scripts/publish-work-regulation-2026-10-12.js" | cut -d" " -f1)" = "$1"
+            test "$(sha256sum "$root/assets/cooperation/work-regulation-2026-10-12.pdf" | cut -d" " -f1)" = 55f22d405f018b4668b5bf64748b08597796bfd97a6c2db162b4847c5d3f9906
+            printf "%s" "$root"
+          ' staging "$script_sha" < "$archive")
+          [[ "$container_root" =~ ^/tmp/st-michael-work-regulation-publication\.[A-Za-z0-9]{6}$ ]]
+          assert_runtime
+          timeout --foreground 2m docker exec \
+            -e APPROVED_OLD_IDS="$approved_ids" -e MODE="$mode" -e CONFIRM_APPLY="$confirm_apply" -e EXPECTED_OLD_HASH="$old_hash" \
+            -e EXPECTED_DEPLOYED_SHA="$deployed_sha" -e PRODUCTION_PG_SYSTEM_IDENTIFIER="$expected_pg" \
+            -e PRODUCTION_MIN_BROKER_ROWS="$broker_floor" -e VERIFIED_BACKUP_SHA256="$backup_checksum" -e VERIFIED_BACKUP_AT="$backup_at" \
+            -e SOURCE_PDF="$container_root/assets/cooperation/work-regulation-2026-10-12.pdf" \
+            st-michael-api node "$container_root/scripts/publish-work-regulation-2026-10-12.js" 2>/dev/null
+          assert_runtime
+          REMOTE_SUFFIX
+          } | timeout --foreground 12m ssh -T -i "$key" -p "$SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o NumberOfPasswordPrompts=0 \
+            -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "bash -s -- '$DEPLOY_PATH' '$SOURCE_SHA' '$DEPLOYED_SHA' '$MODE' '$OLD_HASH' '$BACKUP_RUN' '$BACKUP_ATTEMPT' '$BACKUP_EPOCH' '$EXPECTED_PG' '$BROKER_FLOOR' '$archive_sha' '$script_sha' '$ids64'"
+
+

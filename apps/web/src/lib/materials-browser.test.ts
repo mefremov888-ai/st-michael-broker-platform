@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import {
   MATERIALS_CATALOG_HREF,
   MATERIALS_CONDITIONS_HREF,
@@ -17,6 +18,15 @@ import {
 } from './materials-browser';
 import { materialHref } from './materials-folder-tree';
 import type { MaterialsFolderLayout } from '../../../../packages/shared/src/materials-folder-layout';
+
+test('folder headings share row height without growing or stretching covers', () => {
+  const css = readFileSync(new URL('../components/materials/materials-browser.css', import.meta.url), 'utf8');
+  assert.match(css, /@supports \(grid-template-rows: subgrid\)/);
+  assert.match(css, /\.mb-page \.mb-grid > \.mb-card\s*\{[^}]*grid-template-rows: subgrid;[^}]*grid-row: span 2;[^}]*row-gap: 0;/);
+  assert.match(css, /\.mb-page \.mb-grid > \.mb-card > \.mb-card-heading\s*\{[^}]*min-height: 126px;/);
+  assert.match(css, /\.mb-page \.mb-card-media\s*\{[^}]*flex: 0 0 auto;/);
+  assert.match(css, /\.mb-card-media :is\(img, video\)\s*\{[^}]*object-fit: cover;/);
+});
 
 function document(overrides: Partial<MaterialDocument> = {}): MaterialDocument {
   return {
