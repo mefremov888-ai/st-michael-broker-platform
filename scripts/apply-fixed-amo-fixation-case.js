@@ -26,10 +26,10 @@ const RECOVERY_UUID = "7a8d216e-1637-43eb-985b-19b75fd2b9ed";
 const RECOVERY_SOURCE = "st-michael-fixed-amo-case-recovery-v1";
 const MAX_EVIDENCE_AGE_MS = 60_000;
 const MAX_REQUESTS = 80;
-// The reviewed, failed 11 October operation made zero provider writes and
+// The reviewed, failed 12 October operation made zero provider writes and
 // left no recovery claim. Its finally block alone installed this 24h guard.
-const ZERO_POST_FAILURE_RUN_ID = "38150838032";
-const ABANDONED_LEASE_EXPIRES_AT = Date.parse("2026-10-12T15:22:30.000Z");
+const ZERO_POST_FAILURE_RUN_ID = "38248799497";
+const ABANDONED_LEASE_EXPIRES_AT = Date.parse("2026-10-13T12:26:13.743Z");
 const REPLACE_ABANDONED_UNCERTAIN = [
   "-- fixed-case:replace-reviewed-zero-post-uncertain",
   "local raw = redis.call('GET', KEYS[1])",
