@@ -6,7 +6,7 @@ on:
       mode:
         description: 'inspect: только аудит; apply: проверенная замена с резервной копией'
         type: choice
-        options: [inspect, apply, status, verify]
+        options: [inspect, apply, status, verify, stop_staging]
         default: inspect
         required: true
       source_root:
@@ -16,7 +16,7 @@ on:
         default: auto
 
 concurrency:
-  group: ${{ (inputs.mode == 'status' || inputs.mode == 'verify') && 'materials-transfer-status' || 'sync-yandex-files' }}
+  group: ${{ (inputs.mode == 'status' || inputs.mode == 'verify' || inputs.mode == 'stop_staging') && 'materials-transfer-status' || 'sync-yandex-files' }}
   cancel-in-progress: false
 permissions:
   contents: read
@@ -52,6 +52,12 @@ jobs:
             git fetch origin master
             git cat-file -e "$SCRIPT_SHA^{commit}"
             git merge-base --is-ancestor "$SCRIPT_SHA" origin/master
+            if [ "$MATERIALS_MODE" = stop_staging ]; then
+              git show "$SCRIPT_SHA:scripts/stop-victoria-staging-before-publish.js" > /tmp/stop-victoria-staging-before-publish.js
+              docker cp /tmp/stop-victoria-staging-before-publish.js st-michael-api:/app/scripts/stop-victoria-staging-before-publish.js
+              docker compose exec -T api node /app/scripts/stop-victoria-staging-before-publish.js
+              exit 0
+            fi
             if [ "$MATERIALS_MODE" = status ]; then
               git show "$SCRIPT_SHA:scripts/materials-transfer-status.js" > /tmp/materials-transfer-status.js
               docker cp /tmp/materials-transfer-status.js st-michael-api:/app/scripts/materials-transfer-status.js
