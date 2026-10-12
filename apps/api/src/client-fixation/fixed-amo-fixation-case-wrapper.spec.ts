@@ -228,6 +228,10 @@ describe("DRAFT protected exact-case wrapper (no providers or production command
     expect(runner.safeRefusalCode({ safeCode: "CERT_PRIVATE_TOKEN_79990001122", message: "private token" })).toBe("UNCLASSIFIED_REFUSAL");
     expect(runner.safeRefusalCode(Error("private@example.test"))).toBe("UNCLASSIFIED_REFUSAL");
   });
+    it.each(["EVIDENCE_NOT_FRESH", "CLIENT_CONTACT_EVIDENCE_CHANGED", "WINDOW_REQUEST_FAILED", "REVIEW_NOTES_REQUEST_REJECTED"])("classifies literal readonly preflight failure %s without raw error output", (safeCode) => {
+      expect(runner.safeRefusalCode({ safeCode, message: "private token +79990001122", code: "PRIVATE_VALUE" })).toBe(safeCode);
+      expect(runner.safeRefusalCode({ code: safeCode, message: "private token" })).toBe("UNCLASSIFIED_REFUSAL");
+    });
   it("Redis uses only current runtime settings, bounded connect, no reconnect strategy", () => {
     const Redis = jest.fn(); runner.createRedis(Redis, { REDIS_HOST: "redis", REDIS_PORT: "6379", REDIS_DB: "0" });
     const options = Redis.mock.calls[0][0]; expect(options).toMatchObject({ host: "redis", port: 6379, db: 0, lazyConnect: true, connectTimeout: 5000 });
