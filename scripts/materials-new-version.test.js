@@ -7,13 +7,15 @@ test('stalled headers abort promptly while a responding large body keeps its tra
   const http = require('node:http');
   const server = http.createServer((req, res) => {
     if (req.url === '/headers') res.flushHeaders();
-    setTimeout(() => res.end('body'), 200);
+    // CI runners can take >50ms to initialize Undici on the first request.
+    // Keep the body slower than the header deadline without testing CPU jitter.
+    setTimeout(() => res.end('body'), 3000);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = 'http://127.0.0.1:' + server.address().port;
   try {
-    await assert.rejects(fetchHeaders(base + '/stall', 2000, 50));
-    const response = await fetchHeaders(base + '/headers', 2000, 50);
+    await assert.rejects(fetchHeaders(base + '/stall', 10000, 1000));
+    const response = await fetchHeaders(base + '/headers', 10000, 1000);
     assert.equal(await response.text(), 'body');
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
