@@ -80,6 +80,7 @@ jobs:
               chown 1001:1001 "$UPLOAD_DIR/materials-backups"
               chown -R 1001:1001 "$COVER_DIR"
               docker exec st-michael-api busybox unzip -q -o /app/uploads/materials-backups/victoria-covers-20261012/archive.zip -d /app/uploads/materials-backups/victoria-covers-20261012/covers
+              umask 022
             fi
             docker exec st-michael-api node -e 'const fs=require("fs");for(const p of fs.readdirSync("/proc")){if(!/^\d+$/.test(p))continue;let c="";try{c=fs.readFileSync("/proc/"+p+"/cmdline","utf8")}catch{}if(c.startsWith("node\0")&&/scripts\/sync-yandex-files\.js/.test(c)){console.error("Existing material sync active: "+p);process.exit(1)}}'
             git show "$SCRIPT_SHA:scripts/materials-new-version.js" > /tmp/materials-new-version.js
