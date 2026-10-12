@@ -674,6 +674,53 @@ function recoveryAuditReport(rows, stableReadback) {
         automaticRetryBlocked: payload.automaticRetryBlocked === true, ...counters };
     }) };
 }
+// Literal latest armed recovery only. Diagnostic booleans are not a linking
+// certificate and cannot authorize another provider write or release a lease.
+const ARMED_RECOVERY_LEAD_ID = 32377125;
+const ARMED_RECOVERY_METADATA = Object.freeze({
+  runId: "38252692034", planRunId: "38252028798",
+  caseHash: "ac50b11e3b127b97962b7bd8eddb919fe05fdc885eab6b3568919c8a5fd1f82c",
+  candidateHash: "ba653455a3ef3f00d3307cb9e081b5f9ac0c02b486aa85743949011f0fb4be72",
+  sourceSha256: "33231586afb08d248a1bcf7478264d44c307d4b0dcf62b7338b75e123b0a4c3c",
+  deployedGitSha: "50c88ff5cef87894394c2d563904e2befafd781a",
+});
+function armedRecoveryLeadDiagnostic(row, auditRows, raw, exactIds, scanNow) {
+  validateRecoveryAuditRows(auditRows);
+  const phases = ["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "UNRESOLVED"];
+  const bound = auditRows.length === phases.length && auditRows.every((entry, index) =>
+    entry.action === `AMO_FIXED_CASE_${phases[index]}` && entry.payload.phase === phases[index] &&
+    entry.payload.operationKey === `fixed-amo-fixation-case:v1:${CLIENT_ID}` &&
+    Object.entries(ARMED_RECOVERY_METADATA).every(([key, value]) => entry.payload[key] === value));
+  if (!bound) return { performed: false, reason: "literal_armed_recovery_binding_not_confirmed", retryAuthorized: false };
+  const contactId = positiveId(auditRows[2].payload.contactId);
+  const armed = Date.parse(auditRows[3].payload.armedAt), now = Date.parse(iso(scanNow));
+  if (!contactId || !Number.isFinite(armed) || armed > now || now - armed > WINDOW_MAX_AGE_SECONDS * 1000)
+    return { performed: false, reason: "armed_recovery_details_invalid", retryAuthorized: false };
+  const lead = validatedLead(raw, ARMED_RECOVERY_LEAD_ID, row, makeEvidenceWindow(row, scanNow), false);
+  const expectedContacts = [contactId, positiveId(effectiveBroker(row).broker.amoContactId)].sort((a, b) => a - b);
+  const inRange = (value) => Number.isSafeInteger(value) && value >= Math.floor(armed / 1000) - 120 && value <= Math.floor(now / 1000) + 120;
+  const request = lead.requestValues;
+  const fields = raw.custom_fields_values;
+  if (!Array.isArray(fields) || fields.length > 1000) refused("EXPANDED_LEAD_INVALID");
+  const requestFields = fields.filter((field) => field?.field_id === 833189);
+  const singleRequest = requestFields.length === 1 && Array.isArray(requestFields[0].values) && requestFields[0].values.length === 1;
+  return { performed: true, leadId: ARMED_RECOVERY_LEAD_ID, auditBindingConfirmed: true,
+    unresolvedReasonMatches: auditRows[4].payload.reason === "LEAD_UNCONFIRMED",
+    exactContactLookupMatchesAudit: Array.isArray(exactIds) && JSON.stringify(exactIds) === JSON.stringify([contactId]),
+    exactGeneratedNameMatches: lead.exactGeneratedName,
+    exactLeadContactsMatch: JSON.stringify([...lead.contactIds].sort((a, b) => a - b)) === JSON.stringify(expectedContacts),
+    pipelineMatches: lead.pipelineId === 7600542, statusMatches: lead.statusId === 62907118,
+    strictSourceMarkerMatches: lead.sourceMarker === true,
+    exactProjectMatches: JSON.stringify(lead.projectValues) === JSON.stringify([row.project === "ZORGE9" ? "Зорге 9" : "Берзарина 37"]),
+    createdWithinArmedWindow: inRange(lead.createdAt), requestValueCount: request.length,
+    requestValueIsInteger: request.length === 1 && Number.isSafeInteger(request[0]),
+    requestValueIsString: request.length === 1 && typeof request[0] === "string",
+    requestWithinArmedWindowStrict: request.length === 1 && inRange(request[0]),
+    requestWithinArmedWindowNumeric: request.length === 1 && inRange(Number(request[0])),
+    requestFieldCardinalityMatches: singleRequest,
+    requestFieldNumericWindowMatches: singleRequest && inRange(Number(requestFields[0].values[0]?.value)),
+    identityConfirmed: false, databaseMutationAuthorized: false, amoMutationAuthorized: false, retryAuthorized: false };
+}
 async function snapshot(prisma, environment, includeToken, includeAudit = false) {
   return prisma.$transaction(async (tx) => {
     await helpers.assertReadOnlySession(tx);
@@ -891,12 +938,20 @@ async function run({ prisma, environment = process.env, fetchImpl, now = () => n
   const reviewLeadComparison = await collectReviewLeadComparison(initial.row, expanded, request, createReviewNotesRequester(token, fetchImpl));
   const reviewLeadHistory = await collectReviewLeadHistory(initial.row, expanded, request, createReviewHistoryRequester(token, fetchImpl));
   const evidence = expanded.contactEvidence;
+  let armedRecoveryLead = { performed: false, reason: "literal_recovery_lead_not_observed", retryAuthorized: false };
+  if (expanded.possibleCandidates.some((candidate) => candidate.leadId === ARMED_RECOVERY_LEAD_ID)) {
+    const raw = await request(`/api/v4/leads/${ARMED_RECOVERY_LEAD_ID}`, { with: "contacts" });
+    armedRecoveryLead = armedRecoveryLeadDiagnostic(initial.row, initial.recoveryAudit, raw,
+      evidence.byPhone.get(helpers.normalizePhone(initial.row.phone))?.exactContactIds, scanNow);
+  }
   const storedId = helpers.optionalStoredAmoLeadId(initial.row.amoLeadId);
   const storedRaw = storedId ? await request(`/api/v4/leads/${storedId}`, { with: "contacts" }) : null;
   const storedLead = storedRaw ? helpers.reduceLeadEvidence(storedRaw, storedId) : null;
   const final = await snapshot(prisma, environment, false, true);
   if (privateFingerprint(initial.row) !== privateFingerprint(final.row)) refused("CASE_CHANGED_DURING_SCAN");
-  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)), recoveryAudit: recoveryAuditReport(initial.recoveryAudit, privateFingerprint(initial.recoveryAudit) === privateFingerprint(final.recoveryAudit)), redisLease };
+  if (privateFingerprint(initial.recoveryAudit) !== privateFingerprint(final.recoveryAudit))
+    armedRecoveryLead = { performed: false, reason: "recovery_audit_changed_during_scan", retryAuthorized: false };
+  return { ...buildReport(initial.row, evidence, brokerContact, storedLead, metadata, expanded), reviewLeadComparison, reviewLeadHistory, armedRecoveryLead, caseAudit: auditReport(initial.audit, initial.row, privateFingerprint(initial.audit) === privateFingerprint(final.audit)), recoveryAudit: recoveryAuditReport(initial.recoveryAudit, privateFingerprint(initial.recoveryAudit) === privateFingerprint(final.recoveryAudit)), redisLease };
 }
 function failureCode(error) {
   const allowed = ["INVALID_CASE_TIMESTAMP", "INVALID_CASE_STATE", "RESPONSIBLE_BROKER_UNRESOLVED", "OWNER_BROKER_UNRESOLVED", "FIXED_CLIENT_MISSING", "EXPECTED_BROKER_MISMATCH", "EXPECTED_BROKER_NOT_CANONICAL", "INVALID_CLIENT_PHONE", "PROJECT_MAPPING_UNSUPPORTED", "INVALID_SYNC_ATTEMPTS", "INVALID_BROKER_CONTACT_ID", "AGENCY_SCOPE_TOO_LARGE", "SOURCE_ATTESTATION_INVALID", "DATABASE_ATTESTATION_INVALID", "UNSAFE_TLS_CONFIGURATION", "DATABASE_IDENTITY_MISMATCH", "BROKER_CONTACT_ID_MISMATCH", "CASE_CHANGED_DURING_SCAN", "INVALID_CASE_NAME", "CASE_SCAN_WINDOW_UNSAFE", "WINDOW_REQUEST_CONFIGURATION_INVALID", "WINDOW_PAGE_BOUND_EXCEEDED", "WINDOW_REQUEST_REJECTED", "WINDOW_REQUEST_FAILED", "EXPANDED_LEAD_INVALID", "WINDOW_LEAD_OUT_OF_SCOPE", "WINDOW_PAGE_INVALID", "WINDOW_LEAD_DUPLICATED", "WINDOW_PAGINATION_INCOMPLETE", "BROKER_LINK_SCAN_UNAVAILABLE", "BROKER_LINK_SCAN_INVALID", "EXPANDED_CONTACT_EVIDENCE_INVALID", "EXPANDED_LEAD_CHANGED_DURING_SCAN", "EXPANDED_EVIDENCE_INCOMPLETE", "EXPANDED_POSSIBLE_LEAD_PRESENT"];
@@ -924,5 +979,6 @@ module.exports = { CLIENT_ID, EXPECTED_BROKER_ID, IS_BROKER_FIELD_ID, CLIENT_SEL
 Object.assign(module.exports, { REVIEW_LEAD_ID, normalizedName, textPhoneMatches, createReviewNotesRequester, collectReviewLeadComparison, validatedLead });
 Object.assign(module.exports, { createReviewHistoryRequester, collectReviewEvents, collectReviewLeadHistory, reviewContactEvidence, reviewSourceEvidence, auditQuery, validateAuditRows, auditReport });
 Object.assign(module.exports, { recoveryAuditQuery, validateRecoveryAuditRows, recoveryAuditReport });
+Object.assign(module.exports, { armedRecoveryLeadDiagnostic, ARMED_RECOVERY_METADATA });
 Object.assign(module.exports, { attestedRuntimePhoneLock, createReadOnlyRedis, collectReadOnlyRedisLease });
 if (require.main === module) main().catch((error) => { process.stderr.write(`fixed_case_failure_code=${failureCode(error)}\n`); process.exitCode = 1; });
