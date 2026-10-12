@@ -51,4 +51,44 @@ describe('literal armed recovery lead readonly diagnostic', () => {
     expect(diagnose(lead(time + 10000)).requestWithinArmedWindowNumeric).toBe(false);
     expect(diagnose(lead(), audits().slice(1)).performed).toBe(false);
   });
+  it('separates date-only day normalization from the unchanged strict time predicate', () => {
+    const midnight = Math.floor(time / 86400) * 86400;
+    expect(diagnose(lead(midnight))).toMatchObject({ requestUtcMidnight: true,
+      requestUtcDayMatchesArmed: true, requestWithinArmedWindowStrict: false });
+    expect(diagnose(lead(midnight - 10800))).toMatchObject({ requestMoscowMidnight: true,
+      requestMoscowDayMatchesArmed: true, requestWithinArmedWindowStrict: false });
+    expect(diagnose(lead(midnight - 86400)).requestMoscowDayMatchesArmed).toBe(false);
+  });
+  it('reports only mismatched reviewed field IDs and price comparison, not private values', () => {
+    const raw = lead(); const formRow = { ...row, amount: 12300000, sqm: 42,
+      propertyType: 'квартира', roomsCount: '2к', readinessLevel: 'горячий', purchaseTiming: '1-3 месяца' };
+    const checks = inspector.armedRecoveryFormDiagnostic(raw, formRow);
+    expect(checks).toMatchObject({ expectedFieldCount: 10, priceMatches: false });
+    expect(checks.mismatchedFieldIds).toEqual([583155, 842273, 587387, 583447, 833045, 604555, 839449, 612517]);
+    expect(JSON.stringify(checks)).not.toMatch(/12300000|private|горяч|квартир/);
+  });
+  it('bounds the literal recovery note and field schema without claiming exact full note verification', () => {
+    const field = { id: 833189, entity_type: 'leads', type: 'date' };
+    const note = { id: 1, entity_id: 32377125, note_type: 'common', params: {
+      text: `Клиент: private-name\nТелефон: +79991234567\nCabinet case UUID: ${inspector.CLIENT_ID}\nRecovery UUID: 7a8d216e-1637-43eb-985b-19b75fd2b9ed\nRecovery source: st-michael-fixed-amo-case-recovery-v1` } };
+    const noteRow = { ...row, phone: '+79991234567' };
+    const result = inspector.armedRecoveryExtraDiagnostic(noteRow, { _embedded: { notes: [note] } }, field);
+    expect(result).toMatchObject({ dateFieldType: 'date', recoveryNoteCount: 1,
+      recoveryNoteMarkersPhoneNameMatch: true, fullNoteExactMatchInspected: false });
+    expect(JSON.stringify(result)).not.toMatch(/private-name|79991234567|7a8d216e/);
+    expect(() => inspector.armedRecoveryExtraDiagnostic(noteRow, { _embedded: { notes: [note, note] }, _links: { next: {} } }, field)).toThrow();
+    expect(() => inspector.armedRecoveryExtraDiagnostic(noteRow, null, { ...field, id: 1 })).toThrow();
+  });
+  it('allows only the two literal GET endpoints, with TLS redirects refused and no arbitrary scope', async () => {
+    let done = false;
+    const fetchImpl = jest.fn(async (_url: any, _options: any) => ({ ok: true, status: 200, headers: { get: () => null }, body: {
+      getReader: () => ({ read: async () => done ? { done: true } : (done = true, { done: false, value: Buffer.from('{}') }),
+        cancel: async () => {}, releaseLock: () => {} }) } }));
+    const request = inspector.createArmedRecoveryExtraRequester('private-token', fetchImpl);
+    await request('dateField');
+    expect(String(fetchImpl.mock.calls[0][0])).toBe('https://stmichael.amocrm.ru/api/v4/leads/custom_fields/833189');
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: 'GET', redirect: 'error' });
+    await expect(request('other')).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });
