@@ -176,7 +176,9 @@ async function transaction(prisma, environment, callback, lock = false) {
     if (lock) {
       await tx.$executeRaw`LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE`;
       await tx.$executeRaw`LOCK TABLE brokers, agencies, broker_agencies IN SHARE MODE`;
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${OPERATION_KEY}, 0))`;
+      // PostgreSQL returns void; $queryRaw cannot deserialize it (Prisma P2010).
+      // Execute without decoding a result, retaining the same transaction lock.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${OPERATION_KEY}, 0))`;
     }
     await identity(tx, environment);
     return callback(tx);

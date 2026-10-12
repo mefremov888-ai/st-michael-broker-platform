@@ -121,7 +121,11 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
     const data = { row: clone(initial), audits: [] as any[], updates: [] as any[] };
     const tx: any = {
       $executeRaw: jest.fn(async () => 0),
-      $queryRaw: jest.fn(async (strings: TemplateStringsArray) => strings.join("").includes("pg_control_system") ? [{ database_name: "broker_platform", system_identifier: "1234567", broker_rows: "1000", ...options.identity }] : strings.join("").includes("regexp_replace") ? [{ id: data.row.id, phone: data.row.phone }, ...(options.siblings || [])] : []),
+      $queryRaw: jest.fn(async (strings: TemplateStringsArray) => {
+        const sql = strings.join("");
+        if (sql.includes("pg_advisory_xact_lock")) throw Error("Prisma P2010: cannot deserialize void");
+        return sql.includes("pg_control_system") ? [{ database_name: "broker_platform", system_identifier: "1234567", broker_rows: "1000", ...options.identity }] : sql.includes("regexp_replace") ? [{ id: data.row.id, phone: data.row.phone }, ...(options.siblings || [])] : [];
+      }),
       client: {
         findUnique: jest.fn(async () => clone(data.row)),
         findMany: jest.fn(async () => options.occupied ? [{ id: "other-client" }] : []),
@@ -146,6 +150,19 @@ describe("draft exact-case one-shot recovery (all providers/database mocked)", (
       try { return await callback(tx); } catch (error) { Object.assign(data, previous); throw error; }
     }) };
   }
+  it("claims under the same advisory transaction lock without decoding PostgreSQL void", async () => {
+    const prisma = database();
+    await expect(recovery.claim(prisma, environment(), { row: clone(prisma.data.row) }, metadata)).resolves.toEqual({ prior: false });
+    const calls = prisma.tx.$executeRaw.mock.calls as any[];
+    expect(calls.map(([sql]) => sql.join(""))).toEqual([
+      "LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE",
+      "LOCK TABLE brokers, agencies, broker_agencies IN SHARE MODE",
+      "SELECT pg_advisory_xact_lock(hashtextextended(, 0))",
+    ]);
+    expect(calls[2][1]).toBe(recovery.OPERATION_KEY);
+    expect(prisma.data.audits.map((entry: any) => entry.action)).toEqual(["AMO_FIXED_CASE_CLAIMED"]);
+    expect((prisma.$transaction.mock.calls[0] as any[])[1]).toEqual({ isolationLevel: "Serializable", maxWait: 5000, timeout: 20000 });
+  });
   function json(payload: any, status = 200) {
     let done = false;
     return { status, ok: status >= 200 && status < 300, body: { getReader: () => ({ read: async () => done ? { done: true } : (done = true, { done: false, value: Buffer.from(JSON.stringify(payload)) }), cancel: async () => {}, releaseLock: () => {} }), cancel: async () => {} } };
