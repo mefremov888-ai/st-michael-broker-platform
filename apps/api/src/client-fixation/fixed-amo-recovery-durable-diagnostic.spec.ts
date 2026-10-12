@@ -16,11 +16,11 @@ describe('fixed failed recovery durable readonly diagnostic', () => {
       candidateHash: '65e35f7515359f37364c8e24a04074562e8dc2570ff30c63eb89da7f8797c67f',
       sourceSha256: 'a'.repeat(64), deployedGitSha: 'b'.repeat(40), automaticRetryBlocked: true,
       secret: 'private-api-token', phone: '+79991112233', contactId: 998877, reason: 'private failure details' }, ...changes });
-  it('uses literal scope, UTC day and sentinel ninth record without caller configuration', () => {
+  it('uses literal case, two reviewed UTC days and sentinel seventeenth record without caller configuration', () => {
     expect(inspector.recoveryAuditQuery()).toMatchObject({ where: { entity: 'AmoFixedCaseRecovery', entityId: inspector.CLIENT_ID,
-      createdAt: { gte: new Date('2026-10-11T00:00:00Z'), lte: new Date('2026-10-11T23:59:59.999Z') } }, take: 9 });
+      createdAt: { gte: new Date('2026-10-11T00:00:00Z'), lte: new Date('2026-10-12T23:59:59.999Z') } }, take: 17 });
     expect(inspector.recoveryAuditQuery({ entityId: 'other' }).where.entityId).toBe(inspector.CLIENT_ID);
-    expect(() => inspector.validateRecoveryAuditRows(Array.from({ length: 9 }, (_, i) => entry({ id: `audit${i}` })))).toThrow();
+    expect(() => inspector.validateRecoveryAuditRows(Array.from({ length: 17 }, (_, i) => entry({ id: `audit${i}` })))).toThrow();
   });
   it('reports only allowlisted classification and comparison booleans, no IDs, hash values or arbitrary strings', () => {
     const report = inspector.recoveryAuditReport([entry()], true);
@@ -31,7 +31,7 @@ describe('fixed failed recovery durable readonly diagnostic', () => {
   });
   it.each([
     { entity: 'Client' }, { entityId: 'other' }, { action: 'AMO_FIXED_CASE_PRIVATE' },
-    { createdAt: new Date('2026-10-10T23:59:59.999Z') }, { createdAt: new Date('2026-10-12T00:00:00Z') },
+    { createdAt: new Date('2026-10-10T23:59:59.999Z') }, { createdAt: new Date('2026-10-13T00:00:00Z') },
     { payload: null }, { payload: { secret: 'x'.repeat(64001) } },
   ])('rejects foreign, malformed, oversized or out-of-window records %#', (changes) => {
     expect(() => inspector.validateRecoveryAuditRows([entry(changes)])).toThrow();
@@ -42,5 +42,12 @@ describe('fixed failed recovery durable readonly diagnostic', () => {
       reason: 'UNEXPECTED_FAILURE', contactPosts: 0, leadPosts: 0, patchPosts: 2, notePosts: '0' } })], false);
     expect(report).toMatchObject({ stableReadback: false, events: [{ reason: 'UNEXPECTED_FAILURE', contactPosts: 0, leadPosts: 0, applyRunMatches: false }] });
     expect(report.events[0]).not.toHaveProperty('patchPosts'); expect(report.events[0]).not.toHaveProperty('notePosts');
+  });
+  it('includes the current reviewed attempt without exposing identifiers or claiming provider absence', () => {
+    const report = inspector.recoveryAuditReport([entry({ createdAt: new Date('2026-10-12T11:04:00Z'),
+      payload: { phase: 'CONTACT_ARMED', runId: '38240019073', planRunId: '38238691800' } })], true);
+    expect(report).toMatchObject({ from: '2026-10-11T00:00:00.000Z', to: '2026-10-12T23:59:59.999Z',
+      absenceProof: false, events: [{ latestApplyRunMatches: true, latestPlanRunMatches: true, applyRunMatches: false }] });
+    expect(JSON.stringify(report)).not.toMatch(/38240019073|38238691800/);
   });
 });

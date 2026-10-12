@@ -622,9 +622,9 @@ function auditReport(rows, row, stableReadback) {
     }),
   };
 }
-// One approved failed operation only. No configurable UUID, run, or time window.
+// Two reviewed attempts of this one case only. No caller-configurable scope.
 const RECOVERY_AUDIT_FROM = "2026-10-11T00:00:00.000Z";
-const RECOVERY_AUDIT_TO = "2026-10-11T23:59:59.999Z";
+const RECOVERY_AUDIT_TO = "2026-10-12T23:59:59.999Z";
 const RECOVERY_PHASES = Object.freeze(["CLAIMED", "CONTACT_ARMED", "CONTACT_RESOLVED", "LEAD_ARMED", "LEAD_RESOLVED", "LINKED", "UNRESOLVED"]);
 const RECOVERY_REASONS = Object.freeze(["CONTACT_UNCONFIRMED", "LEAD_UNCONFIRMED", "CASE_DRIFT", "LEASE_LOST", "UNEXPECTED_FAILURE"]);
 const RECOVERY_PLAN = Object.freeze({ runId: "38150838032", planRunId: "38150597583",
@@ -633,11 +633,11 @@ const RECOVERY_PLAN = Object.freeze({ runId: "38150838032", planRunId: "38150597
 function recoveryAuditQuery() {
   return { where: { entity: "AmoFixedCaseRecovery", entityId: CLIENT_ID,
     createdAt: { gte: new Date(RECOVERY_AUDIT_FROM), lte: new Date(RECOVERY_AUDIT_TO) } },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 9,
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 17,
     select: { id: true, entity: true, entityId: true, action: true, createdAt: true, payload: true } };
 }
 function validateRecoveryAuditRows(rows) {
-  if (!Array.isArray(rows) || rows.length > 8) refused("RECOVERY_AUDIT_SCOPE_EXCEEDED");
+  if (!Array.isArray(rows) || rows.length > 16) refused("RECOVERY_AUDIT_SCOPE_EXCEEDED");
   const ids = new Set();
   for (const row of rows) {
     if (!record(row) || typeof row.id !== "string" || !/^[A-Za-z0-9-]{1,80}$/.test(row.id) || ids.has(row.id) ||
@@ -652,7 +652,8 @@ function validateRecoveryAuditRows(rows) {
 }
 function recoveryAuditReport(rows, stableReadback) {
   validateRecoveryAuditRows(rows);
-  return { recordsRead: rows.length, boundedWindowComplete: true, stableReadback, absenceProof: false,
+  return { from: RECOVERY_AUDIT_FROM, to: RECOVERY_AUDIT_TO,
+    recordsRead: rows.length, boundedWindowComplete: true, stableReadback, absenceProof: false,
     events: rows.map((row) => {
       const payload = row.payload;
       const counters = {};
@@ -664,6 +665,8 @@ function recoveryAuditReport(rows, stableReadback) {
         reason: RECOVERY_REASONS.includes(payload.reason) ? payload.reason : "unknown_or_missing",
         operationKeyMatches: payload.operationKey === `fixed-amo-fixation-case:v1:${CLIENT_ID}`,
         applyRunMatches: payload.runId === RECOVERY_PLAN.runId,
+        latestApplyRunMatches: payload.runId === "38240019073",
+        latestPlanRunMatches: payload.planRunId === "38238691800",
         planRunMatches: payload.planRunId === RECOVERY_PLAN.planRunId,
         caseHashMatchesPlan: payload.caseHash === RECOVERY_PLAN.caseHash,
         candidateHashMatchesPlan: payload.candidateHash === RECOVERY_PLAN.candidateHash,
