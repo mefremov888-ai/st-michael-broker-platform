@@ -32,5 +32,8 @@ jobs:
             cd ${{ secrets.DEPLOY_PATH }}
             git fetch origin master
             git show origin/master:scripts/qa-loyalty-filters.js > /tmp/qa-loyalty-filters.js
+            git show origin/master:scripts/qa-loyalty-filters.test.js > /tmp/qa-loyalty-filters.test.js
             docker cp /tmp/qa-loyalty-filters.js st-michael-api:/app/scripts/qa-loyalty-filters.js
+            docker cp /tmp/qa-loyalty-filters.test.js st-michael-api:/app/scripts/qa-loyalty-filters.test.js
+            docker compose exec -T api node --test /app/scripts/qa-loyalty-filters.test.js
             docker compose exec -T api node /app/scripts/qa-loyalty-filters.js
