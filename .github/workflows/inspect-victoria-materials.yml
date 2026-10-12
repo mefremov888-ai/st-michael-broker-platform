@@ -1,0 +1,21 @@
+name: Inspect Victoria AI media source read-only
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Inventory source without production access
+        run: node scripts/inspect-victoria-materials.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victoria-materials-source
+          path: victoria-materials-source.json
+          if-no-files-found: error
+          retention-days: 7
