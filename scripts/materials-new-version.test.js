@@ -1,8 +1,22 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { material, coverTargets, buildLayout, replaceable, sourceRoot } = require('./materials-new-version');
+const { material, coverTargets, buildLayout, replaceable, sourceRoot, fetchHeaders } = require('./materials-new-version');
 const make = (name, folder = 'Зорге 9/Фото/Лобби') => material({ name, path: '/Новая версия/' + folder + '/' + name, size: 100 });
 const saved = { version: 1, groups: [], rules: [{ prefix: 'ЗОРГЕ 9', groupId: 'zorge' }, { prefix: 'Условия сотрудничества', groupId: null }], covers: { 'Зорге 9/Фото': 'old', 'Условия сотрудничества': 'keep' }, looseFolders: { 'Зорге 9/Видео': 'УТП' } };
+test('stalled headers abort promptly while a responding large body keeps its transfer deadline', async () => {
+  const http = require('node:http');
+  const server = http.createServer((req, res) => {
+    if (req.url === '/headers') res.flushHeaders();
+    setTimeout(() => res.end('body'), 200);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = 'http://127.0.0.1:' + server.address().port;
+  try {
+    await assert.rejects(fetchHeaders(base + '/stall', 2000, 50));
+    const response = await fetchHeaders(base + '/headers', 2000, 50);
+    assert.equal(await response.text(), 'body');
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
 test('Victoria source is explicit, isolated, and preserves approved hierarchy', () => {
   const f = material({ name: 'Фото — 01.jpg', path: '/Версия ИИ/Зорге 9/Архитектура/Фото/Фото — 01.jpg', size: 1 }, '/Версия ИИ');
   assert.equal(f.folder, 'Зорге 9/Архитектура/Фото');

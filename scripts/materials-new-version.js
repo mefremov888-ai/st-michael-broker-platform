@@ -120,14 +120,22 @@ async function retry(fn) {
     }
   }
 }
-async function json(endpoint, diskPath, extra = {}) {
+async function json(endpoint, diskPath, extra = {}, timeoutMs = 60000, retryRead = true) {
   const url = new URL('https://cloud-api.yandex.net/v1/disk/public/resources' + endpoint);
   for (const [key, val] of Object.entries({ public_key: SOURCE, path: diskPath, ...extra })) url.searchParams.set(key, String(val));
-  return retry(async () => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+  const read = async () => {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error('Yandex API ' + response.status);
     return response.json();
-  });
+  };
+  return retryRead ? retry(read) : read();
+}
+async function fetchHeaders(url, bodyTimeoutMs, headerTimeoutMs = 10000) {
+  const headers = new AbortController();
+  const timer = setTimeout(() => headers.abort(), headerTimeoutMs);
+  try {
+    return await fetch(url, { signal: AbortSignal.any([headers.signal, AbortSignal.timeout(bodyTimeoutMs)]) });
+  } finally { clearTimeout(timer); }
 }
 async function inventory(diskPath = ROOT, files = [], dirs = [], root = ROOT) {
   sourceRoot(root);
@@ -165,8 +173,8 @@ async function download(f, dest) {
   if (await validFile(dest, f)) return false;
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   await retry(async () => {
-    const { href } = await json('/download', f.path);
-    const response = await fetch(href, { signal: AbortSignal.timeout(30 * 60000) });
+    const { href } = await json('/download', f.path, {}, 15000, false);
+    const response = await fetchHeaders(href, 30 * 60000);
     if (!response.ok) throw new Error('Download ' + response.status);
     const tmp = dest + '.partial';
     await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(tmp));
@@ -175,18 +183,18 @@ async function download(f, dest) {
   });
   return true;
 }
-async function thumbnail(f, original, dest, sharp) {
-  if (fs.existsSync(dest)) {
+async function thumbnail(f, original, dest, sharp, approvedFolderCover) {
+  if (fs.existsSync(dest) && !fs.existsSync(dest + '.folder-cover')) {
     try { const meta = await sharp(dest).metadata(); if (meta.width >= 200 && meta.height >= 100) return; } catch (_) { /* regenerate */ }
   }
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  await retry(async () => {
+  const render = async () => {
     let input = original;
     if (VIDEO.test(f.name)) {
-      const resource = await json('', f.path, { preview_size: '1024x768' });
+      const resource = await json('', f.path, { preview_size: '1024x768' }, approvedFolderCover ? 10000 : 60000, !approvedFolderCover);
       const href = resource.preview || resource.sizes?.find(s => s.name === 'L')?.url;
       if (!href) throw new Error('No video poster: ' + f.path);
-      const response = await fetch(href, { signal: AbortSignal.timeout(60000) });
+      const response = await fetchHeaders(href, approvedFolderCover ? 20000 : 60000);
       if (!response.ok) throw new Error('Poster ' + response.status);
       input = Buffer.from(await response.arrayBuffer());
     }
@@ -195,7 +203,19 @@ async function thumbnail(f, original, dest, sharp) {
     const meta = await sharp(tmp).metadata();
     if (!meta.width || !meta.height || meta.width < 200 || meta.height < 100) throw new Error('Invalid/small thumbnail: ' + f.path);
     fs.renameSync(tmp, dest);
-  });
+    if (fs.existsSync(dest + '.folder-cover')) fs.unlinkSync(dest + '.folder-cover');
+  };
+  if (!approvedFolderCover) return retry(render);
+  try { await render(); } catch {
+    // The original video is still independently checksum-verified. If its CDN
+    // poster is unavailable, use the approved cover for this same folder, not
+    // a fabricated frame or a different project's picture.
+    await sharp(approvedFolderCover).resize({ width: 1024, height: 768, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 85 }).toFile(dest + '.partial');
+    fs.renameSync(dest + '.partial', dest);
+    fs.writeFileSync(dest + '.folder-cover', '', { mode: 0o600 });
+    f.videoPreviewFallback = true;
+    console.log('APPROVED_FOLDER_POSTER ' + f.path);
+  }
 }
 
 async function browserImage(f, original, dest, sharp) {
@@ -291,7 +311,25 @@ async function main() {
           }
           await download(f, original);
           const browser = await browserImage(f, original, path.join(uploadRoot, 'yandex', f.browserRel), sharp);
-          await thumbnail(f, browser, path.join(uploadRoot, 'yandex-thumbs', f.browserRel + '.thumb.jpg'), sharp);
+          const thumbDest = path.join(uploadRoot, 'yandex-thumbs', f.browserRel + '.thumb.jpg');
+          const reusedOriginal = reusable.get(f.sha256);
+          if (reusedOriginal && !fs.existsSync(thumbDest)) {
+            const oldThumb = reusedOriginal.replace(path.join(uploadRoot, 'yandex') + path.sep, path.join(uploadRoot, 'yandex-thumbs') + path.sep) + '.thumb.jpg';
+            if (fs.existsSync(oldThumb) && fs.lstatSync(oldThumb).isFile()) {
+              try {
+                const meta = await sharp(oldThumb).metadata();
+                if (meta.width >= 200 && meta.height >= 100) { fs.mkdirSync(path.dirname(thumbDest), { recursive: true }); fs.linkSync(oldThumb, thumbDest); }
+              } catch { /* generate a fresh poster instead */ }
+            }
+          }
+          let approvedCover;
+          if (ROOT === '/Версия ИИ' && VIDEO.test(f.name)) {
+            const cover = require('../data/victoria-covers-20261012.json').find(c => c.folder === f.folder.normalize('NFC'));
+            const coverDir = path.join(uploadRoot, 'materials-backups', 'victoria-covers-20261012', 'covers');
+            const coverName = cover && fs.readdirSync(coverDir).find(name => name.normalize('NFC') === cover.file);
+            if (coverName) approvedCover = path.join(coverDir, coverName);
+          }
+          await thumbnail(f, browser, thumbDest, sharp, approvedCover);
           console.log('VERIFIED ' + (++done) + '/' + files.length + ' ' + f.path);
         } catch (e) { errors.push(f.path + ': ' + e.message); }
       }
@@ -369,11 +407,11 @@ async function main() {
         if (fs.existsSync(src)) { fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.renameSync(src, dest); retired++; }
       }
     }
-    console.log('PUBLISHED ' + JSON.stringify({ files: files.length, removedOldMedia: remove.length, retiredFiles: retired, backup: backupRoot }));
+    console.log('PUBLISHED ' + JSON.stringify({ files: files.length, approvedFolderPosterFallbacks: files.filter(f => f.videoPreviewFallback).length, removedOldMedia: remove.length, retiredFiles: retired, backup: backupRoot }));
   } finally {
     if (locked) fs.rmdirSync(lock);
     await prisma.$disconnect();
   }
 }
-module.exports = { material, coverTargets, buildLayout, replaceable, inventory, validFile, main, sourceRoot };
+module.exports = { material, coverTargets, buildLayout, replaceable, inventory, validFile, main, sourceRoot, fetchHeaders };
 if (require.main === module) main().catch(e => { console.error(e.stack || e); process.exitCode = 1; });
