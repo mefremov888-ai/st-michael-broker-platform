@@ -9,6 +9,11 @@ on:
         options: [inspect, apply, status, verify]
         default: inspect
         required: true
+      source_root:
+        description: 'auto uses saved source; explicitly select Victoria for first publication'
+        type: choice
+        options: [auto, '/Версия ИИ']
+        default: auto
 
 concurrency:
   group: ${{ (inputs.mode == 'status' || inputs.mode == 'verify') && 'materials-transfer-status' || 'sync-yandex-files' }}
@@ -32,6 +37,7 @@ jobs:
         env:
           SCRIPT_SHA: ${{ github.sha }}
           MATERIALS_MODE: ${{ inputs.mode }}
+          MATERIALS_SOURCE_ROOT: ${{ inputs.source_root }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -39,7 +45,7 @@ jobs:
           port: ${{ secrets.DEPLOY_PORT || 22 }}
           script_stop: true
           command_timeout: 175m
-          envs: SCRIPT_SHA,MATERIALS_MODE
+          envs: SCRIPT_SHA,MATERIALS_MODE,MATERIALS_SOURCE_ROOT
           script: |
             set -eu
             cd ${{ secrets.DEPLOY_PATH }}
@@ -59,10 +65,28 @@ jobs:
               exit 0
             fi
             case "$MATERIALS_MODE" in inspect|apply) ;; *) exit 1 ;; esac
+            case "$MATERIALS_SOURCE_ROOT" in auto|'') MATERIALS_SOURCE_ROOT='' ;; '/Версия ИИ') ;; *) exit 1 ;; esac
+            if [ "$MATERIALS_MODE" = apply ] && [ "$MATERIALS_SOURCE_ROOT" = '/Версия ИИ' ]; then
+              umask 077
+              UPLOAD_DIR=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Source}}{{end}}{{end}}' st-michael-api)
+              case "$UPLOAD_DIR" in /var/lib/docker/volumes/*/_data) ;; *) echo 'Unexpected upload volume'; exit 1 ;; esac
+              COVER_DIR="$UPLOAD_DIR/materials-backups/victoria-covers-20261012"
+              mkdir -p "$COVER_DIR/covers"
+              chmod 700 "$UPLOAD_DIR/materials-backups" "$COVER_DIR" "$COVER_DIR/covers"
+              curl --fail --location --retry 3 --max-time 1800 'https://github.com/sereganikitin/st-michael-broker-platform/releases/download/victoria-covers-20261012/victoria-covers.zip' -o "$COVER_DIR/archive.zip"
+              echo '9a09705509993047dff42bc6a6170ac6603b5bfb1ac4ed662642f4018fd228af  '"$COVER_DIR/archive.zip" | sha256sum --check
+              if unzip -Z1 "$COVER_DIR/archive.zip" | grep -E '[/\\]|^\.\.?$'; then echo 'Unsafe cover archive'; exit 1; fi
+              unzip -q -o "$COVER_DIR/archive.zip" -d "$COVER_DIR/covers"
+              chown 1001:1001 "$UPLOAD_DIR/materials-backups"
+              chown -R 1001:1001 "$COVER_DIR"
+            fi
             docker exec st-michael-api node -e 'const fs=require("fs");for(const p of fs.readdirSync("/proc")){if(!/^\d+$/.test(p))continue;let c="";try{c=fs.readFileSync("/proc/"+p+"/cmdline","utf8")}catch{}if(c.startsWith("node\0")&&/scripts\/sync-yandex-files\.js/.test(c)){console.error("Existing material sync active: "+p);process.exit(1)}}'
             git show "$SCRIPT_SHA:scripts/materials-new-version.js" > /tmp/materials-new-version.js
             docker cp /tmp/materials-new-version.js st-michael-api:/app/scripts/materials-new-version.js
-            docker compose exec -T -e MATERIALS_MODE="$MATERIALS_MODE" api node /app/scripts/materials-new-version.js
+            git show "$SCRIPT_SHA:data/victoria-covers-20261012.json" > /tmp/victoria-covers-20261012.json
+            docker exec st-michael-api mkdir -p /app/data
+            docker cp /tmp/victoria-covers-20261012.json st-michael-api:/app/data/victoria-covers-20261012.json
+            docker compose exec -T -e MATERIALS_MODE="$MATERIALS_MODE" -e MATERIALS_SOURCE_ROOT="$MATERIALS_SOURCE_ROOT" api node /app/scripts/materials-new-version.js
             if [ "$MATERIALS_MODE" = apply ]; then
               git show "$SCRIPT_SHA:scripts/sync-yandex-files.js" > /tmp/sync-yandex-files.js
               docker cp /tmp/sync-yandex-files.js st-michael-api:/app/scripts/sync-yandex-files.js

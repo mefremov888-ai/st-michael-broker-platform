@@ -19,8 +19,13 @@ async function request(url, options = {}) {
 async function main() {
   const db = new PrismaClient();
   try {
-    const docs = await db.document.findMany({ where: { category: 'materials', description: { startsWith: '[yandex-local:/Новая версия/' } } });
-    assert.equal(docs.length, 429, 'Published source count');
+    const source = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
+    const root = source?.value || '/Новая версия';
+    const { inventory } = require('./materials-new-version');
+    const expected = await inventory(root, [], [], root);
+    const docs = await db.document.findMany({ where: { category: 'materials', description: { startsWith: '[yandex-local:' + root + '/' } } });
+    assert.equal(docs.length, expected.files.length, 'Published source count');
+    for (const f of expected.files) assert.ok(docs.some(d => d.description === '[yandex-local:' + f.path + ']' && d.fileUrl === f.fileUrl), 'Source file included');
     assert.ok(docs.every(d => /-[a-f0-9]{12}\.[^.]+$/i.test(d.fileUrl)), 'All originals use the verified publication paths');
     const saved = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_FOLDER_LAYOUT' } });
     const layout = JSON.parse(saved.value);
@@ -52,7 +57,7 @@ async function main() {
     }));
     const cooperation = await (await request('/api/public/documents?category=cooperation')).json();
     const publishedCooperation = Array.isArray(cooperation) ? cooperation : cooperation.documents;
-    assert.ok(publishedCooperation.some(d => /Условия сотрудничества сентябрь/i.test(d.name)));
+    assert.ok(publishedCooperation.some(d => /Условия вознаграждения ST MICHAEL/i.test(d.name)));
     assert.ok(publishedCooperation.some(d => /Калькулятор рассрочки/i.test(d.name) && /\.html$/i.test(d.fileUrl)));
     for (const d of publishedCooperation) await request(d.fileUrl, { method: 'HEAD' });
     for (const url of new Set(Object.values(layout.covers || {}))) {
