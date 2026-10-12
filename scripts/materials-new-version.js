@@ -169,6 +169,26 @@ async function validFile(filename, f) {
   if (!algorithm) throw new Error('Missing source checksum: ' + f.path);
   return await fileHash(filename, algorithm) === f[algorithm];
 }
+async function stagedReady(f, uploadRoot, sharp) {
+  const original = path.join(uploadRoot, 'yandex', f.rel);
+  if (!await validFile(original, f)) throw new Error('Original not staged or checksum invalid');
+  const browser = path.join(uploadRoot, 'yandex', f.browserRel);
+  if (browser !== original) {
+    const image = await sharp(browser).metadata();
+    if (image.format !== 'jpeg' || !(image.width >= 200 && image.height >= 100)) throw new Error('Browser image not ready');
+  }
+  const thumb = path.join(uploadRoot, 'yandex-thumbs', f.browserRel + '.thumb.jpg');
+  const meta = await sharp(thumb).metadata();
+  if (meta.format !== 'jpeg' || !(meta.width >= 200 && meta.height >= 100)) throw new Error('Thumbnail not ready');
+  if (VIDEO.test(f.name) && fs.existsSync(thumb + '.folder-cover')) f.videoPreviewFallback = true;
+}
+function publicationPlan(files, ready, missing, partial) {
+  if (!partial && missing.length) throw new Error('No DB changes. Failed staging: ' + missing.map(f => f.path + ': ' + f.error).join('\n'));
+  if (!ready.length) throw new Error('No verified materials ready; no DB changes');
+  const paths = new Set(ready.map(f => f.path));
+  if (paths.size !== ready.length || ready.length + missing.length !== files.length || missing.some(f => paths.has(f.path))) throw new Error('Incomplete publication partition');
+  return { files: ready, missing };
+}
 async function download(f, dest) {
   if (await validFile(dest, f)) return false;
   fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -244,6 +264,8 @@ async function browserImage(f, original, dest, sharp) {
 
 async function main() {
   const mode = process.env.MATERIALS_MODE || 'apply';
+  if (!['inspect', 'apply', 'apply_available'].includes(mode)) throw new Error('Unsupported materials mode');
+  const partial = mode === 'apply_available';
   const uploadRoot = path.resolve(process.env.UPLOAD_ROOT || '/app/uploads');
   const { PrismaClient } = require('@st-michael/database');
   const prisma = new PrismaClient();
@@ -258,9 +280,18 @@ async function main() {
     const saved = JSON.parse(setting.value);
     const savedSource = await prisma.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
     ROOT = sourceRoot(process.env.MATERIALS_SOURCE_ROOT || savedSource?.value || '/Новая версия');
+    if (partial && ROOT !== '/Версия ИИ') throw new Error('Partial publication is only approved for Victoria materials');
     const docs = await prisma.document.findMany({});
     const { files, dirs } = await inventory();
-    const next = buildLayout(saved, files);
+    const savedPublication = await prisma.systemSetting.findUnique({ where: { key: 'MATERIALS_PARTIAL_PUBLICATION' } });
+    if (savedPublication) {
+      const previous = JSON.parse(savedPublication.value);
+      if (previous.sourceRoot === ROOT && previous.missing?.length) {
+        const sourcePaths = new Set(files.map(f => f.path));
+        if (previous.expected.some(f => !sourcePaths.has(f.path))) throw new Error('Incomplete source after partial publication; expected paths disappeared, manual source review required');
+      }
+    }
+    let next = buildLayout(saved, files);
     const obsolete = docs.filter(d => replaceable(d, saved) && !files.some(f => d.description === '[yandex-local:' + f.path + ']'));
     // Reclassified originals are often byte-identical to the previous tree.
     // Verified hard links in the same upload volume preserve both versions
@@ -287,7 +318,7 @@ async function main() {
     for (const f of files) if (coverTargets(f).length) console.log('COVER ' + f.path + ' => ' + coverTargets(f).join(' | '));
     console.log('COOPERATION ' + JSON.stringify(docs.filter(d => d.category === 'cooperation').map(d => ({ name: d.name, fileUrl: d.fileUrl, isPublic: d.isPublic }))));
     if (mode === 'inspect') return;
-    if (report.freeBytes < needed + 2 * 1024 ** 3) throw new Error('Insufficient staging space (2GB reserve required)');
+    if (report.freeBytes < (partial ? 0 : needed) + 2 * 1024 ** 3) throw new Error('Insufficient staging space (2GB reserve required)');
     const sharp = require('sharp');
     if (ROOT === '/Версия ИИ') {
       const coverDir = path.join(uploadRoot, 'materials-backups', 'victoria-covers-20261012', 'covers');
@@ -299,11 +330,19 @@ async function main() {
       }
     }
     let cursor = 0, done = 0;
-    const errors = [];
+    const errors = [], ready = [];
     await Promise.all(Array.from({ length: 3 }, async () => {
       while (cursor < files.length) {
         const f = files[cursor++];
         try {
+          if (partial) {
+            // Explicit one-off publication of verified staging only. Never fetch
+            // unavailable originals/posters or publish metadata-only links.
+            await stagedReady(f, uploadRoot, sharp);
+            ready.push(f);
+            console.log('VERIFIED ' + (++done) + '/' + files.length + ' ' + f.path);
+            continue;
+          }
           const original = path.join(uploadRoot, 'yandex', f.rel);
           if (!fs.existsSync(original) && reusable.has(f.sha256)) {
             fs.mkdirSync(path.dirname(original), { recursive: true });
@@ -330,11 +369,14 @@ async function main() {
             if (coverName) approvedCover = path.join(coverDir, coverName);
           }
           await thumbnail(f, browser, thumbDest, sharp, approvedCover);
+          ready.push(f);
           console.log('VERIFIED ' + (++done) + '/' + files.length + ' ' + f.path);
-        } catch (e) { errors.push(f.path + ': ' + e.message); }
+        } catch (e) { errors.push({ path: f.path, name: f.name, size: f.size, sha256: f.sha256, md5: f.md5, error: e.message }); }
       }
     }));
-    if (errors.length) throw new Error('No DB changes. Failed staging: ' + errors.join('\n'));
+    const publish = publicationPlan(files, ready, errors, partial);
+    const publishedFiles = publish.files.sort((a, b) => a.path.localeCompare(b.path, 'ru'));
+    next = buildLayout(saved, publishedFiles);
     if (ROOT === '/Версия ИИ') {
       const covers = require('../data/victoria-covers-20261012.json');
       const coverDir = path.join(uploadRoot, 'materials-backups', 'victoria-covers-20261012', 'covers');
@@ -365,7 +407,8 @@ async function main() {
     const currentSetting = await prisma.systemSetting.findUnique({ where: { key: setting.key } });
     if (currentSetting.value !== setting.value) throw new Error('Layout changed during staging; rerun');
     const currentDocs = await prisma.document.findMany({});
-    const remove = currentDocs.filter(d => replaceable(d, saved) && !files.some(f => d.description === '[yandex-local:' + f.path + ']'));
+    const remove = currentDocs.filter(d => replaceable(d, saved) && !publishedFiles.some(f => d.description === '[yandex-local:' + f.path + ']'));
+    if (partial && remove.some(d => publish.missing.some(f => d.description === '[yandex-local:' + f.path + ']'))) throw new Error('Previously published material failed staging verification; refuse removal, no DB changes');
     const backupParent = path.join(uploadRoot, 'materials-backups');
     const backupRoot = path.join(backupParent, new Date().toISOString().replace(/[:.]/g, '-'));
     // nginx runs as another UID: private backups must not be downloadable.
@@ -373,12 +416,16 @@ async function main() {
     fs.chmodSync(backupParent, 0o700);
     fs.chmodSync(backupRoot, 0o700);
     fs.writeFileSync(path.join(backupRoot, 'documents-layout.json'), JSON.stringify({ documents: currentDocs, setting, sourceSetting: savedSource, files, removeIds: remove.map(d => d.id) }, null, 2), { mode: 0o600 });
+    const publication = { sourceRoot: ROOT, createdAt: new Date().toISOString(), expectedCount: files.length, publishedCount: publishedFiles.length, missing: publish.missing, expected: files.map(f => ({ path: f.path, size: f.size, sha256: f.sha256, md5: f.md5 })) };
+    fs.writeFileSync(path.join(backupRoot, 'publication-manifest.json'), JSON.stringify(publication, null, 2), { mode: 0o600 });
     await prisma.$transaction(async tx => {
       const fresh = await tx.systemSetting.findUnique({ where: { key: setting.key } });
       if (fresh.value !== setting.value) throw new Error('Concurrent layout change');
       const freshSource = await tx.systemSetting.findUnique({ where: { key: 'MATERIALS_SOURCE_ROOT' } });
       if ((freshSource?.value || null) !== (savedSource?.value || null)) throw new Error('Concurrent source change');
-      for (const f of files) {
+      const freshPublication = await tx.systemSetting.findUnique({ where: { key: 'MATERIALS_PARTIAL_PUBLICATION' } });
+      if ((freshPublication?.value || null) !== (savedPublication?.value || null)) throw new Error('Concurrent publication manifest change');
+      for (const f of publishedFiles) {
         const description = '[yandex-local:' + f.path + ']';
         const matches = await tx.document.findMany({ where: { category: 'materials', description } });
         if (matches.length > 1) throw new Error('Duplicate material records: ' + f.path);
@@ -389,8 +436,12 @@ async function main() {
       await tx.document.deleteMany({ where: { id: { in: remove.map(d => d.id) }, category: 'materials' } });
       await tx.systemSetting.update({ where: { key: setting.key }, data: { value: JSON.stringify(next) } });
       await tx.systemSetting.upsert({ where: { key: 'MATERIALS_SOURCE_ROOT' }, create: { key: 'MATERIALS_SOURCE_ROOT', value: ROOT }, update: { value: ROOT } });
+      // Scheduled synchronization retains strict all-or-nothing staging. This
+      // manifest persists until a later complete import succeeds, so omissions
+      // are never silently treated as a complete source/publication.
+      await tx.systemSetting.upsert({ where: { key: 'MATERIALS_PARTIAL_PUBLICATION' }, create: { key: 'MATERIALS_PARTIAL_PUBLICATION', value: JSON.stringify(publication) }, update: { value: JSON.stringify(publication) } });
       const count = await tx.document.count({ where: { category: 'materials', description: { startsWith: '[yandex-local:' + ROOT + '/' } } });
-      if (count !== files.length) throw new Error('Published count mismatch');
+      if (count !== publishedFiles.length) throw new Error('Published count mismatch');
     }, { timeout: 120000 });
     // Recoverable retirement: only files referenced by retired media, never PDFs,
     // calculator or still-referenced files. No recursive delete or global sweep.
@@ -407,11 +458,11 @@ async function main() {
         if (fs.existsSync(src)) { fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.renameSync(src, dest); retired++; }
       }
     }
-    console.log('PUBLISHED ' + JSON.stringify({ files: files.length, approvedFolderPosterFallbacks: files.filter(f => f.videoPreviewFallback).length, removedOldMedia: remove.length, retiredFiles: retired, backup: backupRoot }));
+    console.log('PUBLISHED ' + JSON.stringify({ partial: publish.missing.length > 0, files: publishedFiles.length, expectedFiles: files.length, missingFiles: publish.missing.length, missingManifest: path.join(backupRoot, 'publication-manifest.json'), approvedFolderPosterFallbacks: publishedFiles.filter(f => f.videoPreviewFallback).length, removedOldMedia: remove.length, retiredFiles: retired, backup: backupRoot }));
   } finally {
     if (locked) fs.rmdirSync(lock);
     await prisma.$disconnect();
   }
 }
-module.exports = { material, coverTargets, buildLayout, replaceable, inventory, validFile, main, sourceRoot, fetchHeaders };
+module.exports = { material, coverTargets, buildLayout, replaceable, inventory, validFile, main, sourceRoot, fetchHeaders, stagedReady, publicationPlan };
 if (require.main === module) main().catch(e => { console.error(e.stack || e); process.exitCode = 1; });

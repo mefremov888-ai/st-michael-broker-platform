@@ -23,9 +23,26 @@ async function main() {
     const root = source?.value || '/Новая версия';
     const { inventory } = require('./materials-new-version');
     const expected = await inventory(root, [], [], root);
+    const publicationSetting = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_PARTIAL_PUBLICATION' } });
+    const publication = publicationSetting ? JSON.parse(publicationSetting.value) : null;
+    const missing = publication?.sourceRoot === root ? publication.missing || [] : [];
+    const missingPaths = new Set(missing.map(file => file.path));
+    assert.equal(missingPaths.size, missing.length, 'No duplicate missing paths');
+    for (const file of missing) {
+      const sourceFile = expected.files.find(item => item.path === file.path);
+      assert.ok(sourceFile, 'Missing file remains in source');
+      assert.equal(file.size, sourceFile.size, 'Missing source size');
+      assert.equal(file.sha256 || file.md5, sourceFile.sha256 || sourceFile.md5, 'Missing source identity');
+    }
+    const publishedExpected = expected.files.filter(file => !missingPaths.has(file.path));
     const docs = await db.document.findMany({ where: { category: 'materials', description: { startsWith: '[yandex-local:' + root + '/' } } });
-    assert.equal(docs.length, expected.files.length, 'Published source count');
-    for (const f of expected.files) assert.ok(docs.some(d => d.description === '[yandex-local:' + f.path + ']' && d.fileUrl === f.fileUrl), 'Source file included');
+    assert.equal(docs.length, publishedExpected.length, 'Published source count excluding recorded omissions');
+    if (publication?.sourceRoot === root) {
+      assert.equal(publication.expectedCount, expected.files.length, 'Manifest expected count');
+      assert.equal(publication.publishedCount, docs.length, 'Manifest published count');
+    }
+    for (const f of publishedExpected) assert.ok(docs.some(d => d.description === '[yandex-local:' + f.path + ']' && d.fileUrl === f.fileUrl), 'Source file included');
+    assert.ok(!docs.some(d => missing.some(f => d.description === '[yandex-local:' + f.path + ']')), 'Missing files never appear as broken links');
     assert.ok(docs.every(d => /-[a-f0-9]{12}\.[^.]+$/i.test(d.fileUrl)), 'All originals use the verified publication paths');
     const saved = await db.systemSetting.findUnique({ where: { key: 'MATERIALS_FOLDER_LAYOUT' } });
     const layout = JSON.parse(saved.value);
@@ -65,7 +82,7 @@ async function main() {
       await request(coverUrl, { method: 'HEAD' });
     }
     assert.equal(errors.length, 0, errors.join('\n'));
-    console.log(JSON.stringify({ result: 'PASS', materials: docs.length, originalsHttpVerified: verified, thumbnailsHttpVerified: verified, identicalHierarchy: true, cooperationDocuments: publishedCooperation.map(d => d.name), videoCover: layout.covers['Зорге 9/Видео'] }));
+    console.log(JSON.stringify({ result: missing.length ? 'PARTIAL_PUBLICATION_PASS' : 'PASS', materials: docs.length, expectedMaterials: expected.files.length, recordedMissing: missing.length, originalsHttpVerified: verified, thumbnailsHttpVerified: verified, identicalHierarchy: true, cooperationDocuments: publishedCooperation.map(d => d.name), videoCover: layout.covers['Зорге 9/Видео'] }));
   } finally { await db.$disconnect(); }
 }
 main().catch(e => { console.error(e.stack || e); process.exitCode = 1; });
