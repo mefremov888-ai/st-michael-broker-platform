@@ -242,11 +242,27 @@ async function main() {
     const { files, dirs } = await inventory();
     const next = buildLayout(saved, files);
     const obsolete = docs.filter(d => replaceable(d, saved) && !files.some(f => d.description === '[yandex-local:' + f.path + ']'));
+    // Reclassified originals are often byte-identical to the previous tree.
+    // Verified hard links in the same upload volume preserve both versions
+    // without spending disk space on a second copy. Never mutate old files.
+    const reusable = new Map();
+    if (ROOT === '/Версия ИИ') {
+      const sizes = new Set(files.map(f => f.size));
+      const hashes = new Set(files.map(f => f.sha256));
+      for (const d of obsolete) {
+        if (!d.fileUrl.startsWith('/files/yandex/')) continue;
+        const candidate = path.resolve(uploadRoot, decodeURIComponent(d.fileUrl.slice('/files/'.length)));
+        if (!candidate.startsWith(uploadRoot + path.sep) || !fs.existsSync(candidate) || !fs.lstatSync(candidate).isFile()) continue;
+        if (!sizes.has(fs.statSync(candidate).size)) continue;
+        const hash = await fileHash(candidate, 'sha256');
+        if (hashes.has(hash)) reusable.set(hash, candidate);
+      }
+    }
     const free = fs.statfsSync(uploadRoot);
-    const needed = files.reduce((sum, f) => sum + (fs.existsSync(path.join(uploadRoot, 'yandex', f.rel)) ? 0 : f.size), 0);
+    const needed = files.reduce((sum, f) => sum + (fs.existsSync(path.join(uploadRoot, 'yandex', f.rel)) || reusable.has(f.sha256) ? 0 : f.size), 0);
     let sharpAvailable = false;
     try { require('sharp'); sharpAvailable = true; } catch (_) { /* inspect reports missing dependency */ }
-    const report = { mode, sharpAvailable, files: files.length, directories: dirs.length, bytes: files.reduce((sum, f) => sum + f.size, 0), obsoleteMedia: obsolete.length, preservedDocuments: docs.length - obsolete.length, covers: Object.keys(next.covers).length, freeBytes: free.bavail * free.bsize, downloadBytes: needed };
+    const report = { mode, sharpAvailable, files: files.length, directories: dirs.length, bytes: files.reduce((sum, f) => sum + f.size, 0), reusableFiles: reusable.size, obsoleteMedia: obsolete.length, preservedDocuments: docs.length - obsolete.length, covers: Object.keys(next.covers).length, freeBytes: free.bavail * free.bsize, downloadBytes: needed };
     console.log(JSON.stringify(report));
     for (const f of files) if (coverTargets(f).length) console.log('COVER ' + f.path + ' => ' + coverTargets(f).join(' | '));
     console.log('COOPERATION ' + JSON.stringify(docs.filter(d => d.category === 'cooperation').map(d => ({ name: d.name, fileUrl: d.fileUrl, isPublic: d.isPublic }))));
@@ -269,6 +285,10 @@ async function main() {
         const f = files[cursor++];
         try {
           const original = path.join(uploadRoot, 'yandex', f.rel);
+          if (!fs.existsSync(original) && reusable.has(f.sha256)) {
+            fs.mkdirSync(path.dirname(original), { recursive: true });
+            fs.linkSync(reusable.get(f.sha256), original);
+          }
           await download(f, original);
           const browser = await browserImage(f, original, path.join(uploadRoot, 'yandex', f.browserRel), sharp);
           await thumbnail(f, browser, path.join(uploadRoot, 'yandex-thumbs', f.browserRel + '.thumb.jpg'), sharp);
