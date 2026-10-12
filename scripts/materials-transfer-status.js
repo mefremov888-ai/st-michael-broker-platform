@@ -3,14 +3,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
 function count(dir) {
-  const result = { ready: 0, partial: 0, bytes: 0 };
+  const result = { ready: 0, partial: 0, bytes: 0, partialBytes: 0, latestPartialWriteMs: 0 };
   if (!fs.existsSync(dir)) return result;
   for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
     const filename = path.join(dir, item.name);
     if (item.isDirectory()) {
       const child = count(filename);
-      for (const key of Object.keys(result)) result[key] += child[key];
-    } else if (item.name.endsWith('.partial') && /-[a-f0-9]{12}\./i.test(item.name)) result.partial++;
+      for (const key of ['ready', 'partial', 'bytes', 'partialBytes']) result[key] += child[key];
+      result.latestPartialWriteMs = Math.max(result.latestPartialWriteMs, child.latestPartialWriteMs);
+    } else if (item.name.endsWith('.partial') && /-[a-f0-9]{12}\./i.test(item.name)) {
+      const stat = fs.statSync(filename);
+      result.partial++;
+      result.partialBytes += stat.size;
+      result.latestPartialWriteMs = Math.max(result.latestPartialWriteMs, stat.mtimeMs);
+    }
     else if (/-[a-f0-9]{12}\.[^.]+(?:\.thumb\.jpg)?$/i.test(item.name)) { result.ready++; result.bytes += fs.statSync(filename).size; }
   }
   return result;
