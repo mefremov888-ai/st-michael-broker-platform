@@ -65,6 +65,17 @@ const CLIENT_SELECT = {
 };
 
 function fail(code) { const error = new Error("Fixed case recovery refused"); error.safeCode = code; throw error; }
+const PREFLIGHT_STAGES = Object.freeze(["SNAPSHOT", "ACCOUNT", "EVIDENCE", "CERTIFICATE", "PLAN_BINDING", "PRIOR_AUDIT", "NEGATIVE"]);
+async function preflightStep(stage, callback) {
+  if (!PREFLIGHT_STAGES.includes(stage) || typeof callback !== "function") fail("EXECUTION_GATE_INVALID");
+  try { return await callback(); }
+  catch (error) {
+    const known = safeFailureCode(error);
+    // Preserve a reviewed refusal, but never retain raw transport/Prisma errors.
+    // This boundary precedes lease acquisition, durable claim and provider writes.
+    fail(known === "RECOVERY_REFUSED" ? `PREFLIGHT_${stage}_FAILED` : known);
+  }
+}
 function id(value) {
   if (typeof value === "bigint") return value > 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -584,13 +595,13 @@ async function runPlan({ prisma, environment = process.env, confirmation,
   const metadata = planGate(environment, confirmation, operationLock);
   const source = attestSources(environment);
   await operationLock.assertOwned();
-  const initial = await snapshot(prisma, environment, true);
+  const initial = await preflightStep("SNAPSHOT", () => snapshot(prisma, environment, true));
   const token = typeof initial.token === "string" && initial.token.trim() ? initial.token : environment.AMO_ACCESS_TOKEN;
   const request = createSerializedGetRequest(token, fetchImpl);
-  await helpers.assertExpectedAccount(request);
-  const evidence = await freshEvidence(initial.row, request, token, fetchImpl, now);
-  let certificate = await buildCertificate(initial.row, initial.agency, evidence, request, token, fetchImpl);
-  certifiedNegative(evidence, initial.row, initial.agency, certificate, now);
+  await preflightStep("ACCOUNT", () => helpers.assertExpectedAccount(request));
+  const evidence = await preflightStep("EVIDENCE", () => freshEvidence(initial.row, request, token, fetchImpl, now));
+  let certificate = await preflightStep("CERTIFICATE", () => buildCertificate(initial.row, initial.agency, evidence, request, token, fetchImpl));
+  await preflightStep("NEGATIVE", () => certifiedNegative(evidence, initial.row, initial.agency, certificate, now));
   await operationLock.assertOwned(); await unchanged(prisma, environment, initial);
   const readback = await freshEvidence(initial.row, request, token, fetchImpl, now);
   certificate = await recheckCertificate(certificate, initial.row, initial.agency, readback, request, token, fetchImpl);
@@ -655,21 +666,21 @@ async function runDraftRecovery({ prisma, redis, environment = process.env, conf
   const source = attestSources(environment);
   metadata.sourceSha256 = source.hashes.recovery;
   await operationLock.assertOwned();
-  const initial = await snapshot(prisma, environment, true);
+  const initial = await preflightStep("SNAPSHOT", () => snapshot(prisma, environment, true));
   const token = typeof initial.token === "string" && initial.token.trim() ? initial.token : environment.AMO_ACCESS_TOKEN;
   // Legacy request throttling must not be defeated by simultaneous contact/
   // broker collection. Serialize it; the KC-window requester is separately
   // capped at 2.5 requests/sec, below the combined provider budget.
   const request = createSerializedGetRequest(token, fetchImpl);
-  await helpers.assertExpectedAccount(request);
-  const initialEvidence = await freshEvidence(initial.row, request, token, fetchImpl, now);
-  let certificate = await buildCertificate(initial.row, initial.agency, initialEvidence, request, token, fetchImpl);
-  assertCertificateHashes(certificate, metadata);
+  await preflightStep("ACCOUNT", () => helpers.assertExpectedAccount(request));
+  const initialEvidence = await preflightStep("EVIDENCE", () => freshEvidence(initial.row, request, token, fetchImpl, now));
+  let certificate = await preflightStep("CERTIFICATE", () => buildCertificate(initial.row, initial.agency, initialEvidence, request, token, fetchImpl));
+  await preflightStep("PLAN_BINDING", () => assertCertificateHashes(certificate, metadata));
   // A rerun of any previously claimed case is GET-only, regardless of new run
   // ID/source SHA or a subsequently cleared marker. No phase is re-armed.
-  const prior = await transaction(prisma, environment, (tx) => tx.auditLog.findMany({ where: { entity: ENTITY, entityId: CLIENT_ID }, select: { action: true }, take: 1 }));
+  const prior = await preflightStep("PRIOR_AUDIT", () => transaction(prisma, environment, (tx) => tx.auditLog.findMany({ where: { entity: ENTITY, entityId: CLIENT_ID }, select: { action: true }, take: 1 })));
   if (prior.length) return { status: "prior_operation_readonly", automaticRetryBlocked: true, assignmentNeeded: true, directMorekitDispatchAttempted: false, databaseWrites: false, contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0 };
-  certifiedNegative(initialEvidence, initial.row, initial.agency, certificate, now);
+  await preflightStep("NEGATIVE", () => certifiedNegative(initialEvidence, initial.row, initial.agency, certificate, now));
   const leaseKey = randomBytes(32);
   let leases, baseline, contactId, leadId, linked = false, claimAttempted = false;
   const state = { phase: "NONE", requests: 0, contactPosts: 0, leadPosts: 0, patchPosts: 0, notePosts: 0, leadId: null };
@@ -779,5 +790,5 @@ module.exports = { CLIENT_ID, OWNER_ID, OPERATION_KEY, ENTITY, MARKER, CONFIRMAT
   createCanonicalTransport, createIsolatedAdapter, negative, certifiedNegative, contactMatches, leadMatches,
   exactLeadFormFields, expectedRecoveryNote, confirmRecoveryNote, payload, pollContacts, pollLeads, link,
   exactLeadCustomFields, createExactFixationLeadOnce,
-  runPlan, runDraftRecovery, safeFailureCode, ZERO_POST_FAILURE_RUN_ID,
+  runPlan, runDraftRecovery, preflightStep, PREFLIGHT_STAGES, safeFailureCode, ZERO_POST_FAILURE_RUN_ID,
   ABANDONED_LEASE_EXPIRES_AT, readReviewedAbandonedLease, acquireFixedCasePhoneLeases, REPLACE_ABANDONED_UNCERTAIN };
