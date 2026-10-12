@@ -110,6 +110,15 @@ test('project catalog cards retain the landing page project images', () => {
   assert.deepEqual(materialsProjectCover('Зорге 9'), { kind: 'image', src: '/v2/img/materials-zorge9.webp' });
   assert.deepEqual(materialsProjectCover('Квартал Серебряный бор'), { kind: 'image', src: '/v2/img/materials-silver-bor.webp' });
 });
+test('approved Victoria root and album covers override legacy images without changing other covers', () => {
+  const path = 'Зорге 9/Звездные резиденты/Фото';
+  const root = '/files/materials-covers/victoria-20261012/root.jpg';
+  const portrait = '/files/materials-covers/victoria-20261012/portrait.jpg';
+  const configured = layout({ covers: { 'Зорге 9': root, [path]: portrait } });
+  assert.deepEqual(materialsProjectCover('Зорге 9', configured), { kind: 'image', src: root });
+  assert.deepEqual(materialsFolderCover(configured, [], path.split('/')), { kind: 'image', src: portrait, objectPosition: '50% 33%' });
+  assert.deepEqual(materialsProjectCover('Квартал Серебряный бор', configured), materialsProjectCover('Квартал Серебряный бор'));
+});
 
 test('public catalog and conditions have explicit routes distinct from authenticated materials', () => {
   assert.equal(MATERIALS_CATALOG_HREF, '/materials/catalog');
